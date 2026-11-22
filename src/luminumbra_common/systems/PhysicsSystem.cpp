@@ -642,12 +642,12 @@ struct UnassignedOwnerBodyDeleter {
 };
 using UnassignedOwnerBody = std::unique_ptr<JPH::Body, UnassignedOwnerBodyDeleter>;
 
-void AssignRestoredOwnerBody(JPH::BodyInterface& body_interface, JPH::Body* body, JPH::BodyID id) {
-    // Admission checked every occupied slot, irrespective of its generation.
-    // Owner-thread exclusion makes assignment infallible after preparation.
-    if (!body_interface.AssignBodyID(body, id)) {
-        throw std::logic_error("Validated owner body slot became occupied");
-    }
+// Requires the body to own `id` already. Afterwards the slot's sequence counter
+// matches the restored generation, so the slot reuses exactly the generations
+// an uninterrupted run would allocate next.
+void CycleRestoredBodySequence(JPH::BodyInterface& body_interface,
+                               JPH::Body* body,
+                               JPH::BodyID id) {
     // Explicit IDs do not update Jolt's private sequence counter. Unassigning
     // puts this slot first on the free list; ordinary assignment advances that
     // same slot without allocating or changing the other free slots' order.
@@ -662,6 +662,32 @@ void AssignRestoredOwnerBody(JPH::BodyInterface& body_interface, JPH::Body* body
         }
     }
     throw std::logic_error("Owner body sequence did not cycle");
+}
+
+void AssignRestoredOwnerBody(JPH::BodyInterface& body_interface, JPH::Body* body, JPH::BodyID id) {
+    // Admission checked every occupied slot, irrespective of its generation.
+    // Owner-thread exclusion makes assignment infallible after preparation.
+    if (!body_interface.AssignBodyID(body, id)) {
+        throw std::logic_error("Validated owner body slot became occupied");
+    }
+    CycleRestoredBodySequence(body_interface, body, id);
+}
+
+// Restored terrain colliders use the same sequence restore as owner bodies. A refused
+// slot destroys the unassigned body and returns null, like CreateBodyWithID.
+JPH::Body* CreateRestoredBody(JPH::BodyInterface& body_interface,
+                              const JPH::BodyCreationSettings& settings,
+                              JPH::BodyID id) {
+    JPH::Body* body = body_interface.CreateBodyWithoutID(settings);
+    if (body == nullptr) {
+        return nullptr;
+    }
+    if (!body_interface.AssignBodyID(body, id)) {
+        body_interface.DestroyBodyWithoutID(body);
+        return nullptr;
+    }
+    CycleRestoredBodySequence(body_interface, body, id);
+    return body;
 }
 
 // Validate the complete pool topology before allocating or publishing any owner.
@@ -1534,7 +1560,7 @@ bool PhysicsSystem::restore_simulation_terrain(const SimulationTerrainState& inp
                                                  JPH::Quat::sIdentity(),
                                                  JPH::EMotionType::Static,
                                                  Layers::NON_MOVING);
-        auto* body = m_body_interface->CreateBodyWithID(id, settings);
+        auto* body = CreateRestoredBody(*m_body_interface, settings, id);
         if (!body) {
             return false;
         }
@@ -1782,7 +1808,7 @@ bool PhysicsSystem::add_chunk_collision(Chunk& chunk, JPH::BodyID restored_id) {
                                             Layers::NON_MOVING);
     JPH::Body* body = restored_id.IsInvalid()
                           ? m_body_interface->CreateBody(body_settings)
-                          : m_body_interface->CreateBodyWithID(restored_id, body_settings);
+                          : CreateRestoredBody(*m_body_interface, body_settings, restored_id);
     if (body == nullptr) {
         LUMINUMBRA_CORE_WARN(
             "Body pool refused chunk collision for chunk ({},{},{})", cc.x, cc.y, cc.z);

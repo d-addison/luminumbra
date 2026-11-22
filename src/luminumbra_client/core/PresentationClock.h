@@ -62,6 +62,9 @@ private:
     std::optional<double> capture_seconds_;
 };
 
-inline PresentationClock presentation_clock;
+inline PresentationClock& presentation_clock() {
+    static PresentationClock clock;
+    return clock;
+}
 
 } // namespace Luminumbra::Client

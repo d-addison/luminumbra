@@ -36,6 +36,20 @@ def brace_depth(text, position):
     return masked[:position].count("{") - masked[:position].count("}")
 
 
+def assert_each_mode_guard(test, expression, guards):
+    # Evaluate the shipping expression with no flags, each flag independently,
+    # and overlapping flags. Presence alone would miss accidental AND gates.
+    predicate = compact(expression)
+    replacements = {guard: "flag_%d" % index for index, guard in enumerate(guards)}
+    for guard in sorted(guards, key=len, reverse=True):
+        test.assertIn(guard, predicate)
+        predicate = predicate.replace(guard, replacements[guard])
+    predicate = predicate.replace("||", " or ").replace("&&", " and ")
+    for active in (set(), *({index} for index in range(len(guards))), set(range(len(guards)))):
+        values = {replacements[guard]: index in active for index, guard in enumerate(guards)}
+        test.assertEqual(eval(predicate, {"__builtins__": {}}, values), bool(active), active)
+
+
 class UploadBudgetWiring(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -801,9 +815,10 @@ class UploadBudgetWiring(unittest.TestCase):
         prepare = body(policy, "prepare(")
         self.assertLess(prepare.index("m_index.find(chunk.get_id())"),
                         prepare.index("RefineNearTerrain("))
-        self.assertIn("forget(*m_entries[m_next].id)", prepare)
+        self.assertIn("const auto& previous_id = m_entries[m_next].id;", prepare)
+        self.assertIn("forget(*previous_id)", body(prepare, "if (previous_id)"))
         self.assertLess(prepare.index("m_index.emplace("),
-                        prepare.index("forget(*m_entries[m_next].id)"))
+                        prepare.index("forget(*previous_id)"))
         for signature in ("void RenderPipeline::clear_all_chunk_data()",
                           "void RenderPipeline::cleanup_gpu_resources()"):
             self.assertIn("m_near_terrain_refinement.clear()", body(self.pipeline, signature))
@@ -1755,7 +1770,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("return;", body(prepare, guard))
         render = body(self.pipeline, "void RenderPipeline::render_frame(")
         self.assertLess(render.index("if (!m_frame_prepared.valid)"),
-                        render.index("dispatch_stages(camera)"))
+                        render.index("dispatch_stages(camera, deferred_only_capture)"))
         self.assertIn("UploadPresentation presentation = UploadPresentation::Streaming",
                       compact(self.header))
         # Evaluate the shipping selector for all phase boundaries. A measured
@@ -1787,7 +1802,9 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertRegex(call, r"renderPipeline.render_frame\(.*?settling_benchmark_uploads "
                          r"\|\| settling_capture_uploads "
                          r"\? Luminumbra::Rendering::UploadPresentation::Settled "
-                         r": Luminumbra::Rendering::UploadPresentation::Streaming\)")
+                         r": Luminumbra::Rendering::UploadPresentation::Streaming, "
+                         r"Luminumbra::Rendering::RenderPipeline::DiagnosticCapturePolicy::Complete, "
+                         r"sky_publication\)")
         native = read(ROOT / "test/rendering/upload_budget_test.cpp")
         for name in ("SlowPreparationDrainsWithoutDrawingEveryIntermediateImage",
                      "FailedQualificationNeverDrawsAnUnsettledImage"):
@@ -1882,7 +1899,9 @@ class UploadBudgetWiring(unittest.TestCase):
         wait = source[source.index("const bool settling_benchmark_uploads"):]
         call = re.search(r"\.render_frame\((.*?)\);", wait).group(1)
         arguments = [argument.strip() for argument in call.split(",")]
-        self.assertEqual(len(arguments), 6)
+        self.assertEqual(len(arguments), 8)
+        self.assertTrue(arguments[6].endswith("DiagnosticCapturePolicy::Complete"))
+        self.assertEqual(arguments[7], "sky_publication")
         self.assertEqual(arguments[3], "settling_benchmark_uploads || "
                          "settling_capture_uploads ? 0.0f : deltaTime")
         self.assertEqual(arguments[5], "settling_benchmark_uploads || "
@@ -2878,6 +2897,172 @@ class SkyLutContinuity(unittest.TestCase):
     def setUpClass(cls):
         cls.source = read(RENDERING / "SkyAtmosphereLut.ipp")
 
+    def test_deferred_readback_has_one_zero_timeout_check_and_no_early_publication(self):
+        submit = body(self.source, "bool SkyAtmosphereLut::submit_deferred_sky_view(")
+        adopt = body(self.source, "SkyAtmosphereLut::DeferredResult SkyAtmosphereLut::adopt_deferred_sky_view(")
+        dispatch = body(self.source, "bool SkyAtmosphereLut::dispatch_sky_view_gpu(")
+        refresh = body(self.source, "bool SkyAtmosphereLut::refresh_sky_view(")
+        self.assertIn("glCopyBufferSubData(", submit)
+        self.assertIn("glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0)", submit)
+        self.assertNotIn("glClientWaitSync", submit)
+        self.assertEqual(adopt.count("glClientWaitSync("), 1)
+        self.assertIn("glClientWaitSync(m_deferred_fence, 0, 0)", adopt)
+        for entry in (submit, adopt, dispatch):
+            self.assertNotRegex(entry, r"\b(?:while|for)\s*\(")
+            self.assertNotIn("std::this_thread", entry)
+        for entry in (submit, dispatch):
+            for publication in ("glTexSubImage2D", "update_texture(",
+                                "reduce_sky_view_ambient(", "m_sky_ambient =",
+                                "m_skyview_sun_dir ="):
+                self.assertNotIn(publication, entry)
+        timeout = adopt.index("if (status == GL_TIMEOUT_EXPIRED)")
+        failure = adopt.index("if (status != GL_ALREADY_SIGNALED")
+        copy = adopt.index("std::memcpy(")
+        upload = adopt.index("update_texture(")
+        reduce = adopt.index("reduce_sky_view_ambient(m_deferred_sun)")
+        self.assertLess(timeout, failure)
+        self.assertLess(failure, copy)
+        self.assertLess(copy, upload)
+        self.assertLess(upload, reduce)
+        self.assertIn("return DeferredResult::Pending;", adopt[timeout:failure])
+        self.assertIn("return false;", body(refresh, "if (result == DeferredResult::Pending)"))
+        self.assertIn("sun = m_deferred_sun;", refresh)
+        self.assertIn("if (m_use_gpu_skyview && !deferred_failed)", refresh)
+
+    def test_publication_policy_exhausts_deterministic_flags_and_unknown_callers(self):
+        header = read(RENDERING / "SkyAtmosphereLut.h")
+        fields = re.findall(r"bool (\w+) = (\w+);", body(header, "struct RefreshPolicy"))
+        self.assertEqual(fields, [(name, "false") for name in
+                                 ("interactive", "replay", "capture", "benchmark",
+                                  "headless", "test_harness")])
+        selection = compact(body(header, "static constexpr Publication select_publication("))
+        predicate = re.fullmatch(r"return (.*?) \? Publication::Deferred : Publication::SameFrame;",
+                                 selection).group(1)
+        predicate = predicate.replace("policy.", "").replace("&&", " and ")
+        predicate = predicate.replace("!", " not ").strip()
+        for mask in range(64):
+            values = {name: bool(mask & (1 << bit)) for bit, (name, _) in enumerate(fields)}
+            self.assertEqual(eval(predicate, {"__builtins__": {}}, values), mask == 1, values)
+
+    def test_only_interactive_main_call_can_request_deferred_publication(self):
+        main = read(ROOT / "src/luminumbra_client/main_client.cpp")
+        policy_start = main.index("const auto sky_publication = SkyLut::select_publication(")
+        policy_end = main.index("renderPipeline.render_frame(", policy_start)
+        policy = compact(main[policy_start:policy_end])
+        # The request path gates every schema, including legacy benchmark v2.
+        self.assertIn(".benchmark = !g_app.capture.render_benchmark_path.empty()", policy)
+        self.assertNotIn("benchmark_v", policy)
+        self.assertIn(".interactive = currentState == GameState::IN_GAME", policy)
+        replay = policy.split(".replay = ", 1)[1].split(", .capture", 1)[0]
+        assert_each_mode_guard(self, replay,
+                              ("Luminumbra::Rendering::DebugViewPass::controls().frozen",
+                               "Luminumbra::Rendering::DebugViewPass::replay_mode( "
+                               "Luminumbra::Rendering::DebugViewPass::geometry_view())"))
+        self.assertIn(".headless = hidden_window || g_windowState.mode == WindowMode::Headless", policy)
+        self.assertIn(".test_harness = sky_test_harness", policy)
+        # The client main compiles once; the QA link is the one with a runner factory.
+        self.assertIn("const bool sky_test_harness = scenario_runner_factory != nullptr;", main)
+        self.assertIn("const ScenarioRunnerFactory scenario_runner_factory = GetScenarioRunnerFactory();",
+                      main)
+        capture = policy.split(".capture = ", 1)[1].split(", .benchmark", 1)[0]
+        capture_guards = ("photo_capture_pinned", "capture_pinned", "scenario_config.active()",
+                      "g_app.capture.scene_active", "!g_app.capture.frame_scan_path.empty()",
+                      "!g_app.capture.survey_dir.empty()", "!g_app.capture.ui_screens.empty()",
+                      "g_app.capture.ui_preview_live", "g_app.capture.ui_fixtures",
+                      "g_app.capture.fixed_cam", "g_app.capture.play_paths",
+                      "g_app.capture.profile_fly_seconds != 0.0", "!g_app.capture.debug_goto.empty()",
+                      "!g_app.capture.render_benchmark_screenshot.empty()",
+                      "path_options.diagnostics.enabled", "g_app.hud.photoMode.active",
+                      "g_playerController && g_playerController->photo_mode_active()")
+        assert_each_mode_guard(self, capture, capture_guards)
+        photo_guard = main.split("const bool photo_capture_pinned =", 1)[1].split(";", 1)[0]
+        assert_each_mode_guard(self, photo_guard,
+                                  ("scenario_config.active()", "g_rb_active",
+                                   "g_app.capture.timelapse_frames != 0",
+                                   "g_app.capture.scene_active", "g_app.capture.frame_scan_active",
+                                   "g_app.capture.render_parity_active", "g_app.capture.survey_active",
+                                   "!g_app.capture.bake_impostor_path.empty()",
+                                   "!g_app.capture.ui_screenshot_screen.empty()",
+                                   "g_app.capture.ui_thumbs != 0"))
+        call = main[policy_end:main.index(");", policy_end) + 2]
+        self.assertTrue(compact(call).endswith(", sky_publication);"))
+        self.assertEqual(main.count("SkyLut::select_publication("), 1)
+        header = read(RENDERING / "RenderPipeline.h")
+        declaration = header.split("void render_frame(", 1)[1].split(";", 1)[0]
+        self.assertIn("SkyAtmosphereLut::Publication::SameFrame", declaration)
+        # All sibling callers (menus, startup, scenarios, preview, survey, tests)
+        # omit the opt-in; newly added bypasses must be reviewed explicitly.
+        calls = []
+        for directory in ("src", "test"):
+            for path in (ROOT / directory).rglob("*.cpp"):
+                source = read(path)
+                for arguments in re.findall(r"\.render_frame\((.*?)\);", source, re.S):
+                    if "sky_publication" in arguments:
+                        calls.append(path.relative_to(ROOT).as_posix())
+                    else:
+                        # The seventh slot is the diagnostic capture policy.
+                        self.assertLessEqual(len(arguments.split(",")), 7, str(path))
+                    self.assertNotIn("Publication::Deferred", arguments)
+        self.assertEqual(calls, ["src/luminumbra_client/main_client.cpp"])
+        pipeline = read(RENDERING / "RenderPipeline.cpp")
+        render = compact(body(pipeline, "void RenderPipeline::render_frame("))
+        self.assertIn("presentation, sky_publication);", render)
+        prepare = compact(body(pipeline, "void RenderPipeline::prepare_frame("))
+        self.assertIn("update_time_of_day(deltaTime, sky_publication);", prepare)
+        update = compact(body(pipeline, "void RenderPipeline::update_time_of_day("))
+        replay = update.split(".replay = ", 1)[1].split(", .capture", 1)[0]
+        assert_each_mode_guard(self, replay,
+                              ("m_far_world_paired", "DebugViewPass::controls().frozen",
+                               "DebugViewPass::replay_mode(DebugViewPass::geometry_view())"))
+        capture = update.split(".capture = ", 1)[1].split(", .benchmark", 1)[0]
+        assert_each_mode_guard(self, capture,
+                              ("m_capture_diagnostics.enabled", "m_offscreen_target_active",
+                               "Client::presentation_clock().capture_seconds().has_value()"))
+        self.assertIn(".benchmark = m_benchmark_gpu_queries != nullptr", update)
+        self.assertIn("m_sky_lut.refresh_sky_view(toward_sun, &refresh_ms, publication)", update)
+        held_sun = body(update, "if (publication == SkyAtmosphereLut::Publication::Deferred &&")
+        self.assertIn("m_sky_lut.ready() && m_sky_lut.gpu_skyview_enabled()", update)
+        self.assertIn("(refreshed || m_sky_lut.readback_pending())", update)
+        self.assertIn("m_sun.direction = -m_sky_lut.sky_view_sun_dir();", held_sun)
+        self.assertLess(update.index("m_sky_lut.refresh_sky_view("), update.index(held_sun))
+        replay = body(pipeline, "bool RenderPipeline::render_far_world_off_pair(")
+        self.assertNotIn("prepare_frame(", replay)
+        self.assertNotIn("update_time_of_day(", replay)
+
+    def test_existing_consumers_default_to_same_frame_and_register_deferred_cases(self):
+        header = read(RENDERING / "SkyAtmosphereLut.h")
+        self.assertIn("Publication publication = Publication::SameFrame", header)
+        native = read(ROOT / "test/rendering/SkyAtmosphereLutGl_test.cpp")
+        for case in ("DeferredReadbackPublishesIdenticalBytesOnlyOnSignal",
+                     "DeferredWaitFailureFallsBackForSubmittedInput",
+                     "DeferredResourceFailuresMatchCpu", "DeferredModeChangesDiscardPendingInput"):
+            self.assertIn("TEST_F(SkyAtmosphereLutGl, " + case + ")", native)
+        self.assertIn("EXPECT_EQ(Driver().checks, 0u);", native)
+        self.assertIn("EXPECT_EQ(Driver().checks, 5u);", native)
+        self.assertIn("EXPECT_EQ(Driver().copies, 1u);", native)
+        self.assertIn("EXPECT_EQ(Pixels(lut), Pixels(reference));", native)
+
+    def test_cancellation_covers_settings_cpu_switch_and_reinitialization(self):
+        header = read(RENDERING / "SkyAtmosphereLut.h")
+        self.assertIn("release_deferred_readback();", body(header, "void discard_pending_readback("))
+        setter = body(header, "void set_gpu_skyview_enabled(")
+        self.assertIn("discard_pending_readback();", body(setter, "if (!e)"))
+        initialize = compact(body(self.source, "bool SkyAtmosphereLut::initialize("))
+        self.assertTrue(initialize.startswith("// Direct reinitialization"))
+        self.assertIn("if (m_base_built) destroy();", initialize)
+        pipeline = read(RENDERING / "RenderPipeline.cpp")
+        settings = body(pipeline, "bool RenderPipeline::apply_graphics(")
+        self.assertLess(settings.index("return false;"),
+                        settings.index("m_sky_lut.discard_pending_readback();"))
+        release = body(self.source, "void SkyAtmosphereLut::release_deferred_readback(")
+        self.assertNotIn("glClientWaitSync", release)
+        self.assertNotIn("glFinish", release)
+        self.assertIn("release_deferred_readback();", body(self.source, "void SkyAtmosphereLut::destroy("))
+        native = read(ROOT / "test/rendering/SkyAtmosphereLutGl_test.cpp")
+        self.assertIn("TEST_F(SkyAtmosphereLutGl, "
+                      "DeferredCancellationAndReinitializationDiscardPendingInput)", native)
+        self.assertIn("TEST(SkyLutPublicationPolicy, OnlyKnownInteractivePlayDefers)", native)
+
     def test_cpu_fallback_repairs_empty_partial_and_oversized_base_luts_before_sampling(self):
         sky = body(self.source, "void SkyAtmosphereLut::build_sky_view_cpu(")
         prefix = sky.split("const glm::vec3 beta_r =", 1)[0]
@@ -2931,7 +3116,11 @@ class SkyLutContinuity(unittest.TestCase):
                        "bool RenderPipeline::resize_graphics_targets(",
                        "bool RenderPipeline::apply_graphics(",
                        "void RenderPipeline::set_cloud_quality("):
-            self.assertNotIn("m_sky_lut", body(pipeline, method))
+            entry = body(pipeline, method)
+            if method == "bool RenderPipeline::apply_graphics(":
+                self.assertEqual(entry.count("m_sky_lut"), 1)
+                entry = entry.replace("m_sky_lut.discard_pending_readback();", "")
+            self.assertNotIn("m_sky_lut", entry)
 
     def test_gpu_success_then_fallback_regressions_are_registered_without_skips(self):
         registration = read(ROOT / "test/CMakeLists.txt")
@@ -3317,6 +3506,77 @@ class SkyAppearanceWiring(unittest.TestCase):
         clouds = body(shader, "vec3 renderClouds(")
         self.assertIn("return mix(baseColor, cloudColor, alpha);", clouds)
         self.assertIn("return baseColor;", clouds)
+
+    def test_cloud_opacity_attenuates_each_celestial_contribution(self):
+        shader = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        main = body(shader, "void main()")
+        # Consume the production order and composite expression. Moving aurora
+        # after clouds must change these numeric results, even for partial cover.
+        layers = re.findall(r"skyColor\s*(\+=|=)\s*(renderStars|renderAurora|renderClouds)\([^;]*;",
+                            main)
+        self.assertEqual(sorted(layers),
+                         sorted((("+=", "renderStars"), ("+=", "renderAurora"),
+                                 ("=", "renderClouds"))))
+        clouds = compact(body(shader, "vec3 renderClouds("))
+        composite = re.search(r"return ([^;]+);$", clouds).group(1)
+
+        def render(stars, aurora, opacity):
+            color = .02
+            for _, layer in layers:
+                if layer == "renderClouds":
+                    color = eval(composite, {"__builtins__": {}},
+                                 dict(baseColor=color, cloudColor=.04, alpha=opacity,
+                                      mix=lambda a, b, t: a * (1 - t) + b * t))
+                else:
+                    color += stars if layer == "renderStars" else aurora
+            return color
+
+        # Five opacities * four layer combinations: clear, partial and opaque
+        # cover, both zero and independent nonzero layer controls, all bounded.
+        for opacity in (0, .25, .5, .9, 1):
+            baseline = render(0, 0, opacity)
+            for stars, aurora in ((0, 0), (.3, 0), (0, .7), (.3, .7)):
+                with self.subTest(opacity=opacity, stars=stars, aurora=aurora):
+                    self.assertAlmostEqual(render(stars, aurora, opacity) - baseline,
+                                           (stars + aurora) * (1 - opacity))
+
+    def test_stellar_neighbourhood_sharpening_cannot_dig_a_dark_ring(self):
+        shader = read(ROOT / "res/shaders/taau_resolve.frag")
+        helper = compact(body(shader, "vec3 sharpenLuma("))
+        self.assertIn("const vec3 weights = vec3(0.2126, 0.7152, 0.0722);", helper)
+        self.assertIn("float luminance = dot(color, weights);", helper)
+        self.assertIn("float detail = luminance - dot(mean, weights);", helper)
+        gain = re.search(r"float gain = ([^;]+);", helper).group(1)
+        result = re.search(r"return ([^;]+);$", helper).group(1)
+        self.assertIn("vec3 delta = color * (gain - 1.0);", helper)
+        self.assertIn("fraction = min(fraction, (upper[channel] - color[channel]) / delta[channel]);", helper)
+        self.assertIn("fraction = min(fraction, (lower[channel] - color[channel]) / delta[channel]);", helper)
+        main = compact(body(shader, "void main()"))
+        self.assertIn("resolved = sharpenLuma(resolved, mean, nmin, nmax);", main)
+        # Grey stellar neighbourhoods make dot(color, weights) equal color.
+        # The dark neighbour's mean includes one bright star among nine taps.
+        # Test both that neighbour and the peak, including zero background/HDR.
+        for background, peak in ((0, 1), (.02, 1), (.1, 4)):
+            mean = (8 * background + peak) / 9
+            for color in (background, peak):
+                for sharpness in (0, .25, 1):
+                    scope = dict(color=color, luminance=color, detail=color - mean,
+                                 u_sharpness=sharpness, lower=background, upper=peak,
+                                 max=max, clamp=lambda x, lo, hi: min(hi, max(lo, x)))
+                    scope["gain"] = eval(gain, {"__builtins__": {}}, scope)
+                    # Grey taps share one channel value; mirror the shader's
+                    # per-channel bound on the shared adjustment.
+                    delta = color * (scope["gain"] - 1.0)
+                    fraction = 1.0
+                    if delta > 0.0:
+                        fraction = min(fraction, (peak - color) / delta)
+                    elif delta < 0.0:
+                        fraction = min(fraction, (background - color) / delta)
+                    scope["fraction"] = fraction
+                    actual = eval(result, {"__builtins__": {}}, scope)
+                    with self.subTest(background=background, color=color, sharpness=sharpness):
+                        self.assertGreaterEqual(actual, background)
+                        self.assertLessEqual(actual, peak)
 
 class NightLightingSourceTests(unittest.TestCase):
     def test_frame_scan_pins_override_live_clock_before_the_rendered_capture(self):

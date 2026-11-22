@@ -17,7 +17,7 @@ namespace Luminumbra::Client {
 
 // --- RmlSystem Implementation ---
 double RmlSystem::GetElapsedTime() {
-    return presentation_clock.now(glfwGetTime);
+    return presentation_clock().now(glfwGetTime);
 }
 
 // Fixed: The base class virtual function returns a bool.

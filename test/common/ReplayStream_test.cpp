@@ -379,6 +379,172 @@ TEST_P(ReplayOutputFailureTest, PairTraceRefusalPreservesBothDestinations) {
     fs::remove(m_path + ".regions.json");
 }
 
+TEST_F(ReplayStreamTest, AutomaticTraceMatchesCliBytesAndRetiresPreviousGeneration) {
+    const replay::RegionScheduleTrace trace{{1, "0123456789abcdef"}, {2, "fedcba9876543210"}};
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+    writer.RecordInput(1, {7});
+    writer.RecordInput(2, {8});
+    ASSERT_TRUE(writer.Finalize(2, &trace));
+    const auto expected = ReadBytes();
+    const auto inputs = std::make_shared<const std::vector<std::uint8_t>>(1, 7);
+    for (const bool queued : {false, true}) {
+        for (const bool regions : {true, false}) {
+            SCOPED_TRACE(testing::Message() << queued << regions);
+            std::string error;
+            const replay::RegionScheduleTrace previous{{1, "0000000000000000"},
+                                                       {2, "1111111111111111"}};
+            ASSERT_TRUE(replay::WriteRegionScheduleTrace(m_path, previous, error)) << error;
+            replay::BoundedReplayRecorder bounded;
+            replay::QueuedReplayRecorder queue;
+            ASSERT_TRUE(bounded.Configure(256, 4));
+            ASSERT_TRUE(queue.Configure(256, 4));
+            ASSERT_TRUE(queued ? queue.Open(m_path, MakeHeader(), regions)
+                               : bounded.Open(m_path, MakeHeader(), regions));
+            for (std::uint64_t tick = 1; tick <= 2; ++tick) {
+                const auto digest =
+                    regions ? std::string_view(trace.at(tick - 1).second) : std::string_view{};
+                const auto data =
+                    tick == 1 ? inputs : std::make_shared<const std::vector<std::uint8_t>>(1, 8);
+                ASSERT_TRUE(queued ? queue.RecordTick(tick, data, nullptr, tick, digest)
+                                   : bounded.RecordTick(tick, *data, nullptr, tick, digest));
+            }
+            ASSERT_TRUE(queued ? queue.Finalize(m_path, 2, 2) : bounded.Finalize(m_path, 2, 2));
+            EXPECT_EQ(ReadBytes(), expected); // Private trace frames never enter LREC1.
+            if (regions) {
+                replay::RegionScheduleTrace actual;
+                ASSERT_TRUE(replay::ReadRegionScheduleTrace(m_path, 2, actual, error)) << error;
+                EXPECT_EQ(actual, trace);
+            } else {
+                EXPECT_FALSE(fs::exists(m_path + ".regions.json"));
+            }
+        }
+    }
+}
+
+TEST_P(ReplayOutputFailureTest, AutomaticPairFailurePreservesBothGenerations) {
+    const replay::RegionScheduleTrace old{{1, "0123456789abcdef"}};
+    for (const bool queued : {false, true}) {
+        for (const bool regions : {false, true}) {
+            // Test both payload publication (after companion replacement/removal)
+            // and each companion's write/flush/close/publication boundary.
+            for (const bool companion : {false, true}) {
+                if (companion && !regions && std::string_view(GetParam()) != "output-publish")
+                    continue; // Retirement has a publication boundary but no output stream.
+                replay::ReplayWriter writer;
+                ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+                writer.RecordInput(1, {7});
+                ASSERT_TRUE(writer.Finalize(1, &old));
+                const auto previous = ReadBytes();
+                replay::BoundedReplayRecorder bounded;
+                replay::QueuedReplayRecorder queue;
+                ASSERT_TRUE(bounded.Configure(256, 4));
+                ASSERT_TRUE(queue.Configure(256, 4));
+                ASSERT_TRUE(queued ? queue.Open(m_path, MakeHeader(), regions)
+                                   : bounded.Open(m_path, MakeHeader(), regions));
+                const auto inputs = std::make_shared<const std::vector<std::uint8_t>>(1, 8);
+                const auto digest = regions ? "fedcba9876543210" : "";
+                ASSERT_TRUE(queued ? queue.RecordTick(1, inputs, nullptr, 1, digest)
+                                   : bounded.RecordTick(1, *inputs, nullptr, 1, digest));
+                if (queued) {
+                    ASSERT_TRUE(queue.Flush());
+                }
+                OutputFailure failure{
+                    GetParam(), companion ? m_path + ".regions.json" : m_path, 0, 0};
+                {
+                    const ScopedOutputFailure control(failure);
+                    EXPECT_FALSE(queued ? queue.Finalize(m_path, 1, 1)
+                                        : bounded.Finalize(m_path, 1, 1));
+                }
+                EXPECT_EQ(failure.hits, 1u);
+                EXPECT_EQ(ReadBytes(), previous);
+                replay::RegionScheduleTrace actual;
+                std::string error;
+                ASSERT_TRUE(replay::ReadRegionScheduleTrace(m_path, 1, actual, error)) << error;
+                EXPECT_EQ(actual, old);
+                if (queued) {
+                    EXPECT_TRUE(fs::exists(m_path + ".incomplete"));
+                    fs::remove(m_path + ".incomplete");
+                }
+                fs::remove(m_path + ".regions.json");
+            }
+        }
+    }
+}
+
+TEST_F(ReplayStreamTest, AutomaticTraceRefusesInvalidTicksDigestsAndBudgets) {
+    for (const bool queued : {false, true}) {
+        for (const auto digest : {"", "0", "0123456789abcdeg", "0123456789abcdef0"}) {
+            replay::BoundedReplayRecorder bounded;
+            replay::QueuedReplayRecorder queue;
+            ASSERT_TRUE(bounded.Configure(256, 0));
+            ASSERT_TRUE(queue.Configure(256, 0));
+            ASSERT_TRUE(queued ? queue.Open(m_path, MakeHeader(), true)
+                               : bounded.Open(m_path, MakeHeader(), true));
+            const auto inputs = std::make_shared<const std::vector<std::uint8_t>>();
+            EXPECT_FALSE(queued ? queue.RecordTick(1, inputs, nullptr, 1, digest)
+                                : bounded.RecordTick(1, *inputs, nullptr, 1, digest));
+        }
+        for (const bool regions : {false, true}) {
+            replay::BoundedReplayRecorder bounded;
+            replay::QueuedReplayRecorder queue;
+            ASSERT_TRUE(bounded.Configure(45, 0));
+            ASSERT_TRUE(queue.Configure(45, 0));
+            ASSERT_TRUE(queued ? queue.Open(m_path, MakeHeader(), regions)
+                               : bounded.Open(m_path, MakeHeader(), regions));
+            const auto inputs = std::make_shared<const std::vector<std::uint8_t>>();
+            // 17 input bytes plus 29 trace bytes exceed the negotiated budget;
+            // disabled recording must also refuse unexpected trace metadata.
+            EXPECT_FALSE(queued ? queue.RecordTick(1, inputs, nullptr, 1, "0123456789abcdef")
+                                : bounded.RecordTick(1, *inputs, nullptr, 1, "0123456789abcdef"));
+        }
+    }
+    replay::QueuedReplayRecorder queue;
+    ASSERT_TRUE(queue.Configure(46, 0));
+    ASSERT_TRUE(queue.Open(m_path, MakeHeader(), true)) << queue.OpenRefusal();
+    const auto inputs = std::make_shared<const std::vector<std::uint8_t>>();
+    EXPECT_FALSE(queue.RecordTick(2, inputs, nullptr, 2, "0123456789abcdef"));
+    EXPECT_EQ(queue.PendingTicks(), 0u);
+    EXPECT_EQ(queue.PendingBytes(), 0u);
+    queue.Close();
+    replay::BoundedReplayRecorder bounded;
+    ASSERT_TRUE(bounded.Configure(46, 0));
+    ASSERT_TRUE(bounded.Open(m_path, MakeHeader(), true)) << bounded.OpenRefusal();
+    EXPECT_FALSE(bounded.RecordTick(2, {}, nullptr, 2, "0123456789abcdef"));
+    ASSERT_TRUE(bounded.RecordTick(1, {}, nullptr, 1, "0123456789abcdef"));
+    EXPECT_FALSE(bounded.Finalize(m_path, 2, 2)); // Missing consumed tick.
+    ASSERT_TRUE(bounded.Open(m_path, MakeHeader(), true)) << bounded.OpenRefusal();
+    EXPECT_FALSE(bounded.Finalize(m_path, 1000001, 1)); // Existing trace admission bound.
+}
+
+TEST_F(ReplayStreamTest, AutomaticEmptyAndElidedTracePublication) {
+    replay::BoundedReplayRecorder bounded;
+    ASSERT_TRUE(bounded.Configure(46, 0));
+    ASSERT_TRUE(bounded.Open(m_path, MakeHeader(), true)) << bounded.OpenRefusal();
+    ASSERT_TRUE(bounded.Finalize(m_path, 0, 1));
+    replay::RegionScheduleTrace actual;
+    std::string error;
+    ASSERT_TRUE(replay::ReadRegionScheduleTrace(m_path, 0, actual, error)) << error;
+    EXPECT_TRUE(actual.empty());
+    ASSERT_TRUE(bounded.Open(m_path, MakeHeader(), true)) << bounded.OpenRefusal();
+    for (std::uint64_t tick = 1; tick <= 2048; ++tick)
+        ASSERT_TRUE(bounded.RecordTick(tick, {}, nullptr, tick, "0123456789abcdef"));
+    ASSERT_TRUE(bounded.Finalize(m_path, 2048, 2048));
+    EXPECT_FALSE(fs::exists(m_path + ".regions.json"));
+    const auto suffix = replay::ReadReplay(m_path);
+    ASSERT_TRUE(suffix.has_value());
+    if (!suffix)
+        return;
+    EXPECT_EQ(suffix->elided_through_tick, 1024u);
+    EXPECT_EQ(suffix->inputs.size(), 1024u);
+    const auto regional_bytes = ReadBytes();
+    ASSERT_TRUE(bounded.Open(m_path, MakeHeader())) << bounded.OpenRefusal();
+    for (std::uint64_t tick = 1; tick <= 2048; ++tick)
+        ASSERT_TRUE(bounded.RecordTick(tick, {}, nullptr, tick));
+    ASSERT_TRUE(bounded.Finalize(m_path, 2048, 2048));
+    EXPECT_EQ(ReadBytes(), regional_bytes); // Elided digest folds only replay bytes.
+}
+
 TEST_F(ReplayStreamTest, PairSuccessReplacesBothAndCanRemoveStaleTrace) {
     replay::ReplayWriter writer;
     const replay::RegionScheduleTrace old_trace{{1, "0123456789abcdef"}};
@@ -720,7 +886,12 @@ TEST_F(ReplayPairRecoveryTest, StandaloneFinalizationRecoversBeforeReplacingRepl
             EXPECT_FALSE(fs::exists(m_directory / ".replay-pair.undo"));
             const Luminumbra::Persistence::ReplayPairReadGuard playback(m_path);
             ASSERT_TRUE(playback.is_open());
-            EXPECT_EQ(ReadFile(m_path + ".regions.json"), committed ? "new trace" : "old trace");
+            if (bounded) {
+                EXPECT_FALSE(fs::exists(m_path + ".regions.json"));
+            } else {
+                EXPECT_EQ(ReadFile(m_path + ".regions.json"),
+                          committed ? "new trace" : "old trace");
+            }
             const auto contents = replay::ReadReplay(m_path);
             ASSERT_TRUE(contents.has_value());
             if (!contents.has_value()) {
@@ -1250,6 +1421,132 @@ TEST_F(ReplayStreamTest, InvalidPairTraceRefusesBeforeEitherDestinationChanges) 
     fs::remove(m_path + ".regions.json");
 }
 
+TEST_P(ReplayOutputFailureTest, FailedMarkerPublicationRetiresRetainedCompleteGeneration) {
+    for (const bool retained : {false, true}) {
+        SCOPED_TRACE(retained);
+        if (retained) {
+            replay::ReplayWriter old;
+            ASSERT_TRUE(old.Open(m_path, MakeHeader()));
+            ASSERT_TRUE(old.Finalize(0));
+            ASSERT_TRUE(replay::ReadReplay(m_path).has_value());
+        }
+        replay::QueuedReplayRecorder recorder;
+        ASSERT_TRUE(recorder.Configure(17, 0));
+        ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
+        EXPECT_FALSE(recorder.RecordTick(
+            1, std::make_shared<const std::vector<std::uint8_t>>(1, 0), nullptr, 0));
+        OutputFailure failure{GetParam(), m_path + ".incomplete", 0, 0};
+        {
+            const ScopedOutputFailure control(failure);
+            EXPECT_FALSE(recorder.Finalize(m_path, 1, 1));
+        }
+        EXPECT_EQ(failure.hits, 1u);
+        EXPECT_FALSE(fs::exists(m_path));
+        EXPECT_FALSE(fs::exists(m_path + ".incomplete"));
+        EXPECT_FALSE(replay::ReadReplay(m_path).has_value());
+        EXPECT_EQ(recorder.PendingTicks(), 0u);
+        EXPECT_EQ(recorder.SegmentCount(), 0u);
+        EXPECT_FALSE(recorder.Finalize(m_path, 1, 1));
+        ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
+        const auto empty = std::make_shared<const std::vector<std::uint8_t>>();
+        ASSERT_TRUE(recorder.RecordTick(1, empty, nullptr, 1));
+        ASSERT_TRUE(recorder.Finalize(m_path, 1, 1));
+        ASSERT_TRUE(replay::ReadReplay(m_path).has_value());
+        fs::remove(m_path);
+    }
+}
+
+TEST_P(ReplayOutputFailureTest, FailedMarkerPublicationStillAllowsACompleteReplacement) {
+    replay::ReplayWriter old;
+    ASSERT_TRUE(old.Open(m_path, MakeHeader()));
+    ASSERT_TRUE(old.Finalize(0));
+    replay::QueuedReplayRecorder recorder;
+    ASSERT_TRUE(recorder.Configure(17, 0));
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
+    ASSERT_TRUE(
+        recorder.RecordTick(1, std::make_shared<const std::vector<std::uint8_t>>(), nullptr, 1));
+    OutputFailure failure{GetParam(), m_path + ".incomplete", 0, 0};
+    {
+        const ScopedOutputFailure control(failure);
+        ASSERT_TRUE(recorder.Finalize(m_path, 1, 1));
+    }
+    EXPECT_EQ(failure.hits, 1u);
+    EXPECT_FALSE(fs::exists(m_path + ".incomplete"));
+    const auto contents = replay::ReadReplay(m_path);
+    ASSERT_TRUE(contents.has_value());
+    if (contents) {
+        EXPECT_EQ(contents->tick_count, 1u);
+    }
+}
+
+TEST_F(ReplayStreamTest, FinalizationCompletionPreservesForeignMarkersAndAcceptsAbsence) {
+    const auto marker = fs::path(m_path + ".incomplete");
+    for (const int replacement : {0, 1, 2}) {
+        SCOPED_TRACE(replacement);
+        replay::ReplayFinalization publication(m_path, "Incomplete replay\n");
+        ASSERT_TRUE(publication.ready());
+        {
+            const Luminumbra::Persistence::ReplayPairReadGuard owner(m_path);
+            ASSERT_TRUE(owner.is_open());
+            EXPECT_FALSE(publication.Complete());
+            EXPECT_TRUE(fs::exists(marker));
+        }
+        // Keep the old inode alive so identity reuse cannot hide the substitution.
+        fs::rename(marker, m_path + ".retained-marker");
+        if (replacement == 1) {
+            std::ofstream foreign(marker);
+            foreign << "another attempt";
+            ASSERT_TRUE(foreign.good());
+        } else if (replacement == 2) {
+            fs::create_directory(marker);
+        }
+        replay::ReplayWriter writer;
+        ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+        ASSERT_TRUE(writer.Finalize(0));
+        EXPECT_EQ(publication.Complete(), replacement == 0);
+        EXPECT_EQ(fs::exists(marker), replacement != 0);
+        if (replacement == 1) {
+            std::ifstream foreign(marker);
+            EXPECT_EQ(std::string(std::istreambuf_iterator<char>(foreign), {}), "another attempt");
+        }
+        fs::remove(marker);
+        fs::remove(m_path + ".retained-marker");
+    }
+}
+
+TEST_F(ReplayStreamTest, FinalizationCompletionAcceptsRemovalBeforeAReportedFailure) {
+    replay::ReplayFinalization publication(m_path, "Incomplete replay\n");
+    ASSERT_TRUE(publication.ready());
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+    ASSERT_TRUE(writer.Finalize(0));
+    OutputFailure failure{"crash-artifact-removed", m_path + ".incomplete", 0, 0};
+    {
+        const ScopedOutputFailure control(failure);
+        EXPECT_TRUE(publication.Complete());
+    }
+    EXPECT_EQ(failure.hits, 1u);
+    EXPECT_FALSE(fs::exists(m_path + ".incomplete"));
+    EXPECT_TRUE(replay::ReadReplay(m_path).has_value());
+}
+
+TEST_F(ReplayStreamTest, FinalizationPreconditionRefusesContendedAndWrongTypeDestinations) {
+    {
+        const Luminumbra::Persistence::ReplayPairReadGuard owner(m_path);
+        ASSERT_TRUE(owner.is_open());
+        replay::ReplayFinalization publication(m_path, "Incomplete replay\n");
+        EXPECT_FALSE(publication.ready());
+        EXPECT_FALSE(publication.Complete());
+        EXPECT_FALSE(fs::exists(m_path + ".incomplete"));
+    }
+    fs::create_directory(m_path);
+    replay::ReplayFinalization publication(m_path, "Incomplete replay\n");
+    EXPECT_FALSE(publication.ready());
+    EXPECT_FALSE(publication.Complete());
+    EXPECT_TRUE(fs::is_directory(m_path));
+    EXPECT_FALSE(fs::exists(m_path + ".incomplete"));
+}
+
 INSTANTIATE_TEST_SUITE_P(OutputBoundaries,
                          ReplayOutputFailureTest,
                          testing::Values("output-open",
@@ -1435,6 +1732,54 @@ TEST_P(ReplayMalformedSegmentTest, RefusedSegmentNeverTruncatesExistingReplay) {
     EXPECT_FALSE(recorder.RecordTick(1026, {}, nullptr, 0));
     EXPECT_FALSE(recorder.Finalize(m_path, 1025, 1025));
 }
+TEST_P(ReplayMalformedSegmentTest, InvalidPrivateTraceCannotPublishOrReplaceEitherCompanion) {
+    replay::ReplayWriter writer;
+    const replay::RegionScheduleTrace old{{1, "fedcba9876543210"}};
+    ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+    writer.RecordInput(1, {8});
+    ASSERT_TRUE(writer.Finalize(1, &old));
+    const auto previous = ReadBytes();
+    const auto working = fs::path(m_path + ".segments");
+    replay::BoundedReplayRecorder recorder;
+    ASSERT_TRUE(recorder.Configure(256, 2048));
+    const auto destination = (working / "recording").string();
+    ASSERT_TRUE(recorder.Open(destination, MakeHeader(), true)) << recorder.OpenRefusal();
+    // Rotate to close the first segment before touching it on Windows.
+    for (std::uint64_t tick = 1; tick <= 1025; ++tick)
+        ASSERT_TRUE(recorder.RecordTick(tick, {7}, nullptr, 0, "0123456789abcdef"));
+    fs::path segment;
+    for (const auto& entry : fs::directory_iterator(working))
+        segment = entry.path() / "1";
+    ASSERT_FALSE(segment.empty());
+    if (GetParam() == 0) {
+        fs::remove(segment);
+    } else if (GetParam() == 1) {
+        fs::resize_file(segment, 18 + 13 + 15); // Partial fixed-size digest.
+    } else {
+        std::fstream data(segment, std::ios::binary | std::ios::in | std::ios::out);
+        ASSERT_TRUE(data.is_open());
+        if (GetParam() == 2) {
+            data.seekp(18);
+            data.put(static_cast<char>(0xfe)); // Unknown private metadata.
+        } else if (GetParam() == 3) {
+            data.seekp(18 + 9);
+            data.put(15); // Invalid digest length.
+        } else {
+            data.seekp(18 + 13);
+            data.put('g'); // Non-hex digest.
+        }
+        ASSERT_TRUE(data.good());
+    }
+    EXPECT_FALSE(recorder.Finalize(m_path, 1025, 1025));
+    EXPECT_EQ(ReadBytes(), previous);
+    replay::RegionScheduleTrace actual;
+    std::string error;
+    ASSERT_TRUE(replay::ReadRegionScheduleTrace(m_path, 1, actual, error)) << error;
+    EXPECT_EQ(actual, old);
+    fs::remove(m_path + ".regions.json");
+    fs::remove_all(working);
+}
+
 INSTANTIATE_TEST_SUITE_P(MalformedSegments,
                          ReplayMalformedSegmentTest,
                          testing::Values(0, 1, 2, 3, 4));
@@ -1640,17 +1985,52 @@ void SubstituteOutput(const char* step, const fs::path& destination) {
     std::ofstream foreign(substitution->staging, std::ios::binary);
     foreign << "foreign occupant";
 }
+void SubstituteRetainedReplay(const char* step, const fs::path& destination) {
+    auto* substitution = OutputSubstitution();
+    if (!substitution || std::string_view(step) != "output-publish" ||
+        destination != fs::path(substitution->destination.string() + ".incomplete"))
+        return;
+    fs::rename(substitution->destination, substitution->retained);
+    fs::rename(substitution->staging, substitution->destination);
+    throw std::runtime_error("marker refused after destination substitution");
+}
 class ScopedOutputSubstitution {
 public:
-    explicit ScopedOutputSubstitution(SubstitutedOutput& substitution) {
+    explicit ScopedOutputSubstitution(
+        SubstitutedOutput& substitution,
+        Luminumbra::Persistence::SnapshotStepHook hook = SubstituteOutput) {
         OutputSubstitution() = &substitution;
-        Luminumbra::Persistence::set_snapshot_step_hook_for_testing(SubstituteOutput);
+        Luminumbra::Persistence::set_snapshot_step_hook_for_testing(hook);
     }
     ~ScopedOutputSubstitution() {
         Luminumbra::Persistence::set_snapshot_step_hook_for_testing(nullptr);
         OutputSubstitution() = nullptr;
     }
 };
+
+TEST_F(ReplayStreamTest, FailedMarkerRetirementNeverRemovesAChangedGeneration) {
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+    ASSERT_TRUE(writer.Finalize(0));
+    const auto original = ReadBytes();
+    const auto replacement = fs::path(m_path + ".replacement");
+    {
+        std::ofstream output(replacement);
+        output << "different generation";
+        ASSERT_TRUE(output.good());
+    }
+    SubstitutedOutput substitution{false, m_path, replacement, m_path + ".retained"};
+    {
+        const ScopedOutputSubstitution control(substitution, SubstituteRetainedReplay);
+        const replay::ReplayFinalization publication(m_path, "Incomplete replay\n");
+        EXPECT_FALSE(publication.ready());
+    }
+    EXPECT_EQ(ReadBytes(), "different generation");
+    std::ifstream retained(substitution.retained, std::ios::binary);
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(retained), {}), original);
+    retained.close();
+    fs::remove(substitution.retained);
+}
 
 TEST_F(ReplayStreamTest, ChangedStagingOwnershipRefusesAndPreservesForeignOccupant) {
     {
@@ -1864,13 +2244,16 @@ public:
     bool Configure(std::size_t bytes, std::uint64_t ticks) override {
         return m_disk.Configure(bytes, ticks);
     }
-    bool Open(const std::string& destination, const replay::ReplayHeader& header) override {
-        return m_disk.Open(destination, header);
+    bool Open(const std::string& destination,
+              const replay::ReplayHeader& header,
+              bool regions) override {
+        return m_disk.Open(destination, header, regions);
     }
     bool RecordTick(std::uint64_t tick,
                     const std::vector<std::uint8_t>& inputs,
                     const std::array<std::string_view, 4>* hashes,
-                    std::uint64_t confirmed_tick) override {
+                    std::uint64_t confirmed_tick,
+                    std::string_view schedule_digest) override {
         if (std::this_thread::get_id() == m_gate->simulation_thread)
             ++m_gate->simulation_sink_calls;
         {
@@ -1882,8 +2265,8 @@ public:
         if (m_gate->ticks.empty())
             m_gate->first_input = inputs.data();
         m_gate->ticks.push_back(tick);
-        const bool ok =
-            tick != m_gate->fail_tick && m_disk.RecordTick(tick, inputs, hashes, confirmed_tick);
+        const bool ok = tick != m_gate->fail_tick &&
+                        m_disk.RecordTick(tick, inputs, hashes, confirmed_tick, schedule_digest);
         ++m_gate->written_ticks;
         m_gate->digest_bytes += inputs.size();
         return ok;
@@ -1914,6 +2297,31 @@ private:
     std::shared_ptr<RecorderGate> m_gate;
     replay::BoundedReplayRecorder m_disk;
 };
+
+TEST_F(ReplayStreamTest, QueuedRegionDigestsAreCopiedBeforeWorkerDispatch) {
+    auto gate = std::make_shared<RecorderGate>();
+    replay::QueuedReplayRecorder recorder(std::make_unique<GatedReplaySink>(gate));
+    const ReleaseRecorderGate release{gate};
+    ASSERT_TRUE(recorder.Configure(256, 0));
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader(), true)) << recorder.OpenRefusal();
+    const auto inputs = std::make_shared<const std::vector<std::uint8_t>>();
+    std::string digest = "0123456789abcdef";
+    ASSERT_TRUE(recorder.RecordTick(1, inputs, nullptr, 1, digest));
+    WaitForRecorderWorker(gate);
+    digest = "fedcba9876543210";
+    ASSERT_TRUE(recorder.RecordTick(2, inputs, nullptr, 2, digest));
+    digest.clear();
+    ReleaseRecorder(gate);
+    ASSERT_TRUE(recorder.Finalize(m_path, 2, 2));
+    EXPECT_EQ(gate->simulation_sink_calls.load(), 0u);
+    EXPECT_EQ(gate->written_ticks.load(), 2u);
+    replay::RegionScheduleTrace actual;
+    std::string error;
+    ASSERT_TRUE(replay::ReadRegionScheduleTrace(m_path, 2, actual, error)) << error;
+    const replay::RegionScheduleTrace expected{{1, "0123456789abcdef"}, {2, "fedcba9876543210"}};
+    EXPECT_EQ(actual, expected);
+    fs::remove(m_path + ".regions.json");
+}
 
 TEST_F(ReplayStreamTest, QueuedTickOnlyRetainsImmutableDataWhileSinkIsBlocked) {
     auto gate = std::make_shared<RecorderGate>();
@@ -2416,6 +2824,7 @@ TEST_F(ReplayStreamTest, BoundedRecorderPrefixDigestMatchesElidedWireBytes) {
                                              contents.header.system_config_identity,
                                              contents.header.preset_content_hash));
     EXPECT_EQ(contents.elided_through_tick, 1024u);
+    EXPECT_EQ(contents.elided_prefix_digest, UINT64_C(0x876d9f1c8cebb191));
     EXPECT_EQ(contents.elided_prefix_digest, std::stoull(replay::Fnv1a64Hex(prefix), nullptr, 16));
     ASSERT_EQ(contents.inputs.size(), 1024u);
     EXPECT_EQ(contents.inputs.front().tick, 1025u);
@@ -2438,6 +2847,31 @@ TEST_F(ReplayStreamTest, BoundedRecorderPrefixDigestMatchesElidedWireBytes) {
     const auto& invalid_contents = *downgraded;
     EXPECT_TRUE(invalid_contents.truncated);
     EXPECT_EQ(invalid_contents.elided_through_tick, 0u);
+}
+
+TEST_F(ReplayStreamTest, BoundedRecorderStandardDigestResetsAcrossRecordings) {
+    replay::BoundedReplayRecorder recorder;
+    ASSERT_TRUE(recorder.Configure(18, 0));
+    for (int recording = 0; recording < 2; ++recording) {
+        ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
+        for (std::uint64_t tick = 1; tick <= 3072; ++tick) {
+            ASSERT_TRUE(
+                recorder.RecordTick(tick, {static_cast<std::uint8_t>(tick)}, nullptr, tick));
+        }
+        ASSERT_TRUE(recorder.Finalize(m_path, 3072, 3072));
+        const auto read = replay::ReadReplay(m_path);
+        if (!read.has_value()) {
+            FAIL() << "finalized bounded recording should read back";
+        }
+        const auto& contents = *read;
+        EXPECT_FALSE(contents.truncated);
+        EXPECT_TRUE(contents.trailer_present);
+        EXPECT_EQ(contents.elided_through_tick, 2048u);
+        EXPECT_EQ(contents.elided_prefix_digest, UINT64_C(0xfc31c0fdbea9e11d));
+        ASSERT_EQ(contents.inputs.size(), 1024u);
+        EXPECT_EQ(contents.inputs.front().tick, 2049u);
+        EXPECT_EQ(contents.inputs.back().tick, 3072u);
+    }
 }
 
 TEST_F(ReplayStreamTest, VersionFourHeaderPreservesIdentityAndCompleteRecordLayout) {
@@ -3781,6 +4215,15 @@ TEST_F(ReplayStreamTest, CheckpointEncodeDecodeMultiple) {
     EXPECT_EQ(contents->checkpoints[1].tick, 60u);
     EXPECT_EQ(contents->checkpoints[2].tick, 90u);
     EXPECT_EQ(contents->checkpoints[2].world_hash, "wh90");
+}
+
+TEST_F(ReplayStreamTest, Fnv1a64HexStandardKnownAnswers) {
+    EXPECT_EQ(replay::Fnv1a64Hex(""), "cbf29ce484222325");
+    EXPECT_EQ(replay::Fnv1a64Hex("a"), "af63dc4c8601ec8c");
+    EXPECT_EQ(replay::Fnv1a64Hex("foobar"), "85944171f73967e8");
+    EXPECT_EQ(replay::Fnv1a64Hex("default"), "ebada5168620c5fe");
+    EXPECT_EQ(replay::Fnv1a64Hex(std::string("a\0b", 3)), "e5d29919042666b2");
+    EXPECT_EQ(replay::Fnv1a64Hex(std::string("\x80\xff", 2)), "09e5c907b65d72e0");
 }
 
 // Fnv1a64Hex is stable and 16 lowercase hex chars (the shared hash algorithm).

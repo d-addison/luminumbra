@@ -8,6 +8,7 @@
 #include "../FoliageSurfaceSlots.h"
 #include "../RenderContext.h"
 #include "app/FrameAttribution.h"
+#include "app/RenderMeasurement.h"
 
 #include <array>
 #include <cstdint>
@@ -26,6 +27,20 @@ class JobSystem;
 }
 
 namespace Luminumbra::Rendering {
+
+struct GlBenchmarkTimestamps;
+// Borrowed query ids and issued flag belong to the pipeline's current ring slot.
+// The benchmark ring retains its own originating-frame bookkeeping.
+struct GpuPassTimer {
+    std::uint32_t begin_query = 0;
+    std::uint32_t end_query = 0;
+    bool* issued = nullptr;
+    Client::Measurement::GpuQueryRing<GlBenchmarkTimestamps>* benchmark = nullptr;
+    std::size_t pass = 0;
+
+    void begin() const;
+    void end() const;
+};
 
 namespace detail {
 
@@ -87,6 +102,17 @@ class Shader;
 // ===========================================================================
 class FoliagePass {
 public:
+    struct CallerState {
+        // GLboolean storage; this header stays GL-free for non-GL test hosts.
+        unsigned char cull_enabled = 0;
+        static CallerState QueryExternal();
+    };
+
+    // Render-thread diagnostics; handles are refreshed before their ring slot is reused.
+    void set_scatter_gpu_timers(const std::array<GpuPassTimer, 3>& timers) {
+        m_scatter_gpu_timers = timers;
+    }
+
     // --- Pinned capacities. ---
     static constexpr std::size_t kMaxInstances = 262144; // global scatter pool
     // Instance stride: pos(12) + size(8) + color(4) + sway(8) + phase(2) + facing(2).
@@ -366,7 +392,13 @@ public:
     // disabled. -T17: reads frame state from the RenderContext seam
     // (sun/ambient/moon/cloud/time/lit_scene) instead of RenderPipeline; RETURNS
     // the known instance count drawn (0 if unknown); last_draw_calls reports submission.
-    std::size_t execute(const RenderContext& ctx, const Camera& camera);
+    // Shipping dispatch supplies known enable state; direct hosts preserve arbitrary state.
+    std::size_t execute(const RenderContext& ctx, const Camera& camera, const CallerState& caller);
+    std::size_t execute_external(const RenderContext& ctx, const Camera& camera);
+    // Preserve the existing direct-call boundary for previews and pass consumers.
+    std::size_t execute(const RenderContext& ctx, const Camera& camera) {
+        return execute_external(ctx, camera);
+    }
 
     // Opt-in, same-device qualification. Freezes uploaded public scatter/surface
     // inputs; the output is cleared and independently dispatched before capture.
@@ -538,6 +570,7 @@ private:
     // false the CPU loop runs. m_gpu_active is true once a GPU build populated
     // m_blade_ssbo this session (execute then draws from it directly through
     // the command stored in m_count_ssbo).
+    std::array<GpuPassTimer, 3> m_scatter_gpu_timers{};
     void dispatch_scatter();
     void collect_input_hash();
     void poll_vertex_evidence();

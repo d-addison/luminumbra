@@ -1,6 +1,7 @@
 #include "WeatherSystem.h"
 
 #include "../world/GameSession.h"
+#include "../world/WorldClock.h"
 
 #include <algorithm>
 #include <array>
@@ -11,6 +12,7 @@
 #include <iomanip>
 #include <span>
 #include <sstream>
+#include <tuple>
 #include <vector>
 
 #include "../core/DeterministicMath.h"
@@ -325,6 +327,7 @@ WeatherSystem::WeatherSystem(int world_seed)
     Update(0, Vec3(0.0f), nullptr);
     // Construction is setup; only a caller's tick or restore locks installation.
     m_hasUpdatedOrRestored = false;
+    m_constructorState = true;
 }
 
 WeatherSystem::WeatherSystem(const WeatherSystem& other)
@@ -360,6 +363,8 @@ WeatherSystem::WeatherSystem(const WeatherSystem& other)
     , m_anchor_wind(other.m_anchor_wind)
     , m_anchor_category(other.m_anchor_category)
     , m_last_tick(other.m_last_tick)
+    , m_fieldAnchor(other.m_fieldAnchor)
+    , m_constructorState(other.m_constructorState)
     , m_storm_cells(other.m_storm_cells)
     , m_strikes(other.m_strikes)
     , m_pressure_noise(other.m_pressure_noise)
@@ -413,6 +418,8 @@ WeatherSystem::WeatherSystem(WeatherSystem&& other)
     , m_anchor_wind(other.m_anchor_wind)
     , m_anchor_category(other.m_anchor_category)
     , m_last_tick(other.m_last_tick)
+    , m_fieldAnchor(other.m_fieldAnchor)
+    , m_constructorState(other.m_constructorState)
     , m_storm_cells(std::move(other.m_storm_cells))
     , m_strikes(std::move(other.m_strikes))
     , m_pressure_noise(std::move(other.m_pressure_noise))
@@ -993,6 +1000,7 @@ const std::vector<StrikeEvent>& WeatherSystem::StrikeSchedule() const {
 
 void WeatherSystem::RefreshRegionalWeather(std::uint64_t tick, const Vec3& anchor) {
     m_hasUpdatedOrRestored = true;
+    m_constructorState = false;
     m_last_tick = tick;
     if (HasRegionalBackend()) {
         const auto sample = SampleRegional(anchor);
@@ -1112,6 +1120,7 @@ void WeatherSystem::UpdateFromClock(std::uint64_t tick,
                                     const Vec3& region_anchor,
                                     WindFieldSystem& wind) {
     m_hasUpdatedOrRestored = true;
+    m_constructorState = false;
     if (m_schedule) {
         wind.ClearStormPerturbations();
         wind.Update(tick, region_anchor);
@@ -1134,10 +1143,107 @@ void WeatherSystem::UpdateFromClock(std::uint64_t tick,
         wind.SampleWind(Vec3(region_anchor.x, 5.0f, region_anchor.z), WindLayer::Ground);
 }
 
+bool ValidAmbientContinuation(const AmbientContinuation& state) {
+    for (int axis = 0; axis < 3; ++axis) {
+        if (!std::isfinite(state.anchor[axis]) || state.anchor[axis] < -16777216.0f ||
+            state.anchor[axis] >= 16777216.0f) {
+            return false;
+        }
+    }
+    if (state.tick > world::WorldClock::kTickLimit || state.storms.size() > kMaxStormCells ||
+        state.strikes.size() > kMaxLiveStrikes || state.wind.size() > kMaxStormCells ||
+        (state.constructor_state &&
+         (state.tick != 0 || state.anchor != Vec3(0) || !state.storms.empty() ||
+          !state.strikes.empty() || !state.wind.empty()))) {
+        return false;
+    }
+    const auto finite = [](float value) {
+        return std::isfinite(value);
+    };
+    const auto position = [&finite](const Vec2& value) {
+        return finite(value.x) && finite(value.y) && std::abs(value.x) < 33554432.0f &&
+               std::abs(value.y) < 33554432.0f;
+    };
+    const auto unit = [&finite](float value) {
+        return finite(value) && value >= 0 && value <= 1;
+    };
+    for (std::size_t i = 0; i < state.storms.size(); ++i) {
+        const auto& storm = state.storms[i];
+        if (!position(storm.center_world) || !position(storm.velocity) || !unit(storm.intensity) ||
+            storm.lifetime_ticks != kStormLifetimeTicks || storm.spawn_tick > state.tick ||
+            state.tick - storm.spawn_tick >= storm.lifetime_ticks ||
+            (i != 0 && state.storms[i - 1].spawn_tick >= storm.spawn_tick)) {
+            return false;
+        }
+    }
+    const auto strike_key = [](const StrikeEvent& strike) {
+        return std::tuple(strike.strike_tick,
+                          strike.storm_salt,
+                          DeterministicMath::BitsOf(strike.world_x),
+                          DeterministicMath::BitsOf(strike.world_z));
+    };
+    for (std::size_t i = 0; i < state.strikes.size(); ++i) {
+        const auto& strike = state.strikes[i];
+        if (strike.strike_tick < state.tick || strike.strike_tick > world::WorldClock::kTickLimit ||
+            !position({strike.world_x, strike.world_z}) || !unit(strike.magnitude) ||
+            (i != 0 && strike_key(state.strikes[i - 1]) > strike_key(strike))) {
+            return false;
+        }
+    }
+    for (const auto& perturbation : state.wind) {
+        if (!position(perturbation.center_world) || !position(perturbation.velocity) ||
+            perturbation.radius_m != 96.0f || !unit(perturbation.intensity) ||
+            perturbation.intensity == 0) {
+            return false;
+        }
+    }
+    return std::is_sorted(state.wind.begin(), state.wind.end(), AmbientWindPerturbationLess);
+}
+
+bool WeatherSystem::CaptureContinuation(const WindFieldSystem& wind,
+                                        AmbientContinuation& state) const {
+    const auto inputs = wind.continuation_perturbations();
+    if (m_schedule || HasRegionalBackend() || !inputs || wind.last_tick() != m_last_tick ||
+        wind.field_anchor() != m_fieldAnchor || m_storm_cells.size() > kMaxStormCells ||
+        m_strikes.size() > kMaxLiveStrikes) {
+        return false;
+    }
+    AmbientContinuation candidate{.tick = m_last_tick,
+                                  .anchor = m_fieldAnchor,
+                                  .constructor_state = m_constructorState,
+                                  .storms = m_storm_cells,
+                                  .strikes = m_strikes,
+                                  .wind = {inputs->begin(), inputs->end()}};
+    if (!ValidAmbientContinuation(candidate)) {
+        return false;
+    }
+    state = std::move(candidate);
+    return true;
+}
+
+void WeatherSystem::RestoreContinuation(const AmbientContinuation& state, WindFieldSystem& wind) {
+    if (m_schedule || HasRegionalBackend() || !ValidAmbientContinuation(state)) {
+        throw std::invalid_argument("invalid ambient continuation");
+    }
+    wind.RestoreContinuation(state);
+    RebuildFields(state.tick, state.anchor);
+    m_storm_cells = state.storms;
+    m_strikes = state.strikes;
+    m_last_tick = state.tick;
+    m_fieldAnchor = state.anchor;
+    m_hasUpdatedOrRestored = true;
+    m_constructorState = state.constructor_state;
+    m_anchor_wind =
+        state.constructor_state
+            ? Vec2(0)
+            : wind.SampleWind(Vec3(state.anchor.x, 5.0f, state.anchor.z), WindLayer::Ground);
+}
+
 void WeatherSystem::RestoreAtTick(std::uint64_t tick,
                                   const Vec3& region_anchor,
                                   WindFieldSystem& wind) {
     m_hasUpdatedOrRestored = true;
+    m_constructorState = false;
     if (m_schedule) {
         m_scheduledDeliveredThrough = tick;
         m_scheduledPresentations.clear();
@@ -1168,6 +1274,7 @@ void WeatherSystem::Update(std::uint64_t tick,
                            const Vec3& region_anchor,
                            const WindFieldSystem* wind) {
     m_hasUpdatedOrRestored = true;
+    m_constructorState = false;
     m_last_tick = tick;
     if (m_schedule) {
         UpdateSchedule(tick, region_anchor);
@@ -1179,6 +1286,7 @@ void WeatherSystem::Update(std::uint64_t tick,
     if (HasRegionalBackend())
         return;
     // 1) Category map + base precipitation field for this tick.
+    m_fieldAnchor = region_anchor;
     RebuildFields(tick, region_anchor);
     // 2) Storm cells: age/advect existing, spawn on the deterministic schedule.
     StepStormCells(tick, region_anchor, wind);
@@ -1384,6 +1492,8 @@ WeatherSystem& WeatherSystem::operator=(WeatherSystem&& other) {
     m_anchor_wind = other.m_anchor_wind;
     m_anchor_category = other.m_anchor_category;
     m_last_tick = other.m_last_tick;
+    m_fieldAnchor = other.m_fieldAnchor;
+    m_constructorState = other.m_constructorState;
     return *this;
 }
 

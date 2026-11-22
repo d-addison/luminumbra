@@ -15,6 +15,7 @@
 #include "luminumbra_client/rendering/FarVolumeGlBackend.h"
 #include "luminumbra_client/rendering/FarWorldDepthBias.h"
 #include "luminumbra_client/rendering/Mesh.h"
+#include "luminumbra_client/rendering/PassShaderLayouts.h"
 #include "luminumbra_client/rendering/RenderGraph.h"
 #include "luminumbra_client/rendering/Shader.h"
 #include "luminumbra_client/rendering/ShaderSource.h"
@@ -27,6 +28,7 @@
 #include "luminumbra_client/rendering/passes/FoliagePass.h"
 #include "luminumbra_client/rendering/passes/GBufferPass.h"
 #include "luminumbra_client/rendering/passes/GlassOitPass.h"
+#include "luminumbra_client/rendering/passes/GodRaysPass.h"
 #include "luminumbra_client/rendering/passes/LightingPass.h"
 #include "luminumbra_client/rendering/passes/ParticlePass.h"
 #include "luminumbra_client/rendering/passes/SkyboxPass.h"
@@ -4145,9 +4147,9 @@ TEST(RenderSmokeTest, GodRaysUseSkyOcclusionAndRemainVisibleInAir) {
 
 namespace {
 struct ComparisonClockGuard {
-    Luminumbra::Client::PresentationClock saved = Luminumbra::Client::presentation_clock;
+    Luminumbra::Client::PresentationClock saved = Luminumbra::Client::presentation_clock();
     ~ComparisonClockGuard() {
-        Luminumbra::Client::presentation_clock = saved;
+        Luminumbra::Client::presentation_clock() = saved;
     }
 };
 
@@ -4226,7 +4228,7 @@ TEST(RenderSmokeTest, ComparisonAtmosphereReplacesAdverseDefaultsBeforeEveryPhas
     ASSERT_TRUE(context.ready()) << context.error();
     const ComparisonClockGuard clock_guard;
     RenderPipeline pipeline;
-    Luminumbra::Client::presentation_clock.use_wall_clock();
+    Luminumbra::Client::presentation_clock().use_wall_clock();
     EXPECT_TRUE(ResolvedAtmosphereToJson(pipeline)["presentation_seconds"].is_null());
     auto* particles = pipeline.particles();
     ASSERT_NE(particles, nullptr);
@@ -4258,7 +4260,7 @@ TEST(RenderSmokeTest, ComparisonAtmosphereReplacesAdverseDefaultsBeforeEveryPhas
         pipeline.set_lightning_state(lightning);
         particles->set_precipitation(data_root, glm::vec3(0), 1, 1);
         particles->set_wind(glm::vec3(20, 0, -30));
-        Luminumbra::Client::presentation_clock.set_capture_tick(9999, 30);
+        Luminumbra::Client::presentation_clock().set_capture_tick(9999, 30);
         PinComparisonAtmosphere(pipeline, data_root, glm::vec3(0), rain);
         const auto expected = BuildComparisonAtmosphere(rain);
         const auto& actual = pipeline.get_weather_state();
@@ -8086,6 +8088,134 @@ struct ReloadShaderSources {
     }
 };
 
+// Observe program disposal during public pass initialization, before the pass
+// destructor runs. Rejected layouts must release the linked program immediately.
+struct ProgramDeletionCapture {
+    struct State {
+        PFNGLDELETEPROGRAMPROC original = nullptr;
+        std::size_t count = 0;
+    };
+    static State& Current() {
+        static State state;
+        return state;
+    }
+    static void APIENTRY Delete(GLuint program) {
+        auto& state = Current();
+        if (!state.original) {
+            ADD_FAILURE() << "Missing program deletion entry point";
+            return;
+        }
+        ++state.count;
+        state.original(program);
+    }
+    ProgramDeletionCapture() {
+        Current() = {.original = glad_glDeleteProgram, .count = 0};
+        glad_glDeleteProgram = Delete;
+    }
+    ~ProgramDeletionCapture() {
+        glad_glDeleteProgram = Current().original;
+    }
+    ProgramDeletionCapture(const ProgramDeletionCapture&) = delete;
+    ProgramDeletionCapture& operator=(const ProgramDeletionCapture&) = delete;
+};
+
+bool WriteLayoutShader(const fs::path& path, std::string_view source) {
+    std::ofstream output(path, std::ios::binary);
+    output << source;
+    output.close();
+    return !output.fail();
+}
+
+constexpr std::string_view kLayoutVertex = R"(#version 450 core
+void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }
+)";
+
+std::string LayoutFragment(std::string_view sampler, bool wrong_type) {
+    return "#version 450 core\nuniform " +
+           std::string(wrong_type ? "sampler2DArray " : "sampler2D ") + std::string(sampler) +
+           ";\nlayout(location=0) out vec4 color;\nvoid main() { color = texture(" +
+           std::string(sampler) + (wrong_type ? ", vec3(0.5)); }\n" : ", vec2(0.5)); }\n");
+}
+
+bool WritePassLayoutSources(const fs::path& root) {
+    fs::create_directories(root / "res/shaders");
+    // Bounded by the fixed pass registry. Tiny programs keep this a layout and
+    // ownership test, independent of the complexity of shipping shader assets.
+    for (const auto& entry : AllPassShaderLayouts()) {
+        if (entry.expected.samplers.empty() ||
+            entry.expected.samplers.front().type != GL_SAMPLER_2D ||
+            !WriteLayoutShader(root / entry.vert, kLayoutVertex) ||
+            !WriteLayoutShader(root / entry.frag,
+                               LayoutFragment(entry.expected.samplers.front().name, false)))
+            return false;
+    }
+    // Water's companion generator has no sampler layout.
+    return WriteLayoutShader(root / "res/shaders/caustics_generator.frag",
+                             "#version 450 core\nout vec4 color;\n"
+                             "void main() { color = vec4(1.0); }\n");
+}
+
+template<typename Pass>
+void CheckPassLayoutAdoption(const fs::path& root,
+                             std::string_view name,
+                             void (Pass::*initialize)(const fs::path&),
+                             std::size_t rejected_programs) {
+    SCOPED_TRACE(name);
+    const auto* entry = FindPassShaderLayout(name);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_FALSE(entry->expected.samplers.empty());
+    const auto fragment = root / entry->frag;
+    const auto compatible = LayoutFragment(entry->expected.samplers.front().name, false);
+    // Both a matching sampler and absence-only warnings remain usable. Only a
+    // hard mismatch discards programs, including both G-buffer variants.
+    for (int input = 0; input < 3; ++input) {
+        SCOPED_TRACE(input);
+        const bool rejects = input == 1;
+        const auto source = input == 2
+                                ? "#version 450 core\nout vec4 color;\n"
+                                  "void main() { color = vec4(1.0); }\n"
+                                : LayoutFragment(entry->expected.samplers.front().name, rejects);
+        ASSERT_TRUE(WriteLayoutShader(fragment, source));
+        {
+            Shader probe((root / entry->vert).string().c_str(), fragment.string().c_str());
+            ASSERT_TRUE(probe.IsValid()) << probe.Diagnostic();
+            EXPECT_EQ(ValidateReflectedLayout(probe.Reflected(), entry->expected).ok, !rejects);
+        }
+        Pass pass;
+        // Clean up public buffers even on a fatal assertion below.
+        struct Cleanup {
+            Pass& pass;
+            ~Cleanup() {
+                if constexpr (requires { pass.destroy_instanced_static_mesh(); }) {
+                    pass.destroy_instanced_static_mesh();
+                    pass.destroy_skinned_mesh();
+                }
+            }
+        } cleanup{pass};
+        ProgramDeletionCapture capture;
+        (pass.*initialize)(root);
+        EXPECT_EQ(ProgramDeletionCapture::Current().count, rejects ? rejected_programs : 0u);
+        if constexpr (requires { pass.shader(); }) {
+            const Shader* shader = pass.shader().get();
+            if constexpr (requires { pass.weather_shader(); }) {
+                if (name == "weather_overlay")
+                    shader = pass.weather_shader().get();
+            }
+            EXPECT_EQ(shader && shader->IsValid(), !rejects);
+        }
+        if constexpr (requires { pass.ssao(); }) {
+            const auto& ao = pass.ssao();
+            const Shader* shader = name == "ssao"        ? ao.ssaoShader.get()
+                                   : name == "ssao_blur" ? ao.blurShader.get()
+                                   : name == "ssao_gtao" ? ao.gtaoShader.get()
+                                                         : ao.upsampleShader.get();
+            EXPECT_EQ(shader && shader->IsValid(), !rejects);
+        }
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    }
+    ASSERT_TRUE(WriteLayoutShader(fragment, compatible));
+}
+
 // Observe real driver submissions through the public pass, restoring GL entry points.
 struct TreeSubmissionCapture {
     struct Counts {
@@ -8235,6 +8365,13 @@ TEST(RenderSmokeTest, RefusedTreeImpostorsSubmitAvailableMeshLods) {
             const auto entity = entities.create();
             entities.emplace<Luminumbra::Components::TransformComponent>(entity).position = root;
             entities.emplace<Luminumbra::Components::StaticMeshComponent>(entity).meshPath = base;
+        }
+        // Entry preparation resolves every fallback before frozen replay.
+        for (std::size_t frame = 0; frame < 64; ++frame) {
+            if (pass.prepare_meshes(entities, sources.directory, UploadPresentation::Settled)
+                    .pending == 0)
+                break;
+            ASSERT_LT(frame, 63u);
         }
         // Cold far-supported ON frame goes directly to frozen OFF. No mesh-support
         // warm-up is allowed, even for empty or malformed fallback chains.
@@ -8591,6 +8728,140 @@ TEST(RenderSmokeTest, UnterminatedBlockCommentRefusesCompilationAndRollsBackRelo
     EXPECT_TRUE(shader.IsValid());
     EXPECT_NE(shader.Diagnostic().find("unterminated GLSL block comment"), std::string::npos);
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, PassesDiscardLayoutMismatchesAndKeepCompatiblePrograms) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("shader-layout-", ".root");
+    const auto root = temporary.Path().parent_path();
+    ASSERT_TRUE(WritePassLayoutSources(root));
+    CheckPassLayoutAdoption(root, "gbuffer_geometry", &GBufferPass::init_geometry_shader, 2);
+    CheckPassLayoutAdoption(root, "gbuffer_static", &GBufferPass::init_instanced_static_mesh, 2);
+    CheckPassLayoutAdoption(root, "gbuffer_skinned", &GBufferPass::init_skinned_mesh, 2);
+    CheckPassLayoutAdoption(root, "gbuffer_impostor", &GBufferPass::init_instanced_static_mesh, 1);
+    for (const auto* name : {"ssao", "ssao_blur", "ssao_gtao", "ssao_bilateral_upsample"})
+        CheckPassLayoutAdoption(root, name, &SsaoPass::init_shaders, 1);
+    CheckPassLayoutAdoption(root, "skybox", &SkyboxPass::init_shader, 1);
+    CheckPassLayoutAdoption(root, "weather_overlay", &SkyboxPass::init_shader, 1);
+    CheckPassLayoutAdoption(root, "water", &WaterPass::init_shader, 1);
+    CheckPassLayoutAdoption(root, "aerial_perspective", &AerialPass::init_shader, 1);
+    CheckPassLayoutAdoption(root, "god_rays", &GodRaysPass::init_shader, 1);
+    CheckPassLayoutAdoption(root, "magical_particles", &ParticlePass::init_shader, 1);
+}
+
+TEST(RenderSmokeTest, GBufferLayoutFailureRefusesSelectionForEveryVariant) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("shader-layout-", ".root");
+    const auto root = temporary.Path().parent_path();
+    ASSERT_TRUE(WritePassLayoutSources(root));
+    const auto fragment = root / "res/shaders/g_buffer.frag";
+    // Independently fail legacy, ladder, or both, including a correct sampler
+    // type on the wrong explicit binding. Each branch still compiles and links.
+    for (const int input : {0, 1, 2, 3}) {
+        SCOPED_TRACE(input);
+        const auto good = LayoutFragment("u_materialLUT", false);
+        const auto bad = input == 3
+                             ? std::string("#version 450 core\nlayout(binding=7) uniform "
+                                           "sampler2DArray u_staticSurface;\nout vec4 color;\n"
+                                           "void main() { color = texture(u_staticSurface, "
+                                           "vec3(0.5)); }\n")
+                             : LayoutFragment("u_materialLUT", true);
+        const auto conditional = "#version 450 core\n#ifdef LUMINUMBRA_FAR_WORLD_LADDER\n" +
+                                 (input == 0 ? bad : good).substr(good.find('\n') + 1) + "#else\n" +
+                                 (input == 0 ? good : bad).substr(good.find('\n') + 1) + "#endif\n";
+        ASSERT_TRUE(WriteLayoutShader(fragment, input < 2 ? conditional : bad));
+        const auto* expected = FindPassExpectedLayout("gbuffer_geometry");
+        ASSERT_NE(expected, nullptr);
+        for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+            const bool usable = (input == 0 && mode == FarWorldMode::Legacy) ||
+                                (input == 1 && mode == FarWorldMode::Ladder);
+            const std::vector<std::string> defines =
+                mode == FarWorldMode::Ladder
+                    ? std::vector<std::string>{"LUMINUMBRA_FAR_WORLD_LADDER 1"}
+                    : std::vector<std::string>{};
+            Shader probe((root / "res/shaders/g_buffer.vert").string().c_str(),
+                         fragment.string().c_str(),
+                         {},
+                         defines);
+            ASSERT_TRUE(probe.IsValid()) << probe.Diagnostic();
+            EXPECT_EQ(ValidateReflectedLayout(probe.Reflected(), *expected).ok, usable);
+        }
+        GBufferPass pass;
+        struct Cleanup {
+            GBufferPass& pass;
+            ~Cleanup() {
+                pass.destroy_instanced_static_mesh();
+                pass.destroy_skinned_mesh();
+            }
+        } cleanup{pass};
+        pass.init_geometry_shader(root);
+        pass.init_instanced_static_mesh(root);
+        pass.init_skinned_mesh(root);
+        for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+            const bool usable = (input == 0 && mode == FarWorldMode::Legacy) ||
+                                (input == 1 && mode == FarWorldMode::Ladder);
+            for (const auto* shader : {pass.geometry_shader(mode).get(),
+                                       pass.instanced_static_mesh_shader(mode).get(),
+                                       pass.skinned_mesh_shader(mode).get()}) {
+                EXPECT_EQ(shader && shader->IsValid(), usable);
+            }
+        }
+        const auto selection = pass.SelectFarWorldRenderer(
+            SelectFarWorld(FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::None));
+        EXPECT_EQ(selection.refusal,
+                  input == 1 ? FarWorldRefusal::None : FarWorldRefusal::ShaderProgramUnavailable);
+        EXPECT_EQ(selection.effective, input == 1 ? FarWorldMode::Ladder : FarWorldMode::Legacy);
+        pass.reset_shaders();
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    }
+}
+
+TEST(RenderSmokeTest, UnavailablePassProgramsSkipWithoutChangingGlState) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    SsaoPass ssao;
+    SkyboxPass skybox;
+    WaterPass water;
+    Camera camera({0, 0, 0});
+    RenderContext ctx;
+    // Deliberately omit camera and render targets: unavailable programs must
+    // refuse before accessing inputs or changing any GL state.
+    const auto check_skip = [&] {
+        glDepthFunc(GL_LESS);
+        glEnable(GL_CULL_FACE);
+        for (const int quality : {0, 1, 2, 3}) {
+            ctx.ssao_quality = quality;
+            ssao.execute_ssao(ctx);
+            ssao.execute_blur(ctx);
+        }
+        skybox.execute(ctx, camera, false);
+        const WaterPassInput water_input;
+        const auto water_stats = water.execute(ctx, water_input, camera);
+        EXPECT_EQ(water_stats.water_draws, 0u);
+        EXPECT_EQ(water_stats.water_indices, 0u);
+        GLint depth_function = 0;
+        glGetIntegerv(GL_DEPTH_FUNC, &depth_function);
+        EXPECT_EQ(depth_function, GL_LESS);
+        EXPECT_EQ(glIsEnabled(GL_CULL_FACE), GL_TRUE);
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    };
+    check_skip();
+    // Missing files leave non-null Shader owners with IsValid() == false,
+    // exercising the same refusal as a compiler error as well as null owners.
+    Luminumbra::TestSupport::ScopedTempFile temporary("shader-missing-", ".root");
+    const auto root = temporary.Path().parent_path();
+    ssao.init_shaders(root);
+    skybox.init_shader(root);
+    water.init_shader(root);
+    ASSERT_NE(ssao.ssao().ssaoShader, nullptr);
+    EXPECT_FALSE(ssao.ssao().ssaoShader->IsValid());
+    ASSERT_NE(skybox.shader(), nullptr);
+    EXPECT_FALSE(skybox.shader()->IsValid());
+    ASSERT_NE(water.shader(), nullptr);
+    EXPECT_FALSE(water.shader()->IsValid());
+    check_skip();
 }
 
 TEST(RenderSmokeTest, FarWorldSelectionRequiresEveryLadderProgram) {
@@ -10011,7 +10282,14 @@ TEST(RenderSmokeTest, ScenarioBundlesRetainCompletedFrameIdentityAcrossSiblingCa
     registry.emplace<Luminumbra::Components::TransformComponent>(prop);
     registry.emplace<Luminumbra::Components::StaticMeshComponent>(prop).meshPath = mesh_path;
     Camera camera;
-    pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+    // Settled frames draw only after every requested mesh LOD has resolved.
+    for (int frame = 0; frame < 4 * kTreeLodCount + 1; ++frame) {
+        pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+        if (pipeline.render_uploads_settled()) {
+            break;
+        }
+    }
+    ASSERT_TRUE(pipeline.render_uploads_settled());
     ASSERT_TRUE(pipeline.diagnostic_capture_refusal().empty())
         << pipeline.diagnostic_capture_refusal();
     std::vector<unsigned char> pixels(32U * 32U * 3U);
@@ -10607,6 +10885,408 @@ TEST(RenderSmokeTest, DiagnosticRefusalPrecedesManifestAndRetractsLateCompletion
     EXPECT_EQ(ReadTextFile(capture), "completed image");
     EXPECT_FALSE(pipeline.capture_diagnostics(capture));
     EXPECT_FALSE(fs::exists(manifest));
+}
+
+namespace {
+bool WritePreparedMesh(const fs::path& path, bool skinned = false, std::uint32_t vertex_count = 3) {
+    using namespace Luminumbra::Rendering;
+    namespace anim = luminumbra::animation;
+    std::ofstream output(path, std::ios::binary);
+    const std::array<std::uint32_t, 3> indices{0, 1, 2};
+    if (skinned) {
+        anim::Lms2Header header;
+        header.vertexCount = vertex_count;
+        header.indexCount = 3;
+        header.jointCount = 1;
+        header.boundingSphere[3] = 1;
+        std::vector<anim::SkinnedVertexData> vertices(vertex_count);
+        for (auto& vertex : vertices)
+            vertex.weights[0] = 255;
+        const anim::Lms2Joint joint;
+        output.write(reinterpret_cast<const char*>(&header), sizeof(header));
+        output.write(reinterpret_cast<const char*>(vertices.data()),
+                     static_cast<std::streamsize>(vertices.size() * sizeof(vertices[0])));
+        output.write(reinterpret_cast<const char*>(indices.data()), sizeof(indices));
+        output.write(reinterpret_cast<const char*>(&joint), sizeof(joint));
+    } else {
+        constexpr std::uint32_t magic = 0x48534d4c;
+        const std::array<std::uint32_t, 3> counts{magic, vertex_count, 3};
+        const std::array<float, 4> sphere{0, 0, 0, 1};
+        const std::vector<Vertex> vertices(vertex_count, Vertex{{0, 0, 0}, {0, 1, 0}, {0, 0}});
+        output.write(reinterpret_cast<const char*>(counts.data()), sizeof(counts));
+        output.write(reinterpret_cast<const char*>(sphere.data()), sizeof(sphere));
+        output.write(reinterpret_cast<const char*>(vertices.data()),
+                     static_cast<std::streamsize>(vertices.size() * sizeof(Vertex)));
+        output.write(reinterpret_cast<const char*>(indices.data()), sizeof(indices));
+    }
+    output.close();
+    return output.good();
+}
+
+struct MeshAdoptionCalls {
+    std::size_t buffers = 0;
+    std::size_t uploads = 0;
+    std::size_t bytes = 0;
+    PFNGLGENBUFFERSPROC generate = nullptr;
+    PFNGLBUFFERDATAPROC upload = nullptr;
+    static MeshAdoptionCalls*& Active() {
+        static MeshAdoptionCalls* active = nullptr;
+        return active;
+    }
+    static void APIENTRY Generate(GLsizei count, GLuint* names) {
+        auto& calls = *Active();
+        calls.buffers += static_cast<std::size_t>(count);
+        calls.generate(count, names);
+    }
+    static void APIENTRY Upload(GLenum target, GLsizeiptr size, const void* data, GLenum usage) {
+        auto& calls = *Active();
+        ++calls.uploads;
+        calls.bytes += static_cast<std::size_t>(size);
+        calls.upload(target, size, data, usage);
+    }
+    MeshAdoptionCalls()
+        : generate(glGenBuffers)
+        , upload(glBufferData) {
+        Active() = this;
+        glad_glGenBuffers = Generate;
+        glad_glBufferData = Upload;
+    }
+    ~MeshAdoptionCalls() {
+        glad_glGenBuffers = generate;
+        glad_glBufferData = upload;
+        Active() = nullptr;
+    }
+};
+} // namespace
+
+TEST(RenderSmokeTest, MeshDrawCacheMissesDoNoFileReadsOrMeshUploads) {
+    using namespace Luminumbra::Rendering;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("mesh-cold-", ".lmesh");
+    ASSERT_TRUE(WritePreparedMesh(temporary.Path()));
+    RenderResourceRegistry resources;
+    GBufferPass pass;
+    pass.init_geometry_shader(SourceRoot());
+    pass.init_instanced_static_mesh(SourceRoot());
+    pass.init_skinned_mesh(SourceRoot());
+    pass.init_gbuffer(resources, 32, 32);
+    struct Cleanup {
+        GBufferPass& pass;
+        RenderResourceRegistry& resources;
+        ~Cleanup() {
+            pass.destroy_instanced_static_mesh();
+            pass.destroy_skinned_mesh();
+            pass.destroy_gbuffer(resources);
+        }
+    } cleanup{pass, resources};
+    Camera camera({0, 0, 0});
+    Luminumbra::Client::ScenarioHarness::IsolationConfig isolation;
+    glm::vec4 planes[6];
+    std::fill_n(planes, 6, glm::vec4(0, 0, 0, 1));
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = 32;
+    ctx.screen_height = 32;
+    ctx.isolation = &isolation;
+    ctx.frustum_planes = planes;
+    GBufferPassInput input;
+    input.root_path = temporary.Path().parent_path();
+    input.submit_terrain_chunks = [](const glm::vec4(&)[6]) {
+        return TerrainSubmitStats{};
+    };
+    input.static_model_tex = [](const std::string&) -> const StaticModelTex* {
+        return nullptr;
+    };
+    entt::registry entities;
+    constexpr std::size_t count = 7;
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto entity = entities.create();
+        entities.emplace<Luminumbra::Components::TransformComponent>(entity);
+        // One present cold static asset plus distinct absent static/skinned assets.
+        entities.emplace<Luminumbra::Components::StaticMeshComponent>(entity).meshPath =
+            index == 0 ? temporary.Path().filename().string()
+                       : "cold" + std::to_string(index) + ".lmesh";
+        entities.emplace<Luminumbra::Components::SkinnedMeshComponent>(entity).meshPath =
+            "skin" + std::to_string(index) + ".lmesh";
+        entities.emplace<luminumbra::animation::AnimationPlayerComponent>(entity);
+    }
+    MeshAdoptionCalls calls;
+    const auto reads = MeshLoader::file_read_count();
+    for (int frame = 0; frame < 3; ++frame)
+        EXPECT_NO_THROW((void)pass.execute(ctx, entities, input));
+    EXPECT_EQ(MeshLoader::file_read_count(), reads);
+    EXPECT_EQ(calls.buffers, 0u);
+    EXPECT_EQ(calls.uploads, 0u);
+    EXPECT_EQ(pass.cached_mesh(temporary.Path().filename().string()), nullptr);
+    bool prepared = false;
+    for (std::size_t frame = 0; frame < count * (kTreeLodCount + 1) + 1; ++frame) {
+        if (pass.prepare_meshes(entities, input.root_path, UploadPresentation::Settled).pending ==
+            0) {
+            prepared = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(prepared);
+    ASSERT_NE(pass.cached_mesh(temporary.Path().filename().string()), nullptr);
+    // A negative draw memo must not pin a mesh that has since been adopted.
+    TreeSubmissionCapture submissions;
+    const auto resident_reads = MeshLoader::file_read_count();
+    for (const bool replay : {false, true}) {
+        ctx.frozen_replay = replay;
+        TreeSubmissionCapture::Current().mesh_draws = 0;
+        EXPECT_NO_THROW((void)pass.execute(ctx, entities, input));
+        EXPECT_EQ(TreeSubmissionCapture::Current().mesh_draws, 1u);
+        EXPECT_EQ(MeshLoader::file_read_count(), resident_reads);
+    }
+}
+
+TEST(RenderSmokeTest, MeshPreparationBoundsActualGlCallsAndDrainsSettledInventory) {
+    using namespace Luminumbra::Rendering;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("mesh-budget-", ".lmesh");
+    const auto root = temporary.Path().parent_path();
+    entt::registry entities;
+    constexpr std::size_t count = 7;
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto name = "asset" + std::to_string(index) + ".lmesh";
+        // Both layouts, and an indivisible payload exceeding the byte allowance.
+        ASSERT_TRUE(WritePreparedMesh(root / name, index % 2 != 0, index == 0 ? 140000u : 3u));
+        const auto entity = entities.create();
+        if (index % 2 != 0)
+            entities.emplace<Luminumbra::Components::SkinnedMeshComponent>(entity).meshPath = name;
+        else
+            entities.emplace<Luminumbra::Components::StaticMeshComponent>(entity).meshPath = name;
+    }
+    GBufferPass pass;
+    MeshAdoptionCalls calls;
+    bool settled = false;
+    for (std::size_t frame = 0; frame < count * kTreeLodCount + 1; ++frame) {
+        calls.buffers = 0;
+        calls.uploads = 0;
+        calls.bytes = 0;
+        const auto prepared = pass.prepare_meshes(entities, root, UploadPresentation::Settled);
+        EXPECT_LE(prepared.work.attempts, GBufferPass::kMeshUploadLimits.count);
+        EXPECT_LE(calls.buffers, 2 * GBufferPass::kMeshUploadLimits.count);
+        EXPECT_LE(calls.uploads, 2 * GBufferPass::kMeshUploadLimits.count);
+        EXPECT_EQ(calls.bytes, prepared.work.bytes);
+        if (calls.bytes > GBufferPass::kMeshUploadLimits.bytes) {
+            EXPECT_EQ(prepared.work.attempts, 1u);
+        }
+        if (draw_upload_frame(UploadPresentation::Settled, prepared.pending == 0)) {
+            for (std::size_t index = 0; index < count; ++index)
+                EXPECT_NE(
+                    pass.cached_mesh("asset" + std::to_string(index) + ".lmesh", index % 2 != 0),
+                    nullptr);
+            settled = true;
+            break;
+        }
+        EXPECT_GT(prepared.pending, 0u);
+    }
+    EXPECT_TRUE(settled);
+    const auto reads = MeshLoader::file_read_count();
+    const auto empty = pass.prepare_meshes(entities, root, UploadPresentation::Settled);
+    EXPECT_EQ(empty.pending, 0u);
+    EXPECT_EQ(empty.work.attempts, 0u);
+    EXPECT_EQ(MeshLoader::file_read_count(), reads);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, PreparedMeshPayloadsPreserveBuffersAndRejectPartialInputs) {
+    using namespace Luminumbra::Rendering;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("mesh-payload-", ".lmesh");
+    for (const bool skinned : {false, true}) {
+        ASSERT_TRUE(WritePreparedMesh(temporary.Path(), skinned));
+        auto payload = skinned ? MeshLoader::ReadSkinned(temporary.Path().string())
+                               : MeshLoader::Read(temporary.Path().string());
+        ASSERT_NE(payload, nullptr);
+        MeshAdoptionCalls calls;
+        const auto reads = MeshLoader::file_read_count();
+        const auto mesh = MeshLoader::Adopt(*payload);
+        ASSERT_NE(mesh, nullptr);
+        EXPECT_EQ(MeshLoader::file_read_count(), reads);
+        EXPECT_EQ(calls.buffers, 2u);
+        EXPECT_EQ(calls.uploads, 2u);
+        EXPECT_EQ(calls.bytes, payload->upload_bytes());
+        EXPECT_EQ(mesh->indexCount, 3u);
+        EXPECT_EQ(mesh->jointCount, skinned ? 1u : 0u);
+        const auto vertex_bytes = skinned ? payload->skinnedVertices.size() * sizeof(SkinnedVertex)
+                                          : payload->vertices.size() * sizeof(Vertex);
+        std::vector<char> actual(vertex_bytes);
+        glBindBuffer(GL_ARRAY_BUFFER, mesh->vbo);
+        glGetBufferSubData(
+            GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(actual.size()), actual.data());
+        const auto* expected = skinned
+                                   ? reinterpret_cast<const char*>(payload->skinnedVertices.data())
+                                   : reinterpret_cast<const char*>(payload->vertices.data());
+        EXPECT_EQ(actual, std::vector<char>(expected, expected + vertex_bytes));
+        // Size mismatch is rejected before allocating payload vectors.
+        fs::resize_file(temporary.Path(), fs::file_size(temporary.Path()) - 1);
+        EXPECT_EQ(skinned ? MeshLoader::ReadSkinned(temporary.Path().string())
+                          : MeshLoader::Read(temporary.Path().string()),
+                  nullptr);
+    }
+    {
+        std::ofstream partial(temporary.Path(), std::ios::binary | std::ios::trunc);
+        partial << "LM";
+    }
+    EXPECT_EQ(MeshLoader::Read(temporary.Path().string()), nullptr);
+    EXPECT_EQ(MeshLoader::ReadSkinned(temporary.Path().string()), nullptr);
+    EXPECT_EQ(MeshLoader::Read((temporary.Path().parent_path() / "missing.lmesh").string(), true),
+              nullptr);
+    EXPECT_EQ(MeshLoader::ReadSkinned((temporary.Path().parent_path() / "missing.lmesh").string()),
+              nullptr);
+    MeshPayload empty;
+    EXPECT_EQ(MeshLoader::Adopt(empty), nullptr);
+}
+
+TEST(RenderSmokeTest, MeshPreparationTracksOnlyChangedEntitiesAndSurvivesJobRefusal) {
+    using namespace Luminumbra::Rendering;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("mesh-inventory-", ".lmesh");
+    ASSERT_TRUE(WritePreparedMesh(temporary.Path()));
+    const auto root = temporary.Path().parent_path();
+    Luminumbra::JobSystem jobs; // Closed admission must not read on a streaming frame.
+    entt::registry entities;
+    const auto entity = entities.create();
+    entities.emplace<Luminumbra::Components::StaticMeshComponent>(entity).meshPath =
+        temporary.Path().filename().string();
+    GBufferPass pass;
+    pass.attach_mesh_jobs(&jobs);
+    const auto reads = MeshLoader::file_read_count();
+    const auto refused = pass.prepare_meshes(entities, root, UploadPresentation::Streaming);
+    EXPECT_EQ(refused.inventory_visits, 1u);
+    EXPECT_EQ(refused.pending, static_cast<std::size_t>(kTreeLodCount));
+    EXPECT_EQ(refused.work.attempts, 0u);
+    EXPECT_EQ(MeshLoader::file_read_count(), reads);
+    EXPECT_EQ(pass.prepare_meshes(entities, root, UploadPresentation::Streaming).inventory_visits,
+              0u);
+    // Explicit settled preparation can finish even with a closed job system.
+    for (int frame = 0; frame < kTreeLodCount + 1; ++frame) {
+        if (pass.prepare_meshes(entities, root, UploadPresentation::Settled).pending == 0)
+            break;
+        ASSERT_LT(frame, kTreeLodCount);
+    }
+    ASSERT_NE(pass.cached_mesh(temporary.Path().filename().string()), nullptr);
+    ASSERT_TRUE(WritePreparedMesh(root / "replacement.lmesh"));
+    jobs.startup(1);
+    entities.patch<Luminumbra::Components::StaticMeshComponent>(
+        entity, [](auto& component) { component.meshPath = "replacement.lmesh"; });
+    // The worker owns a copied path/payload; changing the component afterwards is safe.
+    const auto changed = pass.prepare_meshes(entities, root, UploadPresentation::Streaming);
+    EXPECT_EQ(changed.inventory_visits, 1u);
+    entities.patch<Luminumbra::Components::StaticMeshComponent>(
+        entity, [](auto& component) { component.meshPath = "removed.lmesh"; });
+    entities.destroy(entity);
+    bool complete = false;
+    for (int frame = 0; frame < kTreeLodCount + 1; ++frame) {
+        if (pass.prepare_meshes(entities, root, UploadPresentation::Settled).pending == 0) {
+            complete = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(complete);
+    EXPECT_NE(pass.cached_mesh("replacement.lmesh"), nullptr);
+    EXPECT_EQ(pass.cached_mesh("removed.lmesh"), nullptr);
+    EXPECT_EQ(pass.prepare_meshes(entities, root, UploadPresentation::Settled).inventory_visits,
+              0u);
+    jobs.shutdown();
+    // Registry-owned callbacks remain safe after an observing pass goes away.
+    {
+        GBufferPass outgoing;
+        EXPECT_EQ(outgoing.prepare_meshes(entities, root, UploadPresentation::Settled).pending, 0u);
+    }
+    const auto arrival = entities.create();
+    entities.emplace<Luminumbra::Components::StaticMeshComponent>(arrival).meshPath =
+        "missing.lmesh";
+    const auto arrival_work = pass.prepare_meshes(entities, root, UploadPresentation::Settled);
+    EXPECT_EQ(arrival_work.inventory_visits, 1u);
+}
+
+TEST(RenderSmokeTest, SettledPipelineWaitsForMeshAssetsBeforeDispatch) {
+    using namespace Luminumbra::Rendering;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(32, 32, SourceRoot()));
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(false);
+    Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    entt::registry entities;
+    // Absolute filenames exercise the same root-independent input used by tools.
+    Luminumbra::TestSupport::ScopedTempFile temporary("mesh-settled-", ".lmesh");
+    ASSERT_TRUE(WritePreparedMesh(temporary.Path()));
+    for (int index = 0; index < 3; ++index) {
+        const auto entity = entities.create();
+        entities.emplace<Luminumbra::Components::TransformComponent>(entity);
+        entities.emplace<Luminumbra::Components::StaticMeshComponent>(entity).meshPath =
+            (temporary.Path().parent_path() / ("missing" + std::to_string(index) + ".lmesh"))
+                .string();
+    }
+    const auto entity = entities.create();
+    entities.emplace<Luminumbra::Components::TransformComponent>(entity);
+    entities.emplace<Luminumbra::Components::StaticMeshComponent>(entity).meshPath =
+        temporary.Path().string();
+    Camera camera({0, 0, 0});
+    bool drawn = false;
+    bool deferred = false;
+    for (int frame = 0; frame < 4 * kTreeLodCount + 1; ++frame) {
+        pipeline.render_frame(entities, world, camera, 0.0f, false, UploadPresentation::Settled);
+        const auto& stats = pipeline.get_last_mesh_upload_stats();
+        EXPECT_LE(stats.asset_budget.attempts, GBufferPass::kMeshUploadLimits.count);
+        if (stats.asset_uploads_deferred != 0) {
+            deferred = true;
+            EXPECT_FALSE(pipeline.render_uploads_settled());
+            EXPECT_TRUE(pipeline.frame_stage_trace().empty());
+        } else {
+            EXPECT_TRUE(pipeline.render_uploads_settled());
+            EXPECT_FALSE(pipeline.frame_stage_trace().empty());
+            drawn = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(deferred);
+    EXPECT_TRUE(drawn);
+}
+
+TEST(RenderSmokeTest, MeshDrawRootsCannotAcquireFilesAndSettlingCountsEveryAssetLane) {
+    const auto source =
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/passes/GBufferPass.cpp");
+    const auto begin = source.find("void GBufferPass::geometry_pass_static_meshes(");
+    ASSERT_NE(begin, std::string::npos);
+    const auto draw_roots = source.substr(begin);
+    for (const auto* forbidden : {"MeshLoader::Load(",
+                                  "MeshLoader::LoadSkinned(",
+                                  "MeshLoader::Read(",
+                                  "MeshLoader::ReadSkinned(",
+                                  "MeshLoader::Adopt(",
+                                  "std::filesystem::exists("})
+        EXPECT_EQ(draw_roots.find(forbidden), std::string::npos) << forbidden;
+    const auto pipeline =
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const auto prepare = pipeline.find("void RenderPipeline::prepare_frame(");
+    ASSERT_NE(prepare, std::string::npos);
+    const auto preparation = pipeline.substr(prepare);
+    EXPECT_LT(preparation.find("prepare_meshes(registry, m_root_path, presentation)"),
+              preparation.find("draw_upload_frame(presentation, render_uploads_settled())"));
+    const auto header =
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+    EXPECT_NE(header.find("m_last_mesh_upload_stats.asset_uploads_deferred == 0"),
+              std::string::npos);
+    for (const auto* path : {"src/luminumbra_client/main_client.cpp",
+                             "src/luminumbra_client/core/ScenarioRunnerCapture.cpp",
+                             "src/luminumbra_client/rendering/SceneSurvey.cpp"}) {
+        const auto consumer = ReadSourceFile(SourceRoot() / path);
+        EXPECT_NE(consumer.find("asset_uploads_deferred"), std::string::npos);
+        EXPECT_NE(consumer.find("asset_budget.adopted"), std::string::npos);
+    }
 }
 
 namespace {

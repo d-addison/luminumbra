@@ -21,6 +21,9 @@ set(COMMON_SOURCES
     # Core
     # Shared exact-byte SHA-256 for content and capture manifests.
     ${CMAKE_CURRENT_LIST_DIR}/authoring/PrefabDigest.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/mods/NativePluginLoader.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/mods/NativePluginLoader.h
+    ${CMAKE_CURRENT_LIST_DIR}/../../include/luminumbra/abi/luminumbra_abi.h
     ${CMAKE_CURRENT_LIST_DIR}/core/CrashReport.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/EngineContracts.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/EngineVersion.cpp
@@ -28,11 +31,22 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/core/FilesystemPath.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/GraphicsPresetClassifier.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/JobSystem.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/IoExecutor.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/Log.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/ModuleRegistry.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/PhaseScheduler.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/PaletteTable.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/BoundedConsoleSink.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/SimulationClock.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/SystemConfig.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/GraphicsPresets.cpp
+
+    # Read-only content overlays
+    ${CMAKE_CURRENT_LIST_DIR}/vfs/ContentVfs.cpp
+
+    # Mods
+    ${CMAKE_CURRENT_LIST_DIR}/mods/ModManifest.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/mods/ModDependencySolver.cpp
 
     # Net
     # delay-based lockstep transport (engine-generic; LoopbackTransport
@@ -56,6 +70,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/network/NetworkStateHash.cpp
 
     # Persistence
+    ${CMAKE_CURRENT_LIST_DIR}/persistence/AuthorityContributor.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldPersistenceRoundtrip.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/SaveTransaction.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldSaveService.cpp
@@ -66,6 +81,10 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/replay/ReplayStream.cpp
 
     # Scripting
+    ${CMAKE_CURRENT_LIST_DIR}/core/DeterministicScriptMath.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/DeterministicScriptMath.h
+    ${CMAKE_CURRENT_LIST_DIR}/scripting/SimCommandBuffer.h
+    ${CMAKE_CURRENT_LIST_DIR}/scripting/SimScriptHost.h
     ${CMAKE_CURRENT_LIST_DIR}/scripting/LuaApiManifest.cpp
     ${CMAKE_CURRENT_LIST_DIR}/scripting/LuaState.cpp
 
@@ -91,6 +110,7 @@ set(COMMON_SOURCES
 
     # World
     ${CMAKE_CURRENT_LIST_DIR}/world/BiomeTable.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/MaterialRegistry.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/Chunk.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/FarLodStore.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/FarDensityQuantization.cpp

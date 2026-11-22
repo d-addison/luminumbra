@@ -548,8 +548,240 @@ struct OwnerMutation {
 // Independent mutation list: it does not call the comparison's scalar projections.
 // The arity guards below fail compilation when a real encoding gains a member.
 
-const std::array<OwnerMutation, 107>& OwnerMutationTable() {
-    static const std::array<OwnerMutation, 107> table{{
+const std::array<OwnerMutation, 138>& OwnerMutationTable() {
+    static const std::array<OwnerMutation, 138> table{{
+        {"owner.version",
+         [](HeavyOwnerCapture& h) {
+             ++h.owners.version;
+         }},
+        {"owner.resident_chunks[0].value",
+         [](HeavyOwnerCapture& h) {
+             ++h.owners.resident_chunks[0];
+         }},
+        {"owner.resident_chunks.size",
+         [](HeavyOwnerCapture& h) {
+             h.owners.resident_chunks.clear();
+         }},
+        {"owner.ambient.present",
+         [](HeavyOwnerCapture& h) {
+             h.owners.ambient.reset();
+         }},
+        {"owner.ambient.tick",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             ++h.owners.ambient->tick;
+         }},
+        {"owner.ambient.anchor.x",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->anchor.x = -0.0f;
+         }},
+        {"owner.ambient.anchor.y",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->anchor.y = -0.0f;
+         }},
+        {"owner.ambient.anchor.z",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->anchor.z = -0.0f;
+         }},
+        {"owner.ambient.constructor_state",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->constructor_state = !h.owners.ambient->constructor_state;
+         }},
+        {"owner.ambient.storms[0].center_world.x",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->storms[0].center_world.x = -0.0f;
+         }},
+        {"owner.ambient.storms[0].center_world.y",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->storms[0].center_world.y = -0.0f;
+         }},
+        {"owner.ambient.storms[0].velocity.x",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->storms[0].velocity.x = -0.0f;
+         }},
+        {"owner.ambient.storms[0].velocity.y",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->storms[0].velocity.y = -0.0f;
+         }},
+        {"owner.ambient.storms[0].intensity",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->storms[0].intensity = -0.0f;
+         }},
+        {"owner.ambient.storms[0].spawn_tick",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             ++h.owners.ambient->storms[0].spawn_tick;
+         }},
+        {"owner.ambient.storms[0].lifetime_ticks",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             ++h.owners.ambient->storms[0].lifetime_ticks;
+         }},
+        {"owner.ambient.storms[0].seed_salt",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             ++h.owners.ambient->storms[0].seed_salt;
+         }},
+        {"owner.ambient.strikes[0].strike_tick",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             ++h.owners.ambient->strikes[0].strike_tick;
+         }},
+        {"owner.ambient.strikes[0].world_x",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->strikes[0].world_x = -0.0f;
+         }},
+        {"owner.ambient.strikes[0].world_z",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->strikes[0].world_z = -0.0f;
+         }},
+        {"owner.ambient.strikes[0].magnitude",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->strikes[0].magnitude = -0.0f;
+         }},
+        {"owner.ambient.strikes[0].storm_salt",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             ++h.owners.ambient->strikes[0].storm_salt;
+         }},
+        {"owner.ambient.wind[0].center_world.x",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->wind[0].center_world.x = -0.0f;
+         }},
+        {"owner.ambient.wind[0].center_world.y",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->wind[0].center_world.y = -0.0f;
+         }},
+        {"owner.ambient.wind[0].radius_m",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->wind[0].radius_m = -0.0f;
+         }},
+        {"owner.ambient.wind[0].velocity.x",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->wind[0].velocity.x = -0.0f;
+         }},
+        {"owner.ambient.wind[0].velocity.y",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->wind[0].velocity.y = -0.0f;
+         }},
+        {"owner.ambient.wind[0].intensity",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->wind[0].intensity = -0.0f;
+         }},
+        {"owner.ambient.storms.size",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->storms.clear();
+         }},
+        {"owner.ambient.strikes.size",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->strikes.clear();
+         }},
+        {"owner.ambient.wind.size",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.ambient) {
+                 ADD_FAILURE() << "Expected populated ambient capture";
+                 return;
+             }
+             h.owners.ambient->wind.clear();
+         }},
         {"owner.world_seed",
          [](HeavyOwnerCapture& h) {
              ++h.owners.world_seed;
@@ -1047,7 +1279,10 @@ const std::array<OwnerMutation, 107>& OwnerMutationTable() {
 
 void CheckOwnerEncodingArity(const HeavyOwnerCapture& h) {
     [[maybe_unused]] const auto& [captured, owners, scheduler] = h;
-    [[maybe_unused]] const auto& [world_seed,
+    [[maybe_unused]] const auto& [version,
+                                  resident_chunks,
+                                  ambient,
+                                  world_seed,
                                   preset_identity,
                                   simulation_tick,
                                   stream_tick,
@@ -1062,6 +1297,26 @@ void CheckOwnerEncodingArity(const HeavyOwnerCapture& h) {
                                   free_slots,
                                   simulation_terrain,
                                   terrain] = owners;
+    if (!ambient) {
+        ADD_FAILURE() << "Expected populated ambient capture";
+        return;
+    }
+    [[maybe_unused]] const auto& [ambient_tick,
+                                  ambient_anchor,
+                                  constructor_state,
+                                  storms,
+                                  strikes,
+                                  wind] = *ambient;
+    [[maybe_unused]] const auto& [storm_center,
+                                  storm_velocity,
+                                  storm_intensity,
+                                  spawn_tick,
+                                  lifetime_ticks,
+                                  seed_salt] = storms.front();
+    [[maybe_unused]] const auto& [strike_tick, world_x, world_z, magnitude, storm_salt] =
+        strikes.front();
+    [[maybe_unused]] const auto& [wind_center, radius_m, wind_velocity, wind_intensity] =
+        wind.front();
     [[maybe_unused]] const auto& [avatar, physics] = owners.avatars.front();
     [[maybe_unused]] const auto& [id, position, facing, velocity] = avatar;
     [[maybe_unused]] const auto& [bytes, size] = physics;
@@ -1116,7 +1371,11 @@ void CheckOwnerEncodingArity(const HeavyOwnerCapture& h) {
                                   cursor,
                                   digest,
                                   wake_pending] = records.begin()->second;
-    EXPECT_EQ(HeavyOwnerFields(owners).size(), 12u);
+    EXPECT_EQ(HeavyOwnerFields(owners).size(), 13u);
+    EXPECT_EQ(HeavyOwnerFields(*ambient).size(), 5u);
+    EXPECT_EQ(HeavyOwnerFields(storms.front()).size(), 8u);
+    EXPECT_EQ(HeavyOwnerFields(strikes.front()).size(), 5u);
+    EXPECT_EQ(HeavyOwnerFields(wind.front()).size(), 6u);
     EXPECT_EQ(HeavyOwnerFields(avatar).size(), 8u);
     EXPECT_EQ(HeavyOwnerFields(state).size(), 9u);
     EXPECT_EQ(HeavyOwnerFields(*player).size(), 4u);
@@ -1126,16 +1385,38 @@ void CheckOwnerEncodingArity(const HeavyOwnerCapture& h) {
     EXPECT_EQ(HeavyOwnerFields(config).size(), 3u);
     EXPECT_EQ(HeavyOwnerFields(clock.calendar()).size(), 5u);
     EXPECT_EQ(HeavyOwnerFields(scheduler).size(), 5u);
-    // 12 descriptor scalars + identity string + 9 body metadata + 7 allocator/terrain
-    // rows added to the original 88 rows (which contained 10 descriptor scalars).
-    // 10 descriptor + 8 avatar + 2*4 body/player + 2 terrain + 5 scheduler +
+    // 13 descriptor scalars + identity string + 9 body metadata + 7 allocator/terrain
+    // + 2 resident + 1 ambient presence + 24 ambient scalars + 3 ambient lengths.
+    // 8 avatar + 2*4 body/player + 2 terrain + 5 scheduler +
     // 6 clock/calendar + 3 config + 3 local anchor + 20 record + 8 map key
     // coordinates + 3 sparse values + 9 sizes/presence + 3 physics lengths.
     EXPECT_EQ(OwnerMutationTable().size(),
-              12u + 1u + 9u + 7u + 8u + 8u + 2u + 5u + 6u + 3u + 3u + 20u + 8u + 3u + 9u + 3u);
+              13u + 1u + 9u + 7u + 2u + 1u + 24u + 3u + 8u + 8u + 2u + 5u + 6u + 3u + 3u + 20u +
+                  8u + 3u + 9u + 3u);
 }
 
 void PopulateOwnerCapture(HeavyOwnerCapture& h) {
+    h.owners.version = 2;
+    h.owners.resident_chunks = {0, 7};
+    h.owners.ambient =
+        Luminumbra::Systems::AmbientContinuation{.tick = 17,
+                                                 .anchor = {1.0f, 2.0f, 3.0f},
+                                                 .constructor_state = false,
+                                                 .storms = {{.center_world = {4.0f, 5.0f},
+                                                             .velocity = {6.0f, 7.0f},
+                                                             .intensity = 0.5f,
+                                                             .spawn_tick = 11,
+                                                             .lifetime_ticks = 19,
+                                                             .seed_salt = 23}},
+                                                 .strikes = {{.strike_tick = 29,
+                                                              .world_x = 8.0f,
+                                                              .world_z = 9.0f,
+                                                              .magnitude = 0.75f,
+                                                              .storm_salt = 31}},
+                                                 .wind = {{.center_world = {10.0f, 11.0f},
+                                                           .radius_m = 12.0f,
+                                                           .velocity = {13.0f, 14.0f},
+                                                           .intensity = 0.25f}}};
     Luminumbra::TestSupport::AvatarContinuationWorld world;
     auto& physics = world.physics();
     h.owners.avatars.emplace_back();
@@ -1266,6 +1547,106 @@ TEST(HeavyComparison, OwnerEmptyCapturesAndRefusals) {
     full.scheduler.local_anchor.emplace(0.0f);
     EXPECT_EQ(HeavyOwnerDifference(true, accepted, full), "scheduler.local_anchor.present");
     EXPECT_EQ(HeavyOwnerDifference(true, full, accepted), "scheduler.local_anchor.present");
+}
+
+TEST(HeavyComparison, OwnerAmbientPresenceIncludesEmptyRecords) {
+    HeavyOwnerCapture absent;
+    absent.captured = true;
+    auto present = absent;
+    present.owners.ambient.emplace();
+    EXPECT_EQ(HeavyOwnerDifference(true, absent, present), "owner.ambient.present");
+    EXPECT_EQ(HeavyOwnerDifference(true, present, absent), "owner.ambient.present");
+    EXPECT_TRUE(HeavyOwnerDifference(true, present, present).empty());
+    EXPECT_TRUE(HeavyOwnerDifference(false, absent, present).empty());
+    EXPECT_TRUE(HeavyOwnerDifference(false, present, absent).empty());
+}
+
+TEST(HeavyComparison, OwnerExtensionSequencesCompareLastEntryAndStoredOrderAtCapacity) {
+    HeavyOwnerCapture base;
+    base.captured = true;
+    base.owners.resident_chunks.resize(Luminumbra::Persistence::kOwnerContinuationResidentChunks);
+    for (std::size_t i = 0; i < base.owners.resident_chunks.size(); ++i) {
+        base.owners.resident_chunks[i] = static_cast<Luminumbra::ChunkID>(i);
+    }
+    auto& state = base.owners.ambient.emplace();
+    state.storms.resize(Luminumbra::Systems::kMaxStormCells);
+    state.storms.back().seed_salt = 7;
+    state.strikes.resize(Luminumbra::Systems::kMaxLiveStrikes);
+    state.strikes.back().storm_salt = 11;
+    state.wind.resize(Luminumbra::Systems::kMaxStormCells);
+    state.wind.back().intensity = 0.5f;
+    auto changed = base;
+    ASSERT_TRUE(changed.owners.ambient);
+    const auto check_sequence = [&base,
+                                 &changed](auto& records, const char* prefix, const char* field) {
+        SCOPED_TRACE(prefix);
+        const auto last = records.back();
+        records.back() = records.front();
+        const auto last_path =
+            std::string(prefix) + "[" + std::to_string(records.size() - 1) + "]." + field;
+        EXPECT_EQ(HeavyOwnerDifference(true, base, changed), last_path);
+        EXPECT_EQ(HeavyOwnerDifference(true, changed, base), last_path);
+        records.back() = last;
+        std::swap(records.front(), records.back());
+        const auto first_path = std::string(prefix) + "[0]." + field;
+        EXPECT_EQ(HeavyOwnerDifference(true, base, changed), first_path);
+        EXPECT_EQ(HeavyOwnerDifference(true, changed, base), first_path);
+        EXPECT_TRUE(HeavyOwnerDifference(false, base, changed).empty());
+        std::swap(records.front(), records.back());
+        EXPECT_TRUE(HeavyOwnerDifference(true, base, changed).empty());
+    };
+    check_sequence(changed.owners.resident_chunks, "owner.resident_chunks", "value");
+    if (!changed.owners.ambient) {
+        FAIL() << "Expected populated ambient capture";
+    }
+    auto& ambient = *changed.owners.ambient;
+    check_sequence(ambient.storms, "owner.ambient.storms", "seed_salt");
+    check_sequence(ambient.strikes, "owner.ambient.strikes", "storm_salt");
+    check_sequence(ambient.wind, "owner.ambient.wind", "intensity");
+}
+
+TEST(HeavyComparison, OwnerAmbientFloatProjectionsPreserveExactBits) {
+    HeavyOwnerCapture base;
+    base.captured = true;
+    auto& state = base.owners.ambient.emplace();
+    state.storms.emplace_back();
+    state.strikes.emplace_back();
+    state.wind.emplace_back();
+    auto changed = base;
+    if (!changed.owners.ambient) {
+        FAIL() << "Expected populated ambient capture";
+    }
+    auto& ambient = *changed.owners.ambient;
+    const std::array<std::pair<const char*, float*>, 17> fields{{
+        {"owner.ambient.anchor.x", &ambient.anchor.x},
+        {"owner.ambient.anchor.y", &ambient.anchor.y},
+        {"owner.ambient.anchor.z", &ambient.anchor.z},
+        {"owner.ambient.storms[0].center_world.x", &ambient.storms[0].center_world.x},
+        {"owner.ambient.storms[0].center_world.y", &ambient.storms[0].center_world.y},
+        {"owner.ambient.storms[0].velocity.x", &ambient.storms[0].velocity.x},
+        {"owner.ambient.storms[0].velocity.y", &ambient.storms[0].velocity.y},
+        {"owner.ambient.storms[0].intensity", &ambient.storms[0].intensity},
+        {"owner.ambient.strikes[0].world_x", &ambient.strikes[0].world_x},
+        {"owner.ambient.strikes[0].world_z", &ambient.strikes[0].world_z},
+        {"owner.ambient.strikes[0].magnitude", &ambient.strikes[0].magnitude},
+        {"owner.ambient.wind[0].center_world.x", &ambient.wind[0].center_world.x},
+        {"owner.ambient.wind[0].center_world.y", &ambient.wind[0].center_world.y},
+        {"owner.ambient.wind[0].radius_m", &ambient.wind[0].radius_m},
+        {"owner.ambient.wind[0].velocity.x", &ambient.wind[0].velocity.x},
+        {"owner.ambient.wind[0].velocity.y", &ambient.wind[0].velocity.y},
+        {"owner.ambient.wind[0].intensity", &ambient.wind[0].intensity},
+    }};
+    for (const auto& [path, scalar] : fields) {
+        SCOPED_TRACE(path);
+        for (const auto bits : {0x80000000u, 1u, 0x7fc00001u}) {
+            *scalar = std::bit_cast<float>(bits);
+            EXPECT_EQ(HeavyOwnerDifference(true, base, changed), path);
+            EXPECT_EQ(HeavyOwnerDifference(true, changed, base), path);
+            EXPECT_TRUE(HeavyOwnerDifference(false, base, changed).empty());
+            EXPECT_TRUE(HeavyOwnerDifference(true, changed, changed).empty());
+        }
+        *scalar = 0.0f;
+    }
 }
 
 TEST(HeavyComparison, OwnerSchedulerCaptureIncludesEmptyLedgerRegisters) {

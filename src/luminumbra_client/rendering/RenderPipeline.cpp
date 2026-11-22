@@ -221,17 +221,13 @@ bool gl_extension_present(const char* extension_name) {
 }
 
 constexpr const char* kGpuTimerPassNames[] = {
-    "shadow",
-    "gbuffer",
-    "ssao",
-    "ssao_blur",
-    "lighting",
-    "water",
-    "skybox",
-    "particles",
-    "foliage",
-    "aerial",
-    "final_blit",
+    "shadow",          "gbuffer",       "ssao",
+    "ssao_blur",       "lighting",      "water",
+    "skybox",          "particles",     "foliage",
+    "aerial",          "final_blit",    "depth_blit_to_lighting",
+    "opaque_snapshot", "froxel_inject", "froxel_integrate",
+    "taau_resolve",    "foliage_count", "foliage_prefix",
+    "foliage_emit",    "cloud_dome",    "cloud_composite",
 };
 
 } // namespace
@@ -426,6 +422,7 @@ void RenderPipeline::set_capture_diagnostics(const DiagnosticCaptureOptions& opt
 
 void RenderPipeline::end_diagnostic_capture() {
     m_diagnostic_capture.reset();
+    m_diagnostic_deferred_only = false;
 }
 
 bool RenderPipeline::diagnostic_capture_destination_available(
@@ -549,6 +546,9 @@ CaptureManifestInput RenderPipeline::diagnostic_capture_manifest() const {
     input.world_hash.unavailable = "not observed by scenario capture";
     input.width = static_cast<int>(m_screen_width);
     input.height = static_cast<int>(m_screen_height);
+    if (m_diagnostic_deferred_only) {
+        input.render_settings["capture_policy"] = "deferred_only_fixed_site";
+    }
     const auto* snapshot = capture_camera();
     if (!snapshot || !SetCaptureManifestCamera(input, *snapshot)) {
         input.near_plane = 0;
@@ -1500,6 +1500,8 @@ bool RenderPipeline::capture_ssao_parity(const std::filesystem::path& out_dir,
 }
 
 void RenderPipeline::attach_farlod_job_system(JobSystem* job_system) {
+    if (m_gbuffer_pass)
+        m_gbuffer_pass->attach_mesh_jobs(job_system);
     if (m_foliage_pass)
         m_foliage_pass->attach_job_system(job_system);
     if (m_farlod) {
@@ -2548,6 +2550,7 @@ void RenderPipeline::init_gpu_pass_timers() {
                   "GPU timer pass name table must mirror GpuTimerPass");
 
     m_gpu_timers = {};
+    m_gpu_stage_queries_created = false;
 
     // Capability gate: GL_TIMESTAMP queries require GL 3.3+ or
     // GL_ARB_timer_query, and the glad-resolved entry points must be non-null.
@@ -2562,9 +2565,12 @@ void RenderPipeline::init_gpu_pass_timers() {
         return;
     }
 
+    static_assert(kGpuTimerPassCount == Client::Measurement::kPassCount);
     for (GpuTimerFrameSlot& slot : m_gpu_timers.slots) {
-        glGenQueries(static_cast<GLsizei>(kGpuTimerPassCount), slot.begin_queries.data());
-        glGenQueries(static_cast<GLsizei>(kGpuTimerPassCount), slot.end_queries.data());
+        glGenQueries(static_cast<GLsizei>(Client::Measurement::kLegacyPassCount),
+                     slot.begin_queries.data());
+        glGenQueries(static_cast<GLsizei>(Client::Measurement::kLegacyPassCount),
+                     slot.end_queries.data());
     }
     m_gpu_timers.supported = true;
 }
@@ -2585,7 +2591,52 @@ void RenderPipeline::destroy_gpu_pass_timers() {
     m_gpu_timers = {};
 }
 
+void RenderPipeline::set_benchmark_gpu_queries(BenchmarkGpuQueries* queries) {
+    m_benchmark_gpu_queries = queries;
+    refresh_scatter_gpu_timers();
+}
+
+void RenderPipeline::set_gpu_stage_attribution(bool enabled) {
+    m_gpu_stage_attribution = enabled;
+    if (enabled && m_gpu_timers.supported && !m_gpu_stage_queries_created) {
+        constexpr auto first = Client::Measurement::kLegacyPassCount;
+        constexpr auto count = static_cast<GLsizei>(kGpuTimerPassCount - first);
+        for (GpuTimerFrameSlot& slot : m_gpu_timers.slots) {
+            glGenQueries(count, slot.begin_queries.data() + first);
+            glGenQueries(count, slot.end_queries.data() + first);
+        }
+        m_gpu_stage_queries_created = true;
+    }
+    refresh_scatter_gpu_timers();
+}
+
+GpuPassTimer RenderPipeline::gpu_pass_timer(GpuTimerPass pass) {
+    const auto index = static_cast<std::size_t>(pass);
+    if (m_gpu_timers_suppressed ||
+        (index >= Client::Measurement::kLegacyPassCount && !m_gpu_stage_attribution)) {
+        return {};
+    }
+    GpuTimerFrameSlot& slot = m_gpu_timers.slots[m_gpu_timers.frame_index % kGpuTimerFrameRing];
+    return {.begin_query = slot.begin_queries[index],
+            .end_query = slot.end_queries[index],
+            .issued = &slot.issued[index],
+            .benchmark = m_benchmark_gpu_queries,
+            .pass = index};
+}
+
+void RenderPipeline::refresh_scatter_gpu_timers() {
+    if (m_foliage_pass) {
+        m_foliage_pass->set_scatter_gpu_timers({gpu_pass_timer(GpuTimerPass::FoliageCount),
+                                                gpu_pass_timer(GpuTimerPass::FoliagePrefix),
+                                                gpu_pass_timer(GpuTimerPass::FoliageEmit)});
+    }
+}
+
 void RenderPipeline::begin_gpu_pass_timer(GpuTimerPass pass) {
+    if (static_cast<std::size_t>(pass) >= Client::Measurement::kLegacyPassCount &&
+        !m_gpu_stage_attribution) {
+        return;
+    }
     // open a KHR_debug group named for the pass so Nsight/RenderDoc
     // captures show a labelled span. Pushed BEFORE the support-guard so markers
     // bracket the pass even on contexts without GL timestamp queries. Pure
@@ -2605,6 +2656,10 @@ void RenderPipeline::begin_gpu_pass_timer(GpuTimerPass pass) {
 }
 
 void RenderPipeline::end_gpu_pass_timer(GpuTimerPass pass) {
+    if (static_cast<std::size_t>(pass) >= Client::Measurement::kLegacyPassCount &&
+        !m_gpu_stage_attribution) {
+        return;
+    }
     if (m_benchmark_gpu_queries && !m_gpu_timers_suppressed)
         m_benchmark_gpu_queries->end_pass(static_cast<std::size_t>(pass));
     if (!m_far_world_paired)
@@ -2625,8 +2680,13 @@ void RenderPipeline::collect_gpu_pass_timers() {
         // the next frame, so polling here never has to block the CPU.
         GpuTimerFrameSlot& read_slot =
             m_gpu_timers.slots[(m_gpu_timers.frame_index + 1u) % kGpuTimerFrameRing];
-        for (size_t pass = 0; pass < kGpuTimerPassCount; ++pass) {
+        const auto count =
+            m_gpu_stage_attribution ? kGpuTimerPassCount : Client::Measurement::kLegacyPassCount;
+        for (size_t pass = 0; pass < count; ++pass) {
             if (!read_slot.issued[pass]) {
+                if (pass >= Client::Measurement::kLegacyPassCount) {
+                    m_gpu_timers.last_gpu_ms[pass] = 0.0;
+                }
                 continue;
             }
             GLint begin_available = GL_FALSE;
@@ -2690,6 +2750,29 @@ void RenderPipeline::collect_gpu_pass_timers() {
     m_last_render_pass_stats.final_blit_gpu_ms =
         m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::FinalBlit)];
 
+    if (m_gpu_stage_attribution) {
+        m_last_render_pass_stats.depth_blit_to_lighting_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::DepthBlitToLighting)];
+        m_last_render_pass_stats.opaque_snapshot_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::OpaqueSnapshot)];
+        m_last_render_pass_stats.froxel_inject_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::FroxelInject)];
+        m_last_render_pass_stats.froxel_integrate_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::FroxelIntegrate)];
+        m_last_render_pass_stats.taau_resolve_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::TaauResolve)];
+        m_last_render_pass_stats.foliage_count_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::FoliageCount)];
+        m_last_render_pass_stats.foliage_prefix_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::FoliagePrefix)];
+        m_last_render_pass_stats.foliage_emit_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::FoliageEmit)];
+        m_last_render_pass_stats.cloud_dome_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::CloudDome)];
+        m_last_render_pass_stats.cloud_composite_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::CloudComposite)];
+    }
+
     // One-time diagnostic so smoke runs prove the ring resolves real samples.
     if (resolved_sample_this_frame && !m_gpu_timers.first_sample_logged) {
         m_gpu_timers.first_sample_logged = true;
@@ -2718,7 +2801,7 @@ void RenderPipeline::finish_gpu_pass_timer_frame() {
     if (!m_gpu_timers.labeled && m_gpu_timers.frame_index + 1u >= kGpuTimerFrameRing) {
         for (size_t slot_index = 0; slot_index < kGpuTimerFrameRing; ++slot_index) {
             const GpuTimerFrameSlot& slot = m_gpu_timers.slots[slot_index];
-            for (size_t pass = 0; pass < kGpuTimerPassCount; ++pass) {
+            for (size_t pass = 0; pass < Client::Measurement::kLegacyPassCount; ++pass) {
                 const std::string base = "gpu_timer." + std::string(kGpuTimerPassNames[pass]) +
                                          "." + std::to_string(slot_index);
                 label_gl_object(GL_QUERY, slot.begin_queries[pass], base + ".begin");
@@ -2728,6 +2811,9 @@ void RenderPipeline::finish_gpu_pass_timer_frame() {
         m_gpu_timers.labeled = true;
     }
     ++m_gpu_timers.frame_index;
+    if (m_gpu_stage_attribution) {
+        refresh_scatter_gpu_timers();
+    }
 }
 
 void RenderPipeline::gather_lights(entt::registry& registry, const glm::vec3& camera_pos) {
@@ -2852,8 +2938,11 @@ void RenderPipeline::render_frame(entt::registry& registry,
                                   const Camera& camera,
                                   float deltaTime,
                                   bool wireframe,
-                                  UploadPresentation presentation) {
+                                  UploadPresentation presentation,
+                                  DiagnosticCapturePolicy capture_policy,
+                                  SkyAtmosphereLut::Publication sky_publication) {
     end_diagnostic_capture();
+    m_water_pass->invalidate_visibility();
     if (!m_started) {
         return;
     }
@@ -2877,7 +2966,8 @@ void RenderPipeline::render_frame(entt::registry& registry,
         camera);
     m_far_world_advanced = false;
     ++m_far_world_frame;
-    prepare_frame(registry, world_system, camera, deltaTime, wireframe, presentation);
+    prepare_frame(
+        registry, world_system, camera, deltaTime, wireframe, presentation, sky_publication);
     if (!m_frame_prepared.valid)
         return;
     // Retain the exact ON temporal inputs before the frame epilogue updates them.
@@ -2901,8 +2991,11 @@ void RenderPipeline::render_frame(entt::registry& registry,
                 DiagnosticExtent{m_internal_width, m_internal_height});
         }
     }
-    dispatch_stages(camera);
-    if (auto* scope = GBufferDiagnosticCapture::Current(); diagnostic_frame && scope) {
+    const bool deferred_only_capture =
+        diagnostic_frame && capture_policy == DiagnosticCapturePolicy::DeferredOnlyFixedSite;
+    dispatch_stages(camera, deferred_only_capture);
+    if (auto* scope = GBufferDiagnosticCapture::Current();
+        diagnostic_frame && scope && !deferred_only_capture) {
         if ((m_plant_procgen_pass && m_plant_procgen_pass->enabled() &&
              m_plant_procgen_pass->index_count() > 0) ||
             (m_ground_decal_pass && m_ground_decal_pass->active())) {
@@ -2948,10 +3041,11 @@ void RenderPipeline::render_frame(entt::registry& registry,
     //  TAAU: also remember this frame's wind wall-clock so next frame's instanced vertex shader
     // can reconstruct where each wind-swayed vertex WAS (camera-only reprojection ghosts
     // tree-tops).
-    m_prev_time = static_cast<float>(Client::presentation_clock.now(glfwGetTime));
+    m_prev_time = static_cast<float>(Client::presentation_clock().now(glfwGetTime));
     // Scatter preparation happens before render_frame. Open admission for the
     // next rendered frame here, so nested sweeps/previews need no outer loop.
     m_diagnostic_capture = std::move(diagnostic_frame);
+    m_diagnostic_deferred_only = deferred_only_capture;
     m_foliage_pass->begin_ground_frame();
 }
 
@@ -2979,11 +3073,19 @@ FarReplayCamera RenderPipeline::replay_camera(const Camera& camera) const {
 bool RenderPipeline::render_far_world_off_pair(const Camera& camera) {
     if (!m_started || !m_frame_prepared.valid || m_far_world_paired)
         return false;
+    // Frozen dispatch cannot initialize glass resources omitted by an earlier frame.
+    // Refuse before detaching attribution or mutating the prepared frame and GL state.
+    if (!m_glass_pane_items.empty() &&
+        (!m_glass_oit_pass->has_targets() || !m_glass_oit_pass->accum_shader() ||
+         !m_glass_oit_pass->accum_shader()->IsValid() || !m_glass_oit_pass->resolve_shader() ||
+         !m_glass_oit_pass->resolve_shader()->IsValid() || !m_glass_quad_vao ||
+         !m_screen_quad_vao)) {
+        return false;
+    }
     const bool history_matches = m_taau_enabled == m_far_world_pair_taau_enabled &&
                                  m_taau_frame == m_far_world_pair_jitter_frame &&
                                  m_taau_jitter_ndc == m_far_world_pair_jitter &&
-                                 m_taau_pass->history_state() == m_far_world_pair_taau_after &&
-                                 (!m_taau_enabled || m_taau_pass->replay_available());
+                                 m_taau_pass->history_state() == m_far_world_pair_taau_after;
     if (CheckFarReplay(m_started,
                        m_frame_prepared.valid,
                        m_far_world_paired,
@@ -2994,6 +3096,7 @@ bool RenderPipeline::render_far_world_off_pair(const Camera& camera) {
     static_assert(std::is_nothrow_swappable_v<RenderContext>);
     auto gl = MakeFarWorldReplayGlAccess();
     std::unique_ptr<RenderView> authored_view;
+    bool replay_ready = false;
     RunFarWorldReplay(
         *gl,
         [this, &authored_view] {
@@ -3054,8 +3157,12 @@ bool RenderPipeline::render_far_world_off_pair(const Camera& camera) {
             m_gpu_timers_suppressed = !FarReplayEffects{true}.Timers();
             m_frame_far_selection = FarWorldSubmissionOverride(m_frame_far_selection, false);
         },
-        [this, &camera] { dispatch_stages(camera); });
-    return true;
+        [this, &camera, &replay_ready] {
+            replay_ready = !m_taau_enabled || m_taau_pass->prepare_replay(m_render_registry);
+            if (replay_ready)
+                dispatch_stages(camera);
+        });
+    return replay_ready;
 }
 
 void RenderPipeline::select_frame_far_world(FarWorldSelection selection, const Camera& camera) {
@@ -3074,7 +3181,8 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
                                    const Camera& camera,
                                    float deltaTime,
                                    bool wireframe,
-                                   UploadPresentation presentation) {
+                                   UploadPresentation presentation,
+                                   SkyAtmosphereLut::Publication sky_publication) {
     m_frame_prepared.valid = false;
     m_mdi_stream.begin_frame();
     m_frame_stage_trace.clear();
@@ -3083,9 +3191,9 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     // One presentation snapshot per frame, shared by every pass
     // via RenderContext.time_seconds so converted passes are deterministic w.r.t.
     // each other (no per-pass glfwGetTime drift). Render-only (u_time sway etc.).
-    m_wall_clock_time = static_cast<float>(Client::presentation_clock.now(glfwGetTime));
+    m_wall_clock_time = static_cast<float>(Client::presentation_clock().now(glfwGetTime));
 
-    update_time_of_day(deltaTime);
+    update_time_of_day(deltaTime, sky_publication);
 
     // consume the newest COMPLETED luminance readback (never
     // blocks; a stale N-frame-old value is the contract) and advance the damped
@@ -3110,10 +3218,13 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     // Underwater is a water-volume membership query, not a global height cutoff.
     // Dry caves below sea/lake level retain their air lighting.
     m_underwater_factor = world_system.IsUnderwater(camera.Position) ? 1.0f : 0.0f;
+    m_last_mesh_upload_stats = {};
+    const auto assets = m_gbuffer_pass->prepare_meshes(registry, m_root_path, presentation);
+    m_last_mesh_upload_stats.asset_budget = assets.work;
+    m_last_mesh_upload_stats.asset_uploads_deferred = assets.pending;
     const auto snapshot_start = std::chrono::steady_clock::now();
     const auto& renderable_chunks = world_system.renderable_chunks_view();
     auto renderable_chunk_snapshots = build_chunk_snapshots(renderable_chunks);
-    m_last_mesh_upload_stats = {};
     m_last_mesh_upload_stats.snapshot_count = renderable_chunk_snapshots.size();
     m_last_render_pass_stats = {};
     m_last_render_pass_stats.snapshot_count = renderable_chunk_snapshots.size();
@@ -3288,7 +3399,12 @@ void RenderPipeline::prepare_camera_projection(const Camera& camera) {
                 sizeof(m_frame_prepared.frustum_planes));
 }
 
-void RenderPipeline::dispatch_stages(const Camera& camera) {
+void RenderPipeline::dispatch_stages(const Camera& camera, bool deferred_only_capture) {
+    // A full redispatch must not reuse a reduced frame's attribution or label.
+    // Discard it only once the caller has admitted the redispatch.
+    if (!deferred_only_capture && m_diagnostic_deferred_only) {
+        end_diagnostic_capture();
+    }
     DebugViewPass::controls().wireframe = m_frame_prepared.wireframe;
     auto diagnostic_frame = m_debug_view_pass && (DebugViewPass::geometry_requested() ||
                                                   DebugViewPass::controls().enabled)
@@ -3342,10 +3458,31 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
         }
         // Unmapped node = a declaration/executor drift the ctest pins; loud in debug.
         assert(fn && "frame-graph node has no executor table entry");
+        // The fixed graph has a bounded number of stages. Exclude every A4
+        // unsupported producer before submission, retaining the graph trace and
+        // G-buffer timer/state epilogue even when procedural plants are omitted.
+        if (deferred_only_capture &&
+            (fn == &RenderPipeline::execute_stage_plant_procgen ||
+             fn == &RenderPipeline::execute_stage_ground_decals ||
+             fn == &RenderPipeline::execute_stage_water ||
+             fn == &RenderPipeline::execute_stage_waterfall ||
+             fn == &RenderPipeline::execute_stage_glass_oit_accum ||
+             fn == &RenderPipeline::execute_stage_glass_oit_resolve ||
+             fn == &RenderPipeline::execute_stage_foliage ||
+             fn == &RenderPipeline::execute_stage_weather_opaque_snapshot ||
+             fn == &RenderPipeline::execute_stage_weather_overlay ||
+             fn == &RenderPipeline::execute_stage_particles)) {
+            record_frame_stage(node.c_str());
+            if (fn == &RenderPipeline::execute_stage_plant_procgen) {
+                finish_gbuffer_stage();
+            }
+            continue;
+        }
         if (fn)
             (this->*fn)(camera);
-        if (diagnostic_frame && node == "gbuffer") {
-            // Gather the deferred snapshot before plants or decals change its AOVs.
+        if (diagnostic_frame && node == "ground_decals") {
+            // Include later deferred surfaces and decal contributors, then retire
+            // attribution before SSAO, lighting and post-processing.
             DebugViewPass::end_frame(diagnostic_frame, make_debug_view_context(camera));
         }
     }
@@ -3572,6 +3709,10 @@ void RenderPipeline::execute_stage_plant_procgen(const Camera& camera) {
         m_plant_procgen_pass->execute(plant_ctx, camera);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
+    finish_gbuffer_stage();
+}
+
+void RenderPipeline::finish_gbuffer_stage() {
     end_gpu_pass_timer(GpuTimerPass::GBuffer);
     glBindVertexArray(0); // Unbind after gbuffer pass
     glDisable(GL_CULL_FACE);
@@ -3650,7 +3791,10 @@ void RenderPipeline::execute_stage_lighting(const Camera& camera) {
     record_frame_stage("lighting");
     m_frame_lighting_ctx = make_lighting_context(camera);
     begin_gpu_pass_timer(GpuTimerPass::Lighting);
-    m_lighting_pass->execute(m_frame_lighting_ctx);
+    // G-buffer establishes depth testing; plant/decal stages retain or restore it,
+    // SSAO only changes bindings, and diagnostic replay restores its entry state.
+    const LightingPass::CallerState caller{.depth_test_enabled = GL_TRUE};
+    m_lighting_pass->execute(m_frame_lighting_ctx, caller);
     end_gpu_pass_timer(GpuTimerPass::Lighting);
     glBindVertexArray(0); // Unbind after lighting pass
 }
@@ -3660,6 +3804,7 @@ void RenderPipeline::execute_stage_depth_blit_to_lighting(const Camera& camera) 
     (void)camera;
     // 5. COPY DEPTH TO LIGHTING FBO SO SKYBOX AND WATER SHARE THE G-BUFFER OCCLUSION
     record_frame_stage("depth_blit_to_lighting");
+    begin_gpu_pass_timer(GpuTimerPass::DepthBlitToLighting);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
     // both G-buffer and lighting are internal-sized; copy the internal depth rect
@@ -3675,6 +3820,7 @@ void RenderPipeline::execute_stage_depth_blit_to_lighting(const Camera& camera) 
                       static_cast<GLint>(m_internal_height),
                       GL_DEPTH_BUFFER_BIT,
                       GL_NEAREST);
+    end_gpu_pass_timer(GpuTimerPass::DepthBlitToLighting);
 }
 
 void RenderPipeline::execute_stage_skybox(const Camera& camera) {
@@ -3684,6 +3830,9 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
     record_frame_stage("skybox");
     begin_gpu_pass_timer(GpuTimerPass::Skybox);
     RenderContext skybox_ctx = make_skybox_context(camera);
+    // Lighting explicitly enables culling; neither lighting nor the depth blit changes it.
+    // Both cloud-resolution paths therefore enter the dome with culling enabled.
+    const SkyboxPass::CallerState caller{.cull_enabled = GL_TRUE};
     if (m_cloud_quality > 0 && m_halfres_cloud.fbo && m_cloud_composite_shader &&
         m_cloud_composite_shader->IsValid()) {
         // Render-optimization (cloud-raymarch-optimization, ): raymarch the
@@ -3695,6 +3844,7 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
         //
         // (a) Dome -> reduced-res FBO. No depth attachment / depth test off: the
         //     dome fills every texel (the sky mask is reapplied at composite time).
+        begin_gpu_pass_timer(GpuTimerPass::CloudDome);
         const GLboolean blend_was = glIsEnabled(GL_BLEND);
         if (blend_was)
             glDisable(GL_BLEND);
@@ -3705,7 +3855,9 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
                    static_cast<GLsizei>(m_halfres_cloud.height));
         glDisable(GL_DEPTH_TEST);
         glDepthMask(GL_FALSE);
-        m_skybox_pass->execute(skybox_ctx, camera, false);
+        m_skybox_pass->execute(skybox_ctx, camera, false, caller);
+        end_gpu_pass_timer(GpuTimerPass::CloudDome);
+        begin_gpu_pass_timer(GpuTimerPass::CloudComposite);
         // (b) Depth-masked upsample composite -> lighting FBO (full res). Writes the
         //     bilinear-upsampled sky only where the scene depth is the far plane.
         glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
@@ -3733,14 +3885,17 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
         glEnable(GL_DEPTH_TEST);
         if (blend_was)
             glEnable(GL_BLEND);
+        end_gpu_pass_timer(GpuTimerPass::CloudComposite);
     } else {
+        begin_gpu_pass_timer(GpuTimerPass::CloudDome);
         glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
         glViewport(0,
                    0,
                    static_cast<GLsizei>(m_internal_width),
                    static_cast<GLsizei>(
                        m_internal_height)); // skybox must not inherit a stale (screen) viewport
-        m_skybox_pass->execute(skybox_ctx, camera, false);
+        m_skybox_pass->execute(skybox_ctx, camera, false, caller);
+        end_gpu_pass_timer(GpuTimerPass::CloudDome);
     }
     end_gpu_pass_timer(GpuTimerPass::Skybox);
     glBindVertexArray(0); // Unbind after skybox pass
@@ -3780,7 +3935,9 @@ void RenderPipeline::execute_stage_opaque_snapshot(const Camera& camera) {
         .glass = !m_glass_pane_items.empty() && m_glass_quad_vao != 0,
         .capture = m_terrain_coverage_enabled || m_water_visibility_capture_enabled};
     if (consumers.opaque_snapshot()) {
+        begin_gpu_pass_timer(GpuTimerPass::OpaqueSnapshot);
         m_lighting_pass->copy_lighting_color_to_opaque_texture(m_frame_lighting_ctx);
+        end_gpu_pass_timer(GpuTimerPass::OpaqueSnapshot);
     }
 }
 
@@ -3879,15 +4036,19 @@ void RenderPipeline::execute_stage_weather_overlay(const Camera& camera) {
 void RenderPipeline::execute_stage_froxel_inject(const Camera& camera) {
     record_frame_stage("froxel_inject");
     RenderContext ctx = make_froxel_context(camera);
+    begin_gpu_pass_timer(GpuTimerPass::FroxelInject);
     if (!m_froxel_pass->execute_inject(ctx, m_root_path)) {
         m_volumetric_quality = 0;
     }
+    end_gpu_pass_timer(GpuTimerPass::FroxelInject);
 }
 
 void RenderPipeline::execute_stage_froxel_integrate(const Camera& camera) {
     record_frame_stage("froxel_integrate");
     RenderContext ctx = make_froxel_context(camera);
+    begin_gpu_pass_timer(GpuTimerPass::FroxelIntegrate);
     m_froxel_pass->execute_integrate(ctx);
+    end_gpu_pass_timer(GpuTimerPass::FroxelIntegrate);
 }
 
 void RenderPipeline::execute_stage_aerial(const Camera& camera) {
@@ -3933,7 +4094,10 @@ void RenderPipeline::execute_stage_foliage(const Camera& camera) {
         RenderContext foliage_ctx = make_foliage_context(camera);
         foliage_ctx.frozen_replay = m_far_world_paired;
         begin_gpu_pass_timer(GpuTimerPass::Foliage);
-        const std::size_t foliage_drawn = m_foliage_pass->execute(foliage_ctx, camera);
+        // Skybox preserves culling; water/glass restore it enabled, waterfall
+        // preserves it, and god rays only change depth/blend. Skipped stages retain it.
+        const FoliagePass::CallerState caller{.cull_enabled = GL_TRUE};
+        const std::size_t foliage_drawn = m_foliage_pass->execute(foliage_ctx, camera, caller);
         // Submission is observable even when the indirect count has no CPU readback.
         if (foliage_drawn > 0 || (!m_foliage_pass->frame_instance_count_known() &&
                                   m_foliage_pass->last_draw_calls() > 0)) {
@@ -3961,7 +4125,9 @@ void RenderPipeline::execute_stage_taau_resolve(const Camera& camera) {
     record_frame_stage("taau_resolve");
     if (m_taau_enabled) {
         RenderContext taau_ctx = make_taau_context();
+        begin_gpu_pass_timer(GpuTimerPass::TaauResolve);
         m_taau_pass->execute(taau_ctx, m_far_world_paired ? &m_far_world_pair_taau : nullptr);
+        end_gpu_pass_timer(GpuTimerPass::TaauResolve);
     }
 }
 
@@ -4327,6 +4493,7 @@ bool RenderPipeline::apply_graphics(const luminumbra::core::ResolvedGraphics& re
     const auto previous = graphics_runtime_config();
     if (!resize_graphics_targets(config.render_scale, static_cast<u32>(config.shadow_resolution)))
         return false;
+    m_sky_lut.discard_pending_readback();
     m_foliage_pass->set_enabled(config.grass_enabled);
     m_foliage_pass->set_density_scale(config.grass_density);
     m_foliage_pass->set_fade_distances(config.grass_fade_start_m, config.grass_fade_end_m);
@@ -6391,7 +6558,8 @@ bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path, Ltex
     return true;
 }
 
-void RenderPipeline::update_time_of_day(float deltaTime) {
+void RenderPipeline::update_time_of_day(float deltaTime,
+                                        SkyAtmosphereLut::Publication sky_publication) {
     // while HELD (photo-mode time-of-day scrub), the day clock does NOT
     // auto-advance — the externally-set m_timeOfDay (via set_time_of_day) persists and the
     // sun/season below recompute from it. Render-only; never touches the sim clock.
@@ -6404,7 +6572,7 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
             m_dayLengthOverride ? m_dayLengthTicks : m_renderClock.calendar().dayLengthTicks;
         m_dayDurationSeconds = static_cast<double>(day_ticks) /
                                luminumbra::core::SimulationClock::kCanonicalTickRateHz;
-        if (const auto& seconds = Client::presentation_clock.capture_seconds())
+        if (const auto& seconds = Client::presentation_clock().capture_seconds())
             m_elapsedDayPhase = std::fmod(*seconds / m_dayDurationSeconds, 1.0);
         else
             m_elapsedDayPhase =
@@ -6478,8 +6646,28 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     // transmittance coupling —  — not a normalized-to-~1 hue multiplier.)
     double refresh_ms = 0.0;
     const glm::vec3 toward_sun = -m_sun.direction;
-    if (m_sky_lut.ready() && m_sky_lut.refresh_sky_view(toward_sun, &refresh_ms)) {
+    // Replay/capture consumers always retain same-frame publication, even if a
+    // caller mistakenly requests deferred publication for an offscreen frame.
+    const auto publication = SkyAtmosphereLut::select_publication(
+        {.interactive = sky_publication == SkyAtmosphereLut::Publication::Deferred,
+         .replay = m_far_world_paired || DebugViewPass::controls().frozen ||
+                   DebugViewPass::replay_mode(DebugViewPass::geometry_view()),
+         .capture = m_capture_diagnostics.enabled || m_offscreen_target_active ||
+                    Client::presentation_clock().capture_seconds().has_value(),
+         .benchmark = m_benchmark_gpu_queries != nullptr,
+         .headless = false,
+         .test_harness = false});
+    const bool refreshed =
+        m_sky_lut.ready() && m_sky_lut.refresh_sky_view(toward_sun, &refresh_ms, publication);
+    if (refreshed) {
         m_skyScatterAmbient = m_sky_lut.sky_ambient();
+    }
+    if (publication == SkyAtmosphereLut::Publication::Deferred && m_sky_lut.ready() &&
+        m_sky_lut.gpu_skyview_enabled() && (refreshed || m_sky_lut.readback_pending())) {
+        // All sky, aerial and direct-light consumers use the published input
+        // while the next GPU result is pending. The requested sun above still
+        // comes from the current clock on every frame.
+        m_sun.direction = -m_sky_lut.sky_view_sun_dir();
     }
     m_sky_view_refresh_ms =
         refresh_ms; // 0.0 on no-refresh frames; copied into stats after the per-frame reset
@@ -6723,7 +6911,7 @@ void RenderPipeline::advance_cloud_phase(float deltaTime) {
     if (!m_cloud_state.enabled) {
         return;
     }
-    if (const auto& seconds = Client::presentation_clock.capture_seconds())
+    if (const auto& seconds = Client::presentation_clock().capture_seconds())
         m_cloud_phase = static_cast<float>(*seconds);
     else
         m_cloud_phase += deltaTime;

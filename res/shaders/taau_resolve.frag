@@ -27,10 +27,20 @@ vec3 sharpenLuma(vec3 color, vec3 mean, vec3 lower, vec3 upper) {
     const vec3 weights = vec3(0.2126, 0.7152, 0.0722);
     float luminance = dot(color, weights);
     float detail = luminance - dot(mean, weights);
-    // A shared RGB gain preserves chroma. Bound the result before storing it in
-    // history so high-contrast silhouettes cannot accumulate sharpen overshoot.
+    // Bound the shared adjustment, not individual RGB channels: independently
+    // clipping a channel at a silhouette changes hue and feeds it into history.
     float gain = max(1.0 + u_sharpness * detail / max(luminance, 1e-6), 0.0);
-    return clamp(color * gain, lower, upper);
+    vec3 delta = color * (gain - 1.0);
+    float fraction = 1.0;
+    // Three channels only; color is already inside the current neighborhood box.
+    for (int channel = 0; channel < 3; ++channel) {
+        if (delta[channel] > 0.0) {
+            fraction = min(fraction, (upper[channel] - color[channel]) / delta[channel]);
+        } else if (delta[channel] < 0.0) {
+            fraction = min(fraction, (lower[channel] - color[channel]) / delta[channel]);
+        }
+    }
+    return color * (1.0 + clamp(fraction, 0.0, 1.0) * (gain - 1.0));
 }
 
 void main() {

@@ -350,7 +350,16 @@ void LightingPass::copy_lighting_color_to_opaque_texture(const RenderContext& ct
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 }
 
-void LightingPass::execute(const RenderContext& ctx) {
+LightingPass::CallerState LightingPass::CallerState::QueryExternal() {
+    return {.depth_test_enabled = glIsEnabled(GL_DEPTH_TEST)};
+}
+
+void LightingPass::execute_external(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL LightingPass.execute_external");
+    return execute(ctx, CallerState::QueryExternal());
+}
+
+void LightingPass::execute(const RenderContext& ctx, const CallerState& caller) {
     LUMIN_PROFILE_ZONE_N("GL LightingPass.execute");
     if (!ctx.render_view && !ctx.camera)
         throw std::invalid_argument("Lighting requires a validated view or production camera");
@@ -376,7 +385,7 @@ void LightingPass::execute(const RenderContext& ctx) {
                            !ctx.frozen_replay;
     const bool prepared = requested && prepare_contributions(ctx);
     Shader* lighting_shader = m_lighting_shader.get();
-    const GLboolean depth_was_enabled = glIsEnabled(GL_DEPTH_TEST);
+    const GLboolean depth_was_enabled = caller.depth_test_enabled;
     // The fullscreen quad lies at clip depth zero. Scene visibility comes from
     // the G-buffer, and its depth is blitted here after deferred lighting.
     glDisable(GL_DEPTH_TEST);

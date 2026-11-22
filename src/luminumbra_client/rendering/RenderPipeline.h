@@ -74,6 +74,7 @@ struct WaterVisibilityMask;
 class SkyboxPass;
 class ParticlePass;
 class FoliagePass;
+struct GpuPassTimer;
 class PlantProcgenPass;
 class FarLodSystem;
 class GroundDecalPass;
@@ -214,6 +215,8 @@ public:
     struct MeshUploadFrameStats {
         UploadWorkStats terrain_budget{};
         UploadWorkStats water_budget{};
+        UploadWorkStats asset_budget{};
+        size_t asset_uploads_deferred = 0;
         size_t snapshot_count = 0;
         size_t terrain_upload_candidates = 0;
         size_t terrain_uploads = 0;
@@ -327,6 +330,17 @@ public:
         // against the transient ≤ 0.5 ms budget (documented design).
         double lightning_pulse_gpu_ms = 0.0;
         double final_blit_gpu_ms = 0.0;
+        double depth_blit_to_lighting_gpu_ms = 0.0;
+        double opaque_snapshot_gpu_ms = 0.0;
+        double froxel_inject_gpu_ms = 0.0;
+        double froxel_integrate_gpu_ms = 0.0;
+        double taau_resolve_gpu_ms = 0.0;
+        double foliage_count_gpu_ms = 0.0;
+        double foliage_prefix_gpu_ms = 0.0;
+        double foliage_emit_gpu_ms = 0.0;
+        double cloud_dome_gpu_ms = 0.0;
+        double cloud_composite_gpu_ms = 0.0;
+
         //  sky scattering LUT precompute timings (CPU build + GL upload).
         // sky_full_precompute_ms is the startup one-shot (budget ≤ 8.0 ms on
         // release); sky_view_refresh_ms is the last per-frame sky-view recompute
@@ -418,12 +432,21 @@ public:
 
     bool startup(u32 screen_width, u32 screen_height, const std::filesystem::path& root_path);
     void shutdown();
-    void render_frame(entt::registry& registry,
-                      Systems::SHIELD_WorldSystem& world_system,
-                      const Camera& camera,
-                      float deltaTime,
-                      bool wireframe = false,
-                      UploadPresentation presentation = UploadPresentation::Streaming);
+    enum class DiagnosticCapturePolicy {
+        Complete,
+        DeferredOnlyFixedSite
+    };
+    // DeferredOnlyFixedSite applies to this admitted diagnostic frame only. It
+    // omits unsupported contributors; ordinary rendering keeps Complete.
+    void render_frame(
+        entt::registry& registry,
+        Systems::SHIELD_WorldSystem& world_system,
+        const Camera& camera,
+        float deltaTime,
+        bool wireframe = false,
+        UploadPresentation presentation = UploadPresentation::Streaming,
+        DiagnosticCapturePolicy capture_policy = DiagnosticCapturePolicy::Complete,
+        SkyAtmosphereLut::Publication sky_publication = SkyAtmosphereLut::Publication::SameFrame);
 
     // push the deterministic Aether scalar field to the lighting-pass
     // emissive tap (one-way sim->render bridge, called per frame from the client).
@@ -477,9 +500,8 @@ public:
     // after this, for the A/B capture path). Also safe at runtime (a settings change): when
     // already started it reallocates the scaled intermediates like on_resize (the output-res
     // TAAU/backbuffer targets are untouched -- only the internal extent moved).
-    void set_benchmark_gpu_queries(BenchmarkGpuQueries* queries) {
-        m_benchmark_gpu_queries = queries;
-    }
+    void set_benchmark_gpu_queries(BenchmarkGpuQueries* queries);
+    void set_gpu_stage_attribution(bool enabled);
     void set_render_scale(float scale);
     // Render-thread startup/live application. Session overrides are resolved by
     // the host before entry. Unchanged values do not allocate or reset history.
@@ -580,7 +602,8 @@ public:
     // Presentation readiness only. Never use to gate simulation or collision.
     bool render_uploads_settled() const {
         return m_last_mesh_upload_stats.terrain_uploads_deferred == 0 &&
-               m_last_mesh_upload_stats.water_uploads_deferred == 0;
+               m_last_mesh_upload_stats.water_uploads_deferred == 0 &&
+               m_last_mesh_upload_stats.asset_uploads_deferred == 0;
     }
     const RenderPassFrameStats& get_last_render_pass_stats() const {
         return m_last_render_pass_stats;
@@ -1263,8 +1286,10 @@ private:
                        const Camera& camera,
                        float deltaTime,
                        bool wireframe,
-                       UploadPresentation presentation);
-    void dispatch_stages(const Camera& camera);
+                       UploadPresentation presentation,
+                       SkyAtmosphereLut::Publication sky_publication);
+    void dispatch_stages(const Camera& camera, bool deferred_only_capture = false);
+    void finish_gbuffer_stage();
     FarReplayCamera replay_camera(const Camera& camera) const;
 
     using StageExecutorFn = void (RenderPipeline::*)(const Camera&);
@@ -1343,6 +1368,16 @@ private:
         Foliage, // Instanced foliage scatter pass.
         Aerial,  // Analytic aerial-perspective fullscreen pass.
         FinalBlit,
+        DepthBlitToLighting,
+        OpaqueSnapshot,
+        FroxelInject,
+        FroxelIntegrate,
+        TaauResolve,
+        FoliageCount,
+        FoliagePrefix,
+        FoliageEmit,
+        CloudDome,
+        CloudComposite,
         Count,
     };
     static constexpr size_t kGpuTimerPassCount = static_cast<size_t>(GpuTimerPass::Count);
@@ -1366,6 +1401,10 @@ private:
     };
     GpuPassTimers m_gpu_timers;
     BenchmarkGpuQueries* m_benchmark_gpu_queries = nullptr;
+    bool m_gpu_stage_attribution = false;
+    bool m_gpu_stage_queries_created = false;
+    GpuPassTimer gpu_pass_timer(GpuTimerPass pass);
+    void refresh_scatter_gpu_timers();
 
     void init_gpu_pass_timers();
     void destroy_gpu_pass_timers();
@@ -1384,7 +1423,9 @@ private:
 
     std::vector<glm::mat4> get_light_space_matrices(const Camera& camera);
 
-    void update_time_of_day(float deltaTime);
+    void update_time_of_day(
+        float deltaTime,
+        SkyAtmosphereLut::Publication sky_publication = SkyAtmosphereLut::Publication::SameFrame);
     float m_timeOfDay = 0.5f;       // Midnight in the noon-origin sky
     double m_elapsedDayPhase = 0.5; // Unwarped, noon-origin presentation time
     bool m_timeOfDayHold = false;   // freeze auto-advance for photo-mode TOD scrub
@@ -1401,6 +1442,7 @@ private:
 
     DiagnosticCaptureOptions m_capture_diagnostics;
     bool m_diagnostic_capture_armed = true;
+    bool m_diagnostic_deferred_only = false;
     std::unique_ptr<DiagnosticFrameCapture> m_diagnostic_capture;
     bool m_capture_waterfall_geometry = false;
     u32 m_screen_width = 0;

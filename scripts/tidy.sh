@@ -108,8 +108,6 @@ gate_checks+=",readability-function-cognitive-complexity"
 tracked_global_tus=(
     # Owns the four process-wide GL-debug diagnostic counters.
     "src/luminumbra_client/core/RuntimeScenarioConfig.cpp"
-    # Owns the GNS initialization flag and live-transport callback registry.
-    "src/luminumbra_common/net/GnsTransport.cpp"
 )
 tracked_global_gate_checks="$gate_checks,-cppcoreguidelines-avoid-non-const-global-variables"
 

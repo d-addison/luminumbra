@@ -1,3 +1,68 @@
+# Compatible leaf implementations compile once; usage requirements stay private.
+add_library(frame_attribution_test_support STATIC
+    ../src/luminumbra_client/app/FrameAttribution.cpp
+)
+target_include_directories(frame_attribution_test_support PRIVATE ../src)
+target_link_libraries(frame_attribution_test_support PRIVATE gtest_main)
+luminumbra_configure_first_party_target(frame_attribution_test_support)
+
+add_library(far_volume_tile_test_support STATIC
+    ../src/luminumbra_common/world/FarVolumeTile.cpp
+)
+target_include_directories(far_volume_tile_test_support PRIVATE ../src)
+target_link_libraries(far_volume_tile_test_support PRIVATE gtest_main)
+luminumbra_configure_first_party_target(far_volume_tile_test_support)
+
+add_library(capture_launch_test_support STATIC
+    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
+    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
+    ../src/luminumbra_client/rendering/TemporalAudit.cpp
+)
+target_include_directories(capture_launch_test_support PRIVATE ../src ../src/luminumbra_client)
+target_link_libraries(capture_launch_test_support PRIVATE gtest_main luminumbra_common nlohmann_json glm)
+
+add_library(capture_profile_test_support STATIC
+    ../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp
+    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
+    ../src/luminumbra_client/rendering/TemporalAudit.cpp
+    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
+)
+target_include_directories(capture_profile_test_support PRIVATE ../src ../src/luminumbra_client)
+target_link_libraries(capture_profile_test_support PRIVATE gtest_main luminumbra_common nlohmann_json glm)
+luminumbra_configure_first_party_target(capture_profile_test_support)
+
+include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
+add_executable(mod_dependency_solver_test ${MOD_DEPENDENCY_TEST_SOURCES})
+target_include_directories(mod_dependency_solver_test PRIVATE ../src)
+target_link_libraries(mod_dependency_solver_test PRIVATE gtest_main luminumbra_common)
+luminumbra_configure_first_party_target(mod_dependency_solver_test)
+
+
+set(_native_plugin_variants good bad_major bad_minor bad_size query_failure
+    init_failure clean_init_failure null_context missing_query missing_init missing_shutdown)
+foreach(_variant IN LISTS _native_plugin_variants)
+    add_library(native_plugin_${_variant} MODULE ${NATIVE_PLUGIN_FIXTURE_SOURCE})
+    target_include_directories(native_plugin_${_variant} PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_compile_definitions(native_plugin_${_variant} PRIVATE LUM_PLUGIN_BUILD)
+    set_target_properties(native_plugin_${_variant} PROPERTIES
+        PREFIX "" C_STANDARD 11 C_STANDARD_REQUIRED YES
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/native-plugins/$<CONFIG>"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/native-plugins/$<CONFIG>")
+    if(_variant MATCHES "^missing_(query|init|shutdown)$")
+        target_compile_definitions(native_plugin_${_variant} PRIVATE
+            "luminumbra_plugin_${CMAKE_MATCH_1}=luminumbra_omitted_${CMAKE_MATCH_1}")
+    elseif(NOT _variant STREQUAL "good")
+        string(TOUPPER "${_variant}" _fixture_mode)
+        target_compile_definitions(native_plugin_${_variant} PRIVATE "LUM_TEST_${_fixture_mode}")
+    endif()
+endforeach()
+add_executable(native_plugin_loader_test ${NATIVE_PLUGIN_TEST_SOURCE})
+target_link_libraries(native_plugin_loader_test PRIVATE gtest_main luminumbra_common)
+luminumbra_configure_first_party_target(native_plugin_loader_test)
+foreach(_variant IN LISTS _native_plugin_variants)
+    add_dependencies(native_plugin_loader_test native_plugin_${_variant})
+endforeach()
+
 # Add the world generation test executable
 add_executable(world_generation_test
     shield/test_world_generation.cpp
@@ -127,6 +192,14 @@ target_link_libraries(morph_asset_test PRIVATE gtest_main nlohmann_json meshopti
 luminumbra_configure_first_party_target(morph_asset_test)
 luminumbra_pin_fp_determinism(morph_asset_test)
 
+# The palette primitive has no client or world-service dependency.
+add_executable(palette_table_test
+    common/PaletteTable_test.cpp
+    ../src/luminumbra_common/core/PaletteTable.cpp)
+target_include_directories(palette_table_test PRIVATE ../src ../include)
+target_link_libraries(palette_table_test PRIVATE gtest_main glm::glm entt)
+luminumbra_configure_first_party_target(palette_table_test)
+
 # The preset classifier has no client, GL or world-service dependency.
 add_executable(graphics_preset_classifier_test
     common/GraphicsPresetClassifier_test.cpp
@@ -146,19 +219,19 @@ luminumbra_configure_first_party_target(hardware_info_test)
 
 # Table-driven volume generation has no client, GL or world-service dependency.
 add_executable(far_volume_tile_test
-    common/FarVolumeTile_test.cpp
-    ../src/luminumbra_common/world/FarVolumeTile.cpp)
+    common/FarVolumeTile_test.cpp)
 target_include_directories(far_volume_tile_test PRIVATE ../src)
-target_link_libraries(far_volume_tile_test PRIVATE gtest_main)
+target_link_libraries(far_volume_tile_test PRIVATE far_volume_tile_test_support
+    gtest_main)
 luminumbra_configure_first_party_target(far_volume_tile_test)
 
 add_executable(far_volume_mesher_test
     common/FarVolumeMesher_test.cpp
     common/FarVolumeMemory_test.cpp
-    ../src/luminumbra_common/world/FarVolumeTile.cpp
     ../src/luminumbra_common/world/FarVolumeMesher.cpp)
 target_include_directories(far_volume_mesher_test PRIVATE ../src)
-target_link_libraries(far_volume_mesher_test PRIVATE gtest_main)
+target_link_libraries(far_volume_mesher_test PRIVATE far_volume_tile_test_support
+    gtest_main)
 luminumbra_configure_first_party_target(far_volume_mesher_test)
 
 add_executable(far_volume_facade_test
@@ -195,6 +268,7 @@ target_link_libraries(net_sockets_transport_test PRIVATE gtest_main spdlog::spdl
 luminumbra_configure_first_party_target(net_sockets_transport_test)
 
 add_executable(common_tests
+    ${MATERIAL_REGISTRY_TEST_SOURCES}
     common/StationDiscoveryArguments_test.cpp
     common/StationDiscovery_test.cpp
     common/Crc32_test.cpp
@@ -214,6 +288,7 @@ add_executable(common_tests
     common/ReplicationDelta_test.cpp
     common/ReplicationDeltaLoop_test.cpp
     common/EngineContracts_test.cpp
+    common/ModuleLifecycle_test.cpp
     common/ResidencyContract_test.cpp
     common/SimulationIdentityContract_test.cpp
     common/FarLodStore_test.cpp
@@ -413,6 +488,12 @@ target_include_directories(filesystem_path_test PRIVATE ../src ../src/luminumbra
 target_compile_definitions(filesystem_path_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 target_link_libraries(filesystem_path_test PRIVATE gtest_main)
 
+# Content overlays use only read-only filesystem operations.
+add_executable(content_vfs_test common/ContentVfs_test.cpp)
+target_include_directories(content_vfs_test PRIVATE ../src)
+target_link_libraries(content_vfs_test PRIVATE gtest_main luminumbra_common)
+luminumbra_configure_first_party_target(content_vfs_test)
+
 # Temporary-path reservation contracts need only the filesystem and GoogleTest.
 add_executable(unique_temp_path_test support/UniqueTempPath_test.cpp)
 target_link_libraries(unique_temp_path_test PRIVATE gtest_main)
@@ -466,25 +547,19 @@ luminumbra_configure_first_party_target(capture_manifest_test)
 # GL-free feature selection, runtime resolution and capability manifest contracts.
 add_executable(capture_feature_profile_test
     rendering/capture_feature_profile_test.cpp
-    rendering/capture_feature_policy_test.cpp
-    ../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp
-    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
-    ../src/luminumbra_client/rendering/TemporalAudit.cpp
-    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp)
+    rendering/capture_feature_policy_test.cpp)
 target_include_directories(capture_feature_profile_test PRIVATE ../src ../src/luminumbra_client)
 target_link_libraries(capture_feature_profile_test PRIVATE
+    capture_profile_test_support
     gtest_main luminumbra_common nlohmann_json glm)
 luminumbra_configure_first_party_target(capture_feature_profile_test)
 
 # GL-free sweep pins, profile refusal and continuous exact-tick transport protocol.
 add_executable(temporal_sweep_test
-    rendering/temporal_sweep_test.cpp
-    ../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp
-    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
-    ../src/luminumbra_client/rendering/TemporalAudit.cpp
-    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp)
+    rendering/temporal_sweep_test.cpp)
 target_include_directories(temporal_sweep_test PRIVATE ../src ../src/luminumbra_client)
 target_link_libraries(temporal_sweep_test PRIVATE
+    capture_profile_test_support
     gtest_main luminumbra_common nlohmann_json glm)
 luminumbra_configure_first_party_target(temporal_sweep_test)
 
@@ -648,6 +723,7 @@ if(MSVC)
 endif()
 
 add_executable(render_smoke_test
+    ${GPU_FRAME_ARENA_TEST_SOURCES}
     rendering/diagnostic_attribution_test.cpp
     rendering/render_smoke_test.cpp
     rendering/FarWorldLegacyIsolation_test.cpp
@@ -1456,6 +1532,9 @@ target_link_libraries(ecology_tick_perf_test PRIVATE
 
 add_executable(runtime_world_visual_validation_test
     performance/runtime_world_visual_validation_test.cpp
+    ../src/luminumbra_server/ServerWorldRunner.cpp
+    ../src/luminumbra_server/modes/ModeHelpers.cpp
+    ../src/luminumbra_server/modes/Replay.cpp
 )
 
 target_compile_definitions(runtime_world_visual_validation_test PRIVATE
@@ -1704,6 +1783,7 @@ add_executable(frontier_gates_test
     ai/perception_scent_hardening_test.cpp
     ai/utility_instinct_hardening_test.cpp
     ai/flocking_evolution_hardening_test.cpp
+    scripting/SimScriptDeterminism_test.cpp
     scripting/lua_api_manifest_gate_test.cpp
     scripting/lua_sandbox_escape_test.cpp
     scripting/aether_script_binding_test.cpp
@@ -1768,14 +1848,13 @@ target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_comm
 # Surface admission exercises both shipping launch parsers without a device.
 add_executable(runtime_surface_options_test
     client/runtime_surface_options_test.cpp
-    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
-    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
 )
 target_include_directories(runtime_surface_options_test PRIVATE
     ../src
     ../src/luminumbra_client
 )
 target_link_libraries(runtime_surface_options_test PRIVATE
+    capture_launch_test_support
     gtest_main
     luminumbra_common
     nlohmann_json
@@ -2040,23 +2119,18 @@ target_link_libraries(audio_volume_readback_test PRIVATE
 # The real CLI parser and null manager run without a client, GL or audio device.
 add_executable(audio_disabled_test
     audio/audio_disabled_test.cpp
-../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
-    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
 )
 target_include_directories(audio_disabled_test PRIVATE
 ../src
 ../src/luminumbra_client
 )
 target_link_libraries(audio_disabled_test PRIVATE
+    capture_launch_test_support
     gtest_main
     luminumbra_common
     nlohmann_json
     glm
 )
-
-# Shared GL-free dependency for the standalone launch-parser consumers.
-target_sources(runtime_surface_options_test PRIVATE ../src/luminumbra_client/rendering/TemporalAudit.cpp)
-target_sources(audio_disabled_test PRIVATE ../src/luminumbra_client/rendering/TemporalAudit.cpp)
 
 #  capture-native update the baseline: resolution-relative gate-threshold scaling unit
 # tests (core/CaptureScale.h is dependency-free, so this needs no GL/common libs).
@@ -2102,6 +2176,11 @@ target_include_directories(eventbus_order_gate_test PRIVATE
 target_link_libraries(eventbus_order_gate_test PRIVATE
     luminumbra_common
 )
+
+add_executable(authority_contributor_test common/AuthorityContributor_test.cpp)
+target_include_directories(authority_contributor_test PRIVATE ../src)
+target_link_libraries(authority_contributor_test PRIVATE gtest_main luminumbra_common)
+luminumbra_configure_first_party_target(authority_contributor_test)
 
 add_executable(world_persistence_roundtrip_gate_test
     persistence/world_persistence_roundtrip_gate_test.cpp
@@ -2153,10 +2232,10 @@ if(LUMINUMBRA_ENABLE_STATIC_PREVIEW)
     luminumbra_configure_first_party_target(viewport_protocol_test)
     gtest_discover_tests(viewport_protocol_test PROPERTIES LABELS "authoring;tools" TIMEOUT 30)
 endif()
-add_executable(frame_attribution_test rendering/frame_attribution_test.cpp
-    ../src/luminumbra_client/app/FrameAttribution.cpp)
+add_executable(frame_attribution_test rendering/frame_attribution_test.cpp)
 target_include_directories(frame_attribution_test PRIVATE ../src)
-target_link_libraries(frame_attribution_test PRIVATE gtest_main)
+target_link_libraries(frame_attribution_test PRIVATE frame_attribution_test_support
+    gtest_main)
 luminumbra_configure_first_party_target(frame_attribution_test)
 
 add_executable(upload_budget_test rendering/upload_budget_test.cpp
@@ -2165,10 +2244,10 @@ target_include_directories(upload_budget_test PRIVATE ../src)
 target_link_libraries(upload_budget_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(upload_budget_test)
 
-add_executable(menu_presentation_test rendering/menu_presentation_test.cpp
-    ../src/luminumbra_client/app/FrameAttribution.cpp)
+add_executable(menu_presentation_test rendering/menu_presentation_test.cpp)
 target_include_directories(menu_presentation_test PRIVATE ../src)
-target_link_libraries(menu_presentation_test PRIVATE gtest_main)
+target_link_libraries(menu_presentation_test PRIVATE frame_attribution_test_support
+    gtest_main)
 luminumbra_configure_first_party_target(menu_presentation_test)
 
 add_executable(jolt_startup_test physics/jolt_startup_test.cpp)
@@ -2197,11 +2276,16 @@ add_test(NAME DiagnosticChecksPython COMMAND "${Python3_EXECUTABLE}" -I -B
 set_tests_properties(DiagnosticChecksPython PROPERTIES LABELS "tools" TIMEOUT 60)
 
 set(LUMINUMBRA_GTEST_TARGETS
+    content_vfs_test
+    mod_dependency_solver_test
+    native_plugin_loader_test
+    authority_contributor_test
     upload_budget_test
     jolt_startup_test
     frame_attribution_test
     menu_presentation_test
     graphics_preset_classifier_test
+    palette_table_test
     hardware_info_test
     far_volume_tile_test
     far_volume_mesher_test
@@ -2340,7 +2424,11 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
     # per-instance unique roots and its socket tests bind ephemeral ports
     # (Listen(0)), so no RESOURCE_LOCK is needed. New tests in the aggregate
     # must keep it that way.
-    if(_lum_gtest_target STREQUAL world_load_bounded_test)
+    if(_lum_gtest_target STREQUAL native_plugin_loader_test)
+        gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
+            PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/native-plugins/$<CONFIG>"
+            TEST_LIST ${_lum_gtest_target}_TESTS)
+    elseif(_lum_gtest_target STREQUAL world_load_bounded_test)
         # This machine-sensitive latency observation is opt-in. Keep it out of
         # normal correctness lanes; the paired relative workflow is the gate.
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
@@ -2932,6 +3020,8 @@ if(LUMINUMBRA_SHADER_SCENES)
 endif()
 add_test(NAME ShaderScenesPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/tools/gates/test_shader_scenes.py")
+add_test(NAME TemporalAssemblyPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/gates/test_temporal_assembly.py")
 
 # Ordinary test lanes need no downloaded game art. Generate valid synthetic
 # meshes/materials and their manifest solely for the isolated runner roots.

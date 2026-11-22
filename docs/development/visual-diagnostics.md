@@ -13,19 +13,20 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | AOV serialization, integer ID encoding and point-probe JSON | Implemented as independent, GL-free codecs | `DiagnosticCapture.h/.cpp`; registered `DiagnosticCapture.*` regressions in `capture_manifest_test`; native execution pending |
 | Lazy integer target with attachment leases | Implemented as a standalone helper | `DiagnosticTargets.h`; registered `DiagnosticTargetDriver.*` regressions in `capture_manifest_test`; native execution pending |
 | Capture-local draw registry | Implemented with separate asset and generated-geometry identities | `DiagnosticDrawTable.h`; registered `DiagnosticDrawTable.*` regressions in `capture_manifest_test` and generated-key `DiagnosticAttribution.*` regressions in `render_smoke_test`; native execution pending |
-| Deferred attribution producers | Implemented inside a leased deferred scope | `GBufferTargets.h/.cpp` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag`, `foliage.frag`, `plant_procgen.frag` and `scent_decal.frag` have guarded `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract and `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test`; native execution pending |
+| Deferred attribution producers | Implemented inside a leased deferred scope | `GBufferTargets.h/.cpp` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag`, `static_asset.frag`, `foliage.frag`, `plant_procgen.frag` and `scent_decal.frag` have guarded `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract and `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test`; native execution pending |
 | G-buffer ID attachment | Implemented for explicit deferred captures | `GBufferPass` holds an `AttachmentLease` during deferred submission; detachment and lease release precede completion, including rollback, recreation, retirement and exceptional exits; registered `GBufferLeaseGl.*` and `DiagnosticAttributionGl.*` regressions; native execution pending |
-| Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI produces one identity per original command in pool-bucket order, using resident upload LOD and mesh version. The ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Uploaded plant/marker batches resume deferred attribution, and additive scent decals use separate contributor storage. Missing contributor storage retains exact Forward records labeled `:contributor_only` and refuses completion. Water surfaces, glass panes and waterfall sheet/pool slots use the separate contributor plane at their original submissions through guarded `water.frag`, `glass_oit.frag` and `waterfall.frag` outputs. Foliage has a guarded shader output but no instrumented forward submission. The original particle batch writes the contributor plane through a guarded `magical_particles.frag` output; the separate weather overlay explicitly refuses coverage |
+| Exact producer coverage | Partial | Inside an explicit producer scope, file-backed and procedural static instances, authored surfaces and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier and bounded generated-geometry keys, retaining unknown provenance where exact SDF provenance is unavailable. Live terrain MDI produces one identity per original command in pool-bucket order, using resident upload LOD and mesh version. The ladder backend records its original submission identity; tree impostors explicitly invalidate coverage. Uploaded plant/marker batches resume deferred attribution, and additive scent decals use separate contributor storage. Missing contributor storage retains exact Forward records labeled `:contributor_only` and refuses completion. Water surfaces, glass panes and waterfall sheet/pool slots use the separate contributor plane at their original submissions through guarded `water.frag`, `glass_oit.frag` and `waterfall.frag` outputs. Foliage has a guarded shader output but no instrumented forward submission. The original particle batch writes the contributor plane through a guarded `magical_particles.frag` output; the separate weather overlay writes it at its original fullscreen draw through an opt-in `weather_system.frag` diagnostic variant (`weather-overlay/fullscreen-quad`) and refuses when that storage or variant is missing |
 | Bundle transactions and opt-in admission | Implemented for the admitted capture paths | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime admission accepts enabled diagnostics only for `world_visual_sweep`, `--frame-scan`, or `--render-benchmark` with `--render-benchmark-screenshot`; every other scenario and the parity redispatches refuse them before save-root output |
 | Shadow projection and receiver filtering (issue #873) | Projection and surface filtering corrected; native re-capture pending | Signed light-view Z bounds become negative-Z plane distances; surface PCF interpolates comparisons with 25 taps. Registered `DiagnosticContributions.LightBoundsContainEveryCornerAndOrderDepthTowardTheLight` and `DiagnosticContributionsGl.ProductionShadowFiltersInterpolateComparisonsAtEveryResolutionAndCascade` regressions; canopy hue and the captured dusk wedge remain unqualified |
+| Sky layer corrections (issue #874) | Code corrections and registered regressions present; native re-capture pending | Ambient dust rejects sky depth; radial stars fade at the horizon; aurora precedes cloud compositing; CPU/GPU atmosphere inputs use bilinear filtering. Numeric source regressions cover celestial attenuation and bounded sharpening. Keep the issue open until native re-capture |
 | Terrain coverage lighting/fog evidence (issue #1107) | Existing capture contract retained; regression expanded; native execution pending | `TerrainCoverageCaptureGl.SyntheticPlanesAndCallerStateSurviveReadback` checks source file headers and payload sizes for every captured layer, lighting/fog uniform values and explicit unavailable volume records; `TerrainCaptureResourceWiring` guards manifest publication |
 | ID views and single-pixel inspector | Implemented as explicit render-thread snapshots | `DebugViewPass`; developer-console debug-view panel; registered `DiagnosticInspector.*` and `DiagnosticInspectorGl.*` regressions in `pass_context_test`; native execution pending. Other B views remain planned |
 | Deferred shader contribution views | Implemented as opt-in live overlays | `DebugViewPass` and `LightingPass`; registered `DiagnosticContributions.*` and `DiagnosticContributionsGl.*` regressions in `pass_context_test`; native execution pending. Fog and separate forward/sky/shadow planes explicitly unsupported |
 | Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material, cutout, night, terrain, normal decode and both depth-convention fixtures registered; bounded sky/terrain shader replays checked under llvmpipe; native scene target execution pending; dusk continuity diagnostic pending issue #918; no required-check or ruleset changes |
 | Bundle validity and image checks | Implemented for schema 1 and reader-only schemas 2/3 | `check-diagnostic-capture.py` and registered `DiagnosticCapturePython` synthetic regressions validate bundles without a renderer. ROI coverage, validity, weather, edge and masked defect measurements plus worst-pixel SVG crops are implemented; synthetic detection is covered, while production thresholds remain advisory/unqualified |
 | Capture feature profile and capability manifest | GL-free setup and shared app policy boundary implemented; adapter admission pending | `CaptureFeatureProfile.h/.cpp`; strict `--capture-feature-profile=none\|all_features` runtime selection; registered `CaptureFeatureProfile.*` and `CaptureFeaturePolicy.*` regressions; native execution pending |
-| Temporal audit plans and admission | GL-free planning, sequence protocol and completion-manifest transport implemented; shipping runtime execution refused | `TemporalAudit.h/.cpp`, `RuntimeScenarioConfig.h/.cpp`; registered `TemporalAudit.*` and `TemporalAuditSequence.*` regressions in `capture_manifest_test`; weather input, app/site admission and A4 runtime integration remain pending; native fixed-site frontier capture is native-pending |
-| Temporal sequences and non-vacuous evidence (E1–E3) | Partial GL-free sequence/profile/policy contracts; runtime coverage pending | Exact-tick site execution, temporal metrics, shipping producer adapters and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
+| Temporal audit plans and admission | Fixed-site runtime scheduling and A4 transport wired; native-pending | `TemporalAudit.h/.cpp`, `RuntimeScenarioConfig.h/.cpp`, `ScenarioRunnerDrive.cpp`, `ScenarioRunnerCapture.cpp` and `main_client.cpp`; registered `TemporalAudit.*` and `TemporalAuditSequence.*` regressions in `capture_manifest_test`; canonical fresh-world spawn/full-frame admission precedes startup writes. Existing A4 contributor refusals remain enforced; native fixed-site capture and visual qualification are native-pending |
+| Temporal sequences and non-vacuous evidence (E1–E3) | Partial; fixed-site runtime wired, GL-free sequence/profile/policy contracts, broader evidence planned | Fixed-site exact-tick execution is wired but native-pending. Temporal metrics, shipping producer adapters and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
 
 For issue #873, `world_visual_sweep` fixes the land eye at
 `(168, 10.0505952835083, -40)`. The dusk pin is `0.25`, horizon pitch is 0°
@@ -168,6 +169,16 @@ color routing. Continuations refuse extent changes with
 lease. The contributor plane identifies the last contributing submission at a
 pixel; table entries retain all instrumented submissions, not every blended layer.
 
+The explicit debug snapshot keeps attribution active through `plant_procgen` and
+`ground_decals`, finalizing after the decal stage and before SSAO, lighting and post.
+It owns distinct lazy contributor storage for decals, so blended albedo retains
+the underlying deferred surface identity. Refresh resets both identity planes and
+the draw table; inactive producers add no submissions. Registered hidden-GL
+`DiagnosticInspectorContributorsGl.*` regressions exercise uploaded plant and scent
+submissions, separate surface/contributor readback and refresh with inactive
+producers. Native execution remains pending. Scenario bundle admission remains
+separately gated; this snapshot does not claim completed-frame forward coverage.
+
 Water surfaces resume the contributor plane after offscreen caustics generation;
 dry-ground discards preserve earlier IDs. Generated water keys identify the
 submitted chunk translation and index count, with Live ownership, Forward pass and
@@ -180,6 +191,22 @@ keeps those pane IDs and does not substitute a fullscreen identity. Waterfall dr
 record the immutable uploaded sheet/pool slot only after the live-water skip; zero
 alpha fragments preserve earlier IDs. Glass and waterfalls use Live ownership,
 Forward pass and LOD zero; their generated geometry is not chunk-owned.
+The particle pass records its original four-vertex instanced billboard batch with
+Live ownership, Forward pass and LOD zero, using the generated mesh key
+`particles/instanced-billboards`. Magical particles, ambient motes, rain, snow,
+impact foam and waterfall spray share that draw; the ID identifies the batch,
+not an individual particle or emitter. Existing shape and final-alpha discards
+preserve earlier contributor IDs, including fully soft-faded fragments. The retained
+particle geometry shader is inventory-only; the live path uses vertex and fragment
+stages. The scene-compositing weather overlay writes the contributor plane at its
+original fullscreen draw through an opt-in diagnostic shader variant, labelled
+`weather-overlay/fullscreen-quad`. Production composition is unchanged; the
+diagnostic tail discards zero-alpha output before writing IDs, so earlier identities
+survive. Missing contributor storage or a missing variant still refuses.
+The adapter must still account for other
+uninstrumented forward passes and refuse incomplete captures before publishing a bundle.
+Capture scopes cannot nest or reuse a nonempty draw table. Exception unwinding
+invalidates the frame; an empty live-terrain submission adds no unsupported record.
 
 Generated geometry can supply an exact bounded key instead of an asset path. The
 registry separates the two namespaces and emits a `generated` mesh member while
@@ -211,19 +238,16 @@ after lease release, unavailable base/skinned/impostor programs and exceptional
 state restoration; native execution remains pending. Normal rendering keeps its batched draws and
 original attachments.
 
-Completing exact coverage requires changes beyond the deferred attachment owners:
-the ladder submission metadata/backend, `StaticDrawPass`, `FoliagePass` and
-`tree_impostor.frag`, plus the scene-compositing weather overlay.
-A foliage identity belongs to a separate forward contributor plane because its color blends
-with the already lit scene. The particle pass records its original four-vertex
-instanced billboard batch with Live ownership, Forward pass and LOD zero, using the
-generated mesh key `particles/instanced-billboards`. Magical particles, ambient motes,
-rain, snow, impact foam and waterfall spray share that draw, so the ID identifies the
-batch, not an individual particle or emitter. Existing shape and final-alpha discards
-preserve earlier contributor IDs. The weather overlay has no exact contributor mask and
-records `weather_overlay_contributor_uninstrumented` immediately before its draw, so it
-cannot publish a complete capture. None of these gaps is represented as a guessed mesh or
-as successful background coverage.
+Remaining unsupported records cover missing/invalid producer metadata, attachment and
+capability refusal, shader variant failures and registry bounds. Without contributor
+storage, scent decal, water, glass, waterfall, particle and weather-overlay records preserve the original
+identity, Forward pass and LOD zero, append `:contributor_only` to the producer label, and invalidate
+completion. Invalid contributor labels or identities explicitly refuse. The former
+`foliage_forward_contributor_target_unavailable` placeholder is no longer emitted.
+Completed-frame readback and scenario bundle integration remain pending. Completing exact coverage still requires
+forward submission instrumentation in `FoliagePass` and guarded outputs in
+`tree_impostor.frag`. A foliage identity belongs to a separate forward contributor
+plane because its color blends with the already lit scene. None of these gaps is represented as a guessed mesh or successful background coverage.
 
 ## A: capture bundle and pixel identity
 
@@ -645,6 +669,28 @@ production camera or the separate fix. The proposed 0.005 threshold is recorded
 as pending issue #918. Dusk capture remains mandatory and finite, but comparison
 and regeneration cannot accept a dusk baseline.
 
+The issue #874 code corrections are already present in devel. Ambient motes use
+a render-instance tag shared by the live vertex and retained geometry paths;
+their fragment branch scatters local light, rejects clear reversed-Z sky depth
+and fades with camera distance without changing authored particle layers.
+Stars use compact nonnegative radial profiles and fade to zero at the horizon
+in both LUT and fallback skies. Aurora and stars enter the background before
+the cloud composite. Atmosphere integration uses texel-centred bilinear inputs
+in both CPU builders and both consuming compute kernels, removing the nearest-bin
+meridian step. The dusk fixture remains diagnostic as described above.
+
+The old star shader's projected noise thresholds explain boxed peaks, but do
+not subtract light to form a dark ring. Unbounded post-resolve sharpening could
+darken a star's neighbours below their background; the current sharpen helper
+clamps to the current neighbourhood range, and interior sky bypasses temporal
+accumulation. Registered `SkyAppearanceWiring` regressions evaluate the production
+cloud composition order at clear, partial and opaque cover, and the production
+sharpen expressions on dark neighbours and bright peaks. Existing regressions
+cover mote tagging, horizon exclusion, radial profiles and CPU/GPU LUT sampling.
+These code and software contracts do not establish native visual acceptance.
+Keep issue #874 open until a native re-capture checks daytime motes, the horizon,
+stellar boxes/rings, the dusk meridian and aurora behind partial clouds.
+
 Terrain draws two triangles with Stone on the left vertices and Sand on the
 right, exercising the real vertex coverage interpolation across a diagonal with
 different provoking materials. A zero texture flag selects fixed reflectances;
@@ -686,6 +732,16 @@ The analytical reference models the fixed resolve and sharpening arithmetic,
 leaving storage rounding to the measured error. A surfaceless llvmpipe replay
 measured residual p99 0.00390625; removing `currentUv`'s clamp raised it to
 0.49218750 and failed the invariant. The mutated source was restored byte-exactly.
+
+TAAU sharpening bounds one shared RGB adjustment to the current neighborhood,
+preserving channel ratios even when only one channel reaches a bound. Clipping
+the channels independently after applying a shared gain could still change hue
+and feed that color into history. The registered CPU shader contracts exercise
+brightening, darkening, zero and signed channels, HDR, flat bounds and channel
+permutations. The existing software-GL terrain scene additionally checks the
+production sharpening helper against fixed RGB results. These checks supplement
+the border fixture and impostor cutout/coverage regressions; native issue #871
+re-capture remains pending and is required before closing the issue.
 
 Compute readback dispatches one workgroup of the production grass prefix kernel
 with counts `[0,3,1,0,7,2,5,1]` and instance cap 13. The expected count/draw words
@@ -927,9 +983,42 @@ proof. Deterministic still pins likewise do not imply deterministic temporal
 sampling: ordinary frame dt is wall-clock derived (`client/main_client.cpp:4518`),
 and current time-lapse adds ticks after readback. Its 45 initial settle frames
 (`client/app/ClientAppContext.h:60`) do not settle each later sample. The existing
-assembler naturally sorts filenames and loads all frames, uses Pillow for GIF
-and optionally ffmpeg for MP4 (`tools/timelapse.py:35`, `:43`, `:75`); it does not
-validate a sequence manifest or produce a temporal contact sheet.
+assembler's legacy path naturally sorts filenames and loads all frames, using
+Pillow for GIF and optionally ffmpeg for MP4. Manifest-aware assembly is described
+below; it does not produce a temporal contact sheet.
+
+The temporal world visual sweep uses the admitted `temporal_audit` scenario runtime:
+`--scenario=temporal_audit`, a canonical fresh-world plan and enabled completed-frame
+diagnostics. Its camera is the fixed spawn-eye view described below. Temporal plans
+with `--scenario=world_visual_sweep` or its environment fallback refuse before
+startup writes. The ordinary still matrix retains its pins, order and all-features
+refusal; the temporal runtime bypasses it entirely.
+
+The GL-free `WorldVisualTemporalTransport` seam separates weather preparation from
+completed-backbuffer validation around the app's existing render call.
+`RunWorldVisualTemporalSweep` consumes each completed step through the same
+`RuntimeTemporalAudit` sequence that owns simulation advancement and output
+reservations. Each requested tick runs physics, normal session simulation
+(including creatures and weather), streaming/water and water-authority promotion
+in host order. Initial streaming may progress while simulation is frozen.
+Readiness uses bounded protocol attempts. Positive planned deltas advance the
+shared presentation clock at 60 Hz; frozen retries advance neither simulation nor
+presentation. Clock admission checks the actual start tick, tick rate and resolved
+calendar before reserving the output directory.
+
+Weather-cycle runs use the shared `WorldVisualSweepWeatherSchedule` builder through
+the admitted runtime's weather contract, installing five clear/ramp/storm/return
+keyframes and the declared strike before world creation. The existing schedule
+identity and persistence format cover these inputs. Other spans use natural
+weather. Real weather/cloud/precipitation inputs retain particle state across
+samples; this transport does not certify lightning or other visible-feature presence.
+
+Output remains the runtime's RGB plus completed-frame diagnostic bundle, with its
+full per-frame and aggregate reservations. The exclusive `<artifact_dir>/temporal`
+directory and verified-file `sequence.json` completion publication described below
+replace the sweep's former RGB-only manifest and completion-directory convention.
+Failed runs retain incomplete evidence. Native captures and all-features presence
+remain pending validation.
 
 ### E1: fixed-camera time-lapse audit runs
 
@@ -964,7 +1053,7 @@ in the plan, along with conservative total presentation/render-attempt bounds
 including unsaved substeps (at most 600 million span presentation steps before
 holds/readiness). No frame-delta or wall-clock input enters scheduling.
 Registered `TemporalAudit.*` regressions cover admission, exact scheduling,
-deduplication, limits and both startup refusal paths; native execution is pending.
+deduplication, limits, fixed-site/A4 byte admission and both startup refusal paths; native execution is pending.
 
 `TemporalAuditSequence` implements a GL-free execution protocol for one admitted
 schedule. It re-admits and compares the complete plan, checks overflow-safe
@@ -991,11 +1080,40 @@ protocol owns no filesystem destination, scenario counters, recorder or runtime 
 `TemporalAuditSequence.*` regressions exercise endpoints, rational bursts, holds,
 readiness exhaustion and last-attempt success, exact settling, phase/controls,
 byte-boundary and altered-plan refusal, clock/transport faults, partial publication
-and real creature-brain ticks matching ordinary fixed ticking. These native tests
-are registered, not execution evidence. Shipping startup still refuses temporal
-runs: integration with the fixed site, simulation/physics/streaming dependencies,
-A4 reservations and completed-frame capture, and existing frontier actions remains
-pending. No temporal or all-features runtime support is claimed.
+and real creature-brain ticks matching ordinary fixed ticking. `TemporalAudit.*`
+additionally exercises the runner's shared tick driver. These native tests are
+registered, not execution evidence.
+The runner now owns temporal simulation/physics advancement and completed-frame
+capture; native execution remains pending. A4 still refuses unsupported contributor
+coverage. No all-features runtime support is claimed.
+
+The renderer exposes an explicit `DeferredOnlyFixedSite` policy for a single
+admitted A4 diagnostic frame. It omits procedural plants, scent decals, forward
+water and waterfalls, glass accumulation and resolve, foliage and particles before
+draw submission. The scene-compositing weather overlay and its snapshot are also
+omitted because that overlay has no exact contributor mask. Supported deferred
+geometry, lighting, sky and lightning remain, including weather inputs to lighting
+and sky. Scene-overlay grading and weather precipitation particles are omitted.
+The capture's
+`render_settings.capture_policy` is `deferred_only_fixed_site`. This is a reduced
+capture, so it cannot establish all-features or precipitation evidence. Default
+renders and unadmitted diagnostic requests retain their existing behavior and
+unsupported-contributor refusals. Paired replay refuses before changing the capture
+when nonempty glass lacks prepared OIT targets, valid accumulation/resolve shaders
+or draw VAOs; an ordinary glass frame prepares those resources. Empty glass needs
+no OIT resources. Resize retires the targets and requires preparation again. Water
+visibility evidence is invalidated at every frame start, including omitted water
+submission and layer isolation. Registered
+`PassContext.DeferredOnlyDiagnosticPolicyOmitsUnsupportedDrawsForOneAdmittedFrame`,
+`PassContext.DeferredOnlyWeatherOmitsSceneOverlayAndCompleteRetainsRefusal`,
+`PassContext.OmittedWaterInvalidatesVisibilityAcrossPolicyAndIsolationChanges`,
+`PassContext.PairedReplayRefusesColdGlassWithoutChangingReducedCapture`
+and Python attribution-wiring regressions cover admission, active rain/snow/fog,
+stage exclusion, water evidence lifetime, replay resource admission, metadata and
+policy isolation. The policy has no temporal runtime caller yet:
+fixed-site transport integration and native day/night and weather-cycle
+recapture with non-vacuous manifests and bounded payload verification remain
+pending. No authority revision, simulation identity or save format changes.
 
 The optional GL-free file transport acknowledges immutable completed payloads with
 `acknowledgeCaptureFiles`. It opens and verifies the directory and each regular
@@ -1005,8 +1123,9 @@ beginning `frame-<frame_index>.`, at most 128 bytes; duplicate names, wrong fram
 prefixes, empty payloads, directory escapes and byte-reservation excess refuse.
 The caller must enumerate every completed-frame payload, including A4 sidecars,
 and must keep the directory and acknowledged files immutable. All captures and
-the manifest must share that directory; changing it refuses. This is a transport contract; no
-shipping scenario invokes it yet and it does not establish site/ROI admission.
+the manifest must share that directory; changing it refuses. The fixed-site runner
+enumerates the RGB image, capture manifest and every A4 sidecar explicitly; it
+acknowledges the immutable payloads before sequence publication.
 
 `completionManifest` serializes only after all file-backed captures are acknowledged.
 Its JSON schema is `luminumbra.temporal_audit_sequence`, `version` is 1 and `status`
@@ -1018,7 +1137,7 @@ without a trailing newline. `frames` preserves capture order with `index`, `tick
 Version 1 encodes span as day-night=0, weather-cycle=1, multi-day=2; frame kind as
 sequence=0, steady-hold=1, night-presence-hold=2; control as live=0, noon=1, night=2.
 There are no wall-clock fields. Serialization is bounded to 16 MiB and the admitted
-manifest reservation. E1d can use this format contract for its reader fixtures;
+manifest reservation. The assembler's reader fixtures use this format contract;
 there is no native sequence artifact yet.
 
 Only a pending publication step can call `publishCompletionManifest`: validate
@@ -1034,14 +1153,71 @@ binary hashes, exact tick counts through file acknowledgement, malformed/missing
 oversized payloads, occupied destinations/staging, cancellation and reservation
 failure before filesystem writes. Native execution and mutation runs remain pending.
 
-The planning parser is callable independently. Both shipping startup parsers reject
-even valid temporal plans, and `--scenario=temporal_audit`, with an explicit
-unsupported-execution reason before world/output creation, including save-root
-creation. Weather input, app/site transport integration, site/ROI/feature capability
-admission, transport byte-bound enforcement and assembly remain later work. Admission alone
-does not certify a temporal or all-features capture, or change simulation identity,
-save/replay formats or authority state. The rest of this section specifies that
-future execution contract.
+The planning parser remains independently callable. Both startup parsers now admit
+`--scenario=temporal_audit` with a plan, `--capture-diagnostics`, site `spawn` and
+ROI `full-frame` (the defaults for `--temporal-site` and `--temporal-roi`). Execution
+requires a fresh seed-424242 default world at tick zero and the canonical 30 Hz,
+162000-tick calendar (dawn 27000, dusk 135000). Alternate worlds, cameras, calendars,
+independent capture drivers and timed runs refuse. This is a single fixed spawn-eye
+view: position is spawn plus 1.8 metres vertically, yaw -90 degrees, pitch -10 degrees.
+Arbitrary sites, ROI selection and feature profiles remain later work.
+Execution uses the QA client scenario runner, as do the existing frontier scenarios;
+the ordinary client continues to refuse QA scenarios when that harness is not linked.
+
+Admission checks the pinned 3840x1600 extent against A4's 512 MiB staging reservation
+and reserves 51 bytes/pixel plus 64 MiB of metadata per frame, plus a 16 MiB sequence
+manifest. `--temporal-output-bytes` can lower the 512 GiB aggregate ceiling. Every
+plan must fit its entire reservation; larger multi-day plans can refuse this bound.
+Invalid site/ROI, probe, calendar and byte-budget inputs refuse before world or
+output creation, including save-root creation. The runtime creates one exclusive
+`temporal` directory under the artifact root and never reuses partial output.
+
+The runner supplies only requested fixed ticks to normal `GameSession` simulation
+and physics; creatures remain on the normal simulation tick path. Frame delta
+supplies no additional ticks. Warmup, settling and readiness use the protocol's
+bounded frozen-tick steps; readiness retries also freeze presentation. A failed
+simulation barrier aborts rather than accumulating another tick. The weather span
+installs the existing versioned weather schedule before world creation, using its
+existing session identity and persistence contract. Calendar TOD resolves through
+the session calendar; noon/night holds are render-only. Each completed RGB/A4 bundle
+is file-acknowledged, then `sequence.json` is published only after the final capture.
+Failure or cancellation preserves partial evidence without a complete sequence manifest.
+
+The existing `TimeOfDaySweep` frontier family has an explicit `-TemporalAudit` leg
+for this fixed-site weather capture. It has not run here: native fixed-site capture,
+A4 contributor coverage at that site and visual qualification remain native-pending.
+A4 producer/extent refusal is preserved, including forward contributors and later
+deferred contributors. The ordinary spawn view can contain these contributors,
+and weather precipitation uses forward particles: this wiring does not yet enable
+a complete native sequence with those contributors active. A fixed-site producer
+policy or the missing A4 producer coverage is a separate prerequisite; admission
+does not promise that coverage. Manifest-aware assembly follows; shared
+producer policy and all-features evidence remain pending.
+No save-format, authority revision or hash algorithm changes are made. The remaining
+section specifies the broader execution contract.
+
+`tools/timelapse.py --manifest PATH` explicitly selects a version-1 sequence
+manifest with any filename inside or outside the frame directory, requires
+complete status and validates the canonical plan hash. An in-directory manifest
+is excluded from extras by file identity. Missing, unreadable, nonregular, oversized
+or invalid explicit manifests refuse without legacy fallback. Assembly joins
+capture records by index to planned tick order, preserving equal-tick holds,
+and requires exactly one image per frame under the existing pattern option.
+Missing, extra, duplicate, malformed or hash-mismatched inputs refuse. Every
+payload, including sidecars, is size/hash checked through the shared verified-file
+reader; image bytes are copied from those same descriptors into private staging.
+The assembler admits at most 4,096 frames, 12 payloads per frame, 128 MiB per
+payload and 512 MiB total payload bytes before decoding/encoding. The selected
+manifest is capped at 16 MiB; the frame scan permits 100,000 flat entries without
+reading unrelated JSON documents. Decoded RGB buffers reserve at most 512 MiB in aggregate; dimensions are at most 16,384
+and image area at most 16,777,216 pixels before and after scaling. GIF uses Pillow;
+requested MP4 requires ffmpeg. Missing/failed encoders and empty videos refuse
+without publishing either staged output, preserving existing destinations.
+No partial-output mode is added. Without `--manifest`, the legacy pipeline and
+optional encoder fallback are retained and no manifest discovery runs. Registered
+stdlib-only `TemporalAssemblyPython` regressions cover order, hashes, partial input, budgets, staged bytes, fake-encoder
+failures and legacy byte parity. This is offline assembly, not native capture,
+temporal metric qualification or all-features support.
 
 Use the audit site's recorded seed, content/settings identity, camera position,
 orientation, projection, resolution and D2 ROIs. Run each site/camera from the same
@@ -1340,13 +1516,13 @@ edits when parallel branches join. No new required CI checks are part of any row
 | D2: image metrics and synthetic qualification | `tools/gates/check-diagnostic-capture.py`; `tools/gates/test_diagnostic_capture.py`; `tools/gates/baselines/diagnostic-rois.json`; `tools/gates/build-visual-sweep-montages.py`; `tools/gates/test_diagnostic_checks.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After D1 and relevant C2 fixtures/B2 channels. Implemented masked holes, seam/reference and boundary residuals, cards, bands, wedges, weather/detail and composition checks with isolated synthetic defects and labeled worst-pixel montages. All shipped thresholds remain advisory/unqualified; production enforcement needs separate repeated-capture evidence. Acceptance-row state is unchanged. Avoids owned files. |
 | E1a: exact-tick plan and admission | `rendering/TemporalAudit.h`; `rendering/TemporalAudit.cpp`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `src/luminumbra_client/sources.cmake`; `test/rendering/temporal_audit_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After A4, D1. Register GL-free tick/cadence/overflow/refusal regressions in capture_manifest_test. Coordinate configuration ownership; admission alone cannot advertise runtime support. |
 | E1b: deterministic weather input | `src/luminumbra_common/systems/WeatherSystem.h`; `src/luminumbra_common/systems/WeatherSystem.cpp`; `src/luminumbra_common/world/GameSession.cpp`; `rendering/TemporalAudit.cpp`; `test/rendering/temporal_weather_test.cpp`; `test/CMakeLists.txt`; `src/luminumbra_client/core/ScenarioRunnerDrive.cpp`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E1a. Coordinate simulation owners: register fixed-tick weather/hydrology/strike and identity/replay tests before enabling script support. Exercise normal live bridge; any format migration is a prerequisite separate slice with both readers/writers, not hidden in this count. |
-| E1c: site sequence driver | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `src/luminumbra_client/core/ScenarioRunnerImpl.h`; `rendering/TemporalAudit.cpp`; `test/rendering/temporal_sequence_test.cpp`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E1b, A4, D1. GL-free protocol and optional version-1 completion-manifest transport implemented with registered sequence/readiness/phase/creature-tick and file-publication regressions. The manifest transport slice changes `rendering/TemporalAudit.h/.cpp`, `test/rendering/temporal_sequence_test.cpp`, `src/luminumbra_common/sources.cmake` (link the unchanged SHA-256 implementation) and this document (5). App/site admission, A4 reservations/runtime transport and existing frontier action wiring remain pending; native fixed-site capture is native-pending. Shipping startup still refuses execution. No all-features claim before E3. |
-| E1d: manifest-aware assembly | `tools/timelapse.py`; `tools/gates/test_temporal_assembly.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/visual-regression.md`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After E1c and D1. Register Python manifest/order/hash/partial-input/encoder-failure/budget tests in PYTHON_TESTS and CTest; preserve existing assembler callers. Existing generic workflow invokes the registry. Coordinate shared assembler and document edits. |
+| E1c: site sequence driver | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `src/luminumbra_client/core/ScenarioRunnerImpl.h`; `rendering/TemporalAudit.cpp`; `test/rendering/temporal_sequence_test.cpp`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E1b, A4, D1. GL-free protocol and optional version-1 completion-manifest transport implemented with registered sequence/readiness/phase/creature-tick and file-publication regressions. The manifest transport slice changes `rendering/TemporalAudit.h/.cpp`, `test/rendering/temporal_sequence_test.cpp`, `src/luminumbra_common/sources.cmake` (link the unchanged SHA-256 implementation) and this document (5). Fixed spawn/full-frame startup admission, canonical fixed-tick simulation/physics, existing weather-schedule installation, A4 file acknowledgements and the opt-in TimeOfDaySweep frontier leg are wired. The runtime slice changes `main_client.cpp`, `RuntimeScenarioConfig.h/.cpp`, `ScenarioRunnerDrive.cpp`, `ScenarioRunnerCapture.cpp`, `test/rendering/temporal_audit_test.cpp`, the existing frontier script, this document, `tools/ci/acceptance_matrix.json` and `docs/acceptance-matrix.md` (10). A4 unsupported-contributor refusal remains; native fixed-site capture is native-pending. No all-features claim before E3. |
+| E1d: manifest-aware assembly | `tools/timelapse.py`; `tools/gates/test_temporal_assembly.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/visual-regression.md`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | Implemented offline after E1c and D1: explicit `--manifest PATH` / `build(..., manifest=PATH)` locator for any filename inside or outside the frame directory, file-identity exclusion, complete/version/plan-order/hash admission, bounded payload and decoded-image work, staged encoder publication and unchanged default legacy pipeline without discovery. Invalid explicit locators refuse without fallback. Stdlib-only locator/identity/manifest/order/hash/partial-input/encoder-failure/budget/legacy-parity regressions are registered in PYTHON_TESTS and CTest; the existing generic workflow invokes the registry. Native sequence capture, metrics and all-features qualification remain pending. |
 | E2a: temporal measurements | `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `tools/gates/check-diagnostic-capture.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After E1d, D1, D2. Register Python fixtures for all five metrics, unknown metadata, empty masks and stable cross-frame identity; reuse D1/D2 readers. Avoid owned rendering files. |
 | E2b: qualification and worst events | `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `tools/gates/baselines/diagnostic-rois.json`; `tools/gates/build-visual-sweep-montages.py`; `tools/gates/test_temporal_montages.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E2a and relevant B2/C2 contributions. Register qualification-status, repeated-run, injected-defect and labelled failure-slot tests in PYTHON_TESTS/CTest. Threshold enforcement requires separately reviewed qualification evidence. Coordinate shared ROI/montage edits. |
 | E3a: profile and capability manifest | `rendering/CaptureFeatureProfile.h`; `rendering/CaptureFeatureProfile.cpp`; `src/luminumbra_client/sources.cmake`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `test/rendering/capture_feature_profile_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | Profile foundation implemented with registered GL-free profile/capability/unknown-feature/incompatible-option tests. Every unimplemented adapter defaults to unsupported. Shipping adapter admission remains pending. |
 | E3b: shared app and scenario policy | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/app/ClientAppContext.h`; `src/luminumbra_client/app/CaveFlourishes.cpp`; `rendering/CaptureFeatureProfile.h`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `rendering/CaptureFeatureProfile.cpp`; `test/rendering/capture_feature_policy_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `docs/visual-regression.md` (10) | Shared policy boundary implemented after E3a and E1c; registered synthetic ordinary-play equivalence, mode-label, admission, no-ui and determinism regressions. Only complete supported snapshots can remove suppression. Shipping adapters and native entry-point validation remain pending; no runtime all-features claim. |
-| E3c: sweep profile adapter | `scenarios/WorldVisualSweep.cpp`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `rendering/TemporalSweep.h`; `test/rendering/temporal_sweep_test.cpp`; `tools/ci/test_replay_source_contract.py`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | Partial after E3b: GL-free fixed-camera sweep transport protocol delegates exact ticks, rational presentation and publication to E1c and passes the shared feature policy without per-cell resets. Registered regressions cover tick plans, creature progression, modeled particle continuity, refusal/failure paths and unchanged legacy camera/TOD/settle pins. Both startup parsers refuse the all-features still matrix before output with `sweep_upward_camera_forces_empty_foliage`, including environment launches. Shipping temporal startup, simulation/weather/completed-frame transport and native validation remain pending; no temporal runtime or all-features presence claim. |
+| Sweep profile adapter | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `src/luminumbra_client/core/ScenarioRunnerDrive.cpp`; `src/luminumbra_client/core/ScenarioRunnerImpl.h`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `rendering/TemporalSweep.h`; `test/rendering/temporal_sweep_test.cpp`; `test/rendering/test_frame_attribution_wiring.py`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (12) | The fixed-camera sweep transport runs through the admitted `temporal_audit` runtime and its single sequence. It advances normal session/creature/weather ticks with physics and streaming/water dependencies, retains particle state and applies exact calendar/presentation controls. Runtime admission checks the resolved clock/calendar; weather uses the existing identity-bearing schedule before world creation. Completed RGB/diagnostic bundles are file-acknowledged before `sequence.json` publication. Failed steps/output cannot publish completion. The original still matrix, pins, order and all-features refusal remain unchanged. Registered `TemporalSweepRuntime.*` and `TemporalSweep.*` regressions cover continuity, admission and failures; native execution remains pending. No all-features presence claim. |
 | E3d: forward feature evidence | `rendering/DiagnosticContributions.h`; `rendering/DiagnosticContributions.cpp`; `rendering/passes/WaterPass.cpp`; `rendering/passes/WaterfallPass.cpp`; `rendering/passes/ParticlePass.cpp`; `rendering/passes/FoliagePass.cpp`; `rendering/RenderPipeline.cpp`; `test/rendering/capture_forward_presence_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md` (10) | After B2 and E3a. Coordinate owned producers. Register GL-free counter joins and native visible-contribution/occlusion fixtures; separate river/waterfall/spray evidence, and report unsupported until instrumented shader contributors land in additional bounded slices with asset inventory updates. |
 | E3e: geometry and atmosphere evidence | `rendering/DiagnosticContributions.h`; `rendering/DiagnosticContributions.cpp`; `rendering/passes/GBufferPass.cpp`; `rendering/passes/SkyboxPass.cpp`; `rendering/passes/LightingPass.cpp`; `rendering/RenderPipeline.cpp`; `test/rendering/capture_scene_presence_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `docs/visual-regression.md` (10) | After E3d. Coordinate owned passes. Register creature/cave/structure/sky/moon/star/cloud-shadow/bolt visibility fixtures, including absent/offscreen cases; shader variants and public asset inventory changes are prerequisite bounded slices under B2, not implicit extra files. |
 | E3f: non-vacuous acceptance report | `rendering/CaptureFeatureProfile.cpp`; `rendering/TemporalAudit.cpp`; `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `test/rendering/capture_feature_profile_test.cpp`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E3c–E3e and E2b. Extend registered suites and existing frontier consumers: zero/unknown/unsupported presence, wrong-frame evidence and failed publication cannot pass; full site/span success requires all expected windows. Qualification/visual approval remain distinct. |

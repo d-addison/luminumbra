@@ -9,6 +9,7 @@
 #include "core/ScenarioRunnerImpl.h"
 
 #include "core/Log.h"
+#include "core/PresentationClock.h"
 #include "core/scenarios/ScenarioCommon.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
@@ -93,11 +94,12 @@ ScenarioRunner::InGameDrive ScenarioRunnerImpl::onGameStateInGame(float deltaTim
     if (drivePersistenceRoundtrip()) {
         return InGameDrive::kBreakCase;
     }
-    if (driveLodGround() || driveWaterVisual() || driveMaterialVisual() || driveSkyboxVisual() ||
-        driveAtmosphereCamera() || driveParticleDeterminism() || driveFoliageVisual() ||
-        driveTimeOfDaySweep() || driveLodBoundaryOscillation() || driveLodSeamArrival() ||
-        drivePlayerView() || driveFarLodHorizon() || driveSkinnedMeshVisual(deltaTime) ||
-        driveCreatureSlice(deltaTime) || driveNetworkedSession()) {
+    if (driveTemporalAudit() || driveLodGround() || driveWaterVisual() || driveMaterialVisual() ||
+        driveSkyboxVisual() || driveAtmosphereCamera() || driveParticleDeterminism() ||
+        driveFoliageVisual() || driveTimeOfDaySweep() || driveLodBoundaryOscillation() ||
+        driveLodSeamArrival() || drivePlayerView() || driveFarLodHorizon() ||
+        driveSkinnedMeshVisual(deltaTime) || driveCreatureSlice(deltaTime) ||
+        driveNetworkedSession()) {
         return scenario_failed ? InGameDrive::kBreakCase : InGameDrive::kHandled;
     }
     return InGameDrive::kFallThrough;

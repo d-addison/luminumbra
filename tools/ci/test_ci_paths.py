@@ -421,30 +421,74 @@ class PathGateTests(unittest.TestCase):
     def test_required_jobs_run_python_plan_on_mixed_changes_and_publish_route(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         workflow += (ROOT / ".github/workflows/windows-build.yml").read_text(encoding="utf-8")
-        for job in ("linux", "windows-msvc"):
+        for job in ("python-contracts", "windows-msvc"):
             # Split on a job boundary, not nested YAML mappings.
             body = re.split(r"\n  [\w-]+:\n", workflow.split(f"  {job}:\n", 1)[1])[0]
             for step in ("Install standalone Python test dependencies",
                          "Run standalone Python contracts (including CTest-registered suites)"):
                 condition = body.split(f"      - name: {step}\n", 1)[1].splitlines()[0].strip()
                 expression = condition.removeprefix("if: ${{ ").removesuffix(" }}")
-                # Both lanes retain the standalone suite on shard-0 qualification.
-                shard_bound = step.startswith("Run standalone")
-                excluded_shard = 2 if job == "linux" else 1
+                # Windows retains the standalone suite on shard-0 qualification.
+                shard_bound = job == "windows-msvc" and step.startswith("Run standalone")
+                excluded_shard = 1
                 for shard in (0, 1, 2):
-                    for cpp, python, expected in (("true", "true", True), ("false", "true", True),
-                                                   ("true", "false", False), ("false", "false", True),
-                                                   ("", "", True)):
+                    for cpp, python in product(("true", "false", "", "unknown"), repeat=2):
+                        expected = cpp == "false" or python != "false"
                         actual = expression.replace("needs.changes.outputs.needs_cpp", repr(cpp)).replace(
                             "needs.changes.outputs.needs_python", repr(python)
                         ).replace("matrix.shard", repr(shard)).replace("||", "or").replace("&&", "and")
                         with self.subTest(job=job, step=step, shard=shard, cpp=cpp, python=python):
                             self.assertEqual(eval(actual, {"__builtins__": {}}),
                                              expected and (shard != excluded_shard or not shard_bound))
-            self.assertIn("route: ${{ steps.route.outputs.route }}", body)
             self.assertIn("tools/ci/ci_paths.py python-tests", body)
+            if job == "python-contracts":
+                continue
+            self.assertIn("route: ${{ steps.route.outputs.route }}", body)
             self.assertIn('echo "$message" >> "$GITHUB_STEP_SUMMARY"', body)
             self.assertIn("native build skipped by Classify changed paths", body)
+
+    def test_linux_python_contracts_have_an_independent_required_lane(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        jobs = dict(re.findall(r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)",
+                               workflow.split("\njobs:\n", 1)[1], re.MULTILINE | re.DOTALL))
+        lane = jobs["python-contracts"]
+        for setting in ("name: Linux / Python contracts", "needs: changes",
+                        "if: ${{ !cancelled() }}", "runs-on: ubuntu-24.04", "timeout-minutes: 20"):
+            self.assertIn("    " + setting + "\n", lane)
+        self.assertNotIn("strategy:", lane)
+        self.assertNotIn("continue-on-error:", lane)
+        self.assertNotIn("matrix.shard", lane)
+        self.assertEqual(re.findall(r"^      - name: (.*)$", lane, re.MULTILINE), [
+            "Reject draft pull requests", "Check out repository",
+            "Install standalone Python test dependencies",
+            "Run standalone Python contracts (including CTest-registered suites)",
+        ])
+        self.assertEqual(lane.split("    steps:\n", 1)[1].split("      - name: Install", 1)[0],
+                         jobs["linux"].split("    steps:\n", 1)[1].split("      - name: Report", 1)[0])
+        self.assertIn("python3-numpy python3-pil python3-jsonschema", lane)
+        self.assertIn("run: python3 -B tools/ci/ci_paths.py python-tests\n", lane)
+        self.assertNotIn("standalone Python", jobs["linux"])
+        self.assertIn("    timeout-minutes: 60\n", jobs["linux"])
+        aggregate = jobs["linux-result"]
+        self.assertIn("    needs: [changes, linux, python-contracts]\n", aggregate)
+        refusal = aggregate.split("      - name: Reject invalid dependencies\n", 1)[1].split(
+            "      - name: ", 1)[0]
+        self.assertIn("exit 1", refusal)
+        self.assertNotIn("continue-on-error:", refusal)
+        results = ("success", "failure", "cancelled", "skipped", "", "unknown")
+        # Bound the complete grid to 432 cases; no shell launches are needed.
+        for classification, native, python, cancelled in product(results, results, results, (False, True)):
+            invalid = classification != "success" or native not in ("success", "skipped") or python != "success"
+            for body, indent, expected in ((aggregate, 4, not cancelled or invalid), (refusal, 8, invalid)):
+                condition = re.search(rf"^{' ' * indent}if: (.*)$", body, re.MULTILINE)[1]
+                expression = condition.removeprefix("${{ ").removesuffix(" }}")
+                for name, result in (("changes", classification), ("linux", native), ("python-contracts", python)):
+                    expression = expression.replace(f"needs.{name}.result", repr(result))
+                expression = expression.replace("!cancelled()", repr(not cancelled)).replace("always()", "True")
+                expression = expression.replace("&&", "and").replace("||", "or")
+                with self.subTest(classification=classification, native=native, python=python,
+                                  cancelled=cancelled, indent=indent):
+                    self.assertEqual(bool(eval(expression, {"__builtins__": {}})), expected)
 
     def test_route_is_visible_in_log_summary_and_step_output(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -471,6 +515,7 @@ class PathGateTests(unittest.TestCase):
         }
         routes = (
             ("ci", "linux", "guarded-python"),
+            ("ci", "python-contracts", "guarded-python"),
             ("windows-build", "windows-msvc", "ready-native-or-python"),
             ("ci", "gns-compile-probe", "ready-native"),
             ("ci", "diligent-rhi", "ready-native"),
@@ -611,6 +656,7 @@ class PathGateTests(unittest.TestCase):
                         # The pull-request fast lane has its own failure coverage in
                         # test_workflow_policy; here it is a passing dependency.
                         expression = expression.replace("needs.fast-lane.result", repr("success"))
+                        expression = expression.replace("needs.python-contracts.result", repr("success"))
                         expression = expression.replace("github.event_name", repr("push"))
                         expression = expression.replace("github.event.pull_request.draft", "False")
                         expression = expression.replace("== false", "== False").replace("&&", "and").replace("||", "or")

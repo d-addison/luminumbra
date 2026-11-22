@@ -13,6 +13,7 @@ import sys
 # Only reviewed, test-backed files may skip native builds. New files require
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
+    "tools/gates/test_temporal_assembly.py",
     "tools/gates/test_shader_scenes.py",
     "tools/test_frozen_terrain_presets.py",
     "test/tools/test_regenerate_region_fixtures.py",
@@ -40,6 +41,7 @@ PYTHON_TESTS = (
     "tools/ci/test_replay_workspace.py",
     "test/rendering/test_upload_budget_wiring.py",
     "tools/ci/test_ci_paths.py",
+    "tools/ci/test_ratchet.py",
     "tools/ci/test_asan_shards.py",
     "tools/ci/test_ctest_shards.py",
     "tools/ci/test_workflow_policy.py",
@@ -58,6 +60,7 @@ PYTHON_TESTS = (
     "tools/ci/test_local_check_contracts.py",
     "tools/ci/test_check_ctest_junit.py",
     "tools/ci/test_containment_link_closure.py",
+    "tools/ci/test_shared_test_sources.py",
     "tools/ci/test_first_party_exceptions.py",
     "tools/ci/test_qualification_capture.py",
     "tools/ci/test_compare_ambient_receipts.py",
@@ -68,6 +71,7 @@ PYTHON_TESTS = (
     "tools/ci/test_validate_public_tree.py",
     "tools/ci/test_validate_visual_catalog.py",
     "tools/ci/test_tidy_cache.py",
+    "tools/ci/test_check_tidy_suppressions.py",
     "tools/perf/test_capture_sim_budget.py",
     "tools/perf/test_check_gl_debug_log.py",
     "tools/perf/test_check_residency.py",
@@ -104,6 +108,7 @@ PYTHON_MODULES = {
     "tools/ci/rmlui_source.py",
     "tools/ci/check_acceptance_matrix.py",
     "tools/ci/ci_paths.py", "tools/ci/ci_shell.py", "tools/ci/check_docs.py",
+    "tools/ci/ratchet.py",
     "tools/ci/changed_tus.py", "tools/ci/offline_deps.py", "tools/ci/path_safety.py",
     "tools/ci/check_ctest_junit.py", "tools/ci/slowest_tests.py",
     "tools/ci/validate_performance_measurement.py",
@@ -258,7 +263,11 @@ RMLUI_CALLER_INPUTS = frozenset({
 def needs_python(path: str) -> bool:
     # Standalone Python suites validate workflow and CI configuration files,
     # so CI infrastructure changes run the Python plan as well as native lanes.
-    return (path.endswith(".py") or path.startswith(CI_PREFIXES) or path in RMLUI_CALLER_INPUTS
+    # The source ratchet scans src/**/*.cpp and src/**/*.h. Keep additions and
+    # deletions in those scopes on the Python lane, including unknown owners.
+    source_ratchet = (path.startswith("src/") and len(PurePosixPath(path).parts) > 2
+                      and PurePosixPath(path).suffix in {".cpp", ".h"})
+    return (source_ratchet or path.endswith(".py") or path.startswith(CI_PREFIXES) or path in RMLUI_CALLER_INPUTS
             or path in {"res/shaders/g_buffer.frag",
                         "src/luminumbra_common/world/MarchingCubes.cpp",
                         "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"}

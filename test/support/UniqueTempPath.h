@@ -2,6 +2,8 @@
 
 // Test-support code only: never include from src/.
 
+#include "../../src/luminumbra_common/core/IntegerPrimitives.h"
+
 #include <gtest/gtest.h>
 
 #include <array>
@@ -33,11 +35,8 @@ inline std::string UniqueTempStem(std::string_view prefix) {
         test_name = std::string(test_info->test_suite_name()) + "." + test_info->name();
     }
     // FNV-1a hashes every byte of the complete, unsanitised suite.name.
-    std::uint32_t name_hash = 2166136261U;
-    for (const char character : test_name) {
-        name_hash ^= static_cast<unsigned char>(character);
-        name_hash *= 16777619U;
-    }
+    const auto name_hash =
+        Core::Fnv1a32(test_name.data(), test_name.size(), Core::kFnv1a32StandardBasis);
     auto hash_text = CompactHex(name_hash);
     hash_text.insert(0, 8 - hash_text.size(), '0');
     if (test_name.size() > 24) {

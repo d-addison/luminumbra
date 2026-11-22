@@ -1,11 +1,23 @@
 # This file lists test source files that are shared by CTest executables.
 # Paths are anchored to this file so it is safe to include from any test
 # CMakeLists.txt in the tree.
+set(GPU_FRAME_ARENA_TEST_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/GpuFrameArenaGl_test.cpp
+)
+
+set(MATERIAL_REGISTRY_TEST_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/common/MaterialRegistry_test.cpp
+)
+
+set(NATIVE_PLUGIN_TEST_SOURCE ${CMAKE_CURRENT_LIST_DIR}/mods/NativePluginLoader_test.cpp)
+set(NATIVE_PLUGIN_FIXTURE_SOURCE ${CMAKE_CURRENT_LIST_DIR}/mods/DummyNativePlugin.c)
+
 set(SIMULATION_TEST_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/simulation/eventbus_order_gate_test.cpp
 )
 
 set(SCRIPTING_TEST_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/scripting/SimScriptDeterminism_test.cpp
     ${CMAKE_CURRENT_LIST_DIR}/scripting/lua_api_manifest_gate_test.cpp
 )
 
@@ -19,6 +31,7 @@ set(AI_TEST_SOURCES
 )
 
 set(PERSISTENCE_TEST_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/common/AuthorityContributor_test.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/world_persistence_roundtrip_gate_test.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/world_save_service_test.cpp
 )
@@ -46,4 +59,8 @@ set(TEST_SOURCES
     ${AI_TEST_SOURCES}
     ${PERSISTENCE_TEST_SOURCES}
     ${NETWORK_TEST_SOURCES}
+)
+
+set(MOD_DEPENDENCY_TEST_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/common/ModDependencySolver_test.cpp
 )

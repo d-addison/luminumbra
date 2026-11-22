@@ -15,8 +15,12 @@ def code(path):
                   "", path.read_text(encoding="utf-8"), flags=re.DOTALL)
 
 
-def body(source, signature):
-    start = source.index("{", source.index(signature))
+def body(source, signature, *, function=False):
+    offset = source.index(signature)
+    if function:
+        # Skip a braced default argument before the function body.
+        offset = source.index(")", offset)
+    start = source.index("{", offset)
     depth = 1
     end = start + 1
     while depth:
@@ -39,6 +43,25 @@ def scopes(source):
 
 
 class AudioPropagationMetricsContract(unittest.TestCase):
+    def test_non_authority_byte_folds_use_shared_primitives(self):
+        # Architectural guard only; frozen native oracles prove value parity.
+        render = code(ROOT / "src/luminumbra_client/app/RenderConfiguration.h")
+        audio = code(SOURCE)
+        utility = code(ROOT / "test/support/UniqueTempPath.h")
+        for source, signature, helper in (
+            (render, "append_content_digest(", "Fnv1a64"),
+            (render, "content_digest(SavedFileInput&", "Fnv1a64"),
+            (render, "read_saved_world(", "Fnv1a64"),
+            (render, "const auto byte =", "Fnv1a64"),
+            (render, "const auto text =", "Fnv1a64"),
+            (audio, "KeyHash::operator()(", "Fnv1a64"),
+            (utility, "UniqueTempStem(", "Fnv1a32"),
+        ):
+            with self.subTest(signature=signature):
+                self.assertRegex(body(source, signature, function=True), rf'\bCore::{helper}\s*\(')
+        for source in (render, audio, utility):
+            self.assertNotRegex(source, r'\b(?:1099511628211|16777619)[uUlL]*\b')
+
     def test_every_metrics_access_is_dominated_by_a_live_guard(self):
         header, source = code(HEADER), code(SOURCE)
         self.assertRegex(header, r'mutable\s+std::mutex\s+m_metrics_mutex\s*;')

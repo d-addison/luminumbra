@@ -1459,6 +1459,14 @@ int main(int argc, char* argv[]) {
     auto& g_loading_visualizer = runtime.loadingVisualizer;
     auto& g_windowState = runtime.windowState;
 
+    // Temporal refusal precedes even logger/output initialization. The same
+    // side-effect-free admission is also used by both public startup parsers.
+    try {
+        (void)ParseTemporalAuditRuntimeOptions(argc, argv);
+    } catch (const std::invalid_argument& error) {
+        std::fprintf(stderr, "Temporal admission refused: %s\n", error.what());
+        return 2;
+    }
     Log::Init();
     Luminumbra::Client::Debug::DeveloperConsole developerConsole;
     Luminumbra::Client::Debug::DeveloperLogAttachment developerLogAttachment(
@@ -1496,6 +1504,9 @@ int main(int argc, char* argv[]) {
         LUMINUMBRA_CORE_ERROR("{}", error.what());
         return 2;
     }
+    if (scenario_config.temporal_audit) {
+        Luminumbra::Client::presentation_clock().set_capture_tick(0, 60);
+    }
     std::string override_error;
     if (HasCommandLineOption(argc, argv, "--systems-config")) {
         luminumbra::core::SystemConfig config;
@@ -1515,11 +1526,9 @@ int main(int argc, char* argv[]) {
         }
         scenario_config.preset_json_override = std::move(json_text);
     }
-#if !defined(LUMINUMBRA_QA_RUNNER)
-    // The shipping client does not compile the QA scenario harness (no
-    // CreateScenarioRunner is linked). Refuse `--scenario` up front, before any
-    // window/GL work, with the dedicated availability exit code.
-    if (scenario_config.active()) {
+    const ScenarioRunnerFactory scenario_runner_factory = GetScenarioRunnerFactory();
+    // Refuse unavailable scenarios before any window/GL work.
+    if (scenario_config.active() && !scenario_runner_factory) {
         // Exit code for a `--scenario` request against a binary compiled WITHOUT the
         // QA harness (the shipping luminumbra_client_app). Distinct from the scenario
         // exit codes the harness itself uses (2 = scenario failed, 3 = memory
@@ -1536,7 +1545,6 @@ int main(int argc, char* argv[]) {
                      kExitScenarioUnavailable);
         return kExitScenarioUnavailable;
     }
-#endif
     RuntimeStateRecorder runtime_state_recorder(scenario_config, g_camera);
     InstallRuntimeCrashHandler(runtime_state_recorder);
     std::unique_ptr<HangWatchdog> hang_watchdog;
@@ -1561,6 +1569,9 @@ int main(int argc, char* argv[]) {
     }
     g_app.overlay.imgui_enabled = g_app.capture.feature_policy.Apply({}, scenario_config.no_ui).ui;
     g_app.scenario_active = scenario_config.active();
+    if (scenario_config.temporal_audit) {
+        scenario_config.capture_heartbeat = &MainLoopHeartbeat();
+    }
     runtime_state_recorder.capture("startup_requested", nullptr, nullptr, nullptr, 0, {});
 
     if (scenario_config.forced_crash()) {
@@ -1725,7 +1736,7 @@ int main(int argc, char* argv[]) {
             throw std::invalid_argument("schema v4 requires a workload traversal");
         if (benchmark_v4) {
             benchmark_content = capture_content();
-            Luminumbra::Client::presentation_clock.set_capture_tick(
+            Luminumbra::Client::presentation_clock().set_capture_tick(
                 0, static_cast<std::uint32_t>(traversal->tickRate));
         }
     } catch (const std::exception& error) {
@@ -2373,6 +2384,16 @@ int main(int argc, char* argv[]) {
     gameSession->SetRootPath(root_path_str);
     gameSession->SetSaveRootPath(path_options.save_root);
     gameSession->ApplySystemConfig(g_systemConfig);
+    bool temporal_weather_ready = true;
+    if (scenario_config.temporal_audit &&
+        scenario_config.temporal_audit->plan.request.span ==
+            Luminumbra::Rendering::TemporalAuditSpan::WeatherCycle) {
+        const auto schedule = BuildTemporalAuditWeatherSchedule(*scenario_config.temporal_audit);
+        temporal_weather_ready = gameSession->SetWeatherSchedule(schedule);
+        if (!temporal_weather_ready) {
+            LUMINUMBRA_CORE_ERROR("Temporal weather schedule refused before world creation");
+        }
+    }
     if (traversal && traversal->kind == "region_crossing")
         gameSession->SetRegionSchedulerConfig(
             {.work_limit = 0, .hold_ticks = 30, .reduced_shift = 1});
@@ -2617,6 +2638,8 @@ int main(int argc, char* argv[]) {
     if (!game_asset_startup_error.empty())
         LUMINUMBRA_CORE_WARN("{}", game_asset_startup_error);
     renderPipeline.enable_static_model_content(game_asset_startup_error.empty());
+    // Share the existing startup refusal/teardown path; no world exists yet.
+    graphics_ready = graphics_ready && temporal_weather_ready;
     if (!graphics_ready || !renderPipeline.startup(static_cast<Luminumbra::u32>(framebufferWidth),
                                                    static_cast<Luminumbra::u32>(framebufferHeight),
                                                    root_dir)) {
@@ -2631,7 +2654,9 @@ int main(int argc, char* argv[]) {
             gameSession.reset();
             jobSystem.shutdown();
         });
-        return Luminumbra::Filesystem::capture_content_paths().refused() ? 2 : -1;
+        return !temporal_weather_ready || Luminumbra::Filesystem::capture_content_paths().refused()
+                   ? 2
+                   : -1;
     }
     // Render-optimization (cloud-raymarch-optimization): apply the reduced-res
     // sky-dome quality once the GL targets exist. No-op at 0 (full).
@@ -4031,16 +4056,10 @@ int main(int argc, char* argv[]) {
                                                 scenario_play_started_at,
                                                 last_readiness_report,
                                                 exit_code};
-#if defined(LUMINUMBRA_QA_RUNNER)
     const std::unique_ptr<ScenarioRunner> scenario_runner =
-        scenario_config.active() ? CreateScenarioRunner(scenario_frame_context) : nullptr;
-#else
-    // Shipping build: no harness linked; the guard at the top of main() already
-    // rejected any --scenario request, so the runner is permanently null and
-    // the frame loop takes only its non-scenario branches.
-    const std::unique_ptr<ScenarioRunner> scenario_runner;
-    (void)scenario_frame_context;
-#endif
+        scenario_runner_factory && scenario_config.active()
+            ? scenario_runner_factory(scenario_frame_context)
+            : nullptr;
     //  honest CPU-vs-GPU attribution for --render-benchmark.
     // wall = max(CPU_submit, GPU_work) + present. NVML is loaded lazily on the
     // first measured frame (optional / guarded).
@@ -4054,6 +4073,8 @@ int main(int argc, char* argv[]) {
     const glm::vec3 kRenderBenchmarkCameraPosition(Luminumbra::BenchmarkPose::kPosX,
                                                    Luminumbra::BenchmarkPose::kPosY,
                                                    Luminumbra::BenchmarkPose::kPosZ);
+    // Ten appended GPU intervals; the final two are included in Skybox.
+    std::array<double, Measurement::kPassCount - Measurement::kLegacyPassCount> gpu_stage_totals{};
     std::unique_ptr<Measurement::SampleRing> measured_samples;
     std::unique_ptr<Luminumbra::Rendering::BenchmarkGpuQueries> benchmark_queries;
     std::uint64_t traversal_ticks = 0;
@@ -4672,6 +4693,8 @@ int main(int argc, char* argv[]) {
     };
     const bool frame_attribution_enabled =
         frame_csv_enabled || HasCommandLineFlag(argc, argv, "--frame-attribution");
+    renderPipeline.set_gpu_stage_attribution(frame_attribution_enabled ||
+                                             !g_app.capture.render_benchmark_path.empty());
     Attribution::FrameRecorder frame_recorder(frame_csv_enabled, "logs");
     if (frame_csv_enabled && !frame_recorder.active())
         LUMINUMBRA_CORE_ERROR("Cannot open logs/frame-attribution.csv");
@@ -4732,9 +4755,11 @@ int main(int argc, char* argv[]) {
                                       const char* phase,
                                       const std::filesystem::path& report) {
         const auto& work = renderPipeline.get_last_mesh_upload_stats();
-        const auto pending = work.terrain_uploads_deferred + work.water_uploads_deferred;
-        const bool waiting =
-            wait.waiting(pending, work.terrain_budget.adopted + work.water_budget.adopted);
+        const auto pending = work.terrain_uploads_deferred + work.water_uploads_deferred +
+                             work.asset_uploads_deferred;
+        const bool waiting = wait.waiting(pending,
+                                          work.terrain_budget.adopted + work.water_budget.adopted +
+                                              work.asset_budget.adopted);
         if (wait.failed()) {
             const nlohmann::json failure{{"status", "failed"},
                                          {"capture_complete", false},
@@ -4871,7 +4896,7 @@ int main(int argc, char* argv[]) {
             traversal ? static_cast<std::uint32_t>(traversal->expectedTicks) : 0u,
             traversal ? static_cast<std::uint32_t>(traversal->tickRate) : 30u);
         if (frame_presentation.tick)
-            Luminumbra::Client::presentation_clock.set_capture_tick(
+            Luminumbra::Client::presentation_clock().set_capture_tick(
                 *frame_presentation.tick, static_cast<std::uint32_t>(traversal->tickRate));
         if (measuring_v3) {
             measured_samples->append(measured_frame_id);
@@ -5364,15 +5389,16 @@ int main(int argc, char* argv[]) {
 
         const bool timelapse_waiting =
             g_app.capture.timelapse_frames > 0 && !timelapse_presentation_ready;
-        const bool simulate_frame =
-            !timelapse_waiting && Measurement::frame_simulation_enabled(benchmark_v4,
-                                                                        traversal.has_value(),
-                                                                        measuring_v3,
-                                                                        g_app.hud.paused,
-                                                                        g_app.capture.timeScale);
+        const bool simulate_frame = !timelapse_waiting && !scenario_config.temporal_audit &&
+                                    Measurement::frame_simulation_enabled(benchmark_v4,
+                                                                          traversal.has_value(),
+                                                                          measuring_v3,
+                                                                          g_app.hud.paused,
+                                                                          g_app.capture.timeScale);
         // Preserve the historical frame-driven behavior outside benchmark capture.
-        const bool advance_frame_simulation =
-            !timelapse_waiting && (!g_rb_active || simulate_frame);
+        const bool advance_frame_simulation = !timelapse_waiting &&
+                                              !scenario_config.temporal_audit &&
+                                              (!g_rb_active || simulate_frame);
         switch (currentState) {
             case GameState::WORLD_LOADING: {
                 glClearColor(0.01f, 0.02f, 0.05f, 1.0f);
@@ -5444,7 +5470,8 @@ int main(int argc, char* argv[]) {
             case GameState::IN_GAME:
                 // Prepare before the local character driver as well as the rigid-body
                 // step below. Render camera/streaming inputs never enter this horizon.
-                if (advance_frame_simulation && !scenario_config.networked_session_smoke()) {
+                if (!scenario_config.temporal_audit && advance_frame_simulation &&
+                    !scenario_config.networked_session_smoke()) {
                     if (auto* physics = gameSession->GetPhysicsSystem()) {
                         if (!physics->prepare_simulation_collisions(
                                 {}, std::numeric_limits<std::uint64_t>::max())) {
@@ -5466,6 +5493,10 @@ int main(int argc, char* argv[]) {
                                      : ScenarioRunner::InGameDrive::kFallThrough;
                 if (scenario_drive == ScenarioRunner::InGameDrive::kBreakCase) {
                     break;
+                }
+                if (scenario_config.temporal_audit) {
+                    // All remaining presentation consumers use the protocol delta.
+                    deltaTime = static_cast<float>(scenario_config.temporal_presentation_delta);
                 }
                 if (scenario_drive == ScenarioRunner::InGameDrive::kFallThrough &&
                     g_app.capture.profile_fly_seconds > 0.0 && g_playerController && g_camera &&
@@ -5670,132 +5701,149 @@ int main(int argc, char* argv[]) {
                                         "timelapse_mode_preparation_failed");
                     }
                 }
-                if (advance_frame_simulation) {
-                    if (auto* physics = gameSession->GetPhysicsSystem())
-                        physics->update(deltaTime * g_app.capture.timeScale);
-                }
-                // fixed 30 Hz simulation tick (SimulationClock +
-                // OrderedEventBus drain) hosted by GameSession. Render,
-                // physics, and scenario paths above remain variable-dt.
-                // the networked-session scenario steps its client world
-                // through the lockstep driver's apply_and_step hook (in lockstep
-                // with the host), so the default per-frame tick + camera-anchored
-                // streaming are SKIPPED here -- ticking twice would desync from the
-                // host, and camera-anchored streaming would diverge the hashed world.
-                _rb_sim_t0 = std::chrono::steady_clock::now(); //
-                if (!scenario_config.networked_session_smoke()) {
-                    if (advance_frame_simulation) {
-                        if (benchmark_v4 && g_camera)
-                            gameSession->SetLocalPlayerSimulationPosition(g_camera->Position, true);
-                        else if (g_playerController)
-                            gameSession->SetLocalPlayerSimulationPosition(
-                                g_playerController->GetPosition(),
-                                g_playerController->GetMovementMode() ==
-                                    Luminumbra::Client::MovementMode::Walking);
+                if (scenario_config.temporal_audit) {
+                    // The runner owns physics and simulation ticks. Streaming and
+                    // uploads may progress during held renders, with water frozen.
+                    if (auto* world = gameSession->GetWorldSystem(); world && g_camera) {
+                        world->update(gameSession->GetRegistry(),
+                                      g_camera->Position,
+                                      gameSession->GetPhysicsSystem(),
+                                      /*advance_simulation=*/false);
+                        world->sync_water_authority();
                     }
-                    if (simulate_frame) {
-                        if (benchmark_v4) {
-                            gameSession->TickSimulation(1.0 / traversal->tickRate);
-                        } else if (traversal) {
-                            while (!gameSession->GetRegionSchedulerFault() &&
-                                   traversal_ticks <
-                                       static_cast<std::uint64_t>(traversal_target_tick)) {
-                                const auto advanced =
-                                    gameSession->TickSimulation(1.0 / traversal->tickRate);
-                                if (advanced == 0) {
-                                    break; // A refused collider barrier retries next frame.
-                                }
-                                traversal_ticks += advanced;
-                            }
-                        } else if (g_app.capture.timeScale == 1.0f) {
-                            gameSession->TickSimulation(static_cast<double>(
-                                deltaTime)); // byte-identical default (gates run here)
-                        } else if (g_app.capture.timeScale > 0.0f) {
-                            // host_timescale: run the sim faster/slower. Chunk into <=4-tick steps
-                            // so a high scale isn't dropped by the catch-up clamp, capped per frame
-                            // to keep spiral protection. Determinism holds (fixed dt per tick).
-                            double simDt = static_cast<double>(deltaTime) *
-                                           static_cast<double>(g_app.capture.timeScale);
-                            const double kFourTicks = (1.0 / 30.0) * 4.0;
-                            const int budget = static_cast<int>(
-                                std::ceil(4.0 * static_cast<double>(g_app.capture.timeScale)));
-                            int ran = 0;
-                            while (simDt > 1e-9 && ran < budget) {
-                                const double step = std::min(simDt, kFourTicks);
-                                const std::uint32_t t = gameSession->TickSimulation(step);
-                                simDt -= step;
-                                if (t == 0u)
-                                    break; // accumulator < 1 tick this frame
-                                ran += static_cast<int>(t);
-                            }
-                        }
-                    } // Paused captures still render and stream without simulation steps.
                     Luminumbra::Client::PollSessionFault(
                         *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
-                    Luminumbra::Client::SaveSessionWhenDue(gameSession.get(),
-                                                           session_persistence_allowed());
-                    rb_sim_ms = std::chrono::duration<double, std::milli>(
-                                    std::chrono::steady_clock::now() - _rb_sim_t0)
-                                    .count();                         //
-                    _rb_stream_t0 = std::chrono::steady_clock::now(); //
-                    if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
-                        // Anchor world streaming on the CAMERA (not the spawn-bound player)
-                        // whenever a fixed, benchmark or scenario camera drives the view.
-                        // Otherwise, a --cam-pos far from spawn streams around the player and the
-                        // camera sees an unloaded, unlit void (the "far-camera renders black" bug).
-                        // g_app.capture.fixed_cam covers the capture/showcase path; the scenario
-                        // smokes keep their existing behaviour.
-                        const bool cam_anchored =
-                            (g_app.capture.fixed_cam ||
-                             ((scenario_config.lod_ground_smoke() ||
-                               scenario_config.water_visual_smoke() ||
-                               scenario_config.material_visual_smoke() ||
-                               scenario_config.skybox_visual_smoke() ||
-                               scenario_config.weather_visual_smoke() ||
-                               scenario_config.cloud_shadow_smoke() ||
-                               scenario_config.precipitation_smoke() ||
-                               scenario_config.timeofday_sweep_smoke() ||
-                               scenario_config.lod_boundary_oscillation_smoke() ||
-                               scenario_config.lod_seam_arrival_smoke() ||
-                               scenario_config.player_view_smoke() ||
-                               scenario_config.world_visual_sweep() ||
-                               scenario_config.farlod_horizon_smoke() ||
-                               scenario_config.skinned_mesh_visual_smoke() ||
-                               scenario_config.creature_slice_smoke()) &&
-                              scenario_ready)) &&
-                            g_camera;
-                        // PlayerController::Update may have moved g_camera back to
-                        // the player this frame; the capture pose is reapplied later
-                        // for rendering. Stream that same position now as well.
-                        Luminumbra::BenchmarkPose::StreamingInputs streaming_in{};
-                        streaming_in.fixed_cam = g_app.capture.fixed_cam;
-                        streaming_in.fixed_cam_pos = g_app.capture.fixed_cam_pos;
-                        streaming_in.benchmark_active = g_rb_active;
-                        streaming_in.has_camera = g_camera != nullptr;
-                        streaming_in.camera_pos = g_camera ? g_camera->Position : glm::vec3(0.0f);
-                        streaming_in.cam_anchored = cam_anchored;
-                        streaming_in.has_player = g_playerController != nullptr;
-                        streaming_in.player_pos = g_playerController
-                                                      ? g_playerController->GetPosition()
-                                                      : glm::vec3(0.0f);
-                        const Luminumbra::Vec3 streaming_position =
-                            Luminumbra::BenchmarkPose::SelectStreamingPosition(streaming_in);
-                        if (g_rb_active) {
-                            g_rb_last_streaming_position = streaming_position;
-                            g_rb_has_streaming_position = true;
-                        }
-                        gameSession->GetWorldSystem()->update(gameSession->GetRegistry(),
-                                                              streaming_position,
-                                                              gameSession->GetPhysicsSystem(),
-                                                              advance_frame_simulation);
-                        // Water ran inside update(): publish its ownership now, so the next
-                        // tick's scheduler and any save or hash read see a settled frame.
-                        gameSession->GetWorldSystem()->sync_water_authority();
+                } else {
+                    if (advance_frame_simulation) {
+                        if (auto* physics = gameSession->GetPhysicsSystem())
+                            physics->update(deltaTime * g_app.capture.timeScale);
                     }
-                    rb_stream_ms = std::chrono::duration<double, std::milli>(
-                                       std::chrono::steady_clock::now() - _rb_stream_t0)
-                                       .count(); //
-                } // end !networked_session_smoke default-tick guard
+                    // fixed 30 Hz simulation tick (SimulationClock +
+                    // OrderedEventBus drain) hosted by GameSession. Render,
+                    // physics, and scenario paths above remain variable-dt.
+                    // the networked-session scenario steps its client world
+                    // through the lockstep driver's apply_and_step hook (in lockstep
+                    // with the host), so the default per-frame tick + camera-anchored
+                    // streaming are SKIPPED here -- ticking twice would desync from the
+                    // host, and camera-anchored streaming would diverge the hashed world.
+                    _rb_sim_t0 = std::chrono::steady_clock::now(); //
+                    if (!scenario_config.networked_session_smoke()) {
+                        if (advance_frame_simulation) {
+                            if (benchmark_v4 && g_camera)
+                                gameSession->SetLocalPlayerSimulationPosition(g_camera->Position,
+                                                                              true);
+                            else if (g_playerController)
+                                gameSession->SetLocalPlayerSimulationPosition(
+                                    g_playerController->GetPosition(),
+                                    g_playerController->GetMovementMode() ==
+                                        Luminumbra::Client::MovementMode::Walking);
+                        }
+                        if (simulate_frame) {
+                            if (benchmark_v4) {
+                                gameSession->TickSimulation(1.0 / traversal->tickRate);
+                            } else if (traversal) {
+                                while (!gameSession->GetRegionSchedulerFault() &&
+                                       traversal_ticks <
+                                           static_cast<std::uint64_t>(traversal_target_tick)) {
+                                    const auto advanced =
+                                        gameSession->TickSimulation(1.0 / traversal->tickRate);
+                                    if (advanced == 0) {
+                                        break; // A refused collider barrier retries next frame.
+                                    }
+                                    traversal_ticks += advanced;
+                                }
+                            } else if (g_app.capture.timeScale == 1.0f) {
+                                gameSession->TickSimulation(static_cast<double>(
+                                    deltaTime)); // byte-identical default (gates run here)
+                            } else if (g_app.capture.timeScale > 0.0f) {
+                                // host_timescale: run the sim faster/slower. Chunk into <=4-tick
+                                // steps so a high scale isn't dropped by the catch-up clamp, capped
+                                // per frame to keep spiral protection. Determinism holds (fixed dt
+                                // per tick).
+                                double simDt = static_cast<double>(deltaTime) *
+                                               static_cast<double>(g_app.capture.timeScale);
+                                const double kFourTicks = (1.0 / 30.0) * 4.0;
+                                const int budget = static_cast<int>(
+                                    std::ceil(4.0 * static_cast<double>(g_app.capture.timeScale)));
+                                int ran = 0;
+                                while (simDt > 1e-9 && ran < budget) {
+                                    const double step = std::min(simDt, kFourTicks);
+                                    const std::uint32_t t = gameSession->TickSimulation(step);
+                                    simDt -= step;
+                                    if (t == 0u)
+                                        break; // accumulator < 1 tick this frame
+                                    ran += static_cast<int>(t);
+                                }
+                            }
+                        } // Paused captures still render and stream without simulation steps.
+                        Luminumbra::Client::PollSessionFault(
+                            *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
+                        Luminumbra::Client::SaveSessionWhenDue(gameSession.get(),
+                                                               session_persistence_allowed());
+                        rb_sim_ms = std::chrono::duration<double, std::milli>(
+                                        std::chrono::steady_clock::now() - _rb_sim_t0)
+                                        .count();                         //
+                        _rb_stream_t0 = std::chrono::steady_clock::now(); //
+                        if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
+                            // Anchor world streaming on the CAMERA (not the spawn-bound player)
+                            // whenever a fixed, benchmark or scenario camera drives the view.
+                            // Otherwise, a --cam-pos far from spawn streams around the player and
+                            // the camera sees an unloaded, unlit void (the "far-camera renders
+                            // black" bug). g_app.capture.fixed_cam covers the capture/showcase
+                            // path; the scenario smokes keep their existing behaviour.
+                            const bool cam_anchored =
+                                (g_app.capture.fixed_cam ||
+                                 ((scenario_config.lod_ground_smoke() ||
+                                   scenario_config.water_visual_smoke() ||
+                                   scenario_config.material_visual_smoke() ||
+                                   scenario_config.skybox_visual_smoke() ||
+                                   scenario_config.weather_visual_smoke() ||
+                                   scenario_config.cloud_shadow_smoke() ||
+                                   scenario_config.precipitation_smoke() ||
+                                   scenario_config.timeofday_sweep_smoke() ||
+                                   scenario_config.lod_boundary_oscillation_smoke() ||
+                                   scenario_config.lod_seam_arrival_smoke() ||
+                                   scenario_config.player_view_smoke() ||
+                                   scenario_config.world_visual_sweep() ||
+                                   scenario_config.farlod_horizon_smoke() ||
+                                   scenario_config.skinned_mesh_visual_smoke() ||
+                                   scenario_config.creature_slice_smoke()) &&
+                                  scenario_ready)) &&
+                                g_camera;
+                            // PlayerController::Update may have moved g_camera back to
+                            // the player this frame; the capture pose is reapplied later
+                            // for rendering. Stream that same position now as well.
+                            Luminumbra::BenchmarkPose::StreamingInputs streaming_in{};
+                            streaming_in.fixed_cam = g_app.capture.fixed_cam;
+                            streaming_in.fixed_cam_pos = g_app.capture.fixed_cam_pos;
+                            streaming_in.benchmark_active = g_rb_active;
+                            streaming_in.has_camera = g_camera != nullptr;
+                            streaming_in.camera_pos =
+                                g_camera ? g_camera->Position : glm::vec3(0.0f);
+                            streaming_in.cam_anchored = cam_anchored;
+                            streaming_in.has_player = g_playerController != nullptr;
+                            streaming_in.player_pos = g_playerController
+                                                          ? g_playerController->GetPosition()
+                                                          : glm::vec3(0.0f);
+                            const Luminumbra::Vec3 streaming_position =
+                                Luminumbra::BenchmarkPose::SelectStreamingPosition(streaming_in);
+                            if (g_rb_active) {
+                                g_rb_last_streaming_position = streaming_position;
+                                g_rb_has_streaming_position = true;
+                            }
+                            gameSession->GetWorldSystem()->update(gameSession->GetRegistry(),
+                                                                  streaming_position,
+                                                                  gameSession->GetPhysicsSystem(),
+                                                                  advance_frame_simulation);
+                            // Water ran inside update(): publish its ownership now, so the next
+                            // tick's scheduler and any save or hash read see a settled frame.
+                            gameSession->GetWorldSystem()->sync_water_authority();
+                        }
+                        rb_stream_ms = std::chrono::duration<double, std::milli>(
+                                           std::chrono::steady_clock::now() - _rb_stream_t0)
+                                           .count(); //
+                    } // end !networked_session_smoke default-tick guard
+                }
                 break;
             case GameState::MAIN_MENU:
                 break;
@@ -6071,7 +6119,7 @@ int main(int argc, char* argv[]) {
                     // overwrites it, so all capture paths keep their exact pins.
                     {
                         const std::uint64_t sim_tick = gameSession->GetSimulationTickCount();
-                        if (gameSession->ActiveRegionsEnabled()) {
+                        if (gameSession->ActiveRegionsEnabled() || scenario_config.temporal_audit) {
                             renderPipeline.set_world_clock(gameSession->GetWorldClock());
                         } else {
                             renderPipeline.set_render_calendar(gameSession->GetRenderCalendar());
@@ -6252,7 +6300,8 @@ int main(int argc, char* argv[]) {
                                 }
                                 if (g_app.weather.boltFramesLeft > 0) {
                                     renderPipeline.set_lightning_state(g_app.weather.liveBolt);
-                                    if (--g_app.weather.boltFramesLeft == 0) {
+                                    if ((!scenario_config.temporal_audit || deltaTime > 0.0f) &&
+                                        --g_app.weather.boltFramesLeft == 0) {
                                         g_app.weather.liveBolt = {};
                                         renderPipeline.set_lightning_state(
                                             g_app.weather.liveBolt); // clear
@@ -6494,6 +6543,30 @@ int main(int argc, char* argv[]) {
                     if (timelapse_waiting) {
                         gameSession->GetWorldSystem()->sync_water_authority();
                     }
+                    using SkyLut = Luminumbra::Rendering::SkyAtmosphereLut;
+                    // The QA link selects a scenario runner; shipping links none.
+                    const bool sky_test_harness = scenario_runner_factory != nullptr;
+                    // This is the sole interactive opt-in. Use the benchmark
+                    // request, independent of schema and warmup/measurement state.
+                    const auto sky_publication = SkyLut::select_publication(
+                        {.interactive = currentState == GameState::IN_GAME,
+                         .replay = Luminumbra::Rendering::DebugViewPass::controls().frozen ||
+                                   Luminumbra::Rendering::DebugViewPass::replay_mode(
+                                       Luminumbra::Rendering::DebugViewPass::geometry_view()),
+                         .capture =
+                             photo_capture_pinned || capture_pinned || scenario_config.active() ||
+                             g_app.capture.scene_active || !g_app.capture.frame_scan_path.empty() ||
+                             !g_app.capture.survey_dir.empty() ||
+                             !g_app.capture.ui_screens.empty() || g_app.capture.ui_preview_live ||
+                             g_app.capture.ui_fixtures || g_app.capture.fixed_cam ||
+                             g_app.capture.play_paths || g_app.capture.profile_fly_seconds != 0.0 ||
+                             !g_app.capture.debug_goto.empty() ||
+                             !g_app.capture.render_benchmark_screenshot.empty() ||
+                             path_options.diagnostics.enabled || g_app.hud.photoMode.active ||
+                             (g_playerController && g_playerController->photo_mode_active()),
+                         .benchmark = !g_app.capture.render_benchmark_path.empty(),
+                         .headless = hidden_window || g_windowState.mode == WindowMode::Headless,
+                         .test_harness = sky_test_harness});
                     renderPipeline.set_diagnostic_capture_armed(
                         !g_rb_active ||
                         g_app.benchmark.measuredFrames == g_app.capture.render_benchmark_frames);
@@ -6505,7 +6578,20 @@ int main(int argc, char* argv[]) {
                         g_app.overlay.wireframe_mode,
                         settling_benchmark_uploads || settling_capture_uploads
                             ? Luminumbra::Rendering::UploadPresentation::Settled
-                            : Luminumbra::Rendering::UploadPresentation::Streaming);
+                            : Luminumbra::Rendering::UploadPresentation::Streaming,
+                        Luminumbra::Rendering::RenderPipeline::DiagnosticCapturePolicy::Complete,
+                        sky_publication);
+                    if (scenario_config.temporal_audit) {
+                        // Fixed-site observation visits at most 25x25 columns;
+                        // never scan the resident world store per temporal step.
+                        scenario_config.temporal_presentation_ready =
+                            ObserveWorldPresentation(*gameSession->GetWorldSystem(),
+                                                     renderPipeline,
+                                                     g_camera->Position,
+                                                     presentation_radius(),
+                                                     entry_water_prepared)
+                                .ready();
+                    }
                     if (timelapse_waiting) {
                         if (timelapse_presentation_started_at ==
                             std::chrono::steady_clock::time_point{}) {
@@ -7439,7 +7525,7 @@ int main(int argc, char* argv[]) {
                 workload_frame_records.append(
                     {.tick = traversal_target_tick,
                      .presentation_seconds =
-                         *Luminumbra::Client::presentation_clock.capture_seconds(),
+                         *Luminumbra::Client::presentation_clock().capture_seconds(),
                      .frame = measured_frame_id,
                      .state = menu.state,
                      .ui_document = menu.document,
@@ -7616,6 +7702,24 @@ int main(int argc, char* argv[]) {
                 rb_foliage += s.foliage_gpu_ms;
                 rb_aerial += s.aerial_gpu_ms;
                 rb_final += s.final_blit_gpu_ms;
+                const std::array stage_times = {
+                    s.depth_blit_to_lighting_gpu_ms,
+                    s.opaque_snapshot_gpu_ms,
+                    s.froxel_inject_gpu_ms,
+                    s.froxel_integrate_gpu_ms,
+                    s.taau_resolve_gpu_ms,
+                    s.foliage_count_gpu_ms,
+                    s.foliage_prefix_gpu_ms,
+                    s.foliage_emit_gpu_ms,
+                    s.cloud_dome_gpu_ms,
+                    s.cloud_composite_gpu_ms,
+                };
+                for (std::size_t stage = 0; stage < stage_times.size(); ++stage) {
+                    gpu_stage_totals[stage] += stage_times[stage];
+                    if (Measurement::kLegacyPassCount + stage < Measurement::kSummedPassCount) {
+                        rb_total += stage_times[stage];
+                    }
+                }
                 rb_total += s.shadow_gpu_ms + s.gbuffer_gpu_ms + s.ssao_gpu_ms +
                             s.ssao_blur_gpu_ms + s.lighting_gpu_ms + s.water_gpu_ms +
                             s.skybox_gpu_ms + s.particle_gpu_ms + s.foliage_gpu_ms +
@@ -7848,6 +7952,10 @@ int main(int argc, char* argv[]) {
                                {"aerial", rb_aerial / n},
                                {"final_blit", rb_final / n},
                                {"total", gpu_sum}};
+                for (std::size_t stage = 0; stage < gpu_stage_totals.size(); ++stage) {
+                    j["avg_ms"][Measurement::kPassNames[Measurement::kLegacyPassCount + stage]] =
+                        gpu_stage_totals[stage] / n;
+                }
                 // The honest frame attribution (the numbers that actually decide
                 // whether we are CPU-bound or GPU-bound).
                 j["avg"] = {{"cpu_submit_ms", cpu},

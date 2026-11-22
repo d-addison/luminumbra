@@ -129,6 +129,12 @@ void WindFieldSystem::LocalCell(const Vec3& world_pos,
 
 void WindFieldSystem::Update(std::uint64_t tick, const Vec3& region_anchor) {
     m_last_tick = tick;
+    m_fieldAnchor = region_anchor;
+    m_appliedStormCount = m_storm_perturbations.size();
+    if (m_appliedStormCount <= m_appliedStorms.size()) {
+        std::copy(
+            m_storm_perturbations.begin(), m_storm_perturbations.end(), m_appliedStorms.begin());
+    }
     if (HasRegionalBackend()) {
         const auto wind = SampleRegional(region_anchor, WindLayer::Ground);
         const float length = std::sqrt(wind.x * wind.x + wind.y * wind.y);
@@ -253,25 +259,35 @@ void WindFieldSystem::Update(std::uint64_t tick, const Vec3& region_anchor) {
     }
 }
 
+void WindFieldSystem::RestoreContinuation(const AmbientContinuation& state) {
+    if (HasRegionalBackend() || !ValidAmbientContinuation(state)) {
+        throw std::invalid_argument("invalid wind continuation");
+    }
+    m_storm_perturbations = state.wind;
+    Update(state.tick, state.anchor);
+}
+
+bool AmbientWindPerturbationLess(const AmbientWindPerturbation& left,
+                                 const AmbientWindPerturbation& right) {
+    return std::tie(left.center_world.x,
+                    left.center_world.y,
+                    left.radius_m,
+                    left.velocity.x,
+                    left.velocity.y,
+                    left.intensity) < std::tie(right.center_world.x,
+                                               right.center_world.y,
+                                               right.radius_m,
+                                               right.velocity.x,
+                                               right.velocity.y,
+                                               right.intensity);
+}
+
 void WindFieldSystem::InjectStormPerturbation(const StormPerturbation& perturbation) {
     if (perturbation.radius_m <= 0.0f || perturbation.intensity <= 0.0f)
         return;
     m_storm_perturbations.push_back(perturbation);
-    std::sort(m_storm_perturbations.begin(),
-              m_storm_perturbations.end(),
-              [](const StormPerturbation& a, const StormPerturbation& b) {
-                  return std::tie(a.center_world.x,
-                                  a.center_world.y,
-                                  a.radius_m,
-                                  a.velocity.x,
-                                  a.velocity.y,
-                                  a.intensity) < std::tie(b.center_world.x,
-                                                          b.center_world.y,
-                                                          b.radius_m,
-                                                          b.velocity.x,
-                                                          b.velocity.y,
-                                                          b.intensity);
-              });
+    std::sort(
+        m_storm_perturbations.begin(), m_storm_perturbations.end(), AmbientWindPerturbationLess);
 }
 
 void WindFieldSystem::ClearStormPerturbations() {
@@ -349,6 +365,9 @@ WindFieldSystem& WindFieldSystem::operator=(WindFieldSystem&& other) noexcept {
     m_wind_seed = other.m_wind_seed;
     m_base_direction = other.m_base_direction;
     m_last_tick = other.m_last_tick;
+    m_appliedStorms = other.m_appliedStorms;
+    m_appliedStormCount = other.m_appliedStormCount;
+    m_fieldAnchor = other.m_fieldAnchor;
     return *this;
 }
 

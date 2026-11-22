@@ -53,7 +53,7 @@ LADDER_DEFINES = ("LUMINUMBRA_FAR_WORLD_LADDER 1",)
 DIAGNOSTIC_FILES = frozenset({
     "g_buffer.frag", "static_asset.frag", "plant_procgen.frag",
     "scent_decal.frag", "foliage.frag", "water.frag", "glass_oit.frag", "waterfall.frag",
-    "magical_particles.frag",
+    "magical_particles.frag", "weather_system.frag",
 })
 DIAGNOSTIC_DEFINES = ("LUMIN_DIAG_IDS 1",)
 # Bounds cover the whole scan and expanded output, including repeated includes.

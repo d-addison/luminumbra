@@ -50,8 +50,8 @@ public:
             return;
         for (std::size_t i = 0; i < image_->region_count(); ++i) {
             const auto region = image_->Region(i);
-            if (region->tier == key.tier && region->support.min.x == key.tx * edge &&
-                region->support.min.z == key.tz * edge &&
+            if (region.has_value() && region->tier == key.tier &&
+                region->support.min.x == key.tx * edge && region->support.min.z == key.tz * edge &&
                 region->support.max.x == (key.tx + 1) * edge &&
                 region->support.max.z == (key.tz + 1) * edge) {
                 region_ = i;

@@ -67,11 +67,11 @@ removed before Git runs. Top-level source `.git` directories cannot be symlinks.
 Internal metadata links are checked before Git runs; a linked config receives the same
 execution restrictions as an ordinary config.
 
-All 17 generic FetchContent dependencies must be present:
+All 16 generic FetchContent dependencies must be present:
 
 ```text
 entt glm glfw glad nlohmann_json joltphysics freetype soil2
-miniaudio meshoptimizer lua_upstream sol2 spdlog imgui_src stb
+miniaudio meshoptimizer luau spdlog imgui_src stb
 googletest lz4_upstream
 ```
 

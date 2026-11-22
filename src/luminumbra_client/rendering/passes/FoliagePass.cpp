@@ -49,12 +49,33 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 namespace Luminumbra::Rendering {
 namespace Attribution = Client::Attribution;
+
+void GpuPassTimer::begin() const {
+    if (benchmark) {
+        benchmark->begin_pass(pass);
+    }
+    if (begin_query != 0) {
+        glQueryCounter(begin_query, GL_TIMESTAMP);
+    }
+}
+
+void GpuPassTimer::end() const {
+    if (benchmark) {
+        benchmark->end_pass(pass);
+    }
+    if (end_query != 0) {
+        glQueryCounter(end_query, GL_TIMESTAMP);
+        *issued = true;
+    }
+}
+
 struct FoliagePass::EvidenceQueries {
     Client::Measurement::SampleRing samples{64};
     BenchmarkGpuQueries queries{samples};
@@ -1824,6 +1845,7 @@ void FoliagePass::collect_input_hash() {
 }
 
 void FoliagePass::dispatch_scatter() {
+    m_scatter_gpu_timers[0].begin();
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_chunk_ssbo);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_surf_ssbo);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, m_blade_ssbo);
@@ -1838,12 +1860,16 @@ void FoliagePass::dispatch_scatter() {
     Luminumbra::Rendering::AttributedGl::Submit(
         glDispatchCompute, groups_x, static_cast<GLuint>(m_uploaded_chunk_count), 1u);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    m_scatter_gpu_timers[0].end();
+    m_scatter_gpu_timers[1].begin();
     Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_prefix_prog);
     glUniform1ui(m_prefix_uniforms.group_count,
                  groups_x * static_cast<GLuint>(m_uploaded_chunk_count));
     glUniform1ui(m_prefix_uniforms.max_instances, kMaxInstances);
     Luminumbra::Rendering::AttributedGl::Submit(glDispatchCompute, 1u, 1u, 1u);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    m_scatter_gpu_timers[1].end();
+    m_scatter_gpu_timers[2].begin();
     Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_compute_prog);
     glUniform1i(m_scatter_uniforms.emit, GL_TRUE);
     glUniform2f(m_scatter_uniforms.wind_xz, m_wind_xz.x, m_wind_xz.y);
@@ -1852,6 +1878,7 @@ void FoliagePass::dispatch_scatter() {
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT |
                     GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
     Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, 0);
+    m_scatter_gpu_timers[2].end();
 }
 
 void FoliagePass::submit_foliage_readback() {
@@ -1932,7 +1959,19 @@ void FoliagePass::map_instances_for_frame() {
     m_draw_instance_limit = count;
 }
 
-std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera) {
+static_assert(std::is_same_v<GLboolean, unsigned char>);
+
+FoliagePass::CallerState FoliagePass::CallerState::QueryExternal() {
+    return {.cull_enabled = glIsEnabled(GL_CULL_FACE)};
+}
+
+std::size_t FoliagePass::execute_external(const RenderContext& ctx, const Camera& camera) {
+    LUMIN_PROFILE_ZONE_N("GL FoliagePass.execute_external");
+    return execute(ctx, camera, CallerState::QueryExternal());
+}
+
+std::size_t
+FoliagePass::execute(const RenderContext& ctx, const Camera& camera, const CallerState& caller) {
     LUMIN_PROFILE_ZONE_N("GL FoliagePass.execute");
     const auto saved_draws = m_last_draw_calls;
     const auto saved_time = m_last_draw_shader_time;
@@ -1990,7 +2029,7 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
     glDepthFunc(GL_GEQUAL);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    const GLboolean cull_was_enabled = glIsEnabled(GL_CULL_FACE);
+    const GLboolean cull_was_enabled = caller.cull_enabled;
     if (cull_was_enabled) {
         glDisable(GL_CULL_FACE); // two-sided cards
     }

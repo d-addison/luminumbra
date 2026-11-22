@@ -2264,7 +2264,7 @@ class HostedConfigurationContracts(unittest.TestCase):
             order.extend(arguments.split() if arguments else ["RmlUi"])
         self.assertEqual(order, ["freetype", "EnTT", "glm", "glfw", "glad", "nlohmann_json",
                                  "JoltPhysics", "RmlUi", "soil2", "miniaudio", "meshoptimizer",
-                                 "lua_upstream", "sol2", "spdlog", "imgui_src", "stb",
+                                 "luau", "spdlog", "imgui_src", "stb",
                                  "googletest", "lz4_upstream"])
         self.assertNotIn("BUILD_SHARED_LIBS", vendor + module)
 

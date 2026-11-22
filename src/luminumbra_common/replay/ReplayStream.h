@@ -43,12 +43,18 @@
 #include <vector>
 
 #include "../HashCheckpoint.h"
+#include "../core/IntegerPrimitives.h"
 #include "../world/AuthorityBootDescriptor.h"
 #include "RegionScheduleTrace.h"
 
 namespace Luminumbra::Persistence {
 class ReplayPairReadGuard;
 }
+
+namespace Luminumbra::world {
+class GameSession;
+struct WorldCalendar;
+} // namespace Luminumbra::world
 
 namespace Luminumbra::Replay {
 
@@ -120,6 +126,35 @@ struct ReplayHeader {
     std::optional<world::AuthorityBootDescriptor> authority_boot = std::nullopt;
     // Canonical WSC1, at most 856 bytes; present only in versions 7/8.
     std::string weather_schedule;
+};
+
+// Shared producer capture. Workload fields (rosters, anchor policy and parked
+// budget) come from the caller; effective simulation settings come from session.
+[[nodiscard]] world::AuthorityBootDescriptor
+CaptureReplayBoot(const world::GameSession& session,
+                  std::uint32_t seed,
+                  const world::WorldCalendar& calendar,
+                  world::AuthorityBootDescriptor workload = {});
+[[nodiscard]] ReplayHeader CaptureReplayHeader(const world::GameSession& session,
+                                               std::uint32_t surface_radius,
+                                               std::uint32_t collision_radius,
+                                               world::AuthorityBootDescriptor workload = {});
+
+// Establish refusal before attempting publication: own a failure companion or
+// retire the retained generation. Complete clears only this attempt's companion,
+// after payload publication. A failed precondition never attempts publication.
+class ReplayFinalization {
+public:
+    ReplayFinalization(const std::string& destination, const std::string& message);
+    ~ReplayFinalization();
+    ReplayFinalization(const ReplayFinalization&) = delete;
+    ReplayFinalization& operator=(const ReplayFinalization&) = delete;
+    [[nodiscard]] bool ready() const;
+    [[nodiscard]] bool Complete();
+
+private:
+    struct State;
+    std::unique_ptr<State> m_state;
 };
 
 // Playback admission, required in addition to start/checkpoint hashes.
@@ -227,15 +262,19 @@ private:
 // seed alone cannot reconstruct the suffix. Such an artifact is diagnostic only.
 // A whole-tick sink. Calls are serialized by QueuedReplayRecorder; implementations
 // may perform blocking I/O here, never in the simulation's enqueue operation.
+// Regional recording requires 29 additional private segment bytes per tick within
+// max_tick_bytes. Published replay bytes and elided-prefix digests exclude them.
 class ReplayTickSink {
 public:
     virtual ~ReplayTickSink() = default;
     virtual bool Configure(std::size_t max_tick_bytes, std::uint64_t unconfirmed_ticks) = 0;
-    virtual bool Open(const std::string& destination, const ReplayHeader& header) = 0;
+    virtual bool
+    Open(const std::string& destination, const ReplayHeader& header, bool regions = false) = 0;
     virtual bool RecordTick(std::uint64_t tick,
                             const std::vector<std::uint8_t>& inputs,
                             const std::array<std::string_view, 4>* hashes,
-                            std::uint64_t confirmed_tick) = 0;
+                            std::uint64_t confirmed_tick,
+                            std::string_view schedule_digest = {}) = 0;
     virtual bool Finalize(const std::string& destination,
                           std::uint64_t tick_count,
                           std::uint64_t divergence_tick) = 0;
@@ -267,11 +306,13 @@ public:
     // Checks the disk bound before any recording allocation: unconfirmed_ticks
     // * max_tick_bytes + three segments (a segment may hold one maximum tick).
     bool Configure(std::size_t max_tick_bytes, std::uint64_t unconfirmed_ticks) override;
-    bool Open(const std::string& destination, const ReplayHeader& header) override;
+    bool
+    Open(const std::string& destination, const ReplayHeader& header, bool regions = false) override;
     bool RecordTick(std::uint64_t tick,
                     const std::vector<std::uint8_t>& inputs,
                     const std::array<std::string_view, 4>* hashes,
-                    std::uint64_t confirmed_tick) override;
+                    std::uint64_t confirmed_tick,
+                    std::string_view schedule_digest = {}) override;
     bool Finalize(const std::string& destination,
                   std::uint64_t tick_count,
                   std::uint64_t divergence_tick) override;
@@ -303,6 +344,7 @@ private:
     // and returns false so Open can refuse in one statement.
     bool Refused(int formatted);
 
+    bool m_regions = false;
     ReplayHeader m_header;
     std::string m_directory;
     std::ofstream m_output;
@@ -310,9 +352,9 @@ private:
     std::size_t m_max_tick_bytes = 0;
     std::size_t m_byte_limit = 0;
     std::size_t m_bytes = 0;
-    std::uint64_t m_digest = 1469598103934665603ULL;
+    std::uint64_t m_digest = Core::kFnv1a64StandardBasis;
     std::uint64_t m_elided_tick = 0;
-    std::uint64_t m_elided_digest = 1469598103934665603ULL;
+    std::uint64_t m_elided_digest = Core::kFnv1a64StandardBasis;
     std::uint64_t m_last_tick = 0;
     std::array<char, kOpenRefusalBytes> m_open_refusal{};
     std::size_t m_open_refusal_length = 0;
@@ -323,8 +365,9 @@ private:
 // Outstanding work (including the active tick) is bounded by both 4096 ticks and
 // max(64 MiB, maximum encoded tick) bytes, plus fixed-size queue metadata. Full
 // queues latch failure without waiting: simulation never depends on disk progress.
-// Finalize drains accepted ticks and reports failure with a .incomplete companion
-// containing the first rejected/failed tick and reason. Close drains then removes
+// Finalize drains accepted ticks and establishes refusal with a .incomplete
+// companion containing the first rejected/failed tick and reason, or by retiring
+// the previous artifact if companion publication fails. Close drains then removes
 // working files; an in-sync shutdown does not publish an artifact.
 class QueuedReplayRecorder {
 public:
@@ -345,11 +388,12 @@ public:
     // limits. Zero bytes selects the default above; ticks must be in [1,4096].
     bool Configure(std::size_t max_tick_bytes, std::uint64_t unconfirmed_ticks);
     bool Configure(std::size_t max_tick_bytes, std::uint64_t unconfirmed_ticks, QueueLimits limits);
-    bool Open(const std::string& destination, const ReplayHeader& header);
+    bool Open(const std::string& destination, const ReplayHeader& header, bool regions = false);
     bool RecordTick(std::uint64_t tick,
                     std::shared_ptr<const std::vector<std::uint8_t>> inputs,
                     std::shared_ptr<const CheckpointRecord> checkpoint,
-                    std::uint64_t confirmed_tick);
+                    std::uint64_t confirmed_tick,
+                    std::string_view schedule_digest = {});
     // Explicit blocking lifecycle barrier, never called by the tick path.
     bool Flush();
     bool Finalize(const std::string& destination,

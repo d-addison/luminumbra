@@ -14,6 +14,7 @@
 #include <luminumbra/core/Types.h>
 
 #include "../world/PlayerAvatar.h"
+#include "AmbientContinuation.h"
 
 #include <array>
 #include <cstddef>
@@ -443,7 +444,12 @@ struct ControllerOwnerContinuation {
     Vec3 anchor{};
     World::PhysicsOwnerState state;
 };
+// Explicit saves retain at most 8192 resident IDs; check counts before allocation.
+inline constexpr std::size_t kOwnerContinuationResidentChunks = 8192;
 struct OwnerContinuation {
+    std::uint32_t version = 2;
+    std::vector<ChunkID> resident_chunks;
+    std::optional<Systems::AmbientContinuation> ambient;
     std::uint32_t world_seed = 0;
     std::string preset_identity;
     std::uint64_t simulation_tick = 0;

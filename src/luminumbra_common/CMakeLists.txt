@@ -81,16 +81,6 @@ elseif(MSVC)
     set_source_files_properties(world/GameSession.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
 endif()
 
-# LuaState.cpp is the one translation unit that includes sol2. GCC 15 diagnoses
-# an unused, ill-formed optional-reference member in sol2 3.3.0 while parsing
-# the template body. Confine that compiler-specific suppression to this file;
-# Clang treats the option itself as an error under -Werror.
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
-   CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
-    set_source_files_properties(scripting/LuaState.cpp PROPERTIES
-        COMPILE_OPTIONS "-Wno-template-body")
-endif()
-
 target_include_directories(luminumbra_common PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_SOURCE_DIR}/include"
@@ -104,13 +94,15 @@ target_link_libraries(luminumbra_common PUBLIC
     entt
     Jolt
     nlohmann_json
-    sol2
-    lua
+    Luau.VM
+    Luau.Compiler
     spdlog
     lz4
     glm
     FastNoise
 )
+
+target_link_libraries(luminumbra_common PUBLIC ${CMAKE_DL_LIBS})
 
 # the TcpTransport (net/LockstepSession.cpp) uses winsock2 under _WIN32; link
 # ws2_32 where (and only where) the platform needs it. The gates/tests drive

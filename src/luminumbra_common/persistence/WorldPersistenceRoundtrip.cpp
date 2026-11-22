@@ -1,6 +1,7 @@
 #include "WorldPersistenceRoundtrip.h"
 #include "../systems/PhysicsSystem.h"
 #include "../world/WorldClock.h"
+#include "AuthorityContributor.h"
 #include "SavedInputLimits.h"
 #include "SavedJsonAdmission.h"
 #include "WorldSaveEncoding.h"
@@ -144,6 +145,126 @@ bool ValidBodyDescriptor(const PhysicsOwnerContinuation& body) {
     }
     return position == AnchorBits(body.anchor);
 }
+std::uint32_t OwnerU32(const nlohmann::json& value) {
+    const auto word = OwnerUnsigned(value);
+    if (word > UINT32_MAX) {
+        throw std::invalid_argument("owner scalar bits");
+    }
+    return static_cast<std::uint32_t>(word);
+}
+float OwnerFloat(const nlohmann::json& value) {
+    const float result = std::bit_cast<float>(OwnerU32(value));
+    if (!std::isfinite(result)) {
+        throw std::invalid_argument("owner non-finite scalar");
+    }
+    return result;
+}
+nlohmann::json EncodeAmbient(const Systems::AmbientContinuation& state) {
+    const auto bits = [](float value) {
+        return std::bit_cast<std::uint32_t>(value);
+    };
+    nlohmann::json storms = nlohmann::json::array();
+    for (const auto& storm : state.storms) {
+        storms.push_back({bits(storm.center_world.x),
+                          bits(storm.center_world.y),
+                          bits(storm.velocity.x),
+                          bits(storm.velocity.y),
+                          bits(storm.intensity),
+                          storm.spawn_tick,
+                          storm.lifetime_ticks,
+                          storm.seed_salt});
+    }
+    nlohmann::json strikes = nlohmann::json::array();
+    for (const auto& strike : state.strikes) {
+        strikes.push_back({strike.strike_tick,
+                           bits(strike.world_x),
+                           bits(strike.world_z),
+                           bits(strike.magnitude),
+                           strike.storm_salt});
+    }
+    nlohmann::json wind = nlohmann::json::array();
+    for (const auto& perturbation : state.wind) {
+        wind.push_back({bits(perturbation.center_world.x),
+                        bits(perturbation.center_world.y),
+                        bits(perturbation.radius_m),
+                        bits(perturbation.velocity.x),
+                        bits(perturbation.velocity.y),
+                        bits(perturbation.intensity)});
+    }
+    return {{"tick", state.tick},
+            {"anchor", AnchorBits(state.anchor)},
+            {"constructor_state", state.constructor_state},
+            {"storms", std::move(storms)},
+            {"strikes", std::move(strikes)},
+            {"wind", std::move(wind)}};
+}
+Systems::AmbientContinuation ReadAmbient(const nlohmann::json& value) {
+    const auto& storms = value.at("storms");
+    const auto& strikes = value.at("strikes");
+    const auto& wind = value.at("wind");
+    // Admit each bounded vector before constructing its storage (16/32/16).
+    if (!storms.is_array() || storms.size() > Systems::kMaxStormCells || !strikes.is_array() ||
+        strikes.size() > Systems::kMaxLiveStrikes || !wind.is_array() ||
+        wind.size() > Systems::kMaxStormCells || !value.at("constructor_state").is_boolean()) {
+        throw std::invalid_argument("owner ambient bounds");
+    }
+    Systems::AmbientContinuation state;
+    state.tick = OwnerUnsigned(value.at("tick"));
+    state.anchor = ReadAnchor(value.at("anchor"));
+    state.constructor_state = value.at("constructor_state").get<bool>();
+    for (const auto& storm : storms) {
+        if (!storm.is_array() || storm.size() != 8) {
+            throw std::invalid_argument("owner storm layout");
+        }
+        state.storms.push_back({.center_world = {OwnerFloat(storm[0]), OwnerFloat(storm[1])},
+                                .velocity = {OwnerFloat(storm[2]), OwnerFloat(storm[3])},
+                                .intensity = OwnerFloat(storm[4]),
+                                .spawn_tick = OwnerUnsigned(storm[5]),
+                                .lifetime_ticks = OwnerU32(storm[6]),
+                                .seed_salt = OwnerU32(storm[7])});
+    }
+    for (const auto& strike : strikes) {
+        if (!strike.is_array() || strike.size() != 5) {
+            throw std::invalid_argument("owner strike layout");
+        }
+        state.strikes.push_back({.strike_tick = OwnerUnsigned(strike[0]),
+                                 .world_x = OwnerFloat(strike[1]),
+                                 .world_z = OwnerFloat(strike[2]),
+                                 .magnitude = OwnerFloat(strike[3]),
+                                 .storm_salt = OwnerU32(strike[4])});
+    }
+    for (const auto& perturbation : wind) {
+        if (!perturbation.is_array() || perturbation.size() != 6) {
+            throw std::invalid_argument("owner wind layout");
+        }
+        state.wind.push_back(
+            {.center_world = {OwnerFloat(perturbation[0]), OwnerFloat(perturbation[1])},
+             .radius_m = OwnerFloat(perturbation[2]),
+             .velocity = {OwnerFloat(perturbation[3]), OwnerFloat(perturbation[4])},
+             .intensity = OwnerFloat(perturbation[5])});
+    }
+    return state;
+}
+bool ValidContinuationExtension(const OwnerContinuation& record) {
+    if (record.version == 1) {
+        return record.resident_chunks.empty() && !record.ambient;
+    }
+    if (record.version != 2 || record.resident_chunks.size() > kOwnerContinuationResidentChunks ||
+        !std::is_sorted(record.resident_chunks.begin(), record.resident_chunks.end()) ||
+        std::adjacent_find(record.resident_chunks.begin(), record.resident_chunks.end()) !=
+            record.resident_chunks.end()) {
+        return false;
+    }
+    for (const auto& terrain : record.terrain) {
+        if (!std::binary_search(
+                record.resident_chunks.begin(), record.resident_chunks.end(), terrain.chunk_id)) {
+            return false;
+        }
+    }
+    return !record.ambient || (record.ambient->tick == record.simulation_tick &&
+                               ValidOwnerAnchor(record.ambient->anchor) &&
+                               Systems::ValidAmbientContinuation(*record.ambient));
+}
 bool ValidOwnerContinuation(const OwnerContinuation& record) {
     if (record.preset_identity.size() != 16 || !ValidOwnerAnchor(record.origin) ||
         !ValidOwnerAnchor(record.anchor) || record.stream_tick > world::WorldClock::kTickLimit ||
@@ -154,7 +275,8 @@ bool ValidOwnerContinuation(const OwnerContinuation& record) {
         record.slot_count > 10240 || record.free_slots.size() > record.slot_count ||
         record.simulation_terrain.bodies.size() >
             Systems::PhysicsSystem::kSimulationColliderBudget ||
-        record.simulation_terrain.columns.size() > record.simulation_terrain.bodies.size()) {
+        record.simulation_terrain.columns.size() > record.simulation_terrain.bodies.size() ||
+        !ValidContinuationExtension(record)) {
         return false;
     }
     if (!record.avatars.empty()) {
@@ -313,25 +435,31 @@ bool EncodeOwnerContinuation(const OwnerContinuation& record, std::string& bytes
             {"state",
              OwnerPayload(std::span(record.player->state.bytes).first(record.player->state.size))}};
     }
-    const nlohmann::json envelope = {{"version", 1u},
-                                     {"world_seed", record.world_seed},
-                                     {"preset_identity", record.preset_identity},
-                                     {"simulation_tick", record.simulation_tick},
-                                     {"stream_tick", record.stream_tick},
-                                     {"moving_anchor", record.moving_anchor},
-                                     {"water_smoke", record.water_smoke},
-                                     {"origin", AnchorBits(record.origin)},
-                                     {"anchor", AnchorBits(record.anchor)},
-                                     {"avatar_count", record.avatars.size()},
-                                     {"body_count", record.bodies.size()},
-                                     {"avatars", std::move(avatars)},
-                                     {"bodies", std::move(bodies)},
-                                     {"player", std::move(player)},
-                                     {"terrain", std::move(terrain)},
-                                     {"slot_count", record.slot_count},
-                                     {"free_slots", record.free_slots},
-                                     {"simulation_bodies", record.simulation_terrain.bodies},
-                                     {"simulation_columns", std::move(columns)}};
+    nlohmann::json envelope = {{"version", record.version},
+                               {"world_seed", record.world_seed},
+                               {"preset_identity", record.preset_identity},
+                               {"simulation_tick", record.simulation_tick},
+                               {"stream_tick", record.stream_tick},
+                               {"moving_anchor", record.moving_anchor},
+                               {"water_smoke", record.water_smoke},
+                               {"origin", AnchorBits(record.origin)},
+                               {"anchor", AnchorBits(record.anchor)},
+                               {"avatar_count", record.avatars.size()},
+                               {"body_count", record.bodies.size()},
+                               {"avatars", std::move(avatars)},
+                               {"bodies", std::move(bodies)},
+                               {"player", std::move(player)},
+                               {"terrain", std::move(terrain)},
+                               {"slot_count", record.slot_count},
+                               {"free_slots", record.free_slots},
+                               {"simulation_bodies", record.simulation_terrain.bodies},
+                               {"simulation_columns", std::move(columns)}};
+    if (record.version == 2) {
+        envelope["resident_count"] = record.resident_chunks.size();
+        envelope["resident_chunks"] = record.resident_chunks;
+        envelope["ambient"] =
+            record.ambient ? EncodeAmbient(*record.ambient) : nlohmann::json(nullptr);
+    }
     std::string candidate;
     const std::lock_guard construction(ChunkRecordSerializerConstructionMutex());
     if (!BoundedJsonDump(envelope, kOwnerContinuationRecordBytes, candidate)) {
@@ -348,7 +476,8 @@ bool DecodeOwnerContinuation(const std::string& bytes, OwnerContinuation& record
     }
     try {
         const auto json = nlohmann::json::parse(bytes);
-        if (OwnerUnsigned(json.at("version")) != 1 || !json.at("moving_anchor").is_boolean() ||
+        const auto version = OwnerUnsigned(json.at("version"));
+        if ((version != 1 && version != 2) || !json.at("moving_anchor").is_boolean() ||
             !json.at("water_smoke").is_boolean()) {
             return false;
         }
@@ -364,6 +493,22 @@ bool DecodeOwnerContinuation(const std::string& bytes, OwnerContinuation& record
             return false;
         }
         OwnerContinuation candidate;
+        candidate.version = static_cast<std::uint32_t>(version);
+        if (version == 2) {
+            const auto count = OwnerUnsigned(json.at("resident_count"));
+            const auto& residents = json.at("resident_chunks");
+            if (count > kOwnerContinuationResidentChunks || !residents.is_array() ||
+                count != residents.size()) {
+                return false;
+            }
+            candidate.resident_chunks.reserve(residents.size());
+            for (const auto& id : residents) {
+                candidate.resident_chunks.push_back(OwnerUnsigned(id));
+            }
+            if (!json.at("ambient").is_null()) {
+                candidate.ambient = ReadAmbient(json.at("ambient"));
+            }
+        }
         const auto seed = OwnerUnsigned(json.at("world_seed"));
         if (seed > UINT32_MAX || !json.at("preset_identity").is_string() ||
             json.at("preset_identity").get_ref<const std::string&>().size() != 16) {
@@ -2691,6 +2836,25 @@ std::string ComposeWorldHash(const std::string& chunk_hash,
     return StableChecksum(chunk_hash + "|wind:" + wind_hash + "|weather:" + weather_hash +
                           "|aether:" + aether_hash + "|scents:" + scent_hash +
                           "|ecology:" + ecology_hash + "|plants:" + plant_hash);
+}
+
+std::string ComposeWorldHash(const std::string& chunk_hash,
+                             const std::string& wind_hash,
+                             const std::string& weather_hash,
+                             const std::string& aether_hash,
+                             const std::string& scent_hash,
+                             const std::string& ecology_hash,
+                             const std::string& plant_hash,
+                             const AuthorityContributorRegistry& contributors) {
+    const auto suffix = contributors.SerializeCanonicalState();
+    if (suffix.empty()) {
+        return ComposeWorldHash(
+            chunk_hash, wind_hash, weather_hash, aether_hash, scent_hash, ecology_hash, plant_hash);
+    }
+    return Checksum(chunk_hash + "|wind:" + wind_hash + "|weather:" + weather_hash +
+                        "|aether:" + aether_hash + "|scents:" + scent_hash +
+                        "|ecology:" + ecology_hash + "|plants:" + plant_hash,
+                    suffix);
 }
 
 std::string StableChecksum(const std::string& canonical_text) {

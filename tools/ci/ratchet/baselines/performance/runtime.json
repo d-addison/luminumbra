@@ -1,0 +1,669 @@
+{
+  "entries": [
+    {
+      "construct": "glGetUniformLocation ( m_inject_program , \"u_densityFalloff\" )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/FroxelPass.cpp",
+      "key": "00d8a8405803953791f20b6671fb2b23eab4d2e9b7ac62aab2622cf15deeeb98",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_STENCIL_FAIL , & glstate_backup . stencil_front . fail )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "018a16822f12ca99254c5e21090b03a6fcaf3f1ccd089dcf9d16fd367df1e431",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glIsEnabled ( GL_BLEND )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "019c368353a44ea7550de78dbe6264d1d994f8144a659a1797f7bb697752a5c1",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetNamedFramebufferAttachmentParameteriv ( ctx . lit_scene . id , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE , & attachment_type )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/SkyboxPass.cpp",
+      "key": "04780f84d1f54f81c8eb40dfa13c2e4d9afb9dfd4aab4f912ad285c84da4612a",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::SkyboxPass::execute_weather_overlay( const RenderContext & ctx , const Camera & camera , const glm :: mat4 & projection )"
+    },
+    {
+      "construct": "glGetNamedFramebufferAttachmentParameteriv ( ctx . lit_scene . id , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE , & attachment_type )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/WaterfallPass.cpp",
+      "key": "048d2aaafb56269c99cfa27d557065a641285ae4e2ce89823da96488277c4ca7",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::WaterfallPass::execute( const RenderContext & ctx )"
+    },
+    {
+      "construct": "glGetQueryObjectui64v ( read_slot . begin_queries [ pass ] , GL_QUERY_RESULT , & begin_ns )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/RenderPipeline.cpp",
+      "key": "0556c461ed437306cdf63795a633e4ebc2750529c0391d9c5e2c74260387e2f6",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::RenderPipeline::collect_gpu_pass_timers( )"
+    },
+    {
+      "construct": "glGetUniformLocation ( m_inject_program , \"u_cascadeSplits\" )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/FroxelPass.cpp",
+      "key": "09bdba3162224987bf92074214be61fe16bc92e5d735305e23ee694537fe5be5",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_READ_FRAMEBUFFER_BINDING , & previous_read_fbo )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/GBufferPass.cpp",
+      "key": "0f5af3b095c65b8dbff1f00407f68eb98990f3669c01c7766fb8dfdff1750e22",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::GBufferPass::execute( const RenderContext & ctx , entt :: registry & registry , const GBufferPassInput & input )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_STENCIL_BACK_FUNC , & glstate_backup . stencil_back . func )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "131b12ddf6b39753c64ac933fb77531564c31c2b3ee3d1858f7696750bc3f0c4",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glIsEnabled ( GL_DEPTH_TEST )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/WaterfallPass.cpp",
+      "key": "183decf970c199f62ccf2c93bc6edee696dba4b8331890335be2ed3fbf4f7ea4",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::WaterfallPass::execute( const RenderContext & ctx )"
+    },
+    {
+      "construct": "glGetUniformLocation ( m_inject_program , \"u_shadowCascades\" )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/FroxelPass.cpp",
+      "key": "1a7015c3a3538d94cf2f4ad18995f844905939fae87b192e87fe2ef7530605c8",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_STENCIL_BACK_REF , & glstate_backup . stencil_back . ref )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "1a7e4f6e10bf1a444ab475c58210fd8a3ed09806aa28a1edd4c9295a5faff574",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_BLEND_EQUATION_RGB , & glstate_backup . blend_equation_rgb )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "1d5f504ec1cfd02fbff50847d234706277430b9da4bc610b161063cb281ce752",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glIsEnabled ( GL_BLEND )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/GodRaysPass.cpp",
+      "key": "1ec2d5ef52ef5744228d39e38df0e4cd88957e5ce13169fc3c71e26e14b36c1b",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::GodRaysPass::execute( const RenderContext & ctx )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_BLEND_DST_RGB , & glstate_backup . blend_dst_rgb )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "1f684fe15d42e8a2bbf420d94254e4688b17d8af281175507d702cb0606134d3",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetUniformLocation ( m_inject_program , \"u_baseDensity\" )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/FroxelPass.cpp",
+      "key": "1fb2058fcc1fc018ea9ac12b675f7159481021bf58a242665a2fbb96cd60bd89",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
+    },
+    {
+      "construct": "RunWorkerBoundary ( m_job_system , \"committed-chunk-read\" , [ & ] { chunk = m_durable_chunk_loader ( coords ) ; if ( ! chunk || chunk -> get_id ( ) != Chunk :: calculate_id ( coords ) || chunk -> get_coords ( ) != coords || ( chunk -> sdf_data . empty ( ) && chunk -> heightmap_data . empty ( ) && ! ( coords . y == 0 && chunk -> has_water_authority ( ) && Persistence :: HasValidWaterColumnState ( * chunk ) ) ) ) throw std :: runtime_error ( \"expected durable chunk is missing, empty or has wrong identity\" ) ; if ( prepare_water ) { chunk -> stage_water_seed_inputs ( { } ) ; const auto scope = acquire_worldgen_sample_scope ( ) ; if ( const auto inputs = request_water_seed_inputs ( * chunk ) ) { ComputeHighWaterSeedInputs ( * inputs , coords , * this ) ; } } } )",
+      "count": 1,
+      "file": "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+      "key": "207e7d0e0378d7fc2c9a19c8d27ca5856cb01c0e5dc01b942ded00b2daa14d8f",
+      "rule": "owner-blocking-wait",
+      "symbol": "Luminumbra::Systems::SHIELD_WorldSystem::read_committed_chunk( const IVec3 & coords , bool prepare_water )const"
+    },
+    {
+      "construct": "glIsEnabled ( GL_STENCIL_TEST )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "2424fb71c2c77508c94f6fff816820a746c8a8af1fd734cbb2314b68deb349a7",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glIsEnabled ( GL_BLEND )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/RenderPipeline.cpp",
+      "key": "284323554ca987edc29714ca8ab1e300dd3ec87956306e503aba5fb3688ac868",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::RenderPipeline::execute_stage_skybox( const Camera & camera )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_STENCIL_REF , & glstate_backup . stencil_front . ref )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "3058eae06524a1278cffe8ad4e9379140041512e159e1ab0bf69a7afec67e721",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_DRAW_FRAMEBUFFER_BINDING , & framebuffer )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/GroundDecalPass.cpp",
+      "key": "312e260076679c36e37af5faed7211d20b2b54b533a585cd42cf74bb2638837c",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::GroundDecalPass::execute( const RenderContext & ctx )"
+    },
+    {
+      "construct": "glIsEnabled ( GL_CULL_FACE )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/ParticlePass.cpp",
+      "key": "318e3f84c5313e48c424dc91d8d6d2c55f24d7c09a5ed9561571ab8964a752ff",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::ParticlePass::execute( const RenderContext & ctx , const Camera & camera )"
+    },
+    {
+      "construct": "glGetFloatv ( GL_COLOR_CLEAR_VALUE , glstate_backup . color_clear_value )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "3834bf11d4361e38ff49728a3f07404b2906aabf3358f4c18cdffa8487e4a499",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "RunWorkerBoundary ( m_jobSystem , \"world-save\" , [ & ] { saved = save ( ) ; } )",
+      "count": 1,
+      "file": "src/luminumbra_common/world/GameSession.cpp",
+      "key": "38975658e510976755f4b387a54fd2b8ba2f65d94e680e1753d3fae523bb6588",
+      "rule": "owner-blocking-wait",
+      "symbol": "Luminumbra::world::GameSession::SaveWorldStateToImpl( const std :: filesystem :: path & save_dir , WorldStateSaveReport * report , bool full_snapshot , bool write_metadata )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_STENCIL_PASS_DEPTH_FAIL , & glstate_backup . stencil_front . pass_depth_fail )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "3c5eb91f2cdc019c02e9c2986f481fafe3f91bffab621fb7e54f8c8bb1604b05",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_VERTEX_ARRAY_BINDING , & previous_vao )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/GBufferPass.cpp",
+      "key": "473ad6f68d211d07fb8db38f9af35e3474c1cb46182c6410d6212f1132ad0252",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::GBufferPass::execute( const RenderContext & ctx , entt :: registry & registry , const GBufferPassInput & input )"
+    },
+    {
+      "construct": "glGetUniformLocation ( m_inject_program , \"u_baseHeight\" )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/FroxelPass.cpp",
+      "key": "4c86b4e59256a6d59e8814ef69cb80ac87100ce2142c9c7c8a99006e41f52bc7",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
+    },
+    {
+      "construct": "glGetBooleanv ( GL_COLOR_WRITEMASK , glstate_backup . color_writemask )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "50430f23f46099e7928e721d778dcbb00d4584c1673660d461fb2bc662c19dd1",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_STENCIL_WRITEMASK , & glstate_backup . stencil_front . writemask )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "50915427b9bc31781509df52fc6e7246c1b072e053ccde8d2b89cc47917102fa",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetQueryObjectiv ( read_slot . end_queries [ pass ] , GL_QUERY_RESULT_AVAILABLE , & end_available )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/RenderPipeline.cpp",
+      "key": "513534249d21c4053328acf18b461e8fa740bb14dfb98ac02754aef401d9a4c2",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::RenderPipeline::collect_gpu_pass_timers( )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_STENCIL_BACK_FAIL , & glstate_backup . stencil_back . fail )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "538e00e60a1a7fb39ad9f247a9067684438aa9ff8b45bc3c8fcada40588f0be4",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glIsEnabled ( GL_CULL_FACE )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/GBufferPass.cpp",
+      "key": "54f34b2a988d02ce89d98eaf0a51bf4907bfc38f9f688f7ecd8e3a6f6424b926",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::GBufferPass::execute( const RenderContext & ctx , entt :: registry & registry , const GBufferPassInput & input )"
+    },
+    {
+      "construct": "glGetNamedFramebufferAttachmentParameteriv ( ctx . lit_scene . id , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE , & attachment_type )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/ParticlePass.cpp",
+      "key": "60db6ffab80c92e619c1ff9de0cf960913dbbc4fa02a6ec63a22dc049c4b63b6",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::ParticlePass::execute( const RenderContext & ctx , const Camera & camera )"
+    },
+    {
+      "construct": "glGetTexParameteriv ( GL_TEXTURE_3D , GL_TEXTURE_IMMUTABLE_FORMAT , & immutable )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/FroxelPass.cpp",
+      "key": "64037e5b56f7ff5637630ea355657b018951797a986bc2e887b46be55a0ee772",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
+    },
+    {
+      "construct": "glIsEnabled ( GL_SCISSOR_TEST )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "68ca6c25fc177b2a31909b0b1e3216ec59646d969478bf7f82d9b68cc4f58d6e",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetFramebufferAttachmentParameteriv ( GL_DRAW_FRAMEBUFFER , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME , & position_texture )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/PlantProcgenPass.cpp",
+      "key": "6b7c85936beba40209f59229e0ab03d79ba9abae520b8efdb97f91bb46ee6a70",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::PlantProcgenPass::execute( const RenderContext & ctx , const Camera & camera )"
+    },
+    {
+      "construct": "glGetUniformLocation ( m_inject_program , \"u_cameraPos\" )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/FroxelPass.cpp",
+      "key": "6c440a64ad33a2389034938d8b9f226526e92cf7b471e59cd699aff5a63fef80",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_STENCIL_VALUE_MASK , & glstate_backup . stencil_front . value_mask )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "6cd1b056de74448b170d486efb79ab0212d1200665d4650c9a2acb9a1fc157c2",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_SCISSOR_BOX , glstate_backup . scissor )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "6f8dee567c3ec6d16c7cce5f5891bf7c30a9ae885f4b0cf1d1f1d6de72e6ac29",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetUniformLocation ( m_inject_program , name . c_str ( ) )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/FroxelPass.cpp",
+      "key": "725fdc6bf3a9590f2034bcb86e97ff2d49b5f5a3607c34fcf14686f229ed5ae8",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
+    },
+    {
+      "construct": "glIsEnabled ( GL_BLEND )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/WaterfallPass.cpp",
+      "key": "7e720c05946d81844bb35cc575cdd6923fed96443acfe205dbea18aadfb9a7f9",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::WaterfallPass::execute( const RenderContext & ctx )"
+    },
+    {
+      "construct": "glGetUniformLocation ( m_inject_program , \"u_inverseView\" )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/FroxelPass.cpp",
+      "key": "87561e4d11fcd41f4562acc60ac704f42f2d6d14799045552a70ef5b6191da6c",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
+    },
+    {
+      "construct": "glGetNamedFramebufferAttachmentParameteriv ( ctx . lit_scene . id , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME , & color_texture )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/WaterfallPass.cpp",
+      "key": "8cbd9f716a03081277e0558eff647abab12c7e5f87fa8e112a56941ee4a72c75",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::WaterfallPass::execute( const RenderContext & ctx )"
+    },
+    {
+      "construct": "glGetUniformLocation ( m_inject_program , \"u_shadowTintCascades\" )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/FroxelPass.cpp",
+      "key": "8d4e19fd404ae34e05dfe8803e297ebc838ced5143a70851d52cc724796f35bd",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_VIEWPORT , glstate_backup . viewport )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "964d7d2be26c4bfd621dd20f9a90b8da0d7640b4818bb29697b2c56d2b47866c",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetUniformLocation ( m_inject_program , \"u_ambientColor\" )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/FroxelPass.cpp",
+      "key": "9697d54c7b77e2c40374a6dc3b0ae6d0e2478b242422ca869ebdaf25eff40ae1",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
+    },
+    {
+      "construct": "glIsEnabled ( GL_POLYGON_OFFSET_FILL )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/WaterfallPass.cpp",
+      "key": "9a1c4762b2f247a1e865bc2d68f4c283e860716570b9007631697e134928f877",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::WaterfallPass::execute( const RenderContext & ctx )"
+    },
+    {
+      "construct": "glGetNamedFramebufferAttachmentParameteriv ( ctx . lit_scene . id , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE , & attachment_type )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/WaterPass.cpp",
+      "key": "9d6d849d9dca7bd1434c8a371165d91892869b7ab541081a8694ffe9cb656f54",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::WaterPass::execute( const RenderContext & ctx , const WaterPassInput & input , const Camera & camera , bool capture_visibility_requested )"
+    },
+    {
+      "construct": "glGetQueryObjectui64v ( read_slot . end_queries [ pass ] , GL_QUERY_RESULT , & end_ns )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/RenderPipeline.cpp",
+      "key": "a0168fb695f66a1ac1933104d8d4467bcce088b264bc31b3eb0bc4c224c089e4",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::RenderPipeline::collect_gpu_pass_timers( )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_STENCIL_CLEAR_VALUE , & glstate_backup . stencil_clear_value )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "a40d9ff773ae63f7256222a23b44be3e974f8a9015661f5f5f59b0e5c98f409b",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_DRAW_FRAMEBUFFER_BINDING , & previous_draw_fbo )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/GBufferPass.cpp",
+      "key": "ab1ba26e6f2f48cc9d57ead1c9b414fffcd0a87b4a590657ac725d73a4def078",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::GBufferPass::execute( const RenderContext & ctx , entt :: registry & registry , const GBufferPassInput & input )"
+    },
+    {
+      "construct": "glIsEnabled ( GL_DEPTH_TEST )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/TaauPass.cpp",
+      "key": "adccf82291a1b1cbaa041598cc6d50f58fe822b9ab2437416e23454159be5e7e",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::TaauPass::execute( const RenderContext & ctx , const TaauHistoryState * frozen )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_DRAW_FRAMEBUFFER_BINDING , & framebuffer )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/PlantProcgenPass.cpp",
+      "key": "b3224c0a4b570b2be401515b44d5fcc164c66650eee0d05e596372f5e4b1f747",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::PlantProcgenPass::execute( const RenderContext & ctx , const Camera & camera )"
+    },
+    {
+      "construct": "glIsEnabled ( GL_DEPTH_TEST )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/GodRaysPass.cpp",
+      "key": "b5e45f4c06372e07ad56e1cc99d33f3c94a076884fdc98f611b7312756022fb6",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::GodRaysPass::execute( const RenderContext & ctx )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_BLEND_DST_ALPHA , & glstate_backup . blend_dst_alpha )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "b82254c714cc1bccaa13baa9b7dde0d03292c9dd12fb235c24137d1485f166fd",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetUniformLocation ( m_inject_program , \"u_sunColor\" )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/FroxelPass.cpp",
+      "key": "b8aaa05b51a2dae70b92f6f9056a7d74c1edc40131d8934d62052d991ec36943",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
+    },
+    {
+      "construct": "glIsEnabled ( GL_DEPTH_TEST )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "bfd0ab8c20f61e604d6936b2fae7867e8e62493fae3fa8ff1010580c852fe56d",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glIsEnabled ( GL_BLEND )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/AerialPass.cpp",
+      "key": "c0e44648e22ce443e1a4eb070637ffa40822528968a5fb2949ce40fc83eace0f",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::AerialPass::execute( const RenderContext & ctx )"
+    },
+    {
+      "construct": "RunWorkerBoundary ( m_jobSystem , \"region-freeze-digest\" , [ & ] { if ( ! digest_operation ) { digest_operation . emplace ( directory , m_regionRequiresIndex ) ; } digest = digest_operation -> digest ( key , inputs ) ; } )",
+      "count": 1,
+      "file": "src/luminumbra_common/world/GameSession.cpp",
+      "key": "c1713a48913aa0ab9d707a2bfcee7aa0d61f020d7dc1222c8e2e901afef39b52",
+      "rule": "owner-blocking-wait",
+      "symbol": "Luminumbra::world::GameSession::RunRegionScheduler( std :: uint64_t current_tick )"
+    },
+    {
+      "construct": "glGetNamedFramebufferAttachmentParameteriv ( ctx . lit_scene . id , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME , & color_texture )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/WaterPass.cpp",
+      "key": "c53a7ac2bed9070c86c647325d0e8c1efdbb69139ab353c9123964c39883e6d0",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::WaterPass::execute( const RenderContext & ctx , const WaterPassInput & input , const Camera & camera , bool capture_visibility_requested )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_POLYGON_MODE , polygon_mode . data ( ) )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/DebugViewPass.cpp",
+      "key": "cb8e44c63e7753d29b485da107f886a2d5ab30214ddaa0415b626a87a0a39a3f",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::DebugViewPass::execute( const RenderContext & ctx )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_BLEND_SRC_ALPHA , & glstate_backup . blend_src_alpha )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "cc62a7e59c2acc1feeaabbe0a3c2c79e50061b670dd7afacd940a30e6be2bf81",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glIsEnabled ( GL_CULL_FACE )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/WaterfallPass.cpp",
+      "key": "d0a8dce122e9bc84aedc7802d17a81c3f41f18f519079000928bbec82841f27a",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::WaterfallPass::execute( const RenderContext & ctx )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_STENCIL_BACK_PASS_DEPTH_FAIL , & glstate_backup . stencil_back . pass_depth_fail )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "d659430eb7573823600bc0b4e873693cb79de9ecbce6b033c9fb111fa8390f33",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_STENCIL_FUNC , & glstate_backup . stencil_front . func )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "d898bc6767e1ea09885daa11a0ecceb0efbf09a5a05433df07b7a8c344eebe00",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_BLEND_EQUATION_ALPHA , & glstate_backup . blend_equation_alpha )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "de57d8945ed3e11ccb4f3ed5b055ccac53d7626ddc273ffff2ed4402358eaa70",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetNamedFramebufferAttachmentParameteriv ( ctx . lit_scene . id , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME , & color_texture )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/SkyboxPass.cpp",
+      "key": "dea9ab9c1e07f115610d636b663e92ac4fd6e2b9cdcd2295571145bc9e2a4026",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::SkyboxPass::execute_weather_overlay( const RenderContext & ctx , const Camera & camera , const glm :: mat4 & projection )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_STENCIL_BACK_VALUE_MASK , & glstate_backup . stencil_back . value_mask )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "df777a98fd5218b1708801b90d280572141b84acd0919f2d581dec232b190cc1",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_ACTIVE_TEXTURE , & glstate_backup . active_texture )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "e199ef4e3f7501a5af8bdae8d9f7bac37ce22c7680738eb9cf87d25dc0b7b05e",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetNamedFramebufferAttachmentParameteriv ( ctx . lit_scene . id , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME , & color_texture )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/ParticlePass.cpp",
+      "key": "e1ff01a3a5a3060d61453dc1245bdb87248641ac0c4f712eb91d7337a4841acd",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::ParticlePass::execute( const RenderContext & ctx , const Camera & camera )"
+    },
+    {
+      "construct": "glIsEnabled ( GL_CULL_FACE )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "e2d70a4f033b7f3e81b1d0484158aa57d786d36a9ec56115eb7be7b8789d159f",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetUniformLocation ( m_inject_program , \"u_sunDirection\" )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/FroxelPass.cpp",
+      "key": "e4403c47b838bc47a0f617d40087aac8ff6cdcb87e966421d306d2eff458a1ac",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_BLEND_SRC_RGB , & glstate_backup . blend_src_rgb )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "e4f06932705275ad3f24a84d63bffde3895fd2128575b9a2b3c64c04f0d52781",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_STENCIL_PASS_DEPTH_PASS , & glstate_backup . stencil_front . pass_depth_pass )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "e508eedc19a93ee1d6f89e74c42d71d830790147645c9f5775523f130108322c",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetQueryObjectiv ( read_slot . begin_queries [ pass ] , GL_QUERY_RESULT_AVAILABLE , & begin_available )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/RenderPipeline.cpp",
+      "key": "e779fdfb94a8d86606bfe87fe415d6c5122efa9199a5248cb80412fcc5691626",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::RenderPipeline::collect_gpu_pass_timers( )"
+    },
+    {
+      "construct": "glIsEnabled ( GL_DEPTH_TEST )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/AerialPass.cpp",
+      "key": "e864fc90681f05d13a2e831b066968c4c54b4829ae7be49ea9975259f3902e6b",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::AerialPass::execute( const RenderContext & ctx )"
+    },
+    {
+      "construct": "glGetUniformLocation ( m_reduce_program , \"u_scene\" )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/LuminanceMeterPass.cpp",
+      "key": "e9201f85d4da7a8509f4f1dc2b19679cc406944a4cc5905dd68355f7e6f19387",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::LuminanceMeterPass::execute( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_STENCIL_BACK_WRITEMASK , & glstate_backup . stencil_back . writemask )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "ef3f94a247d8cb9a26f0fcdf14db0c3994613bba0f99333b4b0dc18cf0f3f11e",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetUniformLocation ( m_inject_program , \"u_aspect\" )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/FroxelPass.cpp",
+      "key": "f287e1ca9d3d2e8fcca3e6bb480e23dd31a7a5b3634284e0c5e348e0d037275c",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
+    },
+    {
+      "construct": "glGetIntegerv ( GL_STENCIL_BACK_PASS_DEPTH_PASS , & glstate_backup . stencil_back . pass_depth_pass )",
+      "count": 1,
+      "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
+      "key": "f57e9fbbf89d4648fa01cabe78a06f760e623f910ae8044c973012e2f1e20258",
+      "rule": "hot-gl-query",
+      "symbol": "RenderInterface_GL3::BeginFrame( )"
+    },
+    {
+      "construct": "glGetUniformLocation ( m_inject_program , \"u_tanHalfFovY\" )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/FroxelPass.cpp",
+      "key": "fa11b64c5ae35d6cc41d4c86292ed85a512e4be409f54b20811a468768853bcb",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
+    },
+    {
+      "construct": "glGetUniformLocation ( m_inject_program , \"u_shadowTintEnabled\" )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/FroxelPass.cpp",
+      "key": "fd916df003c2901922262119485b9b0f6aee7d60dfc024e2f3876ebf63a10969",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
+    },
+    {
+      "construct": "glIsEnabled ( GL_BLEND )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/TaauPass.cpp",
+      "key": "fef4903a8fa4fe1023ac9fd6a787ed610deb2b9109b66453454615bb820301b7",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::TaauPass::execute( const RenderContext & ctx , const TaauHistoryState * frozen )"
+    }
+  ],
+  "schema": 1
+}

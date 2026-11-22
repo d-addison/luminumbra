@@ -44,8 +44,6 @@ target_link_libraries(luminumbra_client PUBLIC
     spdlog
     glm
     nlohmann_json
-    sol2
-    lua
     imgui
     stb_headers
 )
@@ -100,32 +98,34 @@ target_link_libraries(luminumbra_server_app PRIVATE
 luminumbra_configure_first_party_target(luminumbra_server_app)
 
 # --- Client Executables ---
-# Two binaries share the main_client.cpp entry TU:
-#   luminumbra_client_app     - the shipping interactive client. Links ONLY
-#                               luminumbra_client (no QA harness in the image);
-#                               `--scenario` exits with the documented
-#                               availability error (exit code 6).
-#   luminumbra_client_qa_app  - the QA/gate binary. Compiles the same TU with
-#                               LUMINUMBRA_QA_RUNNER=1 (enables the
-#                               CreateScenarioRunner call) and links the
-#                               harness. tools/gates scenario runs target this.
-add_executable(luminumbra_client_app
+# Compile the main body once. Each executable keeps the baseline startup wrapper
+# and selects scenario availability through its linked factory implementation.
+add_library(luminumbra_client_main OBJECT
     ${CLIENT_APP_SOURCES}
+)
+target_link_libraries(luminumbra_client_main PUBLIC luminumbra_client)
+
+# Shipping links the unavailable factory; QA links the scenario harness factory.
+add_library(luminumbra_client_shipping STATIC
+    ${CLIENT_SHIPPING_SOURCES}
+)
+target_link_libraries(luminumbra_client_shipping PUBLIC luminumbra_client)
+
+add_executable(luminumbra_client_app
+    ${CLIENT_ENTRY_SOURCES}
 )
 
 target_link_libraries(luminumbra_client_app PRIVATE
-    luminumbra_client
+    luminumbra_client_main
+    luminumbra_client_shipping
 )
 
 add_executable(luminumbra_client_qa_app
-    ${CLIENT_APP_SOURCES}
-)
-
-target_compile_definitions(luminumbra_client_qa_app PRIVATE
-    LUMINUMBRA_QA_RUNNER=1
+    ${CLIENT_ENTRY_SOURCES}
 )
 
 target_link_libraries(luminumbra_client_qa_app PRIVATE
+    luminumbra_client_main
     luminumbra_client_qa
     luminumbra_client
 )

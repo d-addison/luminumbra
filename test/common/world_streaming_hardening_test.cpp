@@ -51,6 +51,7 @@
 #include <cstring>
 #include <filesystem>
 #include <future>
+#include <latch>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -914,6 +915,175 @@ TEST(StreamingHardening, DurableActivationRetainsFourUpdateCadenceFromStartup) {
     }
 }
 
+TEST(StreamingHardening, WorkerBoundaryCompletesWithEveryCpuWorkerBlocked) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(2);
+    std::latch started(2);
+    std::latch release(1);
+    std::atomic<int> cpu_completed{0};
+    const auto block_cpu = [&] {
+        started.count_down();
+        release.wait();
+        ++cpu_completed;
+    };
+    jobs.dispatch(block_cpu, Luminumbra::JobPriority::High);
+    jobs.dispatch(block_cpu, Luminumbra::JobPriority::Normal);
+    started.wait();
+    bool ran = false;
+    Luminumbra::RunWorkerBoundary(&jobs, "saturated-cpu-read", [&] {
+        EXPECT_TRUE(jobs.io_executor().is_current_worker());
+        EXPECT_FALSE(jobs.is_current_worker());
+        EXPECT_EQ(cpu_completed.load(), 0);
+        ran = true;
+    });
+    EXPECT_TRUE(ran);
+    EXPECT_EQ(cpu_completed.load(), 0);
+    release.count_down();
+    jobs.shutdown();
+    EXPECT_EQ(cpu_completed.load(), 2);
+}
+
+TEST(StreamingHardening, IoExecutorBoundsAdmissionDrainsAndRestarts) {
+    for (const std::uint64_t seed : {0u, 17u}) {
+        SCOPED_TRACE(seed);
+        Luminumbra::IoExecutor executor;
+        const auto increment = +[](void* payload) {
+            ++*static_cast<std::atomic<int>*>(payload);
+        };
+        auto count = std::make_shared<std::atomic<int>>(0);
+        EXPECT_FALSE(executor.dispatch(increment, count, "stopped"));
+        EXPECT_FALSE(executor.try_dispatch(increment, count, "stopped"));
+        executor.shutdown();
+        executor.startup(seed);
+        executor.startup(seed);
+        EXPECT_FALSE(executor.is_current_worker());
+        EXPECT_FALSE(executor.dispatch(nullptr, {}, "invalid"));
+        EXPECT_FALSE(executor.try_dispatch(nullptr, {}, "invalid"));
+        struct Blockers {
+            std::latch started{Luminumbra::IoExecutor::kWorkerCount};
+            std::latch release{1};
+        };
+        const auto blockers = std::make_shared<Blockers>();
+        for (std::size_t index = 0; index < Luminumbra::IoExecutor::kWorkerCount; ++index) {
+            ASSERT_TRUE(executor.try_dispatch(
+                +[](void* payload) {
+                    auto& state = *static_cast<Blockers*>(payload);
+                    state.started.count_down();
+                    state.release.wait();
+                },
+                blockers,
+                "block-io"));
+        }
+        blockers->started.wait();
+        for (std::size_t index = 0; index < Luminumbra::IoExecutor::kQueueCapacity; ++index) {
+            EXPECT_TRUE(executor.try_dispatch(increment, count, "queued"));
+        }
+        EXPECT_FALSE(executor.try_dispatch(increment, count, "full"));
+        EXPECT_EQ(count->load(), 0);
+        std::promise<void> submitting;
+        auto submitted = submitting.get_future();
+        std::thread sender([&] {
+            submitting.set_value();
+            EXPECT_TRUE(executor.dispatch(increment, count, "backpressure"));
+        });
+        submitted.get();
+        blockers->release.count_down();
+        sender.join();
+        executor.shutdown();
+        EXPECT_EQ(count->load(), static_cast<int>(Luminumbra::IoExecutor::kQueueCapacity + 1));
+        EXPECT_FALSE(executor.dispatch(increment, count, "closed"));
+        EXPECT_FALSE(executor.try_dispatch(increment, count, "closed"));
+        const std::weak_ptr<std::atomic<int>> released = count;
+        count.reset();
+        EXPECT_TRUE(released.expired());
+        executor.startup(seed);
+        auto restarted = std::make_shared<std::atomic<int>>(0);
+        EXPECT_TRUE(
+            executor.dispatch(+[](void*) { throw std::runtime_error("storage"); }, {}, "throwing"));
+        EXPECT_TRUE(executor.dispatch(+[](void*) { throw 1; }, {}, "unknown-exception"));
+        EXPECT_TRUE(executor.dispatch(increment, restarted, "restarted"));
+        executor.shutdown();
+        EXPECT_EQ(restarted->load(), 1);
+    }
+}
+
+TEST(StreamingHardening, IoExecutorShutdownRefusesBlockedSubmittersAndDrainsAcceptedWork) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    auto& executor = jobs.io_executor();
+    struct Blockers {
+        explicit Blockers(Luminumbra::JobSystem& pool)
+            : jobs(pool) {}
+        Luminumbra::JobSystem& jobs;
+        std::latch started{Luminumbra::IoExecutor::kWorkerCount};
+        std::latch release{1};
+        std::atomic<int> nested_completed{0};
+    };
+    const auto blockers = std::make_shared<Blockers>(jobs);
+    for (std::size_t index = 0; index < Luminumbra::IoExecutor::kWorkerCount; ++index) {
+        ASSERT_TRUE(executor.try_dispatch(
+            +[](void* payload) {
+                auto& state = *static_cast<Blockers*>(payload);
+                state.started.count_down();
+                state.release.wait();
+                const auto worker = std::this_thread::get_id();
+                Luminumbra::RunWorkerBoundary(&state.jobs, "draining-inline", [&] {
+                    EXPECT_EQ(std::this_thread::get_id(), worker);
+                    ++state.nested_completed;
+                });
+            },
+            blockers,
+            "drain-blocker"));
+    }
+    blockers->started.wait();
+    auto count = std::make_shared<std::atomic<int>>(0);
+    const auto increment = +[](void* payload) {
+        ++*static_cast<std::atomic<int>*>(payload);
+    };
+    for (std::size_t index = 0; index < Luminumbra::IoExecutor::kQueueCapacity; ++index) {
+        EXPECT_TRUE(executor.try_dispatch(increment, count, "accepted"));
+    }
+    std::promise<bool> admission;
+    auto admitted = admission.get_future();
+    std::thread sender(
+        [&] { admission.set_value(executor.dispatch(increment, count, "closed-backpressure")); });
+    std::thread closer([&] { jobs.shutdown(); });
+    // With both workers held and the queue full, only closure can wake admission.
+    EXPECT_FALSE(admitted.get());
+    EXPECT_EQ(count->load(), 0);
+    blockers->release.count_down();
+    sender.join();
+    closer.join();
+    EXPECT_EQ(count->load(), static_cast<int>(Luminumbra::IoExecutor::kQueueCapacity));
+    EXPECT_EQ(blockers->nested_completed.load(),
+              static_cast<int>(Luminumbra::IoExecutor::kWorkerCount));
+}
+
+TEST(StreamingHardening, WorkerBoundaryRunsInlineInsideIoExecutorAndRefusesStoppedLane) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    Luminumbra::RunWorkerBoundary(&jobs, "io-outer", [&] {
+        const auto worker = std::this_thread::get_id();
+        EXPECT_TRUE(jobs.io_executor().is_current_worker());
+        Luminumbra::RunWorkerBoundary(
+            &jobs, "io-inner", [&] { EXPECT_EQ(std::this_thread::get_id(), worker); });
+        EXPECT_THROW(Luminumbra::RunWorkerBoundary(
+                         &jobs, "io-throw", [] { throw std::runtime_error("read"); }),
+                     std::runtime_error);
+    });
+    jobs.io_executor().shutdown();
+    bool ran = false;
+    EXPECT_THROW(Luminumbra::RunWorkerBoundary(&jobs, "io-stopped", [&] { ran = true; }),
+                 Luminumbra::WorkerBoundaryUnavailable);
+    EXPECT_FALSE(ran);
+    const auto batch = jobs.dispatch_batch({[&] {
+        Luminumbra::RunWorkerBoundary(&jobs, "cpu-inline-with-io-stopped", [&] { ran = true; });
+    }});
+    jobs.wait(batch);
+    EXPECT_TRUE(ran);
+    jobs.shutdown();
+}
+
 TEST(StreamingHardening, WorkerBoundaryRunsInlineInsideSingleWorkerBatch) {
     Luminumbra::JobSystem jobs;
     Luminumbra::JobSystem other;
@@ -926,21 +1096,25 @@ TEST(StreamingHardening, WorkerBoundaryRunsInlineInsideSingleWorkerBatch) {
         EXPECT_TRUE(jobs.is_current_worker());
         EXPECT_FALSE(other.is_current_worker());
         std::thread::id nested;
-        Luminumbra::RunWorkerBoundary(&jobs, [&] {
+        Luminumbra::RunWorkerBoundary(&jobs, "test-persistence", [&] {
             EXPECT_EQ(std::this_thread::get_id(), worker);
-            Luminumbra::RunWorkerBoundary(&jobs, [&] { nested = std::this_thread::get_id(); });
+            Luminumbra::RunWorkerBoundary(
+                &jobs, "test-persistence", [&] { nested = std::this_thread::get_id(); });
         });
         EXPECT_EQ(nested, worker);
-        EXPECT_THROW(Luminumbra::RunWorkerBoundary(&jobs, [] { throw std::runtime_error("read"); }),
+        EXPECT_THROW(Luminumbra::RunWorkerBoundary(
+                         &jobs, "test-persistence", [] { throw std::runtime_error("read"); }),
                      std::runtime_error);
-        Luminumbra::RunWorkerBoundary(&other, [&] {
-            EXPECT_TRUE(other.is_current_worker());
+        Luminumbra::RunWorkerBoundary(&other, "test-persistence", [&] {
+            EXPECT_TRUE(other.io_executor().is_current_worker());
+            EXPECT_FALSE(other.is_current_worker());
             EXPECT_FALSE(jobs.is_current_worker());
             EXPECT_NE(std::this_thread::get_id(), worker);
         });
         bool ran = false;
-        EXPECT_THROW(Luminumbra::RunWorkerBoundary(&stopped, [&] { ran = true; }),
-                     Luminumbra::WorkerBoundaryUnavailable);
+        EXPECT_THROW(
+            Luminumbra::RunWorkerBoundary(&stopped, "test-persistence", [&] { ran = true; }),
+            Luminumbra::WorkerBoundaryUnavailable);
         EXPECT_FALSE(ran);
         return worker;
     });
@@ -959,16 +1133,20 @@ TEST(StreamingHardening, WorkerBoundaryPreservesCompletionExceptionsAndStandalon
     Luminumbra::JobSystem jobs;
     jobs.startup(1);
     std::thread::id completed;
-    Luminumbra::RunWorkerBoundary(&jobs, [&] { completed = std::this_thread::get_id(); });
+    Luminumbra::RunWorkerBoundary(
+        &jobs, "test-persistence", [&] { completed = std::this_thread::get_id(); });
     EXPECT_NE(completed, owner);
-    EXPECT_THROW(Luminumbra::RunWorkerBoundary(&jobs, [] { throw std::runtime_error("read"); }),
+    EXPECT_THROW(Luminumbra::RunWorkerBoundary(
+                     &jobs, "test-persistence", [] { throw std::runtime_error("read"); }),
                  std::runtime_error);
-    Luminumbra::RunWorkerBoundary(nullptr, [&] { completed = std::this_thread::get_id(); });
+    Luminumbra::RunWorkerBoundary(
+        nullptr, "test-persistence", [&] { completed = std::this_thread::get_id(); });
     EXPECT_EQ(completed, owner);
     jobs.shutdown();
     completed = {};
-    EXPECT_THROW(Luminumbra::RunWorkerBoundary(&jobs, [&] { completed = owner; }),
-                 std::runtime_error);
+    EXPECT_THROW(
+        Luminumbra::RunWorkerBoundary(&jobs, "test-persistence", [&] { completed = owner; }),
+        std::runtime_error);
     EXPECT_EQ(completed, std::thread::id{});
 }
 
@@ -984,20 +1162,22 @@ TEST(StreamingHardening, ExplicitMaintenanceTransactionsRetainTheirWorkerBoundar
         std::vector<std::string> errors;
         ASSERT_TRUE(transaction.begin(&errors));
         EXPECT_EQ(Persistence::SaveTransaction::active_for(storage.path / "other"), nullptr);
-        Luminumbra::RunWorkerBoundary(&jobs, [&] {
+        Luminumbra::RunWorkerBoundary(&jobs, "test-persistence", [&] {
             completed = std::this_thread::get_id();
             EXPECT_EQ(Persistence::SaveTransaction::active_for(storage.path), &transaction);
         });
         EXPECT_EQ(completed, owner);
         jobs.shutdown();
-        EXPECT_THROW(Luminumbra::RunWorkerBoundary(&jobs, [] { throw std::runtime_error("read"); }),
+        EXPECT_THROW(Luminumbra::RunWorkerBoundary(
+                         &jobs, "test-persistence", [] { throw std::runtime_error("read"); }),
                      std::runtime_error);
         transaction.abort(&errors);
         EXPECT_TRUE(errors.empty());
     }
     completed = {};
-    EXPECT_THROW(Luminumbra::RunWorkerBoundary(&jobs, [&] { completed = owner; }),
-                 Luminumbra::WorkerBoundaryUnavailable);
+    EXPECT_THROW(
+        Luminumbra::RunWorkerBoundary(&jobs, "test-persistence", [&] { completed = owner; }),
+        Luminumbra::WorkerBoundaryUnavailable);
     EXPECT_EQ(completed, std::thread::id{});
 }
 

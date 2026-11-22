@@ -98,7 +98,9 @@ class WaterPreparationContract(unittest.TestCase):
         self.assertIn(".capture = m_terrain_coverage_enabled || m_water_visibility_capture_enabled",
                       snapshot)
         self.assertRegex(snapshot, r"if \(consumers.opaque_snapshot\(\)\) \{ "
-                         r"m_lighting_pass->copy_lighting_color_to_opaque_texture\(m_frame_lighting_ctx\);")
+                         r"begin_gpu_pass_timer\(GpuTimerPass::OpaqueSnapshot\); "
+                         r"m_lighting_pass->copy_lighting_color_to_opaque_texture\(m_frame_lighting_ctx\); "
+                         r"end_gpu_pass_timer\(GpuTimerPass::OpaqueSnapshot\);")
         water = pipeline.split("void RenderPipeline::execute_stage_water(", 1)[1].split(
             "const WaterVisibilityMask&", 1)[0]
         self.assertIn("water_ctx, water_input, camera, m_water_visibility_capture_enabled",

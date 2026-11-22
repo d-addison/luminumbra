@@ -34,6 +34,8 @@
 
 namespace Luminumbra::World {
 
+class MaterialRegistry;
+
 // Sentinel: the column matched no authored biome.
 constexpr u8 kNoBiome = 255u;
 
@@ -103,6 +105,13 @@ public:
     static BiomeTable Load(const std::filesystem::path& table_path,
                            const WorldgenFileReader& read_file = ReadWorldgenFile);
 
+    // Opt-in name resolution, including custom materials and all base names.
+    // Load retains its legacy name set. Only resolved palette bytes are hashed;
+    // registry metadata is not a simulation identity or save-format extension.
+    static BiomeTable LoadWithRegistry(const std::filesystem::path& table_path,
+                                       const MaterialRegistry& registry,
+                                       const WorldgenFileReader& read_file = ReadWorldgenFile);
+
     bool ok() const {
         return m_ok;
     }
@@ -151,6 +160,9 @@ public:
     }
 
 private:
+    static BiomeTable LoadImpl(const std::filesystem::path& table_path,
+                               const WorldgenFileReader& read_file,
+                               const MaterialRegistry* registry);
     std::vector<BiomeDefinition> m_biomes;
     // id -> index into m_biomes (255 entries, kNoBiome means absent). Built at
     // load time so palette_for is O(1).

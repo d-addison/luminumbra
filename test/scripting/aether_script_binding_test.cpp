@@ -4,7 +4,7 @@
 //      REQUIRES a manifest entry — the surface is manifest-enumerated);
 //   2. the binding is absent-safe: no wired layer -> 0.0, never an error;
 //   3. the binding reads QUANTIZED TRUTH: a seeded EnergyFieldState sampled
-//      through the live sol2 VM returns at_cell raw / kEnergyRawPerUnit at the
+//      through the live Luau VM returns at_cell raw / kEnergyRawPerUnit at the
 //      std::floor-quantized 24 m cell — including the emitter-gather path
 //      (FieldEmitterComponent -> GatherFieldEmitterDeposits -> Tick -> Lua).
 //
