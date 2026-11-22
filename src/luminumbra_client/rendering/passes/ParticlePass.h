@@ -172,6 +172,11 @@ public:
     std::size_t live_particle_count() const {
         return m_live_count;
     }
+    // Slots examined by the most recent update, including particles that die.
+    // Constant-time, render-only work diagnostic; no particle storage is exposed.
+    std::size_t update_slot_visits() const {
+        return m_update_slot_visits;
+    }
     // Render-only diagnostic copy in pool order, bounded by kMaxInstances.
     // Reports ownership and motion without exposing mutable particle storage.
     struct LiveParticleState {
@@ -330,7 +335,10 @@ private:
     std::vector<EmitterDescriptor> m_descriptors;
 
     // Ring buffer of live particles (oldest evicted on overflow).
+    struct ActiveSlots;
+    std::unique_ptr<ActiveSlots> m_active_slots;
     std::vector<Particle> m_particles;
+    std::size_t m_update_slot_visits = 0;
     std::size_t m_ring_head = 0; // next write slot
     std::size_t m_live_count = 0;
 
