@@ -619,6 +619,35 @@ class GpuStageAttributionWiring(unittest.TestCase):
             self.assertNotIn('glClientWaitSync', source)
 
 
+class RenderPassMetadataWiring(unittest.TestCase):
+    def test_frame_refresh_uses_retained_schema_and_exact_draw_totals(self):
+        source = read(CLIENT / "rendering/RenderPipeline.cpp")
+        refresh = compact(block(source, "void RenderPipeline::refresh_render_pass_metadata()"))
+        self.assertEqual(refresh, compact("""
+            m_render_pass_metadata.Refresh(
+                m_screen_width, m_screen_height, m_shadow_pass->shadow_map().resolution,
+                m_gbuffer_pass->gbuffer().authored_texture != 0,
+                {m_last_render_pass_stats.shadow_draws,
+                 m_last_render_pass_stats.terrain_draws + m_last_render_pass_stats.far_region_draws +
+                     m_last_render_pass_stats.skinned_draws + m_last_render_pass_stats.authored_draws,
+                 m_last_render_pass_stats.ssao_draws, m_last_render_pass_stats.ssao_blur_draws,
+                 m_last_render_pass_stats.lighting_draws, m_last_render_pass_stats.skybox_draws,
+                 m_last_render_pass_stats.water_draws, m_last_render_pass_stats.particle_draws,
+                 m_last_render_pass_stats.final_blits});
+        """))
+        header = read(CLIENT / "rendering/RenderPipeline.h")
+        self.assertIn("return m_render_pass_metadata.passes();",
+                      block(header, "get_last_render_pass_metadata()"))
+        self.assertIn("snapshot.passes = m_render_pass_metadata.passes();", source)
+        self.assertEqual(source.count("m_render_pass_metadata.Clear();"), 1)
+        cache = read(CLIENT / "rendering/RenderPassMetadata.h")
+        refresh_cache = block(cache, "void Refresh(")
+        self.assertEqual(refresh_cache.count("BuildSchema();"), 1)
+        self.assertIn("BuildSchema();", block(refresh_cache, "if (passes_.empty())"))
+        self.assertNotIn("clear()", refresh_cache)
+        self.assertIn("++schema_build_count_;", block(cache, "void BuildSchema()"))
+
+
 class FrameAttributionWiring(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
