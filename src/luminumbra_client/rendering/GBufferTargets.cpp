@@ -1,4 +1,5 @@
 #include "GBufferTargets.h"
+#include "DiagnosticContributions.h"
 #include "DiagnosticDrawTable.h"
 #include "RenderResourceRegistry.h"
 #include "Shader.h"
@@ -10,6 +11,7 @@
 #include <exception>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace Luminumbra::Rendering {
 namespace {
@@ -45,7 +47,8 @@ GBufferDiagnosticCapture::GBufferDiagnosticCapture(DiagnosticDrawTable& table) {
 
 GBufferDiagnosticCapture::GBufferDiagnosticCapture(DiagnosticTargets& targets,
                                                    DiagnosticDrawTable& table,
-                                                   DiagnosticTargets* forward_targets) {
+                                                   DiagnosticTargets* forward_targets,
+                                                   DiagnosticForwardPresence* forward_presence) {
     if (forward_targets == &targets) {
         throw std::invalid_argument("Forward identities require distinct storage");
     }
@@ -55,9 +58,16 @@ GBufferDiagnosticCapture::GBufferDiagnosticCapture(DiagnosticTargets& targets,
     if (table.resolve(1)) {
         throw std::invalid_argument("Diagnostic capture requires a fresh draw table");
     }
+    if (forward_presence && !forward_presence->fresh()) {
+        throw std::invalid_argument("Forward evidence requires a fresh collector");
+    }
     state_ = std::make_unique<State>(table);
     state_->targets = &targets;
     state_->forward_targets = forward_targets;
+    state_->forward_presence = forward_presence;
+    if (forward_presence && !forward_targets) {
+        abort();
+    }
     SetCurrent(this);
 }
 
@@ -77,6 +87,13 @@ bool GBufferDiagnosticCapture::attachment_failed() const noexcept {
 void GBufferDiagnosticCapture::abort() noexcept {
     state_->failed = true;
     state_->snapshot_failed = true;
+    forward_presence_unavailable();
+}
+
+void GBufferDiagnosticCapture::forward_presence_unavailable() noexcept {
+    if (state_->forward_presence) {
+        state_->forward_presence->unavailable();
+    }
 }
 
 void GBufferDiagnosticCapture::unsupported(std::string_view producer,
@@ -84,6 +101,8 @@ void GBufferDiagnosticCapture::unsupported(std::string_view producer,
                                            DiagnosticOwnership ownership,
                                            DiagnosticPass pass) {
     state_->failed = true;
+    // Any unsupported record makes the frame's forward evidence unavailable.
+    forward_presence_unavailable();
     if (state_->refused) {
         return;
     }
@@ -206,10 +225,15 @@ void GBufferDiagnosticCapture::write(const Shader& shader, const DiagnosticSubmi
         DiagnosticId id{};
         if (submission.provenance == DiagnosticProvenance::Unsupported) {
             state_->failed = true;
+            forward_presence_unavailable();
         }
         if (matching_pass && !state_->refused && !state_->table.submit(submission, id)) {
             state_->refused = true;
             state_->failed = true;
+            forward_presence_unavailable();
+        }
+        if (matching_pass && !state_->refused && state_->forward_presence && state_->forward) {
+            state_->forward_presence->submit(submission, id);
         }
         // Refused draws carry no identity, never the previous draw's ID. Once
         // refused, do no more registry work or allocation for this capture.
@@ -493,6 +517,7 @@ void GBufferDiagnosticCapture::detach_target() {
     if (!state_->framebuffer) {
         return;
     }
+    sample_forward_presence();
     GLint saved_framebuffer = 0;
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &saved_framebuffer);
     // Any registry path (destroy_owned, destroy_all_owned, replace_targets) can
@@ -533,9 +558,77 @@ void GBufferDiagnosticCapture::detach_target() {
         state_->failed = true;
         state_->failure = "gbuffer_retired_during_capture";
         state_->snapshot_failed = true;
+        forward_presence_unavailable();
     }
     // Keep storage protected until detachment and caller-state restoration finish.
     state_->attachment_lease.reset();
+}
+
+void GBufferDiagnosticCapture::sample_forward_presence() noexcept {
+    if (!state_->forward || !state_->forward_presence) {
+        return;
+    }
+    if (state_->failed || !state_->forward_presence->can_sample() || !state_->forward_targets ||
+        !glGetTextureSubImage || glGetError() != GL_NO_ERROR) {
+        abort();
+        return;
+    }
+    try {
+        const auto extent = state_->forward_targets->extent();
+        // At most 16M RGBA32UI pixels / 256 MiB staging, checked before allocation.
+        if (extent.width == 0 || extent.height == 0 || extent.width > 16384 ||
+            extent.height > 16384 || extent.width > 16777216 / extent.height) {
+            abort();
+            return;
+        }
+        std::vector<DiagnosticId> plane(static_cast<std::size_t>(extent.width) * extent.height);
+        struct PackRestore {
+            static constexpr std::array<GLenum, 8> names() {
+                return {GL_PACK_ALIGNMENT,
+                        GL_PACK_ROW_LENGTH,
+                        GL_PACK_IMAGE_HEIGHT,
+                        GL_PACK_SKIP_PIXELS,
+                        GL_PACK_SKIP_ROWS,
+                        GL_PACK_SKIP_IMAGES,
+                        GL_PACK_SWAP_BYTES,
+                        GL_PACK_LSB_FIRST};
+            }
+            std::array<GLint, 8> values{};
+            GLint buffer = 0;
+            PackRestore() {
+                glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &buffer);
+                glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+                for (std::size_t entry = 0; entry < values.size(); ++entry) {
+                    glGetIntegerv(names()[entry], &values[entry]);
+                    glPixelStorei(names()[entry], entry == 0 ? 1 : 0);
+                }
+            }
+            ~PackRestore() {
+                for (std::size_t entry = 0; entry < values.size(); ++entry) {
+                    glPixelStorei(names()[entry], values[entry]);
+                }
+                glBindBuffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(buffer));
+            }
+        } restore;
+        glGetTextureSubImage(state_->forward_targets->texture(),
+                             0,
+                             0,
+                             0,
+                             0,
+                             static_cast<GLsizei>(extent.width),
+                             static_cast<GLsizei>(extent.height),
+                             1,
+                             GL_RGBA_INTEGER,
+                             GL_UNSIGNED_INT,
+                             static_cast<GLsizei>(plane.size() * sizeof(DiagnosticId)),
+                             plane.data());
+        if (glGetError() != GL_NO_ERROR ||
+            !state_->forward_presence->join_stage(state_->table, plane, extent)) {
+            abort();
+        }
+    } catch (...) {
+        abort(); // Allocation/readback refusal still restores the original attachment.
+    }
 }
 
 void GBufferDiagnosticCapture::before_destroy(const GBuffer& gbuffer) {
@@ -543,6 +636,7 @@ void GBufferDiagnosticCapture::before_destroy(const GBuffer& gbuffer) {
         detach_target();
         state_->failed = true;
         state_->snapshot_failed = true;
+        forward_presence_unavailable();
         if (state_->failure.empty()) {
             state_->failure = "gbuffer_recreated_during_capture";
         }

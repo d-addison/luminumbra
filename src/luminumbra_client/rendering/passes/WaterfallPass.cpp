@@ -193,17 +193,30 @@ void WaterfallPass::execute(const RenderContext& ctx) {
             draw_shader->setFloat("u_crest_y", s.crest.y);
             draw_shader->setFloat("u_foot_y", s.foot.y);
             if (auto* capture = GBufferDiagnosticCapture::Current()) {
-                // The immutable uploaded page and its 12-vertex slot identify this mesh.
-                // A size_t ordinal needs at most 20 decimal digits (key under 64 bytes).
-                const std::string mesh_key = "waterfall/sheet-pool/" + std::to_string(i);
-                capture->write_current({.mesh_path = {},
-                                        .shader_variant = "waterfall",
-                                        .chunk = {},
-                                        .lod = 0,
-                                        .ownership = DiagnosticOwnership::Live,
-                                        .pass = DiagnosticPass::Forward,
-                                        .provenance = DiagnosticProvenance::Mesh,
-                                        .generated_mesh = mesh_key});
+                // Separate the original six-vertex sheet and pool ranges in capture
+                // so pool-only coverage cannot certify a visible falling sheet.
+                // Two subranges replace the original draw; no geometry is replayed.
+                for (GLint part = 0; part < 2; ++part) {
+                    std::string mesh_key = "waterfall/sheet-pool/" + std::to_string(i);
+                    if (part == 1) {
+                        mesh_key += "/pool";
+                    }
+                    capture->write_current({.mesh_path = {},
+                                            .shader_variant = "waterfall",
+                                            .chunk = {},
+                                            .lod = 0,
+                                            .ownership = DiagnosticOwnership::Live,
+                                            .pass = DiagnosticPass::Forward,
+                                            .provenance = DiagnosticProvenance::Mesh,
+                                            .generated_mesh = mesh_key});
+                    const auto submit_arrays = glDrawArrays;
+                    Luminumbra::Rendering::AttributedGl::Submit(
+                        submit_arrays,
+                        GL_TRIANGLES,
+                        static_cast<GLint>((i % kSitesPerPage) * 12) + part * 6,
+                        6);
+                }
+                continue;
             }
             // 12 verts/site: the vertical sheet (0..5) + the horizontal plunge-pool quad (6..11).
             Luminumbra::Rendering::AttributedGl::Submit(

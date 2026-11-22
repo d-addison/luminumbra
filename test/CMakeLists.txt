@@ -767,6 +767,7 @@ endif()
 
 add_executable(render_capture_test
     rendering/render_capture_test.cpp
+    rendering/capture_forward_presence_test.cpp
     # the capture-hooks TU under test (GL-free; direct source, same as
     # shader_reflection_test's ShaderReflection.cpp -- render_capture_test links
     # luminumbra_common, not luminumbra_client, so no duplicate symbols).
@@ -786,7 +787,9 @@ target_include_directories(render_capture_test PRIVATE
 
 target_link_libraries(render_capture_test PRIVATE
     gtest_main
+    capture_launch_test_support
     luminumbra_common
+    nlohmann_json::nlohmann_json
     glfw
     glad
 )
