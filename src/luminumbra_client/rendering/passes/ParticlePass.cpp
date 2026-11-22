@@ -18,6 +18,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -83,6 +84,67 @@ float ParticlePass::Curve::sample(float t) const {
     return glm::mix(points[i0], points[i1], frac);
 }
 
+// Three fixed levels cover exactly kMaxInstances slots, with no empty-word scan.
+// Storage is bounded to 1024 slot words, 16 summaries and one root word.
+struct ParticlePass::ActiveSlots {
+    static constexpr std::size_t kWordBits = 64;
+    static constexpr std::size_t kSlotWords = kMaxInstances / kWordBits;
+    static constexpr std::size_t kGroups = kSlotWords / kWordBits;
+    static_assert(kMaxInstances == kWordBits * kWordBits * kGroups && kGroups <= kWordBits);
+    std::array<uint64_t, kSlotWords> slots{};
+    std::array<uint64_t, kGroups> groups{};
+    uint64_t root = 0;
+
+    void insert(std::size_t slot) {
+        const auto word = slot / kWordBits;
+        const auto group = word / kWordBits;
+        slots[word] |= uint64_t{1} << (slot % kWordBits);
+        groups[group] |= uint64_t{1} << (word % kWordBits);
+        root |= uint64_t{1} << group;
+    }
+
+    void erase(std::size_t slot) {
+        const auto word = slot / kWordBits;
+        const auto group = word / kWordBits;
+        slots[word] &= ~(uint64_t{1} << (slot % kWordBits));
+        if (slots[word] == 0) {
+            groups[group] &= ~(uint64_t{1} << (word % kWordBits));
+            if (groups[group] == 0) {
+                root &= ~(uint64_t{1} << group);
+            }
+        }
+    }
+
+    // Returns the first active slot at or after start, or the capacity sentinel.
+    // At most five word lookups skip arbitrarily long gaps in constant time.
+    std::size_t next(std::size_t start) const {
+        if (start >= kMaxInstances) {
+            return kMaxInstances;
+        }
+        auto word = start / kWordBits;
+        const auto remaining_slots = slots[word] & (~uint64_t{0} << (start % kWordBits));
+        if (remaining_slots != 0) {
+            return word * kWordBits + static_cast<std::size_t>(std::countr_zero(remaining_slots));
+        }
+        ++word;
+        if (word >= kSlotWords) {
+            return kMaxInstances;
+        }
+        auto group = word / kWordBits;
+        auto remaining_words = groups[group] & (~uint64_t{0} << (word % kWordBits));
+        if (remaining_words == 0) {
+            const auto remaining_groups = root & (~uint64_t{0} << (group + 1));
+            if (remaining_groups == 0) {
+                return kMaxInstances;
+            }
+            group = static_cast<std::size_t>(std::countr_zero(remaining_groups));
+            remaining_words = groups[group];
+        }
+        word = group * kWordBits + static_cast<std::size_t>(std::countr_zero(remaining_words));
+        return word * kWordBits + static_cast<std::size_t>(std::countr_zero(slots[word]));
+    }
+};
+
 ParticlePass::ParticlePass() = default;
 ParticlePass::~ParticlePass() = default;
 
@@ -120,6 +182,8 @@ void ParticlePass::init_shader(const std::filesystem::path& root_path) {
 
 void ParticlePass::init_buffers() {
     m_particles.assign(kMaxInstances, Particle{});
+    m_active_slots = std::make_unique<ActiveSlots>();
+    m_update_slot_visits = 0;
     m_ring_head = 0;
     m_live_count = 0;
 
@@ -196,6 +260,8 @@ void ParticlePass::destroy_buffers() {
         glDeleteVertexArrays(1, &m_vao);
         m_vao = 0;
     }
+    m_active_slots.reset();
+    m_update_slot_visits = 0;
     m_particles.clear();
     m_particles.shrink_to_fit();
     m_ring_head = 0;
@@ -299,6 +365,9 @@ void ParticlePass::clear_emitters() {
     // empty (no-op) particle pass.
     for (auto& p : m_particles)
         p.alive = false;
+    if (m_active_slots) {
+        *m_active_slots = ActiveSlots{};
+    }
     m_ring_head = 0;
     m_live_count = 0;
 }
@@ -314,12 +383,14 @@ void ParticlePass::clear_waterfall_spray() {
     if (retained == m_active_emitters.size())
         return;
     m_live_count = 0;
-    for (auto& particle : m_particles) {
+    for (std::size_t slot = 0; slot < m_particles.size(); ++slot) {
+        auto& particle = m_particles[slot];
         if (!particle.alive)
             continue;
         const auto replacement = remap[particle.emitter_index];
         if (replacement == kInvalidEmitter) {
             particle.alive = false;
+            m_active_slots->erase(slot);
         } else {
             particle.emitter_index = replacement;
             ++m_live_count;
@@ -516,6 +587,7 @@ void ParticlePass::spawn_from_emitter(ActiveEmitter& emitter, float dt) {
         }
         // else: oldest slot reused -> ring eviction (live count unchanged).
         p.alive = true;
+        m_active_slots->insert(m_ring_head);
         p.age = 0.0f;
         p.lifetime = emitter.data.lifetime;
         p.emitter_index = emitter_index;
@@ -543,6 +615,7 @@ void ParticlePass::spawn_splash_burst(const glm::vec3& world_pos,
             ++m_live_count;
         }
         p.alive = true;
+        m_active_slots->insert(m_ring_head);
         p.age = 0.0f;
         p.lifetime = splash_template.data.lifetime;
         p.emitter_index = splash_index;
@@ -561,6 +634,7 @@ void ParticlePass::spawn_splash_burst(const glm::vec3& world_pos,
 
 void ParticlePass::update(float dt) {
     m_frame_instance_count = 0;
+    m_update_slot_visits = 0;
     if (m_active_emitters.empty() || m_particles.empty()) {
         m_live_count = 0;
         return;
@@ -587,13 +661,14 @@ void ParticlePass::update(float dt) {
 
     std::size_t live = 0;
     std::size_t written = 0;
-    for (auto& p : m_particles) {
-        if (!p.alive) {
-            continue;
-        }
+    for (auto slot = m_active_slots->next(0); slot < kMaxInstances;
+         slot = m_active_slots->next(slot + 1)) {
+        ++m_update_slot_visits;
+        auto& p = m_particles[slot];
         p.age += dt;
         if (p.age >= p.lifetime) {
             p.alive = false;
+            m_active_slots->erase(slot);
             continue;
         }
 
@@ -614,6 +689,7 @@ void ParticlePass::update(float dt) {
             impacts.push_back(
                 ImpactEvent{glm::vec3(p.pos.x, emitter.data.impact_plane_y, p.pos.z)});
             p.alive = false;
+            m_active_slots->erase(slot);
             continue;
         }
         ++live;
