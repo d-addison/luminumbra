@@ -12,6 +12,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/app/PhotoEnvironment.h
     ${CMAKE_CURRENT_LIST_DIR}/app/FrameAudio.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/GameAssets.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/app/UiInputService.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/UiInputRouter.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/InputCallbacks.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/MenuScreens.cpp
