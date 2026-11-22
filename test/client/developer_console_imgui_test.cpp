@@ -61,6 +61,8 @@ struct UiFixture : testing::Test {
     void SetUp() override {
         perf_inspector = RegisterPerfHudInspector(inspectors);
         ASSERT_TRUE(perf_inspector);
+        if (!perf_inspector)
+            return;
         DeveloperHost host;
         host.save = [&] {
             ++saves;
@@ -84,6 +86,8 @@ struct UiFixture : testing::Test {
                                 ++draws[id];
                                 if (id == "perf.hud") {
                                     ASSERT_TRUE(perf_inspector);
+                                    if (!perf_inspector)
+                                        return;
                                     ASSERT_TRUE(PublishPerfHudInspector(
                                         inspectors, *perf_inspector, {0.2, 0.75, 12, 1}));
                                     DrawPerfHudContents(inspectors.Read(*perf_inspector, 1));
@@ -112,9 +116,13 @@ TEST(PerfHudInspector, CopiesCompletedObservationsAndPreservesUnknownProducerAge
     InspectorRegistry registry;
     const auto handle = RegisterPerfHudInspector(registry);
     ASSERT_TRUE(handle);
+    if (!handle)
+        return;
     ASSERT_TRUE(PublishPerfHudInspector(registry, *handle, {0.2, 0.75, 0, 42}));
     const auto snapshot = registry.Read(*handle, 42);
     ASSERT_TRUE(snapshot);
+    if (!snapshot)
+        return;
     EXPECT_EQ(snapshot->metrics[0].value, 200.0);
     EXPECT_EQ(snapshot->metrics[0].age_frames, 0u);
     EXPECT_EQ(snapshot->metrics[1].value, 0.75);
@@ -126,6 +134,8 @@ TEST(PerfHudInspector, CopiesCompletedObservationsAndPreservesUnknownProducerAge
     EXPECT_FALSE(RegisterPerfHudInspector(registry));
     const auto stale = registry.Read(*handle, 43);
     ASSERT_TRUE(stale);
+    if (!stale)
+        return;
     EXPECT_EQ(stale->metrics[0].availability, MetricAvailability::Stale);
     EXPECT_FALSE(stale->metrics[0].value);
     ASSERT_TRUE(registry.Unregister(*handle));
@@ -137,9 +147,13 @@ TEST(PerfHudInspector, MissingAndInvalidInputsHaveNoNumericValue) {
     InspectorRegistry registry;
     const auto handle = RegisterPerfHudInspector(registry);
     ASSERT_TRUE(handle);
+    if (!handle)
+        return;
     ASSERT_TRUE(PublishPerfHudInspector(registry, *handle, {0.0, {}, {}, {}}));
     const auto missing = registry.Read(*handle, 0);
     ASSERT_TRUE(missing);
+    if (!missing)
+        return;
     EXPECT_EQ(missing->metrics[0].availability, MetricAvailability::Pending);
     EXPECT_EQ(missing->metrics[1].availability, MetricAvailability::Unavailable);
     EXPECT_EQ(missing->metrics[2].availability, MetricAvailability::Unavailable);
@@ -153,6 +167,8 @@ TEST(PerfHudInspector, MissingAndInvalidInputsHaveNoNumericValue) {
         ASSERT_TRUE(PublishPerfHudInspector(registry, *handle, {invalid, -1.0, {}, 1}));
         const auto snapshot = registry.Read(*handle, 1);
         ASSERT_TRUE(snapshot);
+        if (!snapshot)
+            return;
         EXPECT_EQ(snapshot->metrics[0].availability, MetricAvailability::Unavailable);
         EXPECT_FALSE(snapshot->metrics[0].value);
     }
@@ -163,6 +179,8 @@ TEST(PerfHudInspector, MissingAndInvalidInputsHaveNoNumericValue) {
         ASSERT_TRUE(PublishPerfHudInspector(registry, *handle, {0.2, invalid, {}, {}}));
         const auto snapshot = registry.Read(*handle, 1);
         ASSERT_TRUE(snapshot);
+        if (!snapshot)
+            return;
         EXPECT_EQ(snapshot->metrics[1].availability, MetricAvailability::Unavailable);
         EXPECT_FALSE(snapshot->metrics[1].value);
         EXPECT_FALSE(snapshot->metrics[0].age_frames);
@@ -172,11 +190,15 @@ TEST(PerfHudInspector, MissingAndInvalidInputsHaveNoNumericValue) {
         ASSERT_TRUE(PublishPerfHudInspector(registry, *handle, {0.2, {}, exact_limit, {}}));
         const auto exact = registry.Read(*handle, 1);
         ASSERT_TRUE(exact);
+        if (!exact)
+            return;
         EXPECT_EQ(exact->metrics[2].value, static_cast<double>(exact_limit));
         ASSERT_TRUE(PublishPerfHudInspector(
             registry, *handle, {0.2, {}, std::numeric_limits<std::size_t>::max(), {}}));
         const auto snapshot = registry.Read(*handle, 1);
         ASSERT_TRUE(snapshot);
+        if (!snapshot)
+            return;
         EXPECT_EQ(snapshot->metrics[2].availability, MetricAvailability::Unavailable);
         EXPECT_FALSE(snapshot->metrics[2].value);
     }
@@ -198,6 +220,8 @@ TEST(PerfHudInspector, PresentationReportsSourceAgeAndEveryAvailabilityWithoutFa
     InspectorRegistry registry;
     const auto handle = RegisterPerfHudInspector(registry);
     ASSERT_TRUE(handle);
+    if (!handle)
+        return;
     for (const auto status : {MetricAvailability::Pending,
                               MetricAvailability::Unsupported,
                               MetricAvailability::Unavailable}) {

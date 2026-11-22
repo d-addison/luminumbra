@@ -278,7 +278,7 @@ ASan also supports light and keeps both heavy cases together on the full route.
 Full native validation and the existing platform limits remain required after
 merge; offline policy tests do not establish hosted-runner qualification.
 
-#### Linux worker admission tooling
+### Linux worker admission tooling
 
 `tools/ci/self_hosted_admission.py` supplies a one-shot admission component for a
 trusted Linux listener adapter. No workflow calls it and no Linux job is routed

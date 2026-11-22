@@ -16,8 +16,12 @@ TEST(InspectorRegistry, PendingUnsupportedAndZeroAreDistinct) {
     InspectorRegistry registry;
     const auto handle = registry.Register("panel", "Panel", kDefinitions);
     ASSERT_TRUE(handle);
+    if (!handle)
+        return;
     const auto initial = registry.Read(*handle, 0);
     ASSERT_TRUE(initial);
+    if (!initial)
+        return;
     EXPECT_EQ(initial->metrics[0].availability, MetricAvailability::Pending);
     EXPECT_FALSE(initial->metrics[0].value);
     EXPECT_FALSE(initial->metrics[0].age_frames);
@@ -28,6 +32,8 @@ TEST(InspectorRegistry, PendingUnsupportedAndZeroAreDistinct) {
     ASSERT_TRUE(registry.Publish(*handle, samples));
     const auto snapshot = registry.Read(*handle, 0);
     ASSERT_TRUE(snapshot);
+    if (!snapshot)
+        return;
     EXPECT_EQ(snapshot->metrics[0].availability, MetricAvailability::Available);
     EXPECT_EQ(snapshot->metrics[0].value, 0.0);
     EXPECT_EQ(snapshot->metrics[0].age_frames, 0u);
@@ -40,15 +46,21 @@ TEST(InspectorRegistry, AgeBoundaryStalenessFutureAndUnknownAreExplicit) {
     InspectorRegistry registry;
     const auto handle = registry.Register("panel", "Panel", kDefinitions);
     ASSERT_TRUE(handle);
+    if (!handle)
+        return;
     const std::array samples{InspectorMetricSample{MetricAvailability::Available, 1.0, 10},
                              InspectorMetricSample{MetricAvailability::Available, 2.0, {}}};
     ASSERT_TRUE(registry.Publish(*handle, samples));
     const auto boundary = registry.Read(*handle, 12);
     ASSERT_TRUE(boundary);
+    if (!boundary)
+        return;
     EXPECT_EQ(boundary->metrics[0].availability, MetricAvailability::Available);
     EXPECT_EQ(boundary->metrics[0].age_frames, 2u);
     const auto stale = registry.Read(*handle, 13);
     ASSERT_TRUE(stale);
+    if (!stale)
+        return;
     EXPECT_EQ(stale->metrics[0].availability, MetricAvailability::Stale);
     EXPECT_EQ(stale->metrics[0].age_frames, 3u);
     EXPECT_FALSE(stale->metrics[0].value);
@@ -56,15 +68,21 @@ TEST(InspectorRegistry, AgeBoundaryStalenessFutureAndUnknownAreExplicit) {
     EXPECT_FALSE(stale->metrics[1].age_frames);
     const auto future = registry.Read(*handle, 9);
     ASSERT_TRUE(future);
+    if (!future)
+        return;
     EXPECT_EQ(future->metrics[0].availability, MetricAvailability::Unavailable);
     EXPECT_FALSE(future->metrics[0].value);
     EXPECT_FALSE(future->metrics[0].age_frames);
     const auto maximum = registry.Read(*handle, std::numeric_limits<std::uint64_t>::max());
     ASSERT_TRUE(maximum);
+    if (!maximum)
+        return;
     EXPECT_EQ(maximum->metrics[0].age_frames, std::numeric_limits<std::uint64_t>::max() - 10);
     // Queries derive availability without modifying the stored observation.
     const auto again = registry.Read(*handle, 10);
     ASSERT_TRUE(again);
+    if (!again)
+        return;
     EXPECT_EQ(again->metrics[0].value, 1.0);
 }
 
@@ -72,6 +90,8 @@ TEST(InspectorRegistry, RejectedPublicationLeavesEveryMetricUnchanged) {
     InspectorRegistry registry;
     const auto handle = registry.Register("panel", "Panel", kDefinitions);
     ASSERT_TRUE(handle);
+    if (!handle)
+        return;
     std::array samples{InspectorMetricSample{MetricAvailability::Available, 1.0, 10},
                        InspectorMetricSample{MetricAvailability::Available, 2.0, 10}};
     ASSERT_TRUE(registry.Publish(*handle, samples));
@@ -95,6 +115,8 @@ TEST(InspectorRegistry, RejectedPublicationLeavesEveryMetricUnchanged) {
         EXPECT_FALSE(registry.Publish(*handle, samples));
         const auto snapshot = registry.Read(*handle, 10);
         ASSERT_TRUE(snapshot);
+        if (!snapshot)
+            return;
         EXPECT_EQ(snapshot->metrics[0].value, 1.0);
         EXPECT_EQ(snapshot->metrics[1].value, 2.0);
     }
@@ -104,6 +126,8 @@ TEST(InspectorRegistry, UnavailableTransitionsNeverReuseAnEarlierValue) {
     InspectorRegistry registry;
     const auto handle = registry.Register("panel", "Panel", kDefinitions);
     ASSERT_TRUE(handle);
+    if (!handle)
+        return;
     for (const auto status : {MetricAvailability::Pending,
                               MetricAvailability::Unsupported,
                               MetricAvailability::Unavailable}) {
@@ -114,6 +138,8 @@ TEST(InspectorRegistry, UnavailableTransitionsNeverReuseAnEarlierValue) {
         ASSERT_TRUE(registry.Publish(*handle, samples));
         const auto snapshot = registry.Read(*handle, 3);
         ASSERT_TRUE(snapshot);
+        if (!snapshot)
+            return;
         EXPECT_EQ(snapshot->metrics[0].availability, status);
         EXPECT_EQ(snapshot->metrics[0].age_frames, 1u);
         EXPECT_FALSE(snapshot->metrics[0].value);
@@ -126,6 +152,8 @@ TEST(InspectorRegistry, MetadataIsOwnedAndRegistrationRefusalsAreAtomic) {
     const std::array definitions{InspectorMetricDefinition{name, name, name, name, 0}};
     const auto handle = registry.Register(name, name, definitions);
     ASSERT_TRUE(handle);
+    if (!handle)
+        return;
     name.assign("edited");
     EXPECT_FALSE(registry.Find("edited"));
     EXPECT_TRUE(registry.Find("owned"));
@@ -153,6 +181,8 @@ TEST(InspectorRegistry, MetadataIsOwnedAndRegistrationRefusalsAreAtomic) {
     EXPECT_FALSE(registry.Register("panel", "Panel", duplicate_metrics));
     const auto snapshot = registry.Read(*handle, 0);
     ASSERT_TRUE(snapshot);
+    if (!snapshot)
+        return;
     EXPECT_STREQ(snapshot->id.data(), "owned");
     EXPECT_STREQ(snapshot->metrics[0].source.data(), "owned");
     EXPECT_TRUE(registry.Register("panel", "Panel", kDefinitions));
@@ -172,8 +202,12 @@ TEST(InspectorRegistry, CapacityAndTextLimitsAreInclusiveAndReusable) {
     const auto handle = registry.Register(
         maximum_text, maximum_text, std::span(definitions).first(kInspectorMetricLimit));
     ASSERT_TRUE(handle);
+    if (!handle)
+        return;
     const auto snapshot = registry.Read(*handle, 0);
     ASSERT_TRUE(snapshot);
+    if (!snapshot)
+        return;
     EXPECT_EQ(snapshot->metric_count, kInspectorMetricLimit);
     EXPECT_STREQ(snapshot->metrics[0].source.data(), maximum_text.c_str());
     for (std::size_t index = 1; index < kInspectorPanelLimit; ++index) {
@@ -190,8 +224,12 @@ TEST(InspectorRegistry, TeardownInvalidatesHandlesAndPreservesCopiedSnapshots) {
     InspectorRegistry other;
     const auto handle = registry.Register("panel", "Panel", kDefinitions);
     ASSERT_TRUE(handle);
+    if (!handle)
+        return;
     const auto snapshot = registry.Read(*handle, 0);
     ASSERT_TRUE(snapshot);
+    if (!snapshot)
+        return;
     EXPECT_FALSE(other.Read(*handle, 0));
     EXPECT_FALSE(other.Publish(*handle, {}));
     EXPECT_FALSE(other.Unregister(*handle));
@@ -209,6 +247,8 @@ TEST(InspectorRegistry, TeardownInvalidatesHandlesAndPreservesCopiedSnapshots) {
     EXPECT_FALSE(registry.Unregister(*handle));
     const auto replacement = registry.Register("panel", "Panel", kDefinitions);
     ASSERT_TRUE(replacement);
+    if (!replacement)
+        return;
     EXPECT_NE(replacement->generation, handle->generation);
     EXPECT_FALSE(registry.Publish(*handle, {}));
     registry.Shutdown();
@@ -218,6 +258,8 @@ TEST(InspectorRegistry, TeardownInvalidatesHandlesAndPreservesCopiedSnapshots) {
     EXPECT_STREQ(snapshot->metrics[0].source.data(), "CPU completed work");
     const auto restarted = registry.Register("panel", "Panel", kDefinitions);
     ASSERT_TRUE(restarted);
+    if (!restarted)
+        return;
     EXPECT_NE(restarted->generation, replacement->generation);
 }
 
@@ -228,13 +270,21 @@ TEST(InspectorRegistry, DiscoveryContainsOnlyLivePanelsAndNeverRevalidatesOldHan
     const auto first = registry.Register("first", "First", kDefinitions);
     const auto second = registry.Register("second", "Second", kDefinitions);
     ASSERT_TRUE(first);
+    if (!first)
+        return;
     ASSERT_TRUE(second);
+    if (!second)
+        return;
     const auto original = registry.List();
     ASSERT_EQ(original.count, 2u);
     const auto first_snapshot = registry.Read(original.panels[0], 0);
     const auto second_snapshot = registry.Read(original.panels[1], 0);
     ASSERT_TRUE(first_snapshot);
+    if (!first_snapshot)
+        return;
     ASSERT_TRUE(second_snapshot);
+    if (!second_snapshot)
+        return;
     EXPECT_STREQ(first_snapshot->id.data(), "first");
     EXPECT_STREQ(second_snapshot->id.data(), "second");
     ASSERT_TRUE(registry.Unregister(*first));
@@ -245,6 +295,8 @@ TEST(InspectorRegistry, DiscoveryContainsOnlyLivePanelsAndNeverRevalidatesOldHan
     ASSERT_EQ(current.count, 2u);
     const auto replacement = registry.Read(current.panels[0], 0);
     ASSERT_TRUE(replacement);
+    if (!replacement)
+        return;
     EXPECT_STREQ(replacement->id.data(), "replacement");
     registry.Shutdown();
     EXPECT_EQ(registry.List().count, 0u);

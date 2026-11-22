@@ -348,8 +348,9 @@ TEST(AuthorityContributor, RequiredIdentitiesRefuseBeforeEveryCallbackOrWrite) {
             EXPECT_FALSE(registry.WriteMetadata(modules, requirements, metadata));
             EXPECT_FALSE(registry.RestoreMetadata(modules, requirements, metadata, error));
             EXPECT_FALSE(error.empty());
-            EXPECT_THROW(registry.LegacyCanonicalState(modules, requirements, "test:metadata"),
-                         std::invalid_argument);
+            EXPECT_THROW(
+                (void)registry.LegacyCanonicalState(modules, requirements, "test:metadata"),
+                std::invalid_argument);
             EXPECT_EQ(metadata.dump(), before);
         }
         EXPECT_EQ(contributor.writes, 0u);
@@ -388,11 +389,11 @@ TEST(AuthorityContributor, MissingBindingUnknownRequirementAndLimitsRefuse) {
     EXPECT_TRUE(registry.ValidateRequiredModules(modules, requirements));
     requirements.push_back(ClockAdapter::kModuleId);
     EXPECT_FALSE(registry.ValidateRequiredModules(modules, requirements));
-    EXPECT_THROW(registry.LegacyCanonicalState(modules, {}, "missing:contributor"),
+    EXPECT_THROW((void)registry.LegacyCanonicalState(modules, {}, "missing:contributor"),
                  std::invalid_argument);
     Contributor canonical_only("canonical:only", "x");
     ASSERT_TRUE(registry.Register(canonical_only));
-    EXPECT_THROW(registry.LegacyCanonicalState(modules, {}, "canonical:only"),
+    EXPECT_THROW((void)registry.LegacyCanonicalState(modules, {}, "canonical:only"),
                  std::invalid_argument);
 }
 
@@ -417,7 +418,8 @@ TEST(AuthorityContributor, UnknownRequirementsPrecedeCallbacksWithLiveRegistered
     EXPECT_EQ(contributor.writes, 1u);
     EXPECT_TRUE(metadata.at("test").get<bool>());
     contributor.bytes.assign(P::AuthorityContributorRegistry::kMaxCanonicalBytes + 1, 'x');
-    EXPECT_THROW(registry.LegacyCanonicalState(modules, {}, "test:metadata"), std::length_error);
+    EXPECT_THROW((void)registry.LegacyCanonicalState(modules, {}, "test:metadata"),
+                 std::length_error);
 }
 
 TEST(AuthorityContributor, ClockRestoreStagesAllContributorsBeforeCommitAndCanRetry) {
