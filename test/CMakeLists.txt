@@ -416,6 +416,7 @@ add_executable(common_tests
     sim/soil_nutrient_test.cpp
     sim/soil_fire_disease_ordering_test.cpp
     sim/pollination_test.cpp
+    sim/PollinationSpatial_test.cpp
     sim/plant_disease_test.cpp
     sim/irrigation_test.cpp
     sim/lifespan_test.cpp
