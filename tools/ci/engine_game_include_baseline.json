@@ -1234,6 +1234,11 @@
     [
       "luminumbra_common",
       "src/luminumbra_common/persistence/WorldSaveService.cpp",
+      "src/luminumbra_common/game/WorldClockAuthorityAdapter.h"
+    ],
+    [
+      "luminumbra_common",
+      "src/luminumbra_common/persistence/WorldSaveService.cpp",
       "src/luminumbra_common/persistence/PlantPersistence.h"
     ],
     [
@@ -1545,6 +1550,11 @@
       "luminumbra_common",
       "src/luminumbra_common/world/GameSession.cpp",
       "src/luminumbra_common/components/ThirstComponents.h"
+    ],
+    [
+      "luminumbra_common",
+      "src/luminumbra_common/world/GameSession.cpp",
+      "src/luminumbra_common/game/WorldClockAuthorityAdapter.h"
     ],
     [
       "luminumbra_common",
