@@ -1998,6 +1998,12 @@ target_link_libraries(audio_physics_binding_test PRIVATE
 find_package(Threads REQUIRED)
 
 # Developer foundations compile directly, without the client or graphics libraries.
+add_library(command_registry_test_support STATIC
+    ../src/luminumbra_common/core/CommandRegistry.cpp
+)
+target_include_directories(command_registry_test_support PUBLIC ../src/luminumbra_common)
+luminumbra_configure_first_party_target(command_registry_test_support)
+
 add_executable(developer_console_pure_test
     client/developer_console_pure_test.cpp
     ../src/luminumbra_client/app/RegisterDeveloperWidgets.cpp
@@ -2009,7 +2015,8 @@ add_executable(developer_console_pure_test
 )
 target_include_directories(developer_console_pure_test PRIVATE
     ../src/luminumbra_client ../src/luminumbra_common)
-target_link_libraries(developer_console_pure_test PRIVATE gtest_main Threads::Threads spdlog::spdlog)
+target_link_libraries(developer_console_pure_test PRIVATE
+    gtest_main Threads::Threads spdlog::spdlog command_registry_test_support)
 luminumbra_configure_first_party_target(developer_console_pure_test)
 
 # CPU-only ImGui acceptance compiles the pinned core directly, without GL backends
@@ -2034,7 +2041,8 @@ add_executable(developer_console_imgui_test
 target_include_directories(developer_console_imgui_test PRIVATE
     ../src/luminumbra_client ../src/luminumbra_common)
 target_include_directories(developer_console_imgui_test SYSTEM PRIVATE "${_developer_imgui_source}")
-target_link_libraries(developer_console_imgui_test PRIVATE gtest_main Threads::Threads)
+target_link_libraries(developer_console_imgui_test PRIVATE
+    gtest_main Threads::Threads command_registry_test_support)
 luminumbra_configure_first_party_target(developer_console_imgui_test)
 
 # User-overlay persistence uses common services only; no client or GL linkage.
