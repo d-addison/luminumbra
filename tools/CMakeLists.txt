@@ -1937,6 +1937,11 @@ if(BUILD_TESTING)
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py" --partition 8)
     set_tests_properties(CTestShardContractPart8
         PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME SelfHostedAdmissionContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_self_hosted_admission.py")
+    set_tests_properties(SelfHostedAdmissionContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
     # Disjoint policy partitions preserve every unittest case and the 30s deadline.
     # Direct Python invocation and unittest discovery still execute the full suite.
     # Partition 9 reserves two slots for its bounded route-grid overlap.
