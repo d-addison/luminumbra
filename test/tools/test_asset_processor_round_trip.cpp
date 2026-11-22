@@ -13,6 +13,7 @@
 #include <iterator>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -243,16 +244,29 @@ std::vector<ExpectedVertex> WriteTwoPrimitiveGltf(const std::filesystem::path& p
 }
 
 ProcessedMesh ReadLmesh(const std::filesystem::path& path) {
-    std::ifstream in(path, std::ios::binary);
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    const auto fileSize = in.tellg();
+    in.seekg(0);
     ProcessedMesh mesh{};
 
     in.read(reinterpret_cast<char*>(&mesh.header), sizeof(mesh.header));
+    const uint64_t expectedSize = sizeof(LMeshHeader) +
+                                  uint64_t(mesh.header.vertexCount) * sizeof(Vertex) +
+                                  uint64_t(mesh.header.indexCount) * sizeof(uint32_t);
+    if (!in || mesh.header.magic != kLmeshMagic || fileSize < 0 ||
+        static_cast<uint64_t>(fileSize) != expectedSize) {
+        throw std::runtime_error("Invalid compiled mesh size or header");
+    }
+    // Readback allocations cannot exceed the payload in this same open stream.
     mesh.vertices.resize(mesh.header.vertexCount);
     mesh.indices.resize(mesh.header.indexCount);
     in.read(reinterpret_cast<char*>(mesh.vertices.data()),
             static_cast<std::streamsize>(mesh.vertices.size() * sizeof(Vertex)));
     in.read(reinterpret_cast<char*>(mesh.indices.data()),
             static_cast<std::streamsize>(mesh.indices.size() * sizeof(uint32_t)));
+    if (!in) {
+        throw std::runtime_error("Incomplete compiled mesh payload");
+    }
 
     return mesh;
 }
@@ -402,6 +416,188 @@ void ExpectVertices(const ProcessedMesh& mesh, const std::vector<ExpectedVertex>
 }
 
 } // namespace
+
+TEST(StaticSceneImport, PreservesAuthoredBoundsNormalsAndWinding) {
+    static_assert(sizeof(LMeshHeader) == 28);
+    static_assert(sizeof(Vertex) == 32);
+    struct Placement {
+        const char* node;
+        std::array<float, 3> minimum;
+        std::array<float, 3> maximum;
+        std::array<float, 3> normal;
+    };
+    const Placement placements[] = {
+        {R"({"mesh": 0})", {0, 0, 0}, {4, 2, 0}, {0, 0, 1}},
+        {R"({"mesh": 0, "translation": [3,-2,5]})", {3, -2, 5}, {7, 0, 5}, {0, 0, 1}},
+        {R"({"mesh": 0, "rotation": [0,0,0,-1]})", {0, 0, 0}, {4, 2, 0}, {0, 0, 1}},
+        {R"({"mesh": 0, "rotation": [0,0,0,1.00004]})", {0, 0, 0}, {4, 2, 0}, {0, 0, 1}},
+        {R"({"mesh": 0, "translation": [3,-1,2], "scale": [2,3,1],
+             "rotation": [0,0,0.7071067811865476,0.7071067811865476]})",
+         {-3, -1, 2},
+         {3, 7, 2},
+         {0, 0, 1}},
+        {R"({"mesh": 0, "translation": [5,-1,2], "scale": [2,3,4],
+             "rotation": [0.7071067811865476,0,0,0.7071067811865476]})",
+         {5, -1, 2},
+         {13, -1, 8},
+         {0, -1, 0}},
+        {R"({"mesh": 0, "translation": [5,-1,2], "scale": [-2,3,1]})",
+         {-3, -1, 2},
+         {5, 5, 2},
+         {0, 0, 1}},
+        {R"({"mesh": 0, "translation": [5,-1,2], "scale": [-2,-3,1]})",
+         {-3, -7, 2},
+         {5, -1, 2},
+         {0, 0, 1}},
+        {R"({"mesh": 0, "translation": [5,-1,2], "scale": [-2,3,-1]})",
+         {-3, -1, 2},
+         {5, 5, 2},
+         {0, 0, -1}},
+        {R"({"mesh": 0, "matrix": [2,0,1,0, 0,3,0,0, 0,0,4,0, 5,-1,2,1]})",
+         {5, -1, 2},
+         {13, 5, 6},
+         {-1 / std::sqrt(5.0f), 0, 2 / std::sqrt(5.0f)}},
+        {R"({"mesh": 0, "matrix": [-2,0,-1,0, 0,3,0,0, 0,0,4,0, 5,-1,2,1]})",
+         {-3, -1, -2},
+         {5, 5, 2},
+         {-1 / std::sqrt(5.0f), 0, 2 / std::sqrt(5.0f)}},
+    };
+    const TempDirectory temp;
+    const auto input = temp.path() / "placement.gltf";
+    const auto output = temp.path() / "placement.lmesh";
+    // Eleven placements, each with six vertices and two triangles.
+    for (const auto& placement : placements) {
+        SCOPED_TRACE(placement.node);
+        WriteTwoPrimitiveGltf(input);
+        ASSERT_TRUE(ReplaceGltf(input,
+                                R"("nodes": [{"mesh": 0}])",
+                                std::string(R"("nodes": [)") + placement.node + "]"));
+        ASSERT_TRUE(process_gltf_checked(input.string(), output.string()));
+        const auto mesh = ReadLmesh(output);
+        ASSERT_EQ(mesh.vertices.size(), 6u);
+        ASSERT_EQ(mesh.indices.size(), 6u);
+        std::array<float, 3> minimum{};
+        std::copy_n(mesh.vertices.front().pos, 3, minimum.begin());
+        auto maximum = minimum;
+        for (const auto& vertex : mesh.vertices) {
+            for (size_t axis = 0; axis < 3; ++axis) {
+                minimum[axis] = std::min(minimum[axis], vertex.pos[axis]);
+                maximum[axis] = std::max(maximum[axis], vertex.pos[axis]);
+                EXPECT_NEAR(vertex.norm[axis], placement.normal[axis], 0.0001f);
+            }
+        }
+        float radiusSquared = 0;
+        for (size_t axis = 0; axis < 3; ++axis) {
+            EXPECT_NEAR(minimum[axis], placement.minimum[axis], 0.0001f);
+            EXPECT_NEAR(maximum[axis], placement.maximum[axis], 0.0001f);
+            const float center = (placement.minimum[axis] + placement.maximum[axis]) / 2;
+            EXPECT_NEAR(mesh.header.boundingSphere[axis], center, 0.0001f);
+            const float extent = placement.maximum[axis] - center;
+            radiusSquared += extent * extent;
+        }
+        EXPECT_NEAR(mesh.header.boundingSphere[3], std::sqrt(radiusSquared), 0.0001f);
+        for (size_t index = 0; index < mesh.indices.size(); index += 3) {
+            for (size_t lane = 0; lane < 3; ++lane) {
+                ASSERT_LT(mesh.indices[index + lane], mesh.vertices.size());
+            }
+            const auto& a = mesh.vertices[mesh.indices[index]];
+            const auto& b = mesh.vertices[mesh.indices[index + 1]];
+            const auto& c = mesh.vertices[mesh.indices[index + 2]];
+            std::array<float, 3> cross{};
+            float alignment = 0;
+            for (size_t axis = 0; axis < 3; ++axis) {
+                const size_t next = (axis + 1) % 3;
+                const size_t last = (axis + 2) % 3;
+                cross[axis] = (b.pos[next] - a.pos[next]) * (c.pos[last] - a.pos[last]) -
+                              (b.pos[last] - a.pos[last]) * (c.pos[next] - a.pos[next]);
+                alignment += cross[axis] * a.norm[axis];
+            }
+            EXPECT_GT(alignment, 0);
+        }
+        const auto first = FileBytes(output);
+        ASSERT_TRUE(process_gltf_checked(input.string(), output.string()));
+        EXPECT_EQ(FileBytes(output), first);
+    }
+}
+
+TEST(StaticSceneImport, RefusesInvalidRotationsBeforeOutput) {
+    const char* rotations[] = {
+        "[0,0,0,0]", "[0,0,0,0.5]", "[0,0,0,2]", "[1,0,0,1]", "[0,0,0,1e38]", "[0,0,0,1e999]"};
+    const TempDirectory temp;
+    const auto input = temp.path() / "rotation.gltf";
+    const auto output = temp.path() / "rotation.lmesh";
+    const auto previous = temp.path() / "previous.lmesh";
+    // Six invalid rotations on a mesh, an ancestor, and a later selected instance.
+    for (const auto* rotation : rotations) {
+        const std::string property = std::string(R"("rotation": )") + rotation;
+        const std::string nodeSets[] = {
+            R"("nodes": [{"mesh": 0, )" + property + "}]",
+            R"("nodes": [{"children": [1], )" + property + R"(}, {"mesh": 0}])",
+            R"("nodes": [{"children": [1,2]}, {"mesh": 0}, {"mesh": 0, )" + property + "}]",
+        };
+        for (const auto& nodes : nodeSets) {
+            SCOPED_TRACE(nodes);
+            WriteTwoPrimitiveGltf(input);
+            ASSERT_TRUE(process_gltf_checked(input.string(), previous.string()));
+            const auto previousBytes = FileBytes(previous);
+            ASSERT_TRUE(ReplaceGltf(input, R"("nodes": [{"mesh": 0}])", nodes));
+            EXPECT_FALSE(process_gltf_checked(input.string(), output.string()));
+            EXPECT_FALSE(std::filesystem::exists(output));
+            EXPECT_NE(Import({input.string(), previous.string()}), 0);
+            EXPECT_EQ(FileBytes(previous), previousBytes);
+        }
+    }
+}
+
+TEST(StaticSceneImport, ExcludesInvalidRotationsOutsideSelectedScene) {
+    const TempDirectory temp;
+    const auto input = temp.path() / "selection.gltf";
+    const auto output = temp.path() / "selection.lmesh";
+    WriteTwoPrimitiveGltf(input);
+    ASSERT_TRUE(process_gltf_checked(input.string(), output.string()));
+    const auto identityBytes = FileBytes(output);
+    ASSERT_TRUE(ReplaceGltf(input,
+                            R"("nodes": [{"mesh": 0}])",
+                            R"("nodes": [{"mesh": 0}, {"mesh": 0, "rotation": [0,0,0,0]}])"));
+    ASSERT_TRUE(process_gltf_checked(input.string(), output.string()));
+    EXPECT_EQ(FileBytes(output), identityBytes);
+}
+
+TEST(AssetProcessorRoundTrip, RejectsIncompleteOrMismatchedReadback) {
+    const TempDirectory temp;
+    const auto input = temp.path() / "readback.gltf";
+    const auto output = temp.path() / "readback.lmesh";
+    WriteTwoPrimitiveGltf(input);
+    ASSERT_TRUE(process_gltf_checked(input.string(), output.string()));
+    const auto bytes = FileBytes(output);
+    ASSERT_EQ(bytes.size(), sizeof(LMeshHeader) + 6 * sizeof(Vertex) + 6 * sizeof(uint32_t));
+    EXPECT_THROW(ReadLmesh(temp.path() / "missing.lmesh"), std::runtime_error);
+    const auto withHeader = [&](uint32_t magic, uint32_t vertices, uint32_t indices) {
+        std::string modified = bytes;
+        const LMeshHeader header{magic, vertices, indices, {0, 0, 0, 0}};
+        std::memcpy(modified.data(), &header, sizeof(header));
+        return modified;
+    };
+    const std::string malformed[] = {
+        "",
+        bytes.substr(0, sizeof(LMeshHeader) - 1),
+        bytes.substr(0, bytes.size() - 1),
+        bytes + "extra",
+        withHeader(0, 6, 6),
+        withHeader(kLmeshMagic, 7, 6),
+        withHeader(kLmeshMagic, 6, 7),
+    };
+    // Seven payload mutations remain bounded by the 244-byte fixture plus five bytes.
+    for (const auto& payload : malformed) {
+        {
+            std::ofstream corrupted(output, std::ios::binary);
+            corrupted.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+            corrupted.close();
+            ASSERT_TRUE(corrupted);
+        }
+        EXPECT_THROW(ReadLmesh(output), std::runtime_error);
+    }
+}
 
 TEST(StaticSceneImport, PreservesNestedTransformsAndRepeatedInstances) {
     const TempDirectory temp;
@@ -795,7 +991,8 @@ TEST(LtexRoundTrip, GradientMip0RoundTripsExactly) {
     unsigned char* png = stbi_load(source.string().c_str(), &w, &h, &c, 4);
     ASSERT_NE(png, nullptr);
     ASSERT_FALSE(image.mips.empty());
-    ASSERT_EQ(image.mips.front().pixels.size(), static_cast<size_t>(w) * h * 4);
+    ASSERT_EQ(image.mips.front().pixels.size(),
+              static_cast<size_t>(w) * static_cast<size_t>(h) * 4u);
     EXPECT_EQ(0,
               std::memcmp(image.mips.front().pixels.data(), png, image.mips.front().pixels.size()));
     stbi_image_free(png);
