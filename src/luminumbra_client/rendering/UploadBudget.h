@@ -211,12 +211,16 @@ private:
 // priority ordering; sorting retained work cannot change its queue position.
 // Two scratch pointer arrays are each bounded by the candidate count, never
 // copying mesh payloads. Each radix sort has eight passes: O(1) per candidate.
-template<typename Item, typename Id, typename Priority>
+template<typename Item, typename Allocator = std::allocator<Item>, typename Id, typename Priority>
 void refresh_uploads(UploadQueue<Item>& queue,
-                     const std::vector<Item>& candidates,
+                     const std::vector<Item, Allocator>& candidates,
                      Id id,
                      Priority priority) {
     queue.begin_refresh();
+    if (candidates.empty()) {
+        queue.end_refresh();
+        return;
+    }
     std::vector<const Item*> arrivals;
     arrivals.reserve(candidates.size());
     for (const auto& candidate : candidates) {

@@ -9225,6 +9225,127 @@ void ExpectProjectionPlane(const glm::mat4& projection, float far_plane, glm::ve
 }
 } // namespace
 
+TEST(RenderSmokeTest, SettledPreparationHasNoScratchAllocationsAndPreservesSubmissionBytes) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(32, 32, SourceRoot()));
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(false);
+    Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    for (int index = 0; index < 4; ++index) {
+        auto chunk =
+            std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(index % 2, 0, index / 2));
+        chunk->set_state(Luminumbra::ChunkState::Ready);
+        chunk->mesh_vertices = {{{0, 6, 0}, {0, 1, 0}, 3u},
+                                {{0, 6, 16}, {0, 1, 0}, 3u},
+                                {{16, 6, 0}, {0, 1, 0}, 3u},
+                                {{16, 6, 16}, {0, 1, 0}, 3u}};
+        chunk->mesh_indices = {0u, 1u, 2u, 2u, 1u, 3u};
+        chunk->water_mesh_vertices = chunk->mesh_vertices;
+        chunk->water_mesh_indices = chunk->mesh_indices;
+        chunk->mesh_version.store(1u);
+        chunk->water_mesh_version.store(1u);
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    }
+    entt::registry registry;
+    for (int index = 0; index < 40; ++index) {
+        const auto entity = registry.create();
+        Luminumbra::Components::TransformComponent transform;
+        transform.position = {static_cast<float>(index), 8.0f, 12.0f};
+        registry.emplace<Luminumbra::Components::TransformComponent>(entity, transform);
+        registry.emplace<Luminumbra::Components::PointLightComponent>(entity);
+    }
+    Camera camera({16, 18, 16}, {0, 1, 0}, -90, -89);
+    const auto render = [&] {
+        pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+    };
+    // Warm every submission slot and both upload lanes before measuring scratch.
+    for (int frame = 0; frame < 8; ++frame) {
+        render();
+    }
+    ASSERT_TRUE(pipeline.render_uploads_settled());
+    ASSERT_EQ(pipeline.get_last_render_pass_stats().terrain_draws, 4u);
+    ASSERT_EQ(pipeline.get_last_render_pass_stats().water_draws, 4u);
+    const auto command_span = pipeline.terrain_command_bytes();
+    const std::vector<std::byte> commands(command_span.begin(), command_span.end());
+    const auto origin_span = std::as_bytes(pipeline.terrain_origins());
+    const std::vector<std::byte> origins(origin_span.begin(), origin_span.end());
+    ASSERT_FALSE(commands.empty());
+    ASSERT_EQ(origins.size(), 4u * sizeof(glm::vec4));
+    const auto& renderable = world.renderable_chunks_view();
+    ASSERT_EQ(renderable.size(), pipeline.terrain_origins().size());
+    for (std::size_t index = 0; index < renderable.size(); ++index) {
+        const auto coords = renderable[index]->get_coords();
+        EXPECT_EQ(pipeline.terrain_origins()[index],
+                  glm::vec4(static_cast<float>(coords.x * Luminumbra::CHUNK_SIZE_X),
+                            static_cast<float>(coords.y * Luminumbra::CHUNK_SIZE_Y),
+                            static_cast<float>(coords.z * Luminumbra::CHUNK_SIZE_Z),
+                            0.0f));
+    }
+
+    // Independent original light-selection oracle, including equal distances.
+    struct Candidate {
+        PointLight light;
+        float d2 = 0;
+    };
+    std::vector<Candidate> reference;
+    const auto view = registry.view<const Luminumbra::Components::TransformComponent,
+                                    const Luminumbra::Components::PointLightComponent>();
+    for (const auto entity : view) {
+        const auto& transform = view.get<const Luminumbra::Components::TransformComponent>(entity);
+        const auto& light = view.get<const Luminumbra::Components::PointLightComponent>(entity);
+        const glm::vec3 delta = transform.position - camera.Position;
+        reference.push_back({{transform.position, light.radius, light.color, light.intensity},
+                             glm::dot(delta, delta)});
+    }
+    std::nth_element(reference.begin(),
+                     reference.begin() + 32,
+                     reference.end(),
+                     [](const Candidate& a, const Candidate& b) { return a.d2 < b.d2; });
+    reference.resize(32);
+    const auto read_albedo = [&] {
+        std::array<unsigned char, 32 * 32 * 4> pixels{};
+        glGetTextureImage(pipeline.gbuffer().albedo_texture,
+                          0,
+                          GL_RGBA,
+                          GL_UNSIGNED_BYTE,
+                          static_cast<GLsizei>(pixels.size()),
+                          pixels.data());
+        return pixels;
+    };
+    const auto expected_albedo = read_albedo();
+    EXPECT_TRUE(std::any_of(expected_albedo.begin(),
+                            expected_albedo.end(),
+                            [](unsigned char value) { return value != 0; }));
+    const auto warmed_allocations = pipeline.preparation_scratch_allocations();
+    EXPECT_GT(warmed_allocations, 0u);
+    for (int frame = 0; frame < 6; ++frame) {
+        render();
+        EXPECT_EQ(pipeline.preparation_scratch_allocations(), warmed_allocations);
+        EXPECT_EQ(pipeline.get_last_render_pass_stats().culling_hierarchy_rebuilds, 0u);
+        EXPECT_EQ(pipeline.get_last_mesh_upload_stats().terrain_budget.attempts, 0u);
+        EXPECT_EQ(pipeline.get_last_mesh_upload_stats().water_budget.attempts, 0u);
+        const auto actual_commands = pipeline.terrain_command_bytes();
+        EXPECT_EQ(std::vector<std::byte>(actual_commands.begin(), actual_commands.end()), commands);
+        const auto actual_origins = std::as_bytes(pipeline.terrain_origins());
+        EXPECT_EQ(std::vector<std::byte>(actual_origins.begin(), actual_origins.end()), origins);
+        const auto lights = pipeline.prepared_point_lights();
+        ASSERT_EQ(lights.size(), reference.size());
+        for (std::size_t index = 0; index < lights.size(); ++index) {
+            EXPECT_EQ(lights[index].position, reference[index].light.position);
+            EXPECT_EQ(lights[index].color, reference[index].light.color);
+            EXPECT_EQ(lights[index].radius, reference[index].light.radius);
+            EXPECT_EQ(lights[index].intensity, reference[index].light.intensity);
+        }
+        EXPECT_EQ(read_albedo(), expected_albedo);
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    }
+}
+
 TEST(RenderSmokeTest, WaterOnlyOwnerSubmitsWaterAndTracksTerrainPresence) {
     HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();
@@ -9357,6 +9478,11 @@ TEST(RenderSmokeTest, WaterOnlyOwnerSubmitsWaterAndTracksTerrainPresence) {
     EXPECT_TRUE(world.renderable_chunks_view().empty());
     EXPECT_EQ(pipeline.get_last_render_pass_stats().snapshot_count, 0u);
     EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 0u);
+    for (int frame = 1; frame <= 30; ++frame) {
+        EXPECT_EQ(pipeline.get_runtime_render_stats().water_gpu_chunks, 1u);
+        render();
+    }
+    EXPECT_EQ(pipeline.get_runtime_render_stats().water_gpu_chunks, 0u);
     pipeline.shutdown();
 }
 
