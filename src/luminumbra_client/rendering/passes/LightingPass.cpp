@@ -48,18 +48,18 @@ LightingPass::~LightingPass() {
 }
 
 namespace {
-// The caller supplies the depth-test enable state. Only the sky depth test
-// changes the depth function, mask, range and clear value, so only it saves them.
+// The caller supplies the depth-test enable state. Every frame changes the depth
+// mask and clear value; only the sky depth test also changes the function and range.
 class LightingDepthState {
 public:
     LightingDepthState(GLboolean enabled, bool sky_depth_test)
         : enabled_(enabled)
         , saved_(sky_depth_test) {
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &mask_);
+        glGetDoublev(GL_DEPTH_CLEAR_VALUE, &clear_);
         if (saved_) {
             glGetIntegerv(GL_DEPTH_FUNC, &function_);
-            glGetBooleanv(GL_DEPTH_WRITEMASK, &mask_);
             glGetDoublev(GL_DEPTH_RANGE, range_.data());
-            glGetDoublev(GL_DEPTH_CLEAR_VALUE, &clear_);
         }
     }
     LightingDepthState(const LightingDepthState&) = delete;
@@ -70,13 +70,13 @@ public:
         } else {
             glDisable(GL_DEPTH_TEST);
         }
+        glDepthMask(mask_);
+        glClearDepth(clear_);
         if (!saved_) {
             return;
         }
         glDepthFunc(static_cast<GLenum>(function_));
-        glDepthMask(mask_);
         glDepthRange(range_[0], range_[1]);
-        glClearDepth(clear_);
     }
 
 private:
