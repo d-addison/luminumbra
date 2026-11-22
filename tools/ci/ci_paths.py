@@ -49,6 +49,7 @@ PYTHON_TESTS = (
     "tools/ci/test_ctest_shards.py",
     "tools/ci/test_workflow_policy.py",
     "tools/ci/test_replay_source_contract.py",
+    "tools/ci/test_engine_game_boundary.py",
     "test/tools/test_region_fixture_capture_contract.py",
 
     "tools/ci/test_terrain_shader_contract.py",
@@ -269,10 +270,12 @@ RMLUI_CALLER_INPUTS = frozenset({
 def needs_python(path: str) -> bool:
     # Standalone Python suites validate workflow and CI configuration files,
     # so CI infrastructure changes run the Python plan as well as native lanes.
-    # The source ratchet scans src/**/*.cpp and src/**/*.h. Keep additions and
-    # deletions in those scopes on the Python lane, including unknown owners.
-    source_ratchet = (path.startswith("src/") and len(PurePosixPath(path).parts) > 2
-                      and PurePosixPath(path).suffix in {".cpp", ".h"})
+    # Source contracts scan engine sources, public headers and target manifests.
+    # Keep additions and deletions on the Python lane, including unknown owners.
+    source_ratchet = (path.startswith(("src/", "include/"))
+                      and (PurePosixPath(path).suffix in {".c", ".cc", ".cpp", ".cxx",
+                                                         ".h", ".hh", ".hpp", ".hxx", ".inl", ".ipp", ".cmake"}
+                           or PurePosixPath(path).name == "CMakeLists.txt"))
     return (source_ratchet or path.endswith(".py") or path.startswith(CI_PREFIXES) or path in RMLUI_CALLER_INPUTS
             or path in {"res/shaders/g_buffer.frag",
                         "src/luminumbra_common/world/MarchingCubes.cpp",

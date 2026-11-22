@@ -3006,6 +3006,8 @@ if(WIN32)
 endif()
 add_test(NAME AudioPropagationMetricsContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_audio_propagation_metrics.py)
+add_test(NAME EngineGameBoundarySourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/ci/test_engine_game_boundary.py)
 add_test(NAME ReplaySourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_replay_source_contract.py)
 add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner_evidence.py)
