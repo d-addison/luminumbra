@@ -346,6 +346,7 @@ add_executable(common_tests
     # Sole definition of the test-only GameSession authority-profile constructor.
     common/GameSessionAuthorityProfileTestSeam.cpp
     common/GameSessionPlantPersistence_test.cpp
+    common/PlantTerrainCache_test.cpp
     common/RegionFixtureCapture_test.cpp
     # Incremental cursor layout and staged-load refusal regressions use the same discovery.
     persistence/world_state_commit_test.cpp
