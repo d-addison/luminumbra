@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace Luminumbra {
@@ -52,6 +53,15 @@ public:
     // successfully started modules, in reverse order. Repeated start/stop is safe.
     ModuleResult startup();
     ModuleResult shutdown() noexcept;
+    // Exact registered identity; callers requiring live services also check running().
+    [[nodiscard]] bool contains(std::string_view id) const noexcept {
+        for (const auto& module : m_modules) {
+            if (module.id == id) {
+                return true;
+            }
+        }
+        return false;
+    }
     bool running() const noexcept {
         return m_state == State::Running;
     }

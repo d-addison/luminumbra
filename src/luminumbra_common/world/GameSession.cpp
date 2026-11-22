@@ -64,6 +64,7 @@
 #include "../core/JobSystem.h"
 #include "../core/Log.h"
 #include "../fields/EnergyFieldState.h"
+#include "../game/WorldClockAuthorityAdapter.h"
 #include "../persistence/CreatedWorldArtifacts.h"
 #include "../persistence/PlantPersistence.h"
 #include "../persistence/SaveTransaction.h"
@@ -4835,11 +4836,11 @@ GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json) {
 
 std::string GameSession::FoldClockIntoEcologyHash(const std::string& ecology_hash) const {
     return m_activeRegionsEnabled
-               ? Persistence::StableChecksum(ecology_hash + m_worldClock.canonical_bytes() +
-                                             m_activeRegionLedger.canonical_bytes() +
-                                             m_groundObjects.canonical_bytes() +
-                                             CaptureGroundNotifications().canonical_bytes() +
-                                             m_fieldPages.canonical_bytes())
+               ? Persistence::StableChecksum(
+                     ecology_hash + Game::WorldClockAuthorityAdapter::CanonicalBytes(m_worldClock) +
+                     m_activeRegionLedger.canonical_bytes() + m_groundObjects.canonical_bytes() +
+                     CaptureGroundNotifications().canonical_bytes() +
+                     m_fieldPages.canonical_bytes())
                : ecology_hash;
 }
 
@@ -5392,7 +5393,7 @@ bool GameSession::PrepareWorldMetadataTo(const fs::path& save_dir,
     if (!m_activeRegionsEnabled && m_renderCalendar)
         metadata_json["renderCalendar"] = WorldClock(0, *m_renderCalendar).calendar_metadata();
     if (m_activeRegionsEnabled) {
-        m_worldClock.write_metadata(metadata_json);
+        Game::WorldClockAuthorityAdapter::WriteMetadata(m_worldClock, metadata_json);
         metadata_json["ambientFieldAnchor"] = {{"x", m_ambientFieldAnchor.x},
                                                {"y", m_ambientFieldAnchor.y},
                                                {"z", m_ambientFieldAnchor.z}};
