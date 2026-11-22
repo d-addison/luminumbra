@@ -2001,6 +2001,11 @@ target_link_libraries(audio_physics_binding_test PRIVATE
 
 find_package(Threads REQUIRED)
 
+add_executable(inspector_registry_test common/InspectorRegistry_test.cpp)
+target_include_directories(inspector_registry_test PRIVATE ../src/luminumbra_common)
+target_link_libraries(inspector_registry_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(inspector_registry_test)
+
 # Developer foundations compile directly, without the client or graphics libraries.
 add_library(command_registry_test_support STATIC
     ../src/luminumbra_common/core/CommandRegistry.cpp
@@ -2299,6 +2304,7 @@ add_test(NAME TemporalMontagesPython COMMAND "${Python3_EXECUTABLE}" -I -B
 set_tests_properties(TemporalMontagesPython PROPERTIES LABELS "tools" TIMEOUT 60)
 
 set(LUMINUMBRA_GTEST_TARGETS
+    inspector_registry_test
     content_vfs_test
     mod_dependency_solver_test
     native_plugin_loader_test
