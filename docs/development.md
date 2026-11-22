@@ -49,10 +49,14 @@ with CMake scripts on all platforms. On Windows with CMake 3.21+, `NetworkingRun
 (labels `ci;tools;net`, timeout 90 seconds) configures and builds a small DLL
 fixture through the real staging module and PE scanner. It tests the current
 generator and Ninja Multi-Config, building both Debug and Release for the latter.
+The inner configure installs the outer compiler metadata before enabling C++
+and reuses its binary-inspection tools, avoiding repeated compiler and tool discovery.
 The fixture checks generated input files, configuration-specific stamps, and
 staged DLL hashes, then deletes a scanned transitive DLL and rebuilds only the
 application to require repair without relinking. Both Windows CI lanes run these
 labels in their full test suite and provide the compiler and Ninja.
+UCRT64 speed qualification remains pending: the timeout stays at 90 seconds until
+configure, build and the complete test fit a 30-second deadline over 20 consecutive runs.
 
 The earlier post-build-only wiring cannot repair a deleted DLL when the
 application is already up to date. Its combined configuration inputs also admit
