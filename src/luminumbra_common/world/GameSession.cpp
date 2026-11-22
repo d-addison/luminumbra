@@ -5,6 +5,8 @@
 #include "../components/ForagingComponents.h"
 #include "../components/ScavengerComponent.h"
 #include "../components/ThirstComponents.h"
+#include "../core/ModuleRegistry.h"
+#include "../core/PhaseScheduler.h"
 #include "../core/SystemConfig.h"
 #include "../persistence/WorkerBoundary.h"
 #include "../simulation/SimBudgetTelemetry.h"
@@ -1791,6 +1793,37 @@ bool GameSession::AdoptPreparedWorld(const std::shared_ptr<WorldPreparation>& pr
     return prepared->create ? AdoptCreatedWorld(*prepared, artifacts) : AdoptLoadedWorld(*prepared);
 }
 
+// Session composition only: systems remain owned by the session. No stored hooks or
+// borrowed callbacks survive execution of a tick.
+struct GameSession::EcologySchedule {
+    ModuleRegistry modules;
+    PhaseScheduler scheduler;
+
+    EcologySchedule() {
+        // Two fixed tasks. Dependency order deliberately differs from ASCII order.
+        const std::vector<PhaseTask> tasks{{"ecology.disease", "Ecology", {"ecology.pollination"}},
+                                           {"ecology.pollination", "Ecology", {}}};
+        for (const auto& task : tasks) {
+            if (modules.register_module({.id = task.id,
+                                         .provides = {task.id},
+                                         .requires_services = task.after,
+                                         .startup = nullptr,
+                                         .shutdown = nullptr,
+                                         .context = nullptr}) != ModuleResult::Ok) {
+                throw std::logic_error("Invalid ecology module registration");
+            }
+        }
+        if (scheduler.compile({"Ecology"}, tasks) != ScheduleResult::Ok ||
+            modules.startup() != ModuleResult::Ok) {
+            throw std::logic_error("Invalid ecology schedule");
+        }
+    }
+};
+
+std::uint64_t GameSession::GetEcologyScheduleTraceHash() const {
+    return m_ecologySchedule->scheduler.execution_trace_hash();
+}
+
 GameSession::GameSession()
     : GameSession(AuthorityProfileOptions{}, AuthorityProfileTag{}) {}
 
@@ -1798,7 +1831,8 @@ GameSession::GameSession()
 // (see GameSession.h); its only definition is the test seam source.
 GameSession::GameSession(const AuthorityProfileOptions& authority_profile,
                          AuthorityProfileTag /*tag*/)
-    : m_authorityProfile(authority_profile) {
+    : m_authorityProfile(authority_profile)
+    , m_ecologySchedule(std::make_unique<EcologySchedule>()) {
     m_scriptState = std::make_unique<Luminumbra::scripting::LuaState>();
     m_registry.on_destroy<Luminumbra::Components::CreaturePhysicsComponent>()
         .connect<&RemoveCreatureAvatar>(*this);
@@ -2718,28 +2752,36 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     m_windFieldSystem ? m_windFieldSystem->SampleWind(m_metadata.spawnPoint)
                                       : ::Luminumbra::Vec2(0.0f);
 
-                budget.Next(Stage::Pollination, [&] {
-                    return SimParticipantCount<TelemetryComp::PollinationTag,
-                                               TelemetryComp::PlantGenomeComponent,
-                                               TelemetryComp::PlantGrowthComponent,
-                                               TelemetryComp::TransformComponent,
-                                               TelemetryComp::PollinationComponent>(
-                        foliage_registry);
+                // Compile once at session startup; dispatch only these two tasks per tick.
+                m_ecologySchedule->scheduler.execute(0, [&](std::string_view id) {
+                    if (id == "ecology.pollination") {
+                        budget.Next(Stage::Pollination, [&] {
+                            return SimParticipantCount<TelemetryComp::PollinationTag,
+                                                       TelemetryComp::PlantGenomeComponent,
+                                                       TelemetryComp::PlantGrowthComponent,
+                                                       TelemetryComp::TransformComponent,
+                                                       TelemetryComp::PollinationComponent>(
+                                foliage_registry);
+                        });
+                        if (!foliage_registry.view<Comp::PlantGenomeComponent>().empty())
+                            fol::RunPollinationOnTick(foliage_registry,
+                                                      current_tick,
+                                                      windXZ,
+                                                      0,
+                                                      m_plantMutationRate,
+                                                      foliage_gate);
+                    } else {
+                        budget.Next(Stage::Disease, [&] {
+                            return SimParticipantCount<TelemetryComp::PlantTag,
+                                                       TelemetryComp::PlantHealthComponent,
+                                                       TelemetryComp::TransformComponent>(
+                                foliage_registry);
+                        });
+                        if (!foliage_registry.view<Comp::PlantHealthComponent>().empty())
+                            fol::RunPlantDiseaseOnTick(
+                                foliage_registry, current_tick, 0, foliage_gate);
+                    }
                 });
-                if (!foliage_registry.view<Comp::PlantGenomeComponent>().empty())
-                    fol::RunPollinationOnTick(foliage_registry,
-                                              current_tick,
-                                              windXZ,
-                                              0,
-                                              m_plantMutationRate,
-                                              foliage_gate);
-                budget.Next(Stage::Disease, [&] {
-                    return SimParticipantCount<TelemetryComp::PlantTag,
-                                               TelemetryComp::PlantHealthComponent,
-                                               TelemetryComp::TransformComponent>(foliage_registry);
-                });
-                if (!foliage_registry.view<Comp::PlantHealthComponent>().empty())
-                    fol::RunPlantDiseaseOnTick(foliage_registry, current_tick, 0, foliage_gate);
                 //  germination: ripe plants senesce -> annual dies + reseeds, perennial
                 // resets + reseeds (child genome = the pollination cross, computed just above, or
                 // self). Runs AFTER pollination so next_genome is fresh. Opt-in via
