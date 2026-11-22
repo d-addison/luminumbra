@@ -731,6 +731,32 @@
       ]
     },
     {
+      "id": "ci.self-hosted-admission",
+      "source": "docs/development.md#linux-worker-admission-tooling",
+      "statement": "A one-shot Linux admission component authenticates a trusted listener channel, binds same-repository push or pull-request metadata to a private job/run/attempt plan, and refuses invalid assignments before worker creation. It executes a protected descriptor with sealed assignment stdin, separate worker credentials and a fresh environment. Registered offline regressions model privileged ownership and account transitions; they do not qualify a deployed host. No Linux routing is enabled. Listener/worker integration, authenticated metadata normalization, descendant containment, cancellation, startup/lifetime bounds, replay prevention and integrated host qualification remain required before activation; LUM_SELF_HOSTED defaults to disabled.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "SelfHostedAdmissionContract"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/ci/self_hosted_admission.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development.md"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/ci/self_hosted_listener.py",
+          "planned": "Implement pinned listener/worker integration, containment and deployed-host qualification before activation; owner: maintainers"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "ci.linux-python-contracts",
       "source": "docs/development.md#continuous-integration",
       "statement": "Linux standalone Python contracts run in a separate Ubuntu 24.04 job with a 20-minute timeout and the GCC draft guard. Dependency installation and the standalone plan retain documentation-only, mixed and uncertain Python classification coverage. GCC shards retain their 60-minute limits and no longer run the standalone plan. The required Linux / GCC aggregate waits for the Python job and rejects any unsuccessful or skipped Python result and unsuccessful classification. Windows standalone placement is unchanged.",

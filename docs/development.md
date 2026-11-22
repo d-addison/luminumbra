@@ -273,6 +273,59 @@ ASan also supports light and keeps both heavy cases together on the full route.
 Full native validation and the existing platform limits remain required after
 merge; offline policy tests do not establish hosted-runner qualification.
 
+#### Linux worker admission tooling
+
+`tools/ci/self_hosted_admission.py` supplies a one-shot admission component for a
+trusted Linux listener adapter. No workflow calls it and no Linux job is routed
+to a self-hosted runner. The existing Windows daily runner is unchanged.
+`LUM_SELF_HOSTED` remains an opt-in and kill switch: the host-owned launch plan
+defaults to disabled and accepts only the case-insensitive string `true`.
+Changing a workflow, its environment or its runner labels cannot supply that plan.
+
+The threat model treats workflow code, action code, shell startup files, event
+files and the job account as hostile, including leftovers from an earlier job.
+The operating system, root supervisor, separately privileged listener, installed
+worker adapter and their configuration are trusted. The supervisor must start
+with an absolute protected Python interpreter, `-I -B`, a clean environment and
+root-protected imports outside the checkout. This Python module cannot protect
+its own interpreter startup. A stock job-start hook cannot enforce admission:
+`always()`, `failure()` and shell startup can execute despite hook denial.
+
+The listener must authenticate the service assignment, derive its normalized
+metadata, and supply the corresponding private `LaunchPlan` before job code can
+execute. The supervisor verifies Linux Unix-stream peer PID and UID against that
+plan, then reads a four-byte network-order length, at most 65536 UTF-8 JSON bytes,
+and EOF from the listener's write-half closure. One channel carries one assignment.
+Duplicate keys, unknown or missing fields, invalid identities, external head/base
+repositories and cancellation refuse execution. Job UUID, run ID and attempt must
+match the private plan. Only same-repository push and pull-request events are
+accepted; other events fail closed. Pull requests bind head and execution revisions
+and their merge ref; pushes bind matching head/execution revisions and their ref.
+Reads and the final pre-launch decision share a five-second monotonic deadline.
+
+Before creating a worker, the supervisor opens a fixed native ELF executable
+through retained directory descriptors, refuses symlinks and job-writable or
+non-root-owned components, and executes that same descriptor. The exact admitted
+JSON bytes become sealed anonymous stdin. The child receives only fixed PATH and
+LANG settings, no supplementary groups, a separate non-root account, a private
+session and a restrictive umask. No shell, checkout import or job environment is
+consulted. Any exception is a terminal refusal; the listener must never fall back
+to an alternate worker. The returned process belongs to the trusted listener.
+The worker adapter must consume this stdin contract; a stock Runner.Worker is
+not compatible with it. The registered `SelfHostedAdmissionContract` covers policy,
+refusals, process creation, descriptor binding and shell-startup sentinels; it
+models privileged ownership and account transitions and is not host qualification.
+
+Activation still requires a pinned listener/worker adapter with no alternate
+launch path, authenticated assignment normalization, supervisor credential and
+filesystem isolation, and per-job descendant containment established before
+launch. The listener must enforce cancellation, startup and lifetime deadlines,
+stop and reap every job descendant, and prevent replay before taking another job.
+Host qualification must exercise direct label requests, status and cancellation
+conditions, action preparation, containers, pre/post actions, startup injection,
+prior-job tampering and independent runner instances. Keep Linux instances offline
+and `LUM_SELF_HOSTED` unset until that integrated qualification succeeds.
+
 For ready pull requests needing native validation, ASan first runs a Python-only
 fast lane with the `ChangedTranslationUnitsContract` and
 `OfflineDependenciesContract` suites registered by the compiler-free contracts

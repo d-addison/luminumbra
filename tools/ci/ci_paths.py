@@ -45,6 +45,7 @@ PYTHON_TESTS = (
     "tools/ci/test_asan_shards.py",
     "tools/ci/test_ctest_shards.py",
     "tools/ci/test_workflow_policy.py",
+    "tools/ci/test_self_hosted_admission.py",
     "tools/ci/test_replay_source_contract.py",
     "test/tools/test_region_fixture_capture_contract.py",
 
@@ -108,6 +109,7 @@ PYTHON_MODULES = {
     "tools/ci/rmlui_source.py",
     "tools/ci/check_acceptance_matrix.py",
     "tools/ci/ci_paths.py", "tools/ci/ci_shell.py", "tools/ci/check_docs.py",
+    "tools/ci/self_hosted_admission.py",
     "tools/ci/ratchet.py",
     "tools/ci/changed_tus.py", "tools/ci/offline_deps.py", "tools/ci/path_safety.py",
     "tools/ci/check_ctest_junit.py", "tools/ci/slowest_tests.py",
