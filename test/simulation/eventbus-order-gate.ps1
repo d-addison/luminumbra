@@ -22,9 +22,9 @@ $header = Get-Content $HeaderPath -Raw
 $test = Get-Content $TestPath -Raw
 
 $sourceChecks = @(
-    @{ name = "ordered bus assigns monotonic sequence ids"; passed = ($source -match "next_sequence_\+\+" -and $header -match "std::uint64_t publish") },
-    @{ name = "same tick delivery is stable by lane then sequence"; passed = ($source -match "std::stable_sort" -and $source -match "lhs\.lane" -and $source -match "lhs\.sequence") },
-    @{ name = "future tick events remain queued until eligible"; passed = ($source -match "first_future->tick <= inclusive_tick" -and $test -match "pending_count\(\) != 2") },
+    @{ name = "ordered bus assigns monotonic sequence ids"; passed = ($source -match "next_sequence_\+\+" -and $header -match "std::uint64_t\s+publish") },
+    @{ name = "same tick delivery is stable by lane then sequence"; passed = ($source -match "std::stable_sort" -and $source -match "lhs\.event\.lane" -and $source -match "lhs\.event\.sequence") },
+    @{ name = "future tick events remain queued until eligible"; passed = ($header -match "first_future->event\.tick <= inclusive_tick" -and $test -match "pending_count\(\) != 2") },
     @{ name = "replay emits deterministic checksum"; passed = ($source -match "eventbus_order_checksum" -and $source -match "fnv1a64") },
     @{ name = "gate artifact records delivered order"; passed = ($test -match "expected_order" -and $source -match "describe_event_order") }
 )

@@ -2904,9 +2904,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             const auto deliver_events = [&] {
                 budget.Next(Stage::Events, [&] { return m_simulationEventBus.pending_count(); });
                 if (m_activeRegionsEnabled) {
-                    m_simulationEventBus.drain(current_tick, [this] { return !m_regionFault; });
+                    m_simulationEventBus.drain_without_capture(current_tick,
+                                                               [this] { return !m_regionFault; });
                 } else {
-                    m_simulationEventBus.drain(current_tick);
+                    m_simulationEventBus.drain_without_capture(current_tick);
                 }
                 budget.Finish();
             };

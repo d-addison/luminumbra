@@ -54,7 +54,19 @@ bool sequence_exhaustion_is_atomic() {
     return true;
 }
 
-bool subscriptions_during_delivery_start_with_later_events() {
+std::vector<luminumbra::simulation::SimulationEvent>
+drain_for_mode(luminumbra::simulation::OrderedEventBus& bus,
+               std::uint64_t tick,
+               bool discard,
+               const std::function<bool()>& continuation = {}) {
+    if (discard) {
+        bus.drain_without_capture(tick, continuation);
+        return {};
+    }
+    return bus.drain(tick, continuation);
+}
+
+bool subscriptions_during_delivery_start_with_later_events(bool discard) {
     using luminumbra::simulation::OrderedEventBus;
     for (const bool interrupted : {false, true}) {
         OrderedEventBus bus;
@@ -75,12 +87,12 @@ bool subscriptions_during_delivery_start_with_later_events() {
         bus.publish(1, "test", "three");
         bus.publish(1, "test", "one", -1);
         bus.publish(1, "test", "two", -1);
-        bus.drain(1, [&] { return keep_delivering; });
+        drain_for_mode(bus, 1, discard, [&] { return keep_delivering; });
         if (interrupted) {
             if (observed != std::vector<std::string>{"first:one", "subscribed:one"})
                 return false;
             keep_delivering = true;
-            bus.drain(1);
+            drain_for_mode(bus, 1, discard);
         }
         const std::vector<std::string> expected{"first:one",
                                                 "subscribed:one",
@@ -93,7 +105,7 @@ bool subscriptions_during_delivery_start_with_later_events() {
                                                 "new:three"};
         if (observed != expected || bus.pending_count() != 1)
             return false;
-        bus.drain(2);
+        drain_for_mode(bus, 2, discard);
         auto complete = expected;
         complete.insert(complete.end(), {"first:four", "second:four", "new:four"});
         if (observed != complete || bus.pending_count() != 0 || !pending_bytes_match(bus))
@@ -102,7 +114,7 @@ bool subscriptions_during_delivery_start_with_later_events() {
     return true;
 }
 
-bool callback_publications_follow_the_interrupted_batch() {
+bool callback_publications_follow_the_interrupted_batch(bool discard) {
     using luminumbra::simulation::OrderedEventBus;
     std::vector<std::string> uninterrupted;
     for (const int mode : {0, 1, 2}) {
@@ -132,7 +144,7 @@ bool callback_publications_follow_the_interrupted_batch() {
         bus.publish(2, "test", "future");
         bool caught = false;
         try {
-            bus.drain(1, [&] { return keep_delivering; });
+            drain_for_mode(bus, 1, discard, [&] { return keep_delivering; });
         } catch (const std::runtime_error&) {
             caught = true;
         }
@@ -142,17 +154,18 @@ bool callback_publications_follow_the_interrupted_batch() {
             if (!second.empty() || bus.pending_count() != 4)
                 return false;
             // A lower retry horizon must not release the interrupted batch's ordering barrier.
-            if (!bus.drain(0).empty() || !second.empty() || !pending_bytes_match(bus))
+            if (!drain_for_mode(bus, 0, discard).empty() || !second.empty() ||
+                !pending_bytes_match(bus))
                 return false;
         }
         keep_delivering = true;
-        bus.drain(1);
+        drain_for_mode(bus, 1, discard);
         const std::vector<std::string> expected{"original", "batch tail", "published"};
         if (first != expected || second != expected ||
             added != std::vector<std::string>{"batch tail", "published"} ||
             bus.pending_count() != 1 || !pending_bytes_match(bus))
             return false;
-        bus.drain(2);
+        drain_for_mode(bus, 2, discard);
         if (first.back() != "future" || second != first || added.back() != "future" ||
             bus.pending_count() != 0 || !pending_bytes_match(bus))
             return false;
@@ -241,17 +254,249 @@ bool concrete_continuation_preserves_refusal_fault_and_retry() {
     return bus.drain(6, empty).size() == 1 && bus.pending_count() == 0;
 }
 
+bool clean_queues_and_retained_scratch_reduce_work() {
+    using luminumbra::simulation::OrderedEventBus;
+    for (const bool discard : {false, true}) {
+        OrderedEventBus bus;
+        drain_for_mode(bus, 0, discard);
+        if (bus.drain_work().sort_comparisons != 0 || bus.drain_work().scratch_growths != 0) {
+            return false;
+        }
+        bus.publish(20, "test", "last");
+        bus.publish(10, "test", "first", -1);
+        drain_for_mode(bus, 0, discard);
+        const auto sorted = bus.drain_work();
+        if (sorted.sort_comparisons == 0 || sorted.scratch_growths != 0) {
+            return false;
+        }
+        for (std::uint64_t tick = 0; tick < 10; ++tick) {
+            drain_for_mode(bus, tick, discard);
+        }
+        if (bus.drain_work().sort_comparisons != sorted.sort_comparisons) {
+            return false;
+        }
+        drain_for_mode(bus, 10, discard);
+        const auto warmed = bus.drain_work();
+        if (warmed.scratch_growths != 1 || warmed.sort_comparisons != sorted.sort_comparisons ||
+            (discard ? warmed.delivered_copy_bytes != 0 : warmed.delivered_copy_bytes == 0)) {
+            return false;
+        }
+        drain_for_mode(bus, 20, discard);
+        if (bus.drain_work().scratch_growths != warmed.scratch_growths ||
+            bus.drain_work().sort_comparisons != sorted.sort_comparisons) {
+            return false;
+        }
+        bus.restore_pending({{2, 1, 0, "test", "tail"}, {1, -1, 1, "test", "head"}}, 2);
+        const auto restored = drain_for_mode(bus, 1, discard);
+        if ((!discard && (restored.size() != 1 || restored.front().payload != "head")) ||
+            bus.pending_count() != 1 || !pending_bytes_match(bus) ||
+            bus.drain_work().sort_comparisons == sorted.sort_comparisons) {
+            return false;
+        }
+        bus.clear();
+        const auto cleared = bus.drain_work();
+        drain_for_mode(bus, 100, discard);
+        if (bus.drain_work().sort_comparisons != cleared.sort_comparisons) {
+            return false;
+        }
+        bus.publish(1, "test", std::string(4096, 'x'));
+        drain_for_mode(bus, 1, discard);
+        if (bus.pending_count() != 0 ||
+            bus.drain_work().scratch_growths != warmed.scratch_growths ||
+            (discard && bus.drain_work().delivered_copy_bytes != 0)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool nested_drains_preserve_outer_storage() {
+    using luminumbra::simulation::OrderedEventBus;
+    std::vector<std::string> baseline;
+    for (const bool discard : {false, true}) {
+        OrderedEventBus bus;
+        std::vector<std::string> observed;
+        bus.subscribe([&](const auto& event) {
+            observed.push_back("first:" + event.payload);
+            if (event.payload == "outer") {
+                bus.publish(1, "test", "nested", -1);
+                drain_for_mode(bus, 1, discard);
+                // The callback's event reference must survive a nested drain.
+                observed.push_back("return:" + event.payload);
+            }
+        });
+        bus.subscribe([&](const auto& event) { observed.push_back("second:" + event.payload); });
+        bus.publish(1, "test", "outer");
+        bus.publish(1, "test", "tail");
+        bus.publish(2, "test", "future");
+        drain_for_mode(bus, 1, discard);
+        const std::vector<std::string> expected{"first:outer",
+                                                "first:nested",
+                                                "second:nested",
+                                                "return:outer",
+                                                "second:outer",
+                                                "first:tail",
+                                                "second:tail"};
+        if (observed != expected || bus.pending_count() != 1 || !pending_bytes_match(bus)) {
+            return false;
+        }
+        const auto warmed = bus.drain_work();
+        drain_for_mode(bus, 2, discard);
+        if (bus.drain_work().scratch_growths != warmed.scratch_growths ||
+            bus.pending_count() != 0 || !pending_bytes_match(bus) ||
+            (discard && bus.drain_work().delivered_copy_bytes != 0)) {
+            return false;
+        }
+        if (discard && observed != baseline) {
+            return false;
+        }
+        baseline = observed;
+    }
+    return true;
+}
+
+bool discard_continuations_preserve_fault_and_retry() {
+    luminumbra::simulation::OrderedEventBus bus;
+    bool allowed = false, throws = false;
+    std::size_t calls = 0;
+    const DirectContinuation continuation(allowed, throws, calls);
+    std::vector<std::string> observed;
+    bus.subscribe([&](const auto& event) { observed.push_back("first:" + event.payload); });
+    bus.subscribe([&](const auto& event) { observed.push_back("second:" + event.payload); });
+    bus.publish(1, "test", "one");
+    bus.drain_without_capture(0, continuation);
+    if (calls != 0) {
+        return false;
+    }
+    bus.drain_without_capture(1, continuation);
+    if (calls != 1 || !observed.empty() || !pending_bytes_match(bus)) {
+        return false;
+    }
+    throws = true;
+    try {
+        bus.drain_without_capture(1, continuation);
+        return false;
+    } catch (const std::runtime_error&) {}
+    if (calls != 2 || !observed.empty() || !pending_bytes_match(bus)) {
+        return false;
+    }
+    allowed = true;
+    throws = false;
+    bus.drain_without_capture(1, continuation);
+    if (calls != 4 || observed != std::vector<std::string>{"first:one", "second:one"}) {
+        return false;
+    }
+    bool (*const missing)() = nullptr;
+    const std::function<bool()> empty;
+    bus.publish(2, "test", "two");
+    bus.drain_without_capture(2, {});
+    bus.publish(3, "test", "three");
+    bus.drain_without_capture(3, missing);
+    bus.publish(4, "test", "four");
+    bus.drain_without_capture(4, nullptr);
+    bus.publish(5, "test", "five");
+    bus.drain_without_capture(5, empty);
+    return observed.size() == 10 && bus.pending_count() == 0 && pending_bytes_match(bus) &&
+           bus.drain_work().delivered_copy_bytes == 0;
+}
+
+bool captured_and_discarded_bytes_match() {
+    using luminumbra::simulation::OrderedEventBus;
+    using luminumbra::simulation::SimulationEvent;
+    const std::vector<SimulationEvent> input{{2, 0, 4, "test", "future"},
+                                             {1, 1, 2, "test", "tail"},
+                                             {1, -1, 3, "escaped\n", "\"\\\t"},
+                                             {1, -1, 1, "test", "head"},
+                                             {1, -1, 1, "test", "equal key"}};
+    OrderedEventBus captured, discarded;
+    captured.restore_pending(input, 5);
+    discarded.restore_pending(input, 5);
+    std::vector<SimulationEvent> observed;
+    discarded.subscribe([&](const auto& event) { observed.push_back(event); });
+    for (const std::uint64_t tick : {0ull, 1ull, 1ull, 2ull}) {
+        observed.clear();
+        const auto delivered = captured.drain(tick);
+        discarded.drain_without_capture(tick);
+        if (luminumbra::simulation::describe_event_order(delivered) !=
+                luminumbra::simulation::describe_event_order(observed) ||
+            luminumbra::simulation::describe_event_order(captured.pending_events()) !=
+                luminumbra::simulation::describe_event_order(discarded.pending_events()) ||
+            captured.next_sequence() != discarded.next_sequence() ||
+            !pending_bytes_match(captured) || !pending_bytes_match(discarded)) {
+            return false;
+        }
+    }
+    return captured.drain_work().delivered_copy_bytes > 0 &&
+           discarded.drain_work().delivered_copy_bytes == 0;
+}
+
+bool nested_faults_resume_in_batch_order() {
+    using luminumbra::simulation::OrderedEventBus;
+    std::vector<std::string> baseline;
+    for (const bool discard : {false, true}) {
+        OrderedEventBus bus;
+        std::vector<std::string> observed;
+        bus.subscribe([&](const auto& event) {
+            observed.push_back("first:" + event.payload);
+            if (event.payload == "outer") {
+                bus.publish(1, "test", "nested", -1);
+                drain_for_mode(bus, 1, discard);
+            } else if (event.payload == "nested") {
+                throw std::runtime_error("nested consumer fault");
+            }
+        });
+        bus.subscribe([&](const auto& event) { observed.push_back("second:" + event.payload); });
+        bus.publish(1, "test", "outer");
+        bus.publish(1, "test", "tail");
+        try {
+            drain_for_mode(bus, 1, discard);
+            return false;
+        } catch (const std::runtime_error&) {}
+        if (bus.pending_count() != 3 || !pending_bytes_match(bus)) {
+            return false;
+        }
+        drain_for_mode(bus, 0, discard);
+        drain_for_mode(bus, 1, discard);
+        const std::vector<std::string> expected{"first:outer",
+                                                "first:nested",
+                                                "second:outer",
+                                                "first:tail",
+                                                "second:tail",
+                                                "second:nested"};
+        if (observed != expected || bus.pending_count() != 0 || !pending_bytes_match(bus) ||
+            (discard && (observed != baseline || bus.drain_work().delivered_copy_bytes != 0))) {
+            return false;
+        }
+        baseline = observed;
+    }
+    return true;
+}
+
 } // namespace
 
 int main() {
+    if (!captured_and_discarded_bytes_match() || !nested_faults_resume_in_batch_order()) {
+        return fail("captured and discarded delivery changed bytes or nested exception resume");
+    }
+    if (!clean_queues_and_retained_scratch_reduce_work()) {
+        return fail("clean queue sorting, scratch reuse or delivery copy work regressed");
+    }
+    if (!nested_drains_preserve_outer_storage()) {
+        return fail("nested drain invalidated an outer batch or changed delivery order");
+    }
+    if (!discard_continuations_preserve_fault_and_retry()) {
+        return fail("discard continuation changed refusal, fault or retry behavior");
+    }
     if (!concrete_continuation_preserves_refusal_fault_and_retry())
         return fail(
             "concrete continuation copied state or changed refusal, fault or retry behavior");
     if (!sequence_exhaustion_is_atomic())
         return fail("exhausted event sequence mutated pending state or wrapped the cursor");
-    if (!subscriptions_during_delivery_start_with_later_events())
+    if (!subscriptions_during_delivery_start_with_later_events(false) ||
+        !subscriptions_during_delivery_start_with_later_events(true))
         return fail("subscription during delivery changed handler lifetime or event order");
-    if (!callback_publications_follow_the_interrupted_batch())
+    if (!callback_publications_follow_the_interrupted_batch(false) ||
+        !callback_publications_follow_the_interrupted_batch(true))
         return fail("callback publication overtook an interrupted delivery batch");
     using luminumbra::simulation::describe_event_order;
     using luminumbra::simulation::OrderedEventBus;
