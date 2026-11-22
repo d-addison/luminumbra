@@ -3643,7 +3643,7 @@ class UniformCacheWiring(unittest.TestCase):
         self.assertNotRegex(lookup, r"m_uniformLocationCache\s*(?:\[|\.at\s*\()")
         self.assertRegex(lookup, r"return\s+\w+->second\s*;")
         self.assertEqual(lookup.count("glGetUniformLocation("), 1)
-        self.assertRegex(lookup, r"m_uniformLocationCache\.(?:try_)?emplace\(name, location\)")
+        self.assertRegex(lookup, r"m_uniformLocationCache\.(?:try_)?emplace\(std::move\(owned_name\), location\)")
         self.assertIn("m_uniformLocationCache.clear();", body(source, "bool Shader::Reload("))
         gbuffer = read(RENDERING / "passes/GBufferPass.cpp")
         for key in ("candidatePath", "basePath", "mesh_info.meshPath"):

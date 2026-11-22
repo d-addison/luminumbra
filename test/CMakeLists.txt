@@ -771,6 +771,13 @@ else()
     target_link_libraries(render_smoke_test PRIVATE OpenGL::GL)
 endif()
 
+add_executable(shader_uniform_lookup_test rendering/shader_uniform_lookup_test.cpp)
+target_compile_definitions(shader_uniform_lookup_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+)
+target_include_directories(shader_uniform_lookup_test PRIVATE ../src ../src/luminumbra_client)
+target_link_libraries(shader_uniform_lookup_test PRIVATE luminumbra_client gtest_main glad glm::glm)
+
 add_executable(render_capture_test
     rendering/render_capture_test.cpp
     rendering/capture_forward_presence_test.cpp
@@ -2389,6 +2396,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     frontier_gates_test
     regional_scent_allocation_test
     replication_delta_allocation_test
+    shader_uniform_lookup_test
     native_file_ownership_test
     world_open_refusal_test
     runtime_surface_options_test
