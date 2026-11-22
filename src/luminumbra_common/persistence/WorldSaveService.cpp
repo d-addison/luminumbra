@@ -6055,7 +6055,12 @@ AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
                                               const std::optional<std::string>& regional_projection,
                                               const std::string& entity_snapshot_json,
                                               const AuthorityRuntimeHashes& runtime,
-                                              AuthorityCaptureParts parts) try {
+                                              AuthorityCaptureParts parts,
+                                              AuthoritySubHashMask requested,
+                                              AuthorityHashWork* work) try {
+    if (!IsValidSubHashMask(requested)) {
+        return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+    }
     if (!water_sim_cursor.has_value()) {
         return {AuthorityCaptureStatus::MissingCursor, std::nullopt};
     }
@@ -6074,20 +6079,29 @@ AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
     }
     const auto cursor = water_sim_cursor.value();
     const std::string streamed =
-        want_streamed ? ComputeWorldStreamingStateHash(state, cursor) : std::string();
+        want_streamed ? ComputeWorldStreamingStateHash(state, cursor, work) : std::string();
     const std::string chunk =
         want_chunk ? (regional_projection ? StableChecksum(*regional_projection) : streamed)
                    : std::string();
     WorldStreamingStateSubHashes sub;
     if (want_sub) {
-        sub = ComputeWorldStreamingStateSubHashes(state, cursor);
-        if (!entity_snapshot_json.empty()) {
+        sub = ComputeWorldStreamingStateSubHashes(state, cursor, requested, work);
+        if (RequestsSubHash(requested, AuthoritySubHashMask::Entities) &&
+            !entity_snapshot_json.empty()) {
             sub.entities = StableChecksum(entity_snapshot_json);
         }
-        sub.wind = runtime.wind;
-        sub.weather = runtime.weather;
-        sub.aether = runtime.aether;
-        sub.aether_state = runtime.aether_state;
+        if (RequestsSubHash(requested, AuthoritySubHashMask::Wind)) {
+            sub.wind = runtime.wind;
+        }
+        if (RequestsSubHash(requested, AuthoritySubHashMask::Weather)) {
+            sub.weather = runtime.weather;
+        }
+        if (RequestsSubHash(requested, AuthoritySubHashMask::Aether)) {
+            sub.aether = runtime.aether;
+        }
+        if (RequestsSubHash(requested, AuthoritySubHashMask::AetherState)) {
+            sub.aether_state = runtime.aether_state;
+        }
     }
     return {AuthorityCaptureStatus::Ready,
             AuthorityHashCapture{streamed,
@@ -6110,13 +6124,24 @@ AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
                                               const AuthorityRegionalInputs& regional,
                                               const std::string& entity_snapshot_json,
                                               const AuthorityRuntimeHashes& runtime,
-                                              AuthorityCaptureParts parts) try {
+                                              AuthorityCaptureParts parts,
+                                              AuthoritySubHashMask requested,
+                                              AuthorityHashWork* work) try {
+    if (!IsValidSubHashMask(requested)) {
+        return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+    }
     if (!water_sim_cursor.has_value()) {
         return {AuthorityCaptureStatus::MissingCursor, std::nullopt};
     }
     if (!NeedsRegionalAuthority(parts)) {
-        return CaptureAuthorityHashes(
-            state, water_sim_cursor, std::nullopt, entity_snapshot_json, runtime, parts);
+        return CaptureAuthorityHashes(state,
+                                      water_sim_cursor,
+                                      std::nullopt,
+                                      entity_snapshot_json,
+                                      runtime,
+                                      parts,
+                                      requested,
+                                      work);
     }
     if (HasIncompleteAuthority(state.snapshot_chunks())) {
         return {AuthorityCaptureStatus::IncompleteOwner, std::nullopt};
@@ -6170,7 +6195,9 @@ AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
                                   std::optional{std::move(projection)},
                                   entity_snapshot_json,
                                   runtime,
-                                  parts);
+                                  parts,
+                                  requested,
+                                  work);
 } catch (const std::exception&) {
     return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
 }

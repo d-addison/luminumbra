@@ -170,9 +170,9 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                          "parts==AuthorityCaptureParts::Composite||"
                          "parts==AuthorityCaptureParts::Chunk;}")
         for expression in (
-                "want_streamed?ComputeWorldStreamingStateHash(state,cursor):std::string()",
+                "want_streamed?ComputeWorldStreamingStateHash(state,cursor,work):std::string()",
                 "want_chunk?(regional_projection?StableChecksum(*regional_projection):streamed):std::string()",
-                "sub=ComputeWorldStreamingStateSubHashes(state,cursor);",
+                "sub=ComputeWorldStreamingStateSubHashes(state,cursor,requested,work);",
                 "sub.entities=StableChecksum(entity_snapshot_json);",
                 "ComposeWorldHash(chunk,runtime.wind,runtime.weather,runtime.aether,"
                 "runtime.scent,runtime.ecology,runtime.plant)"):
@@ -211,7 +211,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         _, _, regional = self.authority_capture_blocks()
         skip = cpp_block(regional, "if(!NeedsRegionalAuthority(parts))")
         self.assertEqual(skip, "{returnCaptureAuthorityHashes(state,water_sim_cursor,std::nullopt,"
-                         "entity_snapshot_json,runtime,parts);}")
+                         "entity_snapshot_json,runtime,parts,requested,work);}")
         self.assertLess(regional.index(skip), regional.index("regional.regions"))
         self.assertLess(regional.index(skip), regional.index("RegionDigestOperationoperation("))
 
@@ -279,7 +279,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertNotIn("m_regionFault", capture)
         self.assertIn("if(!m_worldUsable||!IsSimulationTickBoundary())", capture)
         self.assertIn("returnPersistence::CaptureAuthorityHashes("
-                      "state,cursor,projection,entity_snapshot_json,runtime,parts);", capture)
+                      "state,cursor,projection,entity_snapshot_json,runtime,parts,requested,work);", capture)
         self.assertIn("LatchRegionFault(m_worldClock.tick(),error.what());"
                       "return{AuthorityCaptureStatus::PreparationRefused,std::nullopt};", capture)
 
@@ -287,8 +287,11 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         driver = compact_cpp((ROOT / "src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp")
                              .read_text(encoding="utf-8"))
         capture = cpp_block(driver, "voidNetSessionCaptureHashes(")
-        request = "ctx->session->CaptureAuthorityHashes(empty_entities," \
-                  "Luminumbra::Persistence::AuthorityCaptureParts::StreamedAndSubHashes)"
+        request = ("ctx->session->CaptureAuthorityHashes(empty_entities,"
+                  "Luminumbra::Persistence::AuthorityCaptureParts::StreamedAndSubHashes,"
+                  "Luminumbra::Persistence::AuthoritySubHashMask::Terrain|"
+                  "Luminumbra::Persistence::AuthoritySubHashMask::Water|"
+                  "Luminumbra::Persistence::AuthoritySubHashMask::Entities)")
         self.assertIn(request, capture)
         refusal = cpp_block(capture, "if(!result.capture)")
         self.assertIn("throwLuminumbra::Persistence::AuthorityCaptureRefused();", refusal)

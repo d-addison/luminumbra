@@ -4709,9 +4709,15 @@ std::string GameSession::ComputeChunkStateHash() {
 
 Persistence::AuthorityCaptureResult
 GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
-                                    Persistence::AuthorityCaptureParts parts) {
+                                    Persistence::AuthorityCaptureParts parts,
+                                    Persistence::AuthoritySubHashMask requested,
+                                    Persistence::AuthorityHashWork* work) {
     using Persistence::AuthorityCaptureParts;
     using Persistence::AuthorityCaptureStatus;
+    using Persistence::AuthoritySubHashMask;
+    if (!Persistence::IsValidSubHashMask(requested)) {
+        return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+    }
     // The regional projection only feeds the chunk slot; scent, ecology and plant only
     // feed the composite. Consumers that discard them skip the work.
     const bool want_chunk = parts == AuthorityCaptureParts::All ||
@@ -4719,7 +4725,12 @@ GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
                             parts == AuthorityCaptureParts::Chunk;
     const bool want_composite =
         parts == AuthorityCaptureParts::All || parts == AuthorityCaptureParts::Composite;
-    const bool want_runtime = parts != AuthorityCaptureParts::Chunk;
+    const bool want_sub = parts == AuthorityCaptureParts::All ||
+                          parts == AuthorityCaptureParts::SubHashes ||
+                          parts == AuthorityCaptureParts::StreamedAndSubHashes;
+    const auto want_runtime = [&](AuthoritySubHashMask slot) {
+        return want_composite || (want_sub && Persistence::RequestsSubHash(requested, slot));
+    };
     if (!want_chunk && parts != AuthorityCaptureParts::SubHashes &&
         parts != AuthorityCaptureParts::StreamedAndSubHashes) {
         return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
@@ -4802,30 +4813,55 @@ GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
             projection = std::move(regional);
         }
         Persistence::AuthorityRuntimeHashes runtime;
-        if (want_runtime) {
-            const std::string aether_state = ComputeAetherStateSubHash();
-            const std::string aether =
-                m_aetherFieldSystem ? m_aetherFieldSystem->ComputeAetherSubHash() : std::string();
-            runtime = {
-                .wind = m_windFieldSystem ? m_windFieldSystem->ComputeWindSubHash() : std::string(),
-                .weather =
-                    m_weatherSystem ? m_weatherSystem->ComputeWeatherSubHash() : std::string(),
-                .aether = aether_state.empty()
-                              ? aether
-                              : Persistence::StableChecksum(aether + "|state:" + aether_state),
-                .scent = want_composite ? ComputeScentSubHash() : std::string(),
-                .ecology = want_composite ? FoldClockIntoEcologyHash(
-                                                luminumbra::ai::ComputeEcologySubHash(m_registry))
-                                          : std::string(),
-                .plant = want_composite ? ComputePlantSubHash() : std::string(),
-                .aether_state = aether_state};
+        const auto record_runtime = [&] {
+            if (work) {
+                ++work->runtime_hashes;
+            }
+        };
+        if (want_runtime(AuthoritySubHashMask::Wind) && m_windFieldSystem) {
+            runtime.wind = m_windFieldSystem->ComputeWindSubHash();
+            record_runtime();
+        }
+        if (want_runtime(AuthoritySubHashMask::Weather) && m_weatherSystem) {
+            runtime.weather = m_weatherSystem->ComputeWeatherSubHash();
+            record_runtime();
+        }
+        if (want_runtime(AuthoritySubHashMask::Aether) ||
+            (want_sub &&
+             Persistence::RequestsSubHash(requested, AuthoritySubHashMask::AetherState))) {
+            runtime.aether_state = ComputeAetherStateSubHash();
+            record_runtime();
+        }
+        if (want_runtime(AuthoritySubHashMask::Aether)) {
+            std::string aether;
+            if (m_aetherFieldSystem) {
+                aether = m_aetherFieldSystem->ComputeAetherSubHash();
+                record_runtime();
+            }
+            runtime.aether =
+                runtime.aether_state.empty()
+                    ? aether
+                    : Persistence::StableChecksum(aether + "|state:" + runtime.aether_state);
+        }
+        if (want_composite) {
+            runtime.scent = ComputeScentSubHash();
+            runtime.ecology =
+                FoldClockIntoEcologyHash(luminumbra::ai::ComputeEcologySubHash(m_registry));
+            runtime.plant = ComputePlantSubHash();
         }
         return Persistence::CaptureAuthorityHashes(
-            state, cursor, projection, entity_snapshot_json, runtime, parts);
+            state, cursor, projection, entity_snapshot_json, runtime, parts, requested, work);
     } catch (const std::exception& error) {
         LatchRegionFault(m_worldClock.tick(), error.what());
         return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
     }
+}
+
+Persistence::AuthorityCaptureResult
+GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
+                                    Persistence::AuthorityCaptureParts parts) {
+    return CaptureAuthorityHashes(
+        entity_snapshot_json, parts, Persistence::AuthoritySubHashMask::All);
 }
 
 Persistence::AuthorityCaptureResult

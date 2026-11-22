@@ -154,7 +154,11 @@ void NetSessionCaptureHashes(std::uint64_t tick, Luminumbra::Net::HashMsg& out, 
     const std::string empty_entities = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
         Luminumbra::Ecs::EntityRegistrySnapshot{});
     const auto result = ctx->session->CaptureAuthorityHashes(
-        empty_entities, Luminumbra::Persistence::AuthorityCaptureParts::StreamedAndSubHashes);
+        empty_entities,
+        Luminumbra::Persistence::AuthorityCaptureParts::StreamedAndSubHashes,
+        Luminumbra::Persistence::AuthoritySubHashMask::Terrain |
+            Luminumbra::Persistence::AuthoritySubHashMask::Water |
+            Luminumbra::Persistence::AuthoritySubHashMask::Entities);
     if (!result.capture) {
         throw Luminumbra::Persistence::AuthorityCaptureRefused();
     }
@@ -177,7 +181,11 @@ void NetSessionCaptureAuthorityHashes(std::uint64_t tick,
     const std::string empty_entities = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
         Luminumbra::Ecs::EntityRegistrySnapshot{});
     const auto result = ctx->session->CaptureAuthorityHashes(
-        empty_entities, Luminumbra::Persistence::AuthorityCaptureParts::All);
+        empty_entities,
+        Luminumbra::Persistence::AuthorityCaptureParts::All,
+        Luminumbra::Persistence::AuthoritySubHashMask::Terrain |
+            Luminumbra::Persistence::AuthoritySubHashMask::Water |
+            Luminumbra::Persistence::AuthoritySubHashMask::Entities);
     if (!result.capture) {
         throw Luminumbra::Persistence::AuthorityCaptureRefused();
     }
