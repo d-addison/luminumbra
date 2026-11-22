@@ -13,6 +13,8 @@ import sys
 # Only reviewed, test-backed files may skip native builds. New files require
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
+    "tools/gates/test_temporal_montages.py",
+    "tools/gates/test_temporal_capture.py",
     "tools/gates/test_temporal_assembly.py",
     "tools/gates/test_shader_scenes.py",
     "tools/test_frozen_terrain_presets.py",
@@ -99,9 +101,11 @@ PYTHON_TESTS = (
     "tools/rendering/acceptance/test_scene_matrix.py",
 )
 PYTHON_MODULES = {
+    "tools/gates/build-visual-sweep-montages.py",
     "tools/gates/shader-scenes.py",
     "tools/gates/visual_lint.py",
     "tools/regenerate_region_fixtures.py",
+    "tools/gates/check-temporal-capture.py",
     "tools/gates/check-diagnostic-capture.py",
 
     "tools/ci/compile_shaders.py",
@@ -183,6 +187,7 @@ CI_ENTRYPOINTS = (
     set(PYTHON_TESTS)
     | {command[0] for command in PYTHON_SELF_CHECKS.values()}
     | {
+        "tools/gates/check-temporal-capture.py",
         "tools/gates/check-diagnostic-capture.py",
         "tools/assets/acquire.py", "tools/blender/authoring/probes/run.py",
         "tools/gates/shader-scenes.py",
