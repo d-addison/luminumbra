@@ -757,7 +757,8 @@ class ReplaySourceContract(unittest.TestCase):
         consumers = {name for name, sources in closures.items() if Path(runtime[3:]) in sources}
         self.assertEqual(consumers, {"capture_manifest_test", "capture_feature_profile_test",
                                      "diagnostic_bundle_test", "runtime_surface_options_test",
-                                     "audio_disabled_test", "temporal_sweep_test"})
+                                     "audio_disabled_test", "temporal_sweep_test",
+                                     "render_capture_test"})
         for target, retained in (
             ("capture_manifest_test", ("rendering/capture_manifest_test.cpp",
                                        "rendering/diagnostic_capture_test.cpp",
