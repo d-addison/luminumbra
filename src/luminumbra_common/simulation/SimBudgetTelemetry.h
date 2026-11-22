@@ -118,8 +118,16 @@ public:
     }
 
     void Record(SimBudgetStage stage, std::uint64_t tick, std::uint64_t work, double duration_ms) {
-        if (enabled_)
-            samples_[static_cast<std::size_t>(stage)].push_back({tick, work, duration_ms});
+        if (!enabled_)
+            return;
+        auto& samples = samples_[static_cast<std::size_t>(stage)];
+        // Resume can revisit a stage within one host tick. Measure the whole opportunity.
+        if (!samples.empty() && samples.back().tick == tick) {
+            samples.back().work += work;
+            samples.back().duration_ms += duration_ms;
+        } else {
+            samples.push_back({tick, work, duration_ms});
+        }
     }
 
     void RecordWork(SimWork counter, std::uint64_t tick, std::uint64_t work) {

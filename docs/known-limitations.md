@@ -217,3 +217,9 @@ rosters should not be confused with missing simulation wiring.
   the supported extension paths are documented in the
   [engine guide](engine-guide.md). Binary releases are dormant by policy —
   releases are source-only.
+
+Regional water continuation remains behind the test-only authority profile; the
+active-region switch alone does not select it. Its current planning, publication
+and compatibility boundaries are documented in
+[Regional water continuation](regional-water-continuation.md). Native qualification
+and production activation remain pending.

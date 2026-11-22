@@ -88,6 +88,13 @@ still requires a boot contract supplying its stable IDs and cursor.
 
 ## Setter audit and pins
 
+Regional foliage pages, plant ownership and water continuation use the existing
+identity slots. Fixed-tick regional water remains behind the test-only authority
+profile; the active-region switch alone does not select it. This integration adds
+no configuration field, identity domain, authority revision or mutable-state hash
+binding. Persistence resource limits and autosave intervals remain outside the
+simulation identity.
+
 `GameSession` supplies the current finite-hydrology boolean, signed rain scale, all
 three live ledger `RegionSchedulerConfig` fields and its resolved calendar to the core encoder.
 With active regions enabled, the clock supplies the calendar; otherwise a render marker

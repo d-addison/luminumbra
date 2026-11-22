@@ -31,6 +31,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <unordered_map>
@@ -1428,3 +1429,56 @@ TEST(WaterDeterminism, BelowBudgetAndEmptyWorldRetainRawCursorUntilLaterActivati
         }
     }
 }
+
+namespace {
+TEST(WaterDeterminism, DurableReadErrorRefusesDirectWaterConsumers) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetJobSystem(&jobs);
+    session.SetRootPath(root.root_string());
+    ASSERT_TRUE(session.CreateWorld("WaterReadError", "777", "default"));
+    auto* world = session.GetWorldSystem();
+    auto* water = session.GetWaterSystem();
+    ASSERT_NE(world, nullptr);
+    ASSERT_NE(water, nullptr);
+    world->set_durable_residency(true);
+    int faults = 0;
+    world->set_durable_chunk_loader(
+        [](const Luminumbra::IVec3&) -> std::shared_ptr<Luminumbra::Chunk> {
+            throw std::runtime_error("injected durable read error");
+        },
+        [&faults](const std::string&) { ++faults; });
+    const Luminumbra::IVec3 expected{4096, 0, 4096};
+    world->remember_durable_chunks({expected});
+    // True suppresses procedural regeneration even when restoration fails.
+    ASSERT_TRUE(world->restore_authoritative_chunk(expected));
+    ASSERT_TRUE(world->durable_read_failed());
+    ASSERT_EQ(faults, 1);
+    const auto before = world->debug_water_state_hash().hash;
+    Luminumbra::world::ActiveRegionLedger ledger;
+    ledger.mark_edited({128, 128}, Luminumbra::world::WorldClock{});
+    ASSERT_TRUE(ledger.set_water_debts({{{128, 128}, 17}}));
+    const auto ledger_before = ledger.encode();
+    std::vector<Luminumbra::world::RegionWork> completed;
+    Luminumbra::world::RegionSchedule schedule;
+    water->SetRegionalScheduling(true);
+    const auto work_before = water->regional_work();
+    EXPECT_THROW(water->UpdateRegional(session.GetRegistry(), {}, ledger, schedule, completed),
+                 std::invalid_argument);
+    EXPECT_EQ(ledger.encode(), ledger_before);
+    EXPECT_EQ(water->regional_work(), work_before);
+    EXPECT_TRUE(completed.empty());
+    EXPECT_FALSE(world->find_streamed_chunk(expected));
+    water->SetRegionalScheduling(false);
+    EXPECT_THROW(water->update(session.GetRegistry(), {}), std::runtime_error);
+    EXPECT_THROW(water->get_water_level_at(0.0f, 0.0f), std::runtime_error);
+    EXPECT_THROW(water->get_water_flow_at(0.0f, 0.0f), std::runtime_error);
+    EXPECT_THROW(water->apply_displacement(Vec3(0.0f), 1.0f), std::runtime_error);
+    EXPECT_THROW(water->EditTerrainBed(Vec3(0.0f), 1, 1.0f), std::runtime_error);
+    EXPECT_THROW(water->MigrateChunksToSimResolution({}), std::runtime_error);
+    EXPECT_EQ(world->debug_water_state_hash().hash, before);
+    EXPECT_EQ(faults, 1);
+}
+} // namespace
