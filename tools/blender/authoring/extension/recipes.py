@@ -67,7 +67,8 @@ class RecipeSession:
                 "definition_sha256": DEFINITION_DIGEST,
                 "records": [row for row in rows if row["target"]]}
 
-    def plan(self, records, target_handle, scope=""):
+    def plan(self, records, target_handle, scope="", *, publish=None):
+        """Cache a review only after optional atomic publication succeeds."""
         rows = checked_records(records)
         target = next((row for row in rows if row["handle"] == target_handle), None)
         if (target is None or target["kind"] != "collection" or not target["target"]
@@ -106,8 +107,11 @@ class RecipeSession:
                 "target_asset_id": target["identity"], "target_handle": target_handle,
                 "snapshot_sha256": digest(rows), "changes": changes}
         identity = digest(plan)
+        value = {"plan_sha256": identity, **deepcopy(plan)}
+        if publish is not None:
+            publish(deepcopy(value))
         self.plans[identity] = deepcopy(plan)
-        return {"plan_sha256": identity, **deepcopy(plan)}
+        return value
 
     def apply(self, plan_sha256, request_id, records, write, publish, *, scope="", before_apply=None):
         """Apply a stored reviewed plan; write(handle, value), publish(receipt).

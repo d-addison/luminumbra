@@ -2942,6 +2942,10 @@ add_test(NAME RenderOptionalAudioContent COMMAND render_configuration_test optio
 if(NOT Python3_FOUND)
     message(FATAL_ERROR "RenderContractPython requires a Python3 interpreter")
 endif()
+add_test(NAME BlenderReviewedRecipesPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/blender/authoring/extension_tests/test_recipes.py)
+add_test(NAME BlenderRecipeOperatorPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/blender/authoring/extension_tests/test_recipe_operator.py)
 add_test(NAME RenderContractPython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_contract.py)
 add_test(NAME ContainmentLinkClosurePython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_containment_link_closure.py)

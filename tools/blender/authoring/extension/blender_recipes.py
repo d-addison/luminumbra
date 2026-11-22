@@ -80,9 +80,9 @@ def inspect(scene, collection):
 
 def plan(scene, collection):
     directory = receipt_directory(scene)
-    value = state.plan(records(scene, collection)[0], f"collection:{collection.session_uid}", str(directory))
-    atomic_json(directory / ("plan-" + value["plan_sha256"] + ".json"), value)
-    return value
+    return state.plan(records(scene, collection)[0], f"collection:{collection.session_uid}", str(directory),
+                      publish=lambda value: atomic_json(
+                          directory / ("plan-" + value["plan_sha256"] + ".json"), value))
 
 
 def run(scene, collection, plan_sha256, request_id):
@@ -112,15 +112,23 @@ class LUMINUMBRA_OT_review_id_repairs(bpy.types.Operator):
     request_id: bpy.props.StringProperty(options={"HIDDEN", "SKIP_SAVE"})
 
     def invoke(self, context, _event):
+        reviewed = None
         try:
             self._plan = plan(context.scene, context.scene.lum_author_collection)
+            reviewed = self._plan
             self.plan_sha256 = self._plan["plan_sha256"]
             self.request_id = uuid.uuid4().hex
             if not self._plan["changes"]:
+                self.cancel(context)
                 self.report({"INFO"}, "All asset identities are already distinct")
                 return {"CANCELLED"}
-            return context.window_manager.invoke_props_dialog(self, width=700, confirm_text="Apply Reviewed Repairs")
+            result = context.window_manager.invoke_props_dialog(self, width=700, confirm_text="Apply Reviewed Repairs")
+            if "CANCELLED" in result:
+                self.cancel(context)
+            return result
         except (OSError, ValueError, RuntimeError) as error:
+            if reviewed is not None:
+                self.cancel(context)
             self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
 

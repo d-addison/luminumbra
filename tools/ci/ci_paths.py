@@ -13,6 +13,8 @@ import sys
 # Only reviewed, test-backed files may skip native builds. New files require
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
+    "tools/blender/authoring/extension_tests/test_recipes.py",
+    "tools/blender/authoring/extension_tests/test_recipe_operator.py",
     "tools/gates/test_temporal_assembly.py",
     "tools/gates/test_shader_scenes.py",
     "tools/test_frozen_terrain_presets.py",
