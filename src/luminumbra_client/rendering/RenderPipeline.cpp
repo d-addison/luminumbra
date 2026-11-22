@@ -3809,19 +3809,23 @@ void RenderPipeline::execute_stage_depth_blit_to_lighting(const Camera& camera) 
     begin_gpu_pass_timer(GpuTimerPass::DepthBlitToLighting);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
-    // both G-buffer and lighting are internal-sized; copy the internal depth rect
-    // (a screen-sized rect would leave the internal depth garbage at scale<1.0 -> the skybox
-    // depth-mask fails and the sky goes dark). At scale 1.0 internal==screen (byte-identical).
-    glBlitFramebuffer(0,
-                      0,
-                      static_cast<GLint>(m_internal_width),
-                      static_cast<GLint>(m_internal_height),
-                      0,
-                      0,
-                      static_cast<GLint>(m_internal_width),
-                      static_cast<GLint>(m_internal_height),
-                      GL_DEPTH_BUFFER_BIT,
-                      GL_NEAREST);
+    // Lighting already copied the depth when the sky depth test rejected sky pixels.
+    if (!m_lighting_pass->depth_copied_from_gbuffer()) {
+        // both G-buffer and lighting are internal-sized; copy the internal depth rect
+        // (a screen-sized rect would leave the internal depth garbage at scale<1.0 -> the skybox
+        // depth-mask fails and the sky goes dark). At scale 1.0 internal==screen
+        // (byte-identical).
+        glBlitFramebuffer(0,
+                          0,
+                          static_cast<GLint>(m_internal_width),
+                          static_cast<GLint>(m_internal_height),
+                          0,
+                          0,
+                          static_cast<GLint>(m_internal_width),
+                          static_cast<GLint>(m_internal_height),
+                          GL_DEPTH_BUFFER_BIT,
+                          GL_NEAREST);
+    }
     end_gpu_pass_timer(GpuTimerPass::DepthBlitToLighting);
 }
 

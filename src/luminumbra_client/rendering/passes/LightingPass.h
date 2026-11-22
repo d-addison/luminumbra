@@ -58,6 +58,9 @@ public:
     void execute(const RenderContext& ctx, bool skybox_follows = false) {
         return execute_external(ctx, skybox_follows);
     }
+    bool depth_copied_from_gbuffer() const {
+        return m_depth_copied_from_gbuffer;
+    }
 
     // full-scene lightning light-pulse + bolt overlay. A strike is a
     // deterministic SIM world event (in the `weather` world_hash sub-hash); this is
@@ -83,6 +86,7 @@ private:
     struct UniformNames;
     std::unique_ptr<UniformNames> m_uniform_names;
     FrameBufferObject m_lighting_fbo;
+    bool m_depth_copied_from_gbuffer = false;
     u32 m_environment_brdf = 0; // registry-owned; independent of framebuffer size
     std::unique_ptr<Shader> m_lighting_shader;
     std::unique_ptr<Shader> m_contribution_shader;
