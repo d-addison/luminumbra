@@ -6,6 +6,7 @@
 
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/PlantComponents.h"
+#include "luminumbra_common/core/PhaseScheduler.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/simulation/SimBudgetTelemetry.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -249,6 +250,13 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
         }
         const auto report = runner.RunFixedTicks(ticks);
         ASSERT_EQ(report.ticks_executed, ticks);
+        // Oracle is the previous hard-coded order, repeated once per executed tick.
+        Luminumbra::ExecutionTrace expected_schedule;
+        for (std::uint64_t tick = 0; tick < ticks; ++tick) {
+            expected_schedule.record("phase", "Ecology", "ecology.pollination");
+            expected_schedule.record("phase", "Ecology", "ecology.disease");
+        }
+        EXPECT_EQ(runner.Session()->GetEcologyScheduleTraceHash(), expected_schedule.hash());
         const std::string hash = runner.ComputeWorldHash();
         ASSERT_FALSE(hash.empty());
         std::cout << "SimBudgetParity active_regions=" << GetParam()
@@ -287,6 +295,51 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
         EXPECT_EQ(SavedContentFingerprints(runner.Session()->GetWorldSaveDir()), before);
         runner.Shutdown();
     }
+}
+TEST_P(SimBudgetWorldParity, EcologyScheduleVisitsOnlyExecutedTicksWithEmptyRoster) {
+    Luminumbra::Server::ServerWorldRunnerConfig config;
+    config.root_path = Root().generic_string() + "/";
+    config.seed = "1337";
+    config.surface_radius = 1;
+    config.collision_radius = 1;
+    config.autosave_interval_ticks = 0;
+    config.finite_hydrology = false;
+    Luminumbra::Server::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot());
+    auto* session = runner.Session();
+    ASSERT_NE(session, nullptr);
+    ASSERT_EQ(session->ActiveRegionsEnabled(), GetParam());
+    ASSERT_TRUE(session->GetRegistry().view<Luminumbra::Components::PlantTag>().empty());
+    Luminumbra::ExecutionTrace expected;
+    EXPECT_EQ(session->GetEcologyScheduleTraceHash(), expected.hash());
+    EXPECT_EQ(session->TickSimulation(0.0), 0u);
+    EXPECT_EQ(session->GetEcologyScheduleTraceHash(), expected.hash());
+    const double fixed_dt = session->GetSimulationClock().fixed_dt();
+    EXPECT_EQ(session->TickSimulation(fixed_dt * 0.5), 0u);
+    EXPECT_EQ(session->GetEcologyScheduleTraceHash(), expected.hash());
+    ASSERT_EQ(session->TickSimulation(fixed_dt * 0.5), 1u);
+    expected.record("phase", "Ecology", "ecology.pollination");
+    expected.record("phase", "Ecology", "ecology.disease");
+    EXPECT_EQ(session->GetEcologyScheduleTraceHash(), expected.hash());
+    ASSERT_EQ(session->TickSimulation(fixed_dt * 3.0), 3u);
+    for (std::uint64_t tick = 0; tick < 3; ++tick) {
+        expected.record("phase", "Ecology", "ecology.pollination");
+        expected.record("phase", "Ecology", "ecology.disease");
+    }
+    EXPECT_EQ(session->GetEcologyScheduleTraceHash(), expected.hash());
+    EXPECT_FALSE(session->CreateTransientWorld("Refused schedule", "1337", "missing-preset"));
+    EXPECT_EQ(session->GetEcologyScheduleTraceHash(), expected.hash());
+    ASSERT_TRUE(session->CreateTransientWorld("Reset schedule", "1337", "default"));
+    EXPECT_EQ(session->GetEcologyScheduleTraceHash(), expected.hash());
+    ASSERT_EQ(session->TickSimulation(fixed_dt), 1u);
+    expected.record("phase", "Ecology", "ecology.pollination");
+    expected.record("phase", "Ecology", "ecology.disease");
+    EXPECT_EQ(session->GetEcologyScheduleTraceHash(), expected.hash());
+    runner.Shutdown();
+    runner.Shutdown();
+    // A new session starts with its own registry and trace after teardown.
+    const Luminumbra::world::GameSession next;
+    EXPECT_EQ(next.GetEcologyScheduleTraceHash(), Luminumbra::ExecutionTrace{}.hash());
 }
 INSTANTIATE_TEST_SUITE_P(ActiveRegions,
                          SimBudgetWorldParity,

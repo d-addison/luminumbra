@@ -636,6 +636,8 @@ public:
     [[nodiscard]] const FieldPageState& GetFieldPages() const {
         return m_fieldPages;
     }
+    // Session-lifetime executed ecology schedule trace; excluded from identity and saves.
+    [[nodiscard]] std::uint64_t GetEcologyScheduleTraceHash() const;
     // Observational foliage preparation/publication counts; excluded from identity and saves.
     [[nodiscard]] std::uint64_t GetFoliageSelectionVisits() const;
     [[nodiscard]] std::uint64_t GetFoliageRegistryStageVisits() const;
@@ -784,7 +786,9 @@ private:
     // The single real constructor; the default and the test-only constructors delegate here.
     GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTag);
 
+    struct EcologySchedule;
     const AuthorityProfileOptions m_authorityProfile;
+    std::unique_ptr<EcologySchedule> m_ecologySchedule;
     OwnerContinuationOptions m_continuationOptions;
     const std::vector<World::PlayerAvatar>* m_ownerAvatarSources = nullptr;
     std::optional<std::uint32_t> m_ownerRosterCount;
