@@ -610,9 +610,11 @@ private:
     struct PrefixUniforms {
         int group_count = -1;
         int max_instances = -1;
+        int pass = -1;
     } m_prefix_uniforms;
     u32 m_group_counts_ssbo = 0;
     u32 m_group_offsets_ssbo = 0;
+    u32 m_block_scan_ssbo = 0;
     int m_uploaded_chunk_count = 0;
     static constexpr std::size_t kMaxGpuChunks = FoliageSurfaceSlots::kCapacity;
     // Rebuild scratch retains its high-water capacity. GPU input scratch is
