@@ -47,6 +47,8 @@ class CreatedWorldArtifacts;
 struct AuthorityCaptureResult;
 struct OwnerContinuation;
 enum class AuthorityCaptureParts;
+enum class AuthoritySubHashMask : std::uint16_t;
+struct AuthorityHashWork;
 } // namespace Luminumbra::Persistence
 
 namespace luminumbra::fields {
@@ -774,6 +776,11 @@ public:
     [[nodiscard]] Persistence::AuthorityCaptureResult
     CaptureAuthorityHashes(const std::string& entity_snapshot_json,
                            Persistence::AuthorityCaptureParts parts);
+    [[nodiscard]] Persistence::AuthorityCaptureResult
+    CaptureAuthorityHashes(const std::string& entity_snapshot_json,
+                           Persistence::AuthorityCaptureParts parts,
+                           Persistence::AuthoritySubHashMask requested,
+                           Persistence::AuthorityHashWork* work = nullptr);
     [[nodiscard]] bool IsSimulationTickBoundary() const {
         return !m_activeRegionsEnabled || (!m_simulationBatchInProgress && m_regionWork.empty());
     }

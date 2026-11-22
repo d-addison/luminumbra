@@ -1844,6 +1844,7 @@ target_link_libraries(frontier_gates_test PRIVATE
 # Exercise the shipping server runner and the client's GameSession open paths.
 add_executable(world_open_refusal_test
     persistence/world_open_refusal_test.cpp
+    persistence/requested_subhash_test.cpp
     ../src/luminumbra_client/ui/core/UIHotReload.cpp
     common/SimBudgetWorldParity_test.cpp
     common/EffectivePresetIdentity_test.cpp
