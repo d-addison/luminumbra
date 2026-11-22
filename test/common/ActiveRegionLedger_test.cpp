@@ -29,9 +29,30 @@ std::size_t*& AllocationCounter() {
     static thread_local std::size_t* counter = nullptr;
     return counter;
 }
+std::size_t*& AllocationFailureCountdown() {
+    static thread_local std::size_t* remaining = nullptr;
+    return remaining;
+}
+class ScopedAllocationFailure {
+public:
+    explicit ScopedAllocationFailure(std::size_t& remaining) {
+        AllocationFailureCountdown() = &remaining;
+    }
+    ~ScopedAllocationFailure() {
+        AllocationFailureCountdown() = nullptr;
+    }
+    ScopedAllocationFailure(const ScopedAllocationFailure&) = delete;
+    ScopedAllocationFailure& operator=(const ScopedAllocationFailure&) = delete;
+};
 } // namespace
 
 void* operator new(std::size_t bytes) {
+    if (auto* remaining = AllocationFailureCountdown()) {
+        if (*remaining == 0) {
+            throw std::bad_alloc();
+        }
+        --*remaining;
+    }
     if (auto* storage = std::malloc(bytes == 0 ? 1 : bytes)) {
         if (auto* counter = AllocationCounter())
             ++*counter;
@@ -46,6 +67,12 @@ void operator delete(void* storage, std::size_t) noexcept {
     std::free(storage);
 }
 void* operator new(std::size_t bytes, const std::nothrow_t&) noexcept {
+    if (auto* remaining = AllocationFailureCountdown()) {
+        if (*remaining == 0) {
+            return nullptr;
+        }
+        --*remaining;
+    }
     auto* storage = std::malloc(bytes == 0 ? 1 : bytes);
     if (storage != nullptr) {
         if (auto* counter = AllocationCounter())
@@ -936,6 +963,43 @@ TEST(ActiveRegionLedgerTest, WarmScheduleCountsAnchorAdmittedRegionWorkFromTheNe
             EXPECT_EQ(ledger.encode(), fresh.encode());
         }
     }
+}
+
+TEST(ActiveRegionLedgerTest, PriorityAdmissionAllocationFailuresLeaveWarmLedgerRetryable) {
+    const std::array anchors{Vec3{100, 0, 100}};
+    const std::array retry_anchors{Vec3{-10240, 0, -10240}};
+    bool completed = false;
+    // At most 12 admitted records and two index nodes per record, plus bounded
+    // vector/string growth: 128 failure positions cover this warm preparation.
+    for (std::size_t failure = 0; failure < 128; ++failure) {
+        ActiveRegionLedger ledger;
+        ledger.activate_owned(kFar, WorldClock{});
+        ledger.schedule(WorldClock(1));
+        ledger.activate_owned({11, 11}, WorldClock(1));
+        auto fresh = ledger;
+        auto remaining = failure;
+        bool refused = false;
+        try {
+            const ScopedAllocationFailure allocations(remaining);
+            ledger.schedule(WorldClock(2), anchors);
+        } catch (const std::bad_alloc&) {
+            refused = true;
+        }
+        if (!refused) {
+            completed = true;
+            break;
+        }
+        SCOPED_TRACE(failure);
+        EXPECT_EQ(ledger.records(), fresh.records());
+        EXPECT_EQ(ledger.encode(), fresh.encode());
+        EXPECT_EQ(ledger.canonical_bytes(), fresh.canonical_bytes());
+        EXPECT_EQ(ledger.schedule(WorldClock(2), retry_anchors),
+                  fresh.schedule(WorldClock(2), retry_anchors));
+        EXPECT_EQ(ledger.records(), fresh.records());
+        EXPECT_EQ(ledger.encode(), fresh.encode());
+        EXPECT_EQ(ledger.canonical_bytes(), fresh.canonical_bytes());
+    }
+    EXPECT_TRUE(completed);
 }
 
 TEST(ActiveRegionLedgerTest, WorkWithoutValidAnchorsRequiresAnExistingRecord) {

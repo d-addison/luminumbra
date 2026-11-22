@@ -435,39 +435,54 @@ void ActiveRegionLedger::visit(const Vec3& anchor,
         record.last_proximity = clock.tick();
     }
 }
-void ActiveRegionLedger::evict_idle(const WorldClock& clock, const OwnershipProbe& owned) {
-    if (!owned)
-        return;
-    for (auto it = m_records.begin(); it != m_records.end();) {
-        const auto& r = it->second;
-        // Cheap record conditions first so the probe runs only for evictable records.
-        const bool idle = clock.tick() >= r.last_proximity &&
-                          clock.tick() - r.last_proximity >= kIdleEvictionTicks;
-        if (!r.pinned && !r.edited && !r.populated && r.water_cursor == 0 && idle &&
-            !energy_ages().contains(it->first) && !m_waterDebts.contains(it->first) &&
-            !completed_work().contains(it->first) && !owned(it->first)) {
-            m_legacyFrozenDigests.erase(it->first);
-            if (inspect_frozen_history(r))
-                --m_frozenHistoryCount;
-            it = m_records.erase(it);
-        } else
-            ++it;
-    }
-}
 struct ActiveRegionLedger::ScheduleScratch {
     struct Row {
         RegionKey key;
         ActiveRegionRecord* record;
-        std::uint64_t proximity;
+        // Current effective stamp is observational within the index: only the
+        // separate ordering stamp and rank participate in comparisons.
+        mutable std::uint64_t proximity;
+        int rank;
+        std::uint64_t order_proximity;
     };
-    // Rows and new nodes are bounded by kMaxRegions; input scratch follows the supplied spans.
-    std::vector<Row> rows;
+    struct PriorityLess {
+        std::uint64_t* comparisons;
+        bool operator()(const Row& a, const Row& b) const noexcept {
+            ++*comparisons;
+            // Subtracting both proximities from the same tick preserves this order.
+            return std::tuple(a.rank, ~a.order_proximity, a.key) <
+                   std::tuple(b.rank, ~b.order_proximity, b.key);
+        }
+    };
+    std::uint64_t priorityComparisons = 0;
+    using Rows = std::set<Row, PriorityLess>;
+    // Both indexes and new nodes are bounded by kMaxRegions. Priority snapshots
+    // keep comparisons independent of record writes and failed preparations.
+    Rows rows{PriorityLess{&priorityComparisons}};
+    std::map<RegionKey, Rows::iterator> by_key;
+    void erase(RegionKey key) {
+        const auto entry = by_key.find(key);
+        if (entry != by_key.end()) {
+            if (entry->second != rows.end()) {
+                rows.erase(entry->second);
+            }
+            by_key.erase(entry);
+        }
+    }
+    // An unchanged visited cohort remains ahead of every unvisited stamp.
+    // Its ordering epoch stays fixed while effective proximity advances.
+    std::vector<RegionKey> previous_visits;
+    std::uint64_t visit_epoch = 0;
     std::vector<RegionKey> visits, evictions;
     std::vector<RegionWork> work;
     std::map<RegionKey, ActiveRegionRecord> added;
     RegionSchedule result;
     std::string trace;
 };
+
+std::uint64_t ActiveRegionLedger::priority_comparisons() const noexcept {
+    return m_scheduleScratch ? m_scheduleScratch->priorityComparisons : 0;
+}
 
 const RegionSchedule* ActiveRegionLedger::last_schedule() const noexcept {
     return m_scheduleScratch ? &m_scheduleScratch->result : nullptr;
@@ -495,6 +510,12 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
     result.prior_ticks.clear();
     result.transitions.clear();
     result.evicted.clear();
+    // A failed preparation can leave unpublished nodes indexed. Remove their
+    // rows before releasing storage; committed record nodes keep stable addresses.
+    for (const auto& [key, record] : scratch.added) {
+        (void)record;
+        scratch.erase(key);
+    }
     scratch.added.clear();
     auto& visits = scratch.visits;
     visits.clear();
@@ -525,6 +546,10 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
         visit_anchor(anchor);
     std::sort(visits.begin(), visits.end());
     visits.erase(std::unique(visits.begin(), visits.end()), visits.end());
+    const bool same_visits = visits == scratch.previous_visits;
+    const auto visit_epoch = same_visits ? scratch.visit_epoch : clock.tick();
+    // Both visit sets contain at most kMaxRegions unique admitted keys.
+    scratch.previous_visits.reserve(visits.size());
     auto& accepted_work = scratch.work;
     accepted_work.clear();
     // Size for every candidate report, so a warm tick that accepts more of the
@@ -547,11 +572,11 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
             accept_work(RegionWork{key, total, 0, 0, 0});
 
     auto& rows = scratch.rows;
-    rows.clear();
-    rows.reserve(m_records.size() + scratch.added.size());
+    const auto record_count = m_records.size() + scratch.added.size();
     // Publication swaps these buffers; retain both capacities for warm calls.
-    scratch.evictions.reserve(rows.capacity());
-    result.evicted.reserve(rows.capacity());
+    scratch.evictions.reserve(record_count);
+    result.evicted.reserve(record_count);
+    auto cached = scratch.by_key.begin();
     auto existing = m_records.begin();
     auto added = scratch.added.begin();
     auto next_visit = visits.begin();
@@ -581,14 +606,25 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
                            !m_completedWork.contains(key);
         if (evict)
             scratch.evictions.push_back(key);
-        rows.push_back({key, &r, proximity});
+        // Walk the key index alongside the existing admission pass: unchanged
+        // records need neither tree searches nor priority comparisons.
+        if (cached == scratch.by_key.end() || cached->first != key) {
+            cached = scratch.by_key.emplace_hint(cached, key, rows.end());
+        }
+        const auto rank = Rank(r);
+        const auto order_proximity = nearby ? visit_epoch : r.last_proximity;
+        if (cached->second == rows.end()) {
+            cached->second = rows.insert({key, &r, proximity, rank, order_proximity}).first;
+        } else if (cached->second->rank != rank ||
+                   cached->second->order_proximity != order_proximity) {
+            auto node = rows.extract(cached->second);
+            node.value().rank = rank;
+            node.value().order_proximity = order_proximity;
+            cached->second = rows.insert(std::move(node)).position;
+        }
+        cached->second->proximity = proximity;
+        ++cached;
     }
-    std::sort(rows.begin(), rows.end(), [&](const auto& a, const auto& b) {
-        const auto& ra = *a.record;
-        const auto& rb = *b.record;
-        return std::tuple(Rank(ra), clock.tick() - a.proximity, a.key) <
-               std::tuple(Rank(rb), clock.tick() - b.proximity, b.key);
-    });
     const bool over = result.work > m_config.work_limit;
     // Select at most one budget transition from the complete tick's totals.
     // Degrade the lowest priority eligible region; recover the highest. Then
@@ -739,6 +775,7 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
         const auto record = m_records.find(key);
         if (inspect_frozen_history(record->second))
             --m_frozenHistoryCount;
+        scratch.erase(key);
         m_records.erase(record);
     }
     // Compact the parallel rollback stamps together with the surviving due
@@ -755,6 +792,10 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
     result.prior_ticks.resize(retained);
     result.evicted.swap(scratch.evictions);
     result.ledger_records = m_records.size();
+    if (!same_visits) {
+        scratch.previous_visits.assign(visits.begin(), visits.end());
+        scratch.visit_epoch = visit_epoch;
+    }
     return result;
 }
 

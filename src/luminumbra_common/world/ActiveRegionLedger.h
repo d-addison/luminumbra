@@ -357,6 +357,9 @@ public:
     // The retained runtime result supports rollback even if copying schedule()
     // to a consumer throws. Null before scheduling; valid until the next call.
     [[nodiscard]] const RegionSchedule* last_schedule() const noexcept;
+    // Const diagnostic: cumulative comparisons maintaining runtime priority order.
+    // An unchanged rank/proximity/membership adds zero; never persisted or hashed.
+    [[nodiscard]] std::uint64_t priority_comparisons() const noexcept;
     [[nodiscard]] std::string canonical_bytes() const;
     // Throws std::length_error if the envelope would exceed kMaxFileBytes.
     [[nodiscard]] std::string encode() const;
@@ -365,9 +368,6 @@ public:
 
 private:
     void swap(ActiveRegionLedger& other) noexcept;
-    // Drops idle, unowned, non-pinned, unedited, unpopulated records with no water cursor,
-    // energy age, water debt or completed work, including records due in the current schedule.
-    void evict_idle(const WorldClock& clock, const OwnershipProbe& owned);
     ActiveRegionRecord& activate(RegionKey key, const WorldClock& clock);
     void visit(const Vec3& anchor, const WorldClock& clock, RegionRejections& rejected);
     std::string payload(bool observational) const;
