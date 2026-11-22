@@ -29,6 +29,7 @@ PYTHON_TESTS = (
     "tools/gates/test_common_library_isa.py",
     "tools/gates/test_visual_lint.py",
     "test/tools/test_runtime_config_contract.py",
+    "test/tools/test_inline_texture_qualification.py",
     "test/tools/test_graphics_ui_contract.py",
     "test/tools/test_frame_pacing_contract.py",
     "test/tools/test_win32_macro_identifiers.py",
