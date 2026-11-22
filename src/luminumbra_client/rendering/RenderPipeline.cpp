@@ -1937,7 +1937,7 @@ RenderPipeline::get_render_health_snapshot(bool drain_gl_errors) const {
     snapshot.runtime = get_runtime_render_stats();
     snapshot.resources = get_resource_registry_stats();
     snapshot.shaders = get_shader_health();
-    snapshot.passes = m_last_render_pass_metadata;
+    snapshot.passes = m_render_pass_metadata.passes();
     snapshot.started = m_started;
 
     auto fail = [&snapshot](std::string message) {
@@ -2056,122 +2056,21 @@ RenderPipeline::get_render_health_snapshot(bool drain_gl_errors) const {
 }
 
 void RenderPipeline::refresh_render_pass_metadata() {
-    m_last_render_pass_metadata.clear();
-    auto add_pass = [this](std::string name,
-                           std::vector<std::string> inputs,
-                           std::vector<std::string> outputs,
-                           u32 width,
-                           u32 height,
-                           std::string clear,
-                           std::string load_store,
-                           size_t draw_count,
-                           size_t dispatch_count = 0u) {
-        RenderPassMetadata metadata;
-        metadata.name = std::move(name);
-        metadata.inputs = std::move(inputs);
-        metadata.outputs = std::move(outputs);
-        metadata.width = width;
-        metadata.height = height;
-        metadata.clear = std::move(clear);
-        metadata.load_store = std::move(load_store);
-        metadata.draw_count = draw_count;
-        metadata.dispatch_count = dispatch_count;
-        m_last_render_pass_metadata.push_back(std::move(metadata));
-    };
-
-    add_pass("shadow",
-             {"terrain_depth"},
-             {"shadow.depth_texture_array"},
-             m_shadow_pass->shadow_map().resolution,
-             m_shadow_pass->shadow_map().resolution,
-             "depth",
-             "store depth cascades",
-             m_last_render_pass_stats.shadow_draws);
-    add_pass("gbuffer",
-             {"terrain_meshes",
-              "farlod_region_meshes",
-              "static_meshes",
-              "skinned_meshes",
-              "material_lut",
-              "terrain_texture_array",
-              "terrain_normal_array"},
-             {"gbuffer.position",
-              "gbuffer.normal_material",
-              "gbuffer.albedo_roughness",
-              "gbuffer.metallic_ao",
-              "gbuffer.depth"},
-             m_screen_width,
-             m_screen_height,
-             "color+depth",
-             "store deferred attachments",
-             m_last_render_pass_stats.terrain_draws + m_last_render_pass_stats.far_region_draws +
-                 m_last_render_pass_stats.skinned_draws + m_last_render_pass_stats.authored_draws);
-    if (m_gbuffer_pass->gbuffer().authored_texture != 0) {
-        m_last_render_pass_metadata.back().inputs.push_back("authored_static_meshes");
-        m_last_render_pass_metadata.back().outputs.push_back("gbuffer.authored_surface");
-    }
-    add_pass("ssao",
-             {"gbuffer.position", "gbuffer.normal_material", "ssao.noise"},
-             {"ssao.raw"},
-             m_screen_width,
-             m_screen_height,
-             "color",
-             "store ambient occlusion",
-             m_last_render_pass_stats.ssao_draws);
-    add_pass("ssao_blur",
-             {"ssao.raw"},
-             {"ssao.blur"},
-             m_screen_width,
-             m_screen_height,
-             "color",
-             "store blurred ambient occlusion",
-             m_last_render_pass_stats.ssao_blur_draws);
-    add_pass("lighting",
-             {"gbuffer.*",
-              "shadow.depth_texture_array",
-              "ssao.blur",
-              "terrain_texture_array",
-              "material_lut",
-              "lighting.environment_brdf",
-              "water.fallback.black"},
-             {"lighting.color", "lighting.depth"},
-             m_screen_width,
-             m_screen_height,
-             "color+depth",
-             "store lit scene",
-             m_last_render_pass_stats.lighting_draws);
-    add_pass("skybox",
-             {"skybox_vertices"},
-             {"lighting.color"},
-             m_screen_width,
-             m_screen_height,
-             "load lighting",
-             "store sky contribution",
-             m_last_render_pass_stats.skybox_draws);
-    add_pass("water",
-             {"lighting.opaque_color_copy", "gbuffer.depth", "water_meshes", "water.fallback.*"},
-             {"lighting.color"},
-             m_screen_width,
-             m_screen_height,
-             "load sky+lighting",
-             "blend water over sky+lighting",
-             m_last_render_pass_stats.water_draws);
-    add_pass("particles",
-             {"particle_instances", "gbuffer.depth"},
-             {"lighting.color"},
-             m_screen_width,
-             m_screen_height,
-             "load lighting",
-             "blend forward-lit particles",
-             m_last_render_pass_stats.particle_draws);
-    add_pass("final_blit",
-             {"lighting.color"},
-             {"swapchain.color"},
-             m_screen_width,
-             m_screen_height,
-             "default color+depth",
-             "present-ready color",
-             m_last_render_pass_stats.final_blits);
+    m_render_pass_metadata.Refresh(
+        m_screen_width,
+        m_screen_height,
+        m_shadow_pass->shadow_map().resolution,
+        m_gbuffer_pass->gbuffer().authored_texture != 0,
+        {m_last_render_pass_stats.shadow_draws,
+         m_last_render_pass_stats.terrain_draws + m_last_render_pass_stats.far_region_draws +
+             m_last_render_pass_stats.skinned_draws + m_last_render_pass_stats.authored_draws,
+         m_last_render_pass_stats.ssao_draws,
+         m_last_render_pass_stats.ssao_blur_draws,
+         m_last_render_pass_stats.lighting_draws,
+         m_last_render_pass_stats.skybox_draws,
+         m_last_render_pass_stats.water_draws,
+         m_last_render_pass_stats.particle_draws,
+         m_last_render_pass_stats.final_blits});
 }
 
 // --- PER-PASS GPU TIMERS ---
@@ -5060,7 +4959,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_shadow_pass->reset_shader();
     m_ssao_pass->reset_shaders();
     m_water_pass->reset_shader();
-    m_last_render_pass_metadata.clear();
+    m_render_pass_metadata.Clear();
     m_terrain_texture_fallback_layers = 0;
     m_started = false;
 }

@@ -17,9 +17,10 @@
 #include "ImpostorCoverage.h"
 #include "Mesh.h"
 #include "NearTerrainRefinement.h"
-#include "RenderContext.h"          // pass contract (make_ssao_context returns by value)
-#include "RenderFrameTypes.h"       // light/weather/cloud PODs (extracted)
-#include "RenderInputs.h"           //  GlassPaneItem (the glass draw list member)
+#include "RenderContext.h"    // pass contract (make_ssao_context returns by value)
+#include "RenderFrameTypes.h" // light/weather/cloud PODs (extracted)
+#include "RenderInputs.h"     //  GlassPaneItem (the glass draw list member)
+#include "RenderPassMetadata.h"
 #include "RenderResourceRegistry.h" // render resource registry (value member)
 #include "ShadowMap.h"              // ShadowMap (extracted)
 #include "SkyAtmosphereLut.h"       //  Hillaire 2020 scattering LUTs
@@ -360,17 +361,7 @@ public:
         double cpu_post_ms = 0.0;        // ssao + lighting + skybox + water + particles + final
     };
 
-    struct RenderPassMetadata {
-        std::string name;
-        std::vector<std::string> inputs;
-        std::vector<std::string> outputs;
-        u32 width = 0;
-        u32 height = 0;
-        std::string clear;
-        std::string load_store;
-        size_t draw_count = 0;
-        size_t dispatch_count = 0;
-    };
+    using RenderPassMetadata = Rendering::RenderPassMetadata;
 
     struct RenderResourceRegistryStats {
         size_t framebuffers = 0;
@@ -609,7 +600,7 @@ public:
         return m_last_render_pass_stats;
     }
     const std::vector<RenderPassMetadata>& get_last_render_pass_metadata() const {
-        return m_last_render_pass_metadata;
+        return m_render_pass_metadata.passes();
     }
     // the ORDERED stage ids render_frame actually dispatched last frame --
     // the runtime golden the declarative RenderGraph (BuildLuminumbraFrameGraph) is gated against
@@ -1698,7 +1689,7 @@ private:
 
     MeshUploadFrameStats m_last_mesh_upload_stats;
     RenderPassFrameStats m_last_render_pass_stats;
-    std::vector<RenderPassMetadata> m_last_render_pass_metadata;
+    RenderPassMetadataCache m_render_pass_metadata;
     std::vector<std::string> m_frame_stage_trace; //  ( ): last frame's dispatch order
 
     // the prepared per-frame state dispatch_stages reads (see prepare_frame).
