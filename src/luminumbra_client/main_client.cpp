@@ -3560,6 +3560,9 @@ int main(int argc, char* argv[]) {
     double observedFrameSeconds = 0.0;
     // Explicit registrations and current-service callbacks; no player/world pointers retained.
     namespace Developer = Luminumbra::Client::Debug;
+    luminumbra::core::InspectorRegistry inspectors;
+    const auto perfHudInspector = Developer::RegisterPerfHudInspector(inspectors);
+    std::uint64_t inspectorFrame = 0;
     std::vector<std::string> developerShaderReloads;
     Developer::DeveloperHost developerHost;
     developerHost.renderer_available = [&] {
@@ -3660,11 +3663,17 @@ int main(int argc, char* argv[]) {
         {}, [&](Developer::DeveloperFrameAdapter&) {
             Developer::PerfHudSample sample;
             sample.frame_seconds = observedFrameSeconds;
+            sample.observed_frame = inspectorFrame;
             if (g_uiManager)
                 sample.ui_submit_ms = g_uiManager->GetLastUiFrameMs();
             if (gameStateManager.GetCurrentState() == GameState::IN_GAME)
                 sample.terrain_draws = renderPipeline.get_last_render_pass_stats().terrain_draws;
-            Developer::DrawPerfHudContents(sample);
+            if (perfHudInspector &&
+                Developer::PublishPerfHudInspector(inspectors, *perfHudInspector, sample)) {
+                Developer::DrawPerfHudContents(inspectors.Read(*perfHudInspector, inspectorFrame));
+            } else {
+                Developer::DrawPerfHudContents(std::nullopt);
+            }
         }};
     widgetServices["perf.gpu"] = {worldAvailable, [&](Developer::DeveloperFrameAdapter&) {
                                       DrawGpuProfilerContents(renderPipeline, g_uiManager.get());
@@ -4824,6 +4833,9 @@ int main(int argc, char* argv[]) {
         const Attribution::FoliageFrameScope foliage_scope(frame_attribution_enabled);
         const Luminumbra::WaterAttribution::FrameScope water_scope(frame_attribution_enabled);
         Attribution::PhaseFrameScope phase_scope(frame_attribution_enabled);
+        if (inspectorFrame != std::numeric_limits<std::uint64_t>::max()) {
+            ++inspectorFrame;
+        }
         const double observedFrame = glfwGetTime();
         observedFrameSeconds = observedFrame - previousObservedFrame;
         previousObservedFrame = observedFrame;
