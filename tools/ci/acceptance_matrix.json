@@ -8668,6 +8668,67 @@
           "ref": "docs/development/ratchet.md"
         }
       ]
+    },
+    {
+      "id": "contract.snapshot-decoding-peer-admission",
+      "source": "docs/active-regions.md#snapshot-decoding-and-peer-admission",
+      "statement": "Plain JSON terrain decoding preserves canonical serialization, legacy fallback and all-or-nothing publication; terminal Hello refusal prevents subsequent admission and ticks while pending connected handshakes retry. Existing revision-8 cursor bytes and both restore paths remain unchanged. Native execution remains pending.",
+      "status": "covered",
+      "requirements": [
+        "ar.snapshot-peer.001",
+        "ar.snapshot-peer.002",
+        "ar.snapshot-peer.003",
+        "ar.snapshot-peer.004",
+        "ar.snapshot-peer.005",
+        "ar.snapshot-peer.006",
+        "ar.snapshot-peer.007"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "PersistenceHardening.SnapshotTerrainSamplesBypassNumericDomAndKeepCanonicalBytes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "PersistenceHardening.SnapshotTerrainFallbackPreservesDuplicateKeysAndLegacyContainers"
+        },
+        {
+          "kind": "ctest",
+          "ref": "PersistenceHardening.SnapshotTerrainParsingHandlesEmptyWorldAndEmptyArrays"
+        },
+        {
+          "kind": "ctest",
+          "ref": "PersistenceHardening.SnapshotNumericTypesMatchAcrossFastFallbackAndLegacyContainers"
+        },
+        {
+          "kind": "ctest",
+          "ref": "PersistenceHardening.SnapshotDirectTerrainParsingKeepsNumericConversionsAndUnknownFields"
+        },
+        {
+          "kind": "ctest",
+          "ref": "PersistenceHardening.SnapshotTerrainParsingRefusesMalformedSamplesWithoutPartialState"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WaterDeterminism.RawSchedulerCursorDistinguishesEqualPresentAndDifferentFuture"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WaterDeterminism.BelowBudgetAndEmptyWorldRetainRawCursorUntilLaterActivation"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.NonzeroSchedulerRoundTripsBothLoadPathsAndChangesContinuation"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.DisabledRegionsIncrementalSaveRestoresSchedulerAndAuthorityHash"
+        }
+      ]
     }
   ]
 }

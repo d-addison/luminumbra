@@ -434,3 +434,16 @@ and format-patch artifacts, not engine inputs. Absence supplies no commit;
 corruption or an unsupported bundle version is refused by Git's bundle verifier,
 and a patch with invalid context is refused by Git's patch application. Neither
 artifact grants permission to alter another checkout.
+
+
+## Snapshot decoding and peer admission
+
+Plain JSON terrain snapshots stream SDF and heightmap samples into native float arrays while retaining the existing snapshot schema, record encoding and serialization bytes.
+Duplicate terrain keys and noncanonical containers use the legacy decoder with its last-key-wins semantics, and both paths reject boolean samples consistently across all four float arrays.
+Snapshot publication follows complete record validation, preserves serialized insertion order and leaves no partial world on refusal.
+
+A terminal Hello refusal prevents later inputs, checkpoints, replay output and simulation ticks while draining received frames under the existing receive budgets.
+A connected peer with no Hello yet or a transient send refusal can retry, and a successfully sent Hello is not transmitted twice.
+
+The current authority rules revision remains 8, and existing captures already bind the persisted raw water-scheduler cursor in both active-region modes without introducing another hash envelope.
+Both world load entries restore that cursor, including empty and below-budget worlds whose later continuation can depend on its unnormalized value.

@@ -111,6 +111,22 @@ std::string SerializeChunkRecordPayloadJson(const Chunk& chunk, bool* strict_wat
 // Allocation-free validation using the saved water grid, mirror and scalar rules.
 // Dormant and Off states retain bounded arrays independently of their resolution.
 bool HasValidWaterPersistenceState(const Chunk& chunk);
+// Decodes the same snapshot contract without boxing terrain samples as JSON values.
+// The const diagnostic counts samples decoded directly in the last successful load;
+// it is zero after failure or when a noncanonical input needs the general decoder.
+class WorldStreamingSnapshotDecoder {
+public:
+    bool load(const std::string& json_text,
+              WorldStreamingState& out_state,
+              std::vector<std::string>& errors,
+              const ChunkAuthorityLoadPolicy& authority = {});
+    [[nodiscard]] std::size_t direct_terrain_samples() const {
+        return m_directTerrainSamples;
+    }
+
+private:
+    std::size_t m_directTerrainSamples = 0;
+};
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
                                          std::vector<std::string>& errors,
