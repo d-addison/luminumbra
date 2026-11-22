@@ -2303,6 +2303,23 @@ set_tests_properties(JoltStartupPatchContract PROPERTIES LABELS "ci;tools" TIMEO
 add_test(NAME InlineTextureQualification COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/test/tools/test_inline_texture_qualification.py")
 set_tests_properties(InlineTextureQualification PROPERTIES LABELS "tools" TIMEOUT 30)
+# Compile database coverage for the independent fixture, without default outputs.
+add_library(installed_sdk_abi_compile OBJECT EXCLUDE_FROM_ALL sdk/installed_consumer/abi.c)
+target_link_libraries(installed_sdk_abi_compile PRIVATE Luminumbra::ABI)
+set_target_properties(installed_sdk_abi_compile PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES)
+add_library(installed_sdk_modules_compile OBJECT EXCLUDE_FROM_ALL sdk/installed_consumer/main.cpp)
+target_link_libraries(installed_sdk_modules_compile PRIVATE Luminumbra::ModuleContracts)
+luminumbra_configure_first_party_target(installed_sdk_modules_compile)
+add_test(NAME InstalledSdkPackageContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/sdk/test_installed_sdk.py")
+set_tests_properties(InstalledSdkPackageContract PROPERTIES TIMEOUT 30)
+# Nested compiler startup has little margin on loaded Windows runners. Keep the
+# build/run fixture on Linux; configure/install contracts run on every platform.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_test(NAME InstalledSdkConsumer COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/test/sdk/test_installed_sdk.py" --consume)
+    set_tests_properties(InstalledSdkConsumer PROPERTIES TIMEOUT 30)
+endif()
 add_test(NAME DiagnosticCapturePython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/tools/gates/test_diagnostic_capture.py")
 set_tests_properties(DiagnosticCapturePython PROPERTIES LABELS "tools" TIMEOUT 60)

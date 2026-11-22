@@ -17,6 +17,7 @@ PYTHON_TESTS = (
     "tools/gates/test_temporal_capture.py",
     "tools/blender/authoring/extension_tests/test_recipes.py",
     "tools/blender/authoring/extension_tests/test_recipe_operator.py",
+    "test/sdk/test_installed_sdk.py",
     "tools/gates/test_temporal_assembly.py",
     "tools/gates/test_shader_scenes.py",
     "tools/test_frozen_terrain_presets.py",

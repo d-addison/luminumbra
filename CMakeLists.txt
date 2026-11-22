@@ -4,6 +4,9 @@ project(Luminumbra VERSION 0.3.0 LANGUAGES C CXX)
 
 include(CTest)
 
+# Header contracts have no game, content or third-party dependencies.
+add_subdirectory(tools/sdk)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)

@@ -1,0 +1,7 @@
+@PACKAGE_INIT@
+
+# Both components are header contracts with no external dependencies.
+include("${CMAKE_CURRENT_LIST_DIR}/LuminumbraTargets.cmake")
+set(Luminumbra_ABI_FOUND TRUE)
+set(Luminumbra_ModuleContracts_FOUND TRUE)
+check_required_components(Luminumbra)
