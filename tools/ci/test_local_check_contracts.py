@@ -141,6 +141,11 @@ class RegistrationTests(unittest.TestCase):
                 '  message(FATAL_ERROR "Compiler metadata or language rules were not restored")\n'
                 'endif()\n'
                 'add_executable(language_fixture empty.cpp)\n', encoding="utf-8")
+            # CMake still runs the synthetic "compiler" (CMake itself) for its
+            # linker probe. Give it an empty working directory so the probe
+            # cannot configure whatever project the test was launched from.
+            probe_cwd = root / "compiler probe cwd"
+            probe_cwd.mkdir()
             for generator in ("Ninja", "Ninja Multi-Config"):
                 with self.subTest(generator=generator):
                     build = root / generator
@@ -149,7 +154,7 @@ class RegistrationTests(unittest.TestCase):
                         ["cmake", "-S", str(source), "-B", str(build), "-G", generator,
                          info_argument, "-DCMAKE_SYSTEM_NAME=Generic",
                          "--trace-format=json-v1", f"--trace-redirect={trace}"],
-                        capture_output=True, text=True)
+                        cwd=probe_cwd, capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     events = [json.loads(line) for line in trace.read_text(
                         encoding="utf-8").splitlines()[1:]]
@@ -183,7 +188,7 @@ class RegistrationTests(unittest.TestCase):
                         ["cmake", "-S", str(source), "-B", str(root / str(missing)),
                          "-G", "Ninja", info_argument, "-DCMAKE_SYSTEM_NAME=Generic",
                          "--trace-format=json-v1",
-                         f"--trace-redirect={trace}"], capture_output=True, text=True)
+                         f"--trace-redirect={trace}"], cwd=probe_cwd, capture_output=True, text=True)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("Outer CXX compiler information is incomplete", result.stderr)
                     events = [json.loads(line) for line in trace.read_text(
