@@ -520,6 +520,28 @@
       "requirements": []
     },
     {
+      "id": "ci.networking-runtime-compiler-reuse",
+      "source": "docs/development.md#presets",
+      "statement": "The Windows networking runtime build fixture initializes the platform directory, installs the outer CXX compiler metadata and enables CXX without repeating compiler or binutils discovery. The outer binary-inspection tools are forwarded. Compiler-free regressions check effective registration with its 90-second timeout, tool forwarding, initialized language rules and missing or incomplete metadata refusals. The real DLL compilation, staging, import scanning, execution, deletion repair without relinking and Debug/Release isolation checks remain. UCRT64 configure/build timings and 20 consecutive runs well below 15 seconds remain pending.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "LocalCheckRegistrationContract"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/ci/test_local_check_contracts.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development.md",
+          "planned": "Measure configure and build phases and the complete NetworkingRuntimeBuildIntegration test over 20 consecutive hosted UCRT64 runs; owner: maintainers"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "ci.changed-tus-partitions",
       "source": "docs/ci/local-checks.md#python-helper-checks",
       "statement": "Six disjoint whole-case selector partitions retain every assertion, ci/tools labels and 30-second deadlines. Selection, CI replay and publication, CMake fixtures, process-tree checks, base-ref subprocesses and locale subprocesses have separate entries in both engine and compiler-free CTest projects. Direct invocation and unittest discovery retain the complete suite. Roster and CLI regressions reject unknown, duplicate, missing and invalid selections and pin exact coverage. Windows retains four-slot reservations; hosted Windows deadline qualification remains pending. Publication failure still overrides pending replay exceptions and cancellation after cache namespace restoration, without returning from finally.",

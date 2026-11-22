@@ -99,6 +99,9 @@ if(BUILD_TESTING)
                     "-DNETWORK_TEST_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
                     "-DNETWORK_TEST_COMPILER=${CMAKE_CXX_COMPILER}"
                     "-DNETWORK_TEST_COMPILER_INFO=${CMAKE_PLATFORM_INFO_DIR}/CMakeCXXCompiler.cmake"
+                    "-DNETWORK_TEST_OBJDUMP=${CMAKE_OBJDUMP}"
+                    "-DNETWORK_TEST_DUMPBIN=${CMAKE_DUMPBIN}"
+                    "-DNETWORK_TEST_NM=${CMAKE_NM}"
                     -P "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_networking_runtime_integration.cmake")
         set_tests_properties(NetworkingRuntimeBuildIntegration
             PROPERTIES LABELS "ci;tools;net" TIMEOUT 90)
