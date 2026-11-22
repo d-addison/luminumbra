@@ -830,7 +830,9 @@ class AcceptanceMatrixTests(AcceptanceFixture):
                         "occupied-metadata", "directory-name", "short-write", "write-error", "publication",
                         "racing-metadata", "racing-directory", "publication-short-write", "publication-flush"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
-                base = Path(directory)
+                # explode_matrix resolves its destination; macOS /var and Windows
+                # short names differ from the resolved paths the hooks compare.
+                base = Path(directory).resolve()
                 legacy = base / "legacy.json"
                 matrix = baseline_matrix()
                 if failure == "duplicate":

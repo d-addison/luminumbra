@@ -7,7 +7,7 @@ cannot identify a draw. Diagnostics must connect the same captured pixel to its 
 and producer without changing simulation, saves, hashes or authority revisions.
 
 Acceptance slices edit their own feature row in
-[`tools/ci/acceptance/rows/`](../../tools/ci/acceptance/rows/), using
+`tools/ci/acceptance/rows/`, using
 `render.visual-diagnostic-*` IDs. A slice never appends prose to another
 feature's row. Preserve pending qualification and feature-specific evidence.
 
