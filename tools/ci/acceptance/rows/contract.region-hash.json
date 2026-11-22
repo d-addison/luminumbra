@@ -1,0 +1,26 @@
+{
+  "id": "contract.region-hash",
+  "source": "docs/active-regions.md#hash-and-replay",
+  "statement": "Canonical ledger hashing excludes observations; schedule digests match the hand-built byte oracle.",
+  "status": "covered",
+  "requirements": [
+    "ar.hash.001",
+    "ar.hash.002",
+    "ar.hash.003",
+    "ar.hash.007"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.CanonicalLayoutAndObservationalExclusion"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.ScheduleTraceMatchesTheHandBuiltByteOracle"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.RegionScheduleAndWorldHashResumeAcrossBothHoldCounters"
+    }
+  ]
+}

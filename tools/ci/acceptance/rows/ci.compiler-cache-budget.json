@@ -1,0 +1,17 @@
+{
+  "id": "ci.compiler-cache-budget",
+  "source": "docs/development.md#continuous-integration",
+  "statement": "MSVC and UCRT64 compiler caches use 1200M each on the daily runner's disk. The five hosted compiler lanes total 2.35 GB per branch; main/devel's newest generations total 4.7 GB, within the unchanged 9.5 GB repository cleanup budget with 4.8 GB to spare. The remaining 5.3 GB of the 10 GB repository limit accommodates other caches, grace-window generations and saves in progress. Extra protected or grace-window caches that exceed the cleanup budget cause cleanup to warn and skip deletion; the margin does not guarantee against cache churn and no extra cache spend is enabled.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "script",
+      "ref": "tools/ci/test_cache_retention.py"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development.md"
+    }
+  ],
+  "requirements": []
+}

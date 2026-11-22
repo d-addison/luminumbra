@@ -1,0 +1,28 @@
+{
+  "id": "perf.timer-coverage",
+  "source": "docs/distant-world.md#performance-measurement-contract",
+  "statement": "The client must record frame wall, CPU submit, present and GPU timings with frame attribution and explicit unavailability. Software ring and query tests exercise attribution with fake queries; client timing assignments and real GL timestamp capture remain outstanding native/GPU qualification.",
+  "status": "needs-native-run",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "RenderMeasurementFrameRing"
+    },
+    {
+      "kind": "ctest",
+      "ref": "RenderMeasurementGpuQueries"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/perf/run_qualification.py",
+      "planned": "render qualification runner (v0.3.1); owner: ac",
+      "command": "python tools/perf/run_qualification.py --package <dir> --out <dir> --declare-refresh 3840x1600=143",
+      "receipt_schema": "luminumbra.render_qualification.v1"
+    }
+  ],
+  "requirements": [
+    "dw.perf.009",
+    "dw.perf.010",
+    "dw.mappings.009"
+  ]
+}

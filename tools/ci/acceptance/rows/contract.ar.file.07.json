@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.file.07",
+  "source": "docs/active-regions.md#file-and-compatibility",
+  "statement": "Acceptance obligations: the host supplies its spawn feet position for a legacy save. / No old-world migration occurs. / A save containing the ledger requires `sim.active_regions`; / opening or writing with it off refuses as incompatible configuration. / Older engine builds refuse this file as an unknown region file. / Unknown extension types cannot be skipped and are corrupt.",
+  "status": "planned",
+  "requirements": [
+    "ar.file.042",
+    "ar.file.044",
+    "ar.file.046",
+    "ar.file.047",
+    "ar.file.048",
+    "ar.file.050"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArFileContract.Requirements07",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.file.07.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

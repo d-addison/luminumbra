@@ -646,11 +646,12 @@ records.
 
 `tools/ci/acceptance_requirements.json` accounts for every extracted prose, bullet,
 and table statement in `docs/distant-world.md` and `docs/active-regions.md`.
-`tools/ci/acceptance_matrix.json` maps requirement IDs to evidence and status.
-Validate both inventories and the generated view with:
+`tools/ci/acceptance/rows/` maps requirement IDs to evidence and status.
+Validate both inventories with the command below. Generate the optional view
+using the [acceptance refresh recipe](ci/acceptance-refresh.md).
 
 ```sh
-python3 -I -B tools/ci/check_acceptance_matrix.py --check-doc docs/acceptance-matrix.md
+python3 -I -B tools/ci/check_acceptance_matrix.py
 python3 -I -B tools/ci/validate_public_tree.py --root .
 ```
 
@@ -689,8 +690,8 @@ Any unresolved decision or static validation error makes refresh exit unsuccessf
 without changing any outputs. Repeating refresh reports the same decisions until
 the inventory and mappings are explicitly resolved.
 
-Refresh regenerates `docs/acceptance-matrix.md` through the existing renderer when
-the view changes and all decisions and validation errors are resolved. Writers
+Refresh updates changed acceptance row files and the requirement inventory when
+all decisions and validation errors are resolved. Writers
 hold an operating-system lock in the checkout's Git metadata from input reads
 through the final replacement. Lock acquisition fails clearly after two seconds;
 a crashed holder releases its lock automatically. The persistent lock file stays
@@ -700,7 +701,7 @@ publication, refusing changes made while it was running. All output bytes and
 rollback copies are staged before replacing any file. A failed replacement,
 including a locked file on Windows, restores the previous outputs. Close the
 locking program and retry after resolving concurrent source edits. After manual
-accounting or evidence edits, use `--write-doc docs/acceptance-matrix.md` with a new
+accounting or evidence edits, use `--write-doc build/acceptance-matrix.md` with a new
 `--preparation-receipt-file` outside the checkout and Git metadata, and rerun
 `--check-doc`.
 The inventory-completeness error for `iss.126` clears exactly when the inventory

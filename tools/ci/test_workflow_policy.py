@@ -1522,7 +1522,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
             "lint": "dd5aa1be75b2a7139dc2fc676293422207c80c6b031b5df0d21e60dc615faa32",
             "tidy-shard": "46faf8410f18629a107172a8dcc148e88f7df8b693541835fccfe53c3c34307a",
             "tidy": "9c7e37ba07488aefd7232a216a927229f1a0a7b83820f4439187f1972f057ad8",
-            "public-tree": "032ff20e807665460da7c2bd1d3343dd3e949cd904b8e3a2f5074d3d852f8d21",
+            "public-tree": "d3cfdd450c2ea85d89c4945441db64963945f07c4e817f706b61dbe266be09b4",
         }
         actual = jobs(self.workflows["ci.yml"])
         self.assertTrue(all(not key.startswith("windows-") for key in actual))
@@ -2314,7 +2314,13 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertEqual(value(upload, "retention-days", 10), "30")
         public = ci["public-tree"]
         self.assertIn("python3 tools/ci/test_check_acceptance_matrix.py", public)
-        self.assertIn("python3 tools/ci/check_acceptance_matrix.py --check-doc docs/acceptance-matrix.md", public)
+        self.assertIn("python3 tools/ci/check_acceptance_matrix.py --write-doc build/acceptance-matrix.md --check-doc build/acceptance-matrix.md", public)
+        document_upload = {step.splitlines()[0].removeprefix("      - name: "): step
+                           for step in steps(public)}["Upload acceptance matrix"]
+        self.assertEqual(value(document_upload, "name", 10), "acceptance-matrix")
+        self.assertEqual(value(document_upload, "path", 10), "build/acceptance-matrix.md")
+        self.assertEqual(value(document_upload, "if-no-files-found", 10), "error")
+        self.assertNotIn("--check-doc docs/acceptance-matrix.md", public)
         # Run the actual evidence-selection script for both execution routes.
         for full, owner in (("false", 1), ("true", 0)):
             for missing in (None, "ctest-discovery.json", "netsoak.junit.xml"):

@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.perf.01",
+  "source": "docs/distant-world.md#performance-measurement-contract",
+  "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
+  "status": "planned",
+  "requirements": [
+    "dw.perf.001",
+    "dw.perf.002",
+    "dw.perf.003",
+    "dw.perf.004",
+    "dw.perf.005",
+    "dw.perf.006"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwPerfContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.perf.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ac"
+    }
+  ]
+}

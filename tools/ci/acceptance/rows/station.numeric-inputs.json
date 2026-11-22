@@ -1,0 +1,35 @@
+{
+  "id": "station.numeric-inputs",
+  "source": "docs/distant-world.md#station-discovery-req-e4",
+  "statement": "Discovery checks its ISA/FP environment and preset, hydro and structure integer domains before world construction while preserving existing world generation; exploratory results remain uncertified. Compile-time injected CPU profiles cover missing FMA, disabled OS AVX state and every required feature for GNU/Clang and MSVC, including optional Jolt AVX-512. The CLI smoke exercises the supported host profile. Child-process controls set each unsupported rounding mode and the independent MXCSR rounding, FTZ and DAZ states, then require refusal with empty stdout before argument parsing; a supported-state control emits a complete document.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "StationDiscoveryCliSmoke"
+    },
+    {
+      "kind": "doc",
+      "ref": "tools/station_discovery.cpp"
+    },
+    {
+      "kind": "ctest",
+      "ref": "StationDiscoveryNumericRefusals"
+    },
+    {
+      "kind": "ctest",
+      "ref": "CommonLibraryIsaContract"
+    }
+  ],
+  "requirements": [
+    "dw.station.076",
+    "dw.station.077",
+    "dw.station.078",
+    "dw.station.079",
+    "dw.station.080",
+    "dw.station.081",
+    "dw.station.082",
+    "dw.station.083",
+    "dw.station.087"
+  ]
+}

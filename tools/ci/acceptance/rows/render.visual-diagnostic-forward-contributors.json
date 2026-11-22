@@ -1,0 +1,42 @@
+{
+  "id": "render.visual-diagnostic-forward-contributors",
+  "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+  "statement": "The contributor API supports a distinct forward target through the same lease path and preserves its original draw buffers; scent decals invoke it without replacing deferred surface identities. Water surfaces, glass panes, waterfall sheet/pool slots and the original particle batch resume the same contributor plane at their original draws; water metadata that cannot recover an exact chunk translation explicitly refuses attribution. Noncontributing fragments preserve prior contributor IDs; glass resolve retains pane identities and unavailable resolve resources refuse capture completion. Particle IDs identify the original shared billboard batch across magical particles, ambient motes, rain, snow, impact foam and waterfall spray; existing shape/alpha discards preserve earlier IDs. The separate weather overlay writes the contributor plane at its original fullscreen draw through an opt-in diagnostic variant and refuses when that storage or variant is missing. Default shader bytes are pinned and the offline shader inventory covers diagnostic permutations. The explicit debug snapshot keeps attribution active through plant_procgen and ground_decals, finalizes before SSAO, lighting and post, and owns distinct lazy decal contributor storage. Refresh resets both planes and the draw table; inactive producers add no submissions. Registered DiagnosticInspectorContributorsGl hidden-GL regressions cover plant and scent submissions, separate surface/contributor readback and inactive-producer refresh; native execution remains pending. Scenario bundle admission remains separately gated. Both continuation planes retain earlier IDs and original color routing, and refuse mid-frame extent changes before resizing or leasing storage. Empty, sky, outside-field and negligible decal fragments discard before writing contributor IDs. Without forward storage or an instrumented current program, exact per-draw Forward records retain metadata with a :contributor_only label and completion remains false. Missing or aliased storage, nested attachment, invalid extents and mismatched contributor passes refuse coverage. Optional frame/tick-bound forward evidence joins original water-surface, waterfall-sheet, shared particle-batch and all five foliage submissions to integer contributor samples at stage boundaries, with absent, occluded, disabled and unsupported states. River-site and waterfall-spray identities remain separate unsupported rows; generic water or particle evidence cannot satisfy them. Registered GL-free joins and hidden-GL shipping-fragment fixtures await native execution; runtime profile adapter/publication integration and all-features or production qualification remain pending.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticAttribution.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticAttributionGl.*"
+    },
+    {
+      "kind": "script",
+      "ref": "test/rendering/test_frame_attribution_wiring.py"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticCaptureIntegration.*",
+      "planned": "Add and run GPU attribution and scenario capture bundle regressions; owner: maintainers"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development/visual-diagnostics.md"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ForwardPresenceJoin.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ForwardPresenceGl.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticInspectorContributorsGl.*"
+    }
+  ],
+  "requirements": []
+}

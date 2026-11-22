@@ -1,0 +1,70 @@
+{
+  "id": "contract.calendar-compatibility",
+  "source": "docs/distant-world.md#simulation-clock-and-calendar",
+  "statement": "Absent and unversioned calendars retain pinned legacy values, explicit saves select the legacy or version 2 encoding without rescaling state, and legacy clock hash bytes remain exact. Calendar identity participates in admission without changing replay layouts.",
+  "status": "covered",
+  "requirements": [
+    "dw.calendar.018",
+    "dw.calendar.012",
+    "dw.calendar.019",
+    "dw.calendar.038",
+    "dw.calendar.039",
+    "dw.calendar.040",
+    "dw.calendar.041",
+    "dw.calendar.042",
+    "dw.calendar.043",
+    "dw.calendar.044",
+    "dw.calendar.045",
+    "dw.calendar.046"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "WorldClockTest.MissingMetadataUsesPinnedDefaults"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldClockTest.LegacyMetadataRoundTripsAsExactTwoFieldV1Record"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldClockTest.ExtendedSolarOrLunarParametersRetainV2Encoding"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldClockTest.LegacyCanonicalBytesMatchV1Exactly"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldClockTest.CanonicalBytesAreTaggedLittleEndianAndIgnoreFrameTime"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldOpenRefusal.SupportedCalendarFormsAreReadOnlyAndMarkerDoesNotRequireFeature"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.EnabledLegacyClockPinsEmptyEcologyFold"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.ActiveClockSaveLoadContinuationMatchesUninterruptedWorldHash"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.CalendarIdentityRejectsDifferentResolvedCalendarsBeforeAdmission"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development/system-config-identity.md"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ReplayStreamTest.HeaderRoundtrip"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ReplayStreamTest.EffectiveConfigIdentityRefusesDifferentRulesBeforePlayback"
+    }
+  ]
+}

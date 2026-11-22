@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.persistence.09",
+  "source": "docs/distant-world.md#persistence-and-format-contract",
+  "statement": "Acceptance obligations: The replay checkpoint record keeps its existing fields; / the new sub-hashes are diagnostics outside the checkpoint. / Replay determinism gates in v0.3 start from fresh worlds; / replaying a resumed snapshot needs a replay boot reference to a snapshot and absolute tick, which is tracked separately. / In v0.3 lockstep evidence is produced with identical builds and content; / pre-tick admission by calendar, configuration and content identity belongs to the v0.4 admission work.",
+  "status": "planned",
+  "requirements": [
+    "dw.persistence.049",
+    "dw.persistence.050",
+    "dw.persistence.051",
+    "dw.persistence.052",
+    "dw.persistence.053",
+    "dw.persistence.054"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwPersistenceContract.Requirements09",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.persistence.09.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

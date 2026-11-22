@@ -1,0 +1,17 @@
+{
+  "id": "station.certification",
+  "source": "docs/distant-world.md#station-discovery-req-e4",
+  "statement": "Certification still requires shared canonical world generation numerics and identical real-seed GCC, MSVC and UCRT goldens; synthetic sampled topology is insufficient.",
+  "status": "planned",
+  "evidence": [
+    {
+      "kind": "doc",
+      "ref": "test/common/StationDiscovery_test.cpp",
+      "planned": "Establish matching real-seed goldens across GCC, MSVC and UCRT with canonical world generation numerics; owner: world generation"
+    }
+  ],
+  "requirements": [
+    "dw.station.086",
+    "dw.station.089"
+  ]
+}

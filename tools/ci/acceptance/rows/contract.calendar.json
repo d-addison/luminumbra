@@ -1,0 +1,90 @@
+{
+  "id": "contract.calendar",
+  "source": "docs/distant-world.md#simulation-clock-and-calendar",
+  "statement": "The default 162,000-tick calendar, solar horizons, linear indices and seasonal offsets have unit evidence on the real simulation tick path; simulation curves use integer ticks. Weather, storms, wind and aether retain their absolute tick periods. Snapshots refuse inside a batched catch-up and are taken only at tick boundaries.",
+  "status": "covered",
+  "requirements": [
+    "dw.calendar.001",
+    "dw.calendar.002",
+    "dw.calendar.024",
+    "dw.calendar.025",
+    "dw.calendar.026",
+    "dw.calendar.004",
+    "dw.calendar.005",
+    "dw.calendar.006",
+    "dw.calendar.007",
+    "dw.calendar.008",
+    "dw.calendar.027",
+    "dw.calendar.015",
+    "dw.calendar.010",
+    "dw.calendar.032",
+    "dw.calendar.011",
+    "dw.calendar.033",
+    "dw.calendar.035",
+    "dw.calendar.036",
+    "dw.calendar.020",
+    "dw.calendar.016"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "WorldClockTest.MidnightMidwinterPhasesAndIndicesWrapExactly"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldClockTest.CustomCalendarAndCheckedTickLimits"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldClockTest.SolarHorizonsUseIntegerBoundariesAtEverySeason"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldClockTest.SymmetricIdentityOddDaysAndLargeIntegerProducts"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldClockTest.SmoothSolarKnotsHaveExactPhasesAndContinuousRates"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldClockTest.SmoothSolarDaylightShareIsExactToOneTickInEverySeason"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldClockTest.StimulusSolarLightTemperatureAndOverridesPreserveFallbacks"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.CalendarConsumersUsePinnedPhasesOnTheRealTickPath"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.DefaultCalendarContinuesAcrossSaveAndExplicitSnapshot"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldClockTest.BoundedWeatherRestorationMatchesStormMotionAndStrikes"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldOpenRefusal.ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.ClockSnapshotsRefuseInsideCatchUpBatch"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldClockTest.MissingMetadataUsesPinnedDefaults"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldClockInvalidMetadata.RefusesWithoutChangingClock"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.ActiveClockSaveLoadContinuationMatchesUninterruptedWorldHash"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "id": "contract.dw.evidence.02",
+  "source": "docs/distant-world.md#evidence-map",
+  "statement": "Acceptance obligations: | Performance | Benchmark schema v3 artifacts for six fixed views and three traversals per profile per display from the native command set, checked by `tools/perf/render_contract.py` and `validate_render_capture.py` | / | Client hang | `hang_watchdog_test`, the reproduction matrix records and hang reports archived with the campaign evidence | / Names of new tests are binding once their slices land; / the activation slice fills in fixture identifiers, thresholds and artifact schemas per row.",
+  "status": "planned",
+  "requirements": [
+    "dw.evidence.007",
+    "dw.evidence.008",
+    "dw.evidence.009",
+    "dw.evidence.010"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwEvidenceContract.Requirements02",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.evidence.02.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ac"
+    }
+  ]
+}

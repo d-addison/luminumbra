@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.file.10",
+  "source": "docs/active-regions.md#file-and-compatibility",
+  "statement": "Acceptance obligations: | 36 | 1 | reduced cadence shift, 1 through 16 | / | 37 | 1 | local anchor present, 0 or 1 | / | 38 | 2 | reserved zero | / | 40 | 12 | local walking feet X, Y, Z; / all zero if absent | / | 52 | 4 | record count, at most 1,048,576 |",
+  "status": "planned",
+  "requirements": [
+    "ar.file.063",
+    "ar.file.064",
+    "ar.file.065",
+    "ar.file.066",
+    "ar.file.067",
+    "ar.file.068"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArFileContract.Requirements10",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.file.10.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "id": "station.architecture",
+  "source": "docs/distant-world.md#station-discovery-req-e4",
+  "statement": "The discovery executable is CPU-only and constructs an unstreamed read-only query world with an explicit data root; its contract and CLI smoke are ordinary CTest entries.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "StationDiscoveryCliSmoke"
+    },
+    {
+      "kind": "doc",
+      "ref": "tools/CMakeLists.txt"
+    },
+    {
+      "kind": "doc",
+      "ref": "tools/station_discovery.cpp"
+    },
+    {
+      "kind": "doc",
+      "ref": "test/CMakeLists.txt"
+    }
+  ],
+  "requirements": [
+    "dw.station.001",
+    "dw.station.002",
+    "dw.station.003",
+    "dw.station.004",
+    "dw.station.005",
+    "dw.station.090"
+  ]
+}

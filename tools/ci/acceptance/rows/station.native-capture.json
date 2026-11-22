@@ -1,0 +1,26 @@
+{
+  "id": "station.native-capture",
+  "source": "docs/distant-world.md#station-discovery-req-e4",
+  "statement": "Existing oracle negative controls retain inclusive 90-second readiness, camera-derived per-tier Uploaded/Empty coverage, sky, seam, edge, binding, span and water refusals. Integration of arbitrary discovery pose/name manifests and native receipts for every row, profile and display remains planned.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "script",
+      "ref": "tools/gates/test_far_ladder_oracle.py"
+    },
+    {
+      "kind": "doc",
+      "ref": "tools/gates/validate-engine-frontier.ps1",
+      "planned": "Integrate arbitrary discovery pose/name manifests with exact pose and world/render binding clocks, custom-manifest mismatch controls and per-row/profile/display native receipts; owner: native capture"
+    }
+  ],
+  "requirements": [
+    "dw.station.092",
+    "dw.station.093",
+    "dw.station.094",
+    "dw.station.095",
+    "dw.station.096",
+    "dw.station.097",
+    "dw.station.098"
+  ]
+}

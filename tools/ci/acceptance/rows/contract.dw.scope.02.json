@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.scope.02",
+  "source": "docs/distant-world.md#scope",
+  "statement": "Acceptance obligations: Chunk identity, region identity, persistence and hashing are integer-addressed and unaffected. / - Distant caves are real: long interior sightlines from inside caverns and tunnels, coarse real interiors visible through cave mouths from outside, and openings, overhangs and arches kept as silhouette features to the full radius. / - Every terrain edit is carried into every coarse tier at that tier's sample spacing. / Whether an edit smaller than the spacing appears at a tier depends on the sampling phase; / it is neither guaranteed to vanish nor to appear, and a sampling-phase test matrix documents the behaviour per tier. / - The far representation is volumetric coarse signed-distance tiers.",
+  "status": "planned",
+  "requirements": [
+    "dw.scope.007",
+    "dw.scope.008",
+    "dw.scope.009",
+    "dw.scope.010",
+    "dw.scope.011",
+    "dw.scope.012"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwScopeContract.Requirements02",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.scope.02.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: fw"
+    }
+  ]
+}

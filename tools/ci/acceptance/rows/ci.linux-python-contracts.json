@@ -1,0 +1,17 @@
+{
+  "id": "ci.linux-python-contracts",
+  "source": "docs/development.md#continuous-integration",
+  "statement": "Linux standalone Python contracts run in a separate Ubuntu 24.04 job with a 20-minute timeout and the GCC draft guard. Dependency installation and the standalone plan retain documentation-only, mixed and uncertain Python classification coverage. GCC shards retain their 60-minute limits and no longer run the standalone plan. The required Linux / GCC aggregate waits for the Python job and rejects any unsuccessful or skipped Python result and unsuccessful classification. Windows standalone placement is unchanged.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "script",
+      "ref": "tools/ci/test_ci_paths.py"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development.md"
+    }
+  ],
+  "requirements": []
+}

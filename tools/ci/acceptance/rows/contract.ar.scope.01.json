@@ -1,0 +1,25 @@
+{
+  "id": "contract.ar.scope.01",
+  "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
+  "statement": "Acceptance obligations: The host ledger implements the persistent-active scheduling foundation in [distant-world.md](distant-world.md). / It is gated by the existing `sim.active_regions` switch, enabled in compiled and packaged defaults for v0.3.0. / Budgets remain unlimited in shipped configuration. / No distant system consumes this schedule yet; / field pages, creature records, water shares, diagnostics and measured budget activation remain separate work. / Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures are planned for v0.3.1. / Regional continuation performance/default enablement is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320). / These consumers are outside the shipping scheduler foundation. / The dedicated server autosaves every five minutes; / this does not implement those continuation consumers.",
+  "status": "planned",
+  "requirements": [
+    "ar.scope.001",
+    "ar.scope.002",
+    "ar.scope.004",
+    "ar.scope.005",
+    "ar.scope.006",
+    "ar.scope.007",
+    "ar.scope.008",
+    "ar.scope.009",
+    "ar.scope.010",
+    "ar.scope.011"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArScopeContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.scope.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

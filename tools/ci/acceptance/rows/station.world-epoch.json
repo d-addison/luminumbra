@@ -1,0 +1,24 @@
+{
+  "id": "station.world-epoch",
+  "source": "docs/distant-world.md#station-discovery-req-e4",
+  "statement": "World-backed discovery holds one shared sampling epoch across the catalogue and samples; callers must enter without holding the non-recursive scope. Shared epoch soak and query fixtures exercise the public sampling contract.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "StationDiscovery.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldgenPreviewReinitRace.*"
+    },
+    {
+      "kind": "doc",
+      "ref": "src/luminumbra_common/world/StationDiscovery.cpp"
+    }
+  ],
+  "requirements": [
+    "dw.station.084",
+    "dw.station.085"
+  ]
+}

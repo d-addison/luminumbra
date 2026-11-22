@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.persistence.08",
+  "source": "docs/distant-world.md#persistence-and-format-contract",
+  "statement": "Acceptance obligations: The host-owned authoritative chunk domain is the set of chunks with an edited or simulated record (live, parked or durable) plus the simulation arrays of regions that are due this tick; / it is decided by the host tick, never by render or storage arrivals, and pristine chunks are hash-neutral; / each member contributes exactly one canonical simulation-only projection (voxel lattice, materials and water millimetre state; / never meshes, storage envelopes or compression) with the precedence live over parked over durable, and pristine space contributes through the seed and generation parameters, so the hash is independent of residency and of the camera; / frozen regions contribute the digest stamped at freeze, computed from the same projection. / Identity, ordering and random-stream rules apply to plants, creatures, avatars and ground objects alike through their persistent identities.",
+  "status": "planned",
+  "requirements": [
+    "dw.persistence.043",
+    "dw.persistence.044",
+    "dw.persistence.045",
+    "dw.persistence.046",
+    "dw.persistence.047",
+    "dw.persistence.048"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwPersistenceContract.Requirements08",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.persistence.08.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

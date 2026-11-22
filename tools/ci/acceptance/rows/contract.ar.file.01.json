@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.file.01",
+  "source": "docs/active-regions.md#file-and-compatibility",
+  "statement": "Acceptance obligations: The record is `<save>/chunks/region/active-regions.arl`, following the accepted contract's placement in the region integrity scan. / This resolves the slice brief's conflicting save-root wording in favour of that contract. / ARL1 does not alter LMR1 v2, the world manifest, EFS1, plant payloads, FSD2 v3, or canonical chunk serialization. / An anchor-only ledger is not a chunk snapshot: with active regions enabled, the first save with dirty chunks writes all resident chunks, including clean chunks in other regions. / The disabled path keeps the legacy existing-save query: a plant-only save makes later saves incremental. / Presets now use revision 8 with revision-6 omission compatibility and frozen packaged-preset fallback.",
+  "status": "planned",
+  "requirements": [
+    "ar.file.001",
+    "ar.file.002",
+    "ar.file.003",
+    "ar.file.004",
+    "ar.file.005",
+    "ar.file.119"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArFileContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.file.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "id": "contract.ar.activation.05",
+  "source": "docs/active-regions.md#activation-and-ordering",
+  "statement": "Acceptance obligations: no callback consumer or catch-up is installed.",
+  "status": "planned",
+  "requirements": [
+    "ar.activation.060"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArActivationContract.Requirements05",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.activation.05.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

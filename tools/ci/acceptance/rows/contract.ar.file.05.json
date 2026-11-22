@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.file.05",
+  "source": "docs/active-regions.md#file-and-compatibility",
+  "statement": "Acceptance obligations: loading ignores it, and every later ledger save, including an empty-ledger save, attempts to reclaim only staging with a valid durable ownership record binding its filename, save-instance ID, file and record identities and world directory. / Reclamation holds the shared mutex through cleanup and replacement, so existing staging cannot belong to another active in-process writer. / It is best effort: unknown or unprovable occupants (including legacy files, invalid records, substitutions, symlinks and directories) remain untouched and never block the save, which reserves fresh unique names. / Unknown files inside the region directory are still refused. / The POSIX subprocess regression exits after staging and ownership bytes and directory entries are durably flushed, verifies recovery while both files remain, and then verifies the next successful save removes the proven pair. / An accepted partial pair can contain an older ledger than its saved clock.",
+  "status": "planned",
+  "requirements": [
+    "ar.file.025",
+    "ar.file.026",
+    "ar.file.027",
+    "ar.file.028",
+    "ar.file.029",
+    "ar.file.030"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArFileContract.Requirements05",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.file.05.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

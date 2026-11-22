@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.history.02",
+  "source": "docs/active-regions.md#historical-ambient-hash-portability-investigation",
+  "statement": "Acceptance obligations: zero is the default. / It is not serialized in LREC1, so capped diagnostic recordings must be replayed with the same option. / The ordinary `--radius 1` only bounds the initial horizon: subsequent streaming previously expanded the test to 4,459 chunks, exceeding even its explicit 600-second CI timeout. / The cap bounds the ongoing wanted set while retaining both tick-30 checkpoint roundtrips, all 30 enabled schedule entries, disabled companion removal and the failed-removal assertion. / Each subprocess has a 45-second limit; / the test registration allows 240 seconds for all five subprocesses and cleanup.",
+  "status": "planned",
+  "requirements": [
+    "ar.history.026",
+    "ar.history.027",
+    "ar.history.028",
+    "ar.history.029",
+    "ar.history.030",
+    "ar.history.031"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArHistoryContract.Requirements02",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.history.02.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ac"
+    }
+  ]
+}

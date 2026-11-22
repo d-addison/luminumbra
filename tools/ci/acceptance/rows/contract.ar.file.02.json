@@ -1,0 +1,20 @@
+{
+  "id": "contract.ar.file.02",
+  "source": "docs/active-regions.md#file-and-compatibility",
+  "statement": "Acceptance obligations: Clock/ledger pair saves are synchronous and serialize with all persistence writers in the process. / The client calls them during world creation, its main-thread pause-menu quit callback, and shutdown after the main loop returns. / Its explicit persistence scenario also runs on that thread. / The server calls them synchronously from `RunFixedTicks` autosave, `SaveFullSnapshot` between runs, and `Shutdown` after the tick loop. / Job workers do not call the pair writer.",
+  "status": "planned",
+  "requirements": [
+    "ar.file.008",
+    "ar.file.009",
+    "ar.file.010",
+    "ar.file.011",
+    "ar.file.012"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArFileContract.Requirements02",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.file.02.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

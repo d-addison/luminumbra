@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.policy.05",
+  "source": "docs/distant-world.md#per-system-distant-policy",
+  "statement": "Acceptance obligations: | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances | / | Scheduled game events | Not implemented | Deferred to a later milestone | \u2014 | / Authority is server-only on the deterministic fixed tick with per-region seeded random streams; / clients render coarse results only, and delivering coarse state to remote clients is outside v0.3 (host-local evidence). / Distant water simulates only where its millimetre arrays are resident; / a simulation-only residency class is not part of this contract and would be a separate decision.",
+  "status": "planned",
+  "requirements": [
+    "dw.policy.025",
+    "dw.policy.026",
+    "dw.policy.027",
+    "dw.policy.028",
+    "dw.policy.029",
+    "dw.policy.030"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwPolicyContract.Requirements05",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.policy.05.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

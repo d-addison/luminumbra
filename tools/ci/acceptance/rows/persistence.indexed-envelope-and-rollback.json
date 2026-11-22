@@ -1,0 +1,62 @@
+{
+  "id": "persistence.indexed-envelope-and-rollback",
+  "source": "docs/active-regions.md#file-and-compatibility",
+  "statement": "Indexed metadata uses version 3 while region containers remain version 2. Indexed envelope witnesses preserve legacy admission and require an index after upgrade. Compound indexed saves restore the committed tree and pending acknowledgements on failure; creation retains failed cleanup evidence in its artifact registry. Ownership checks cover publication, rollback and retirement on both platforms. Region digest work and client autosave refusal gates have registered regressions. Native execution and crash qualification remain pending.",
+  "status": "partial",
+  "requirements": [
+    "ar.file.006",
+    "ar.file.007",
+    "indexed.persistence.001",
+    "indexed.persistence.002",
+    "indexed.persistence.003",
+    "indexed.persistence.004",
+    "indexed.persistence.005",
+    "indexed.persistence.006",
+    "indexed.persistence.007",
+    "indexed.persistence.008",
+    "indexed.persistence.009",
+    "indexed.persistence.010",
+    "indexed.persistence.011",
+    "indexed.persistence.012",
+    "indexed.persistence.013",
+    "indexed.persistence.014",
+    "indexed.persistence.015",
+    "indexed.persistence.016",
+    "indexed.persistence.017",
+    "indexed.persistence.018",
+    "indexed.persistence.019",
+    "indexed.persistence.020",
+    "indexed.persistence.021"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "SaveTransaction.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldDurableResidency.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldOpenRefusal.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "CompleteSaveFailure.*"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/active-regions.md",
+      "planned": "Run registered native persistence, host and interruption regressions on supported platforms; owner: maintainers"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/engine-guide.md"
+    }
+  ]
+}

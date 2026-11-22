@@ -1,0 +1,54 @@
+{
+  "id": "contract.calendar-pacing",
+  "source": "docs/distant-world.md#simulation-clock-and-calendar",
+  "statement": "Pure celestial and inverse-mapping tests cover calendar-relative sun, season and moon phases. The registered rendering clock test exercises fallback pacing, restored calendars, pins, hold and overrides with a GL context; live client rendering, environment precedence and unchanged disc/shader presentation remain pending native qualification.",
+  "status": "needs-native-run",
+  "requirements": [
+    "dw.calendar.009",
+    "dw.calendar.028",
+    "dw.calendar.029",
+    "dw.calendar.030",
+    "dw.calendar.050",
+    "dw.calendar.054",
+    "dw.calendar.055",
+    "dw.calendar.056",
+    "dw.calendar.057",
+    "dw.calendar.058",
+    "dw.calendar.059",
+    "dw.calendar.060",
+    "dw.calendar.061",
+    "dw.calendar.062",
+    "dw.calendar.003",
+    "dw.calendar.023"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "TimeOfDayModel.ElapsedSolarInverseAndCalendarRelativeCelestialSeam"
+    },
+    {
+      "kind": "ctest",
+      "ref": "TimeOfDayModel.MoonAndSeasonPaletteMatchCanonicalPrimitivesAndAnchors"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldClockTest.SkyCircadianAndStimulusSharePinnedCalendarPhases"
+    },
+    {
+      "kind": "ctest",
+      "ref": "RenderClock.DefaultPacingAndRestoredCustomCalendarPreserveOverrides"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/gates/validate-engine-frontier.ps1",
+      "command": "pwsh tools/gates/validate-engine-frontier.ps1 -Mode TimeOfDaySweep",
+      "receipt_schema": "luminumbra.timeofday_sweep.v1",
+      "planned": "Extend the visual sweep to qualify default and imported calendar pacing, marker selection, environment and direct illumination precedence, pin release and unchanged moon disc/shaders in the live client; the existing pinned sweep alone does not establish these claims.; owner: ac"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/distant-world.md",
+      "planned": "map discriminating regression and qualification evidence for the updated contract; owner: ac"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "id": "ci.source-ratchet",
+  "source": "docs/development/ratchet.md",
+  "statement": "The registered Python source ratchet compares finding keys and multiplicities against committed target baselines, permits a reviewed seed only for newly registered rule ids, refuses incomplete analysis and updates baselines only by shrinking existing rules. Explicit runtime scopes cover GL queries, draw-time mesh loads, owner worker-boundary waits and the direct duplicate-lookup form.",
+  "status": "covered",
+  "requirements": [],
+  "evidence": [
+    {
+      "kind": "script",
+      "ref": "tools/ci/test_ratchet.py"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development/ratchet.md"
+    }
+  ]
+}

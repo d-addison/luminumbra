@@ -1,0 +1,34 @@
+{
+  "id": "ci.deterministic-work-budgets",
+  "source": "docs/deterministic-work-budgets.md",
+  "statement": "Issue #396 uses pinned integer work ceilings in the existing native suites for foliage idle, dirty sampling, copies, transfers, simulation counters, activation, backlog growth and eventual drain. Terrain and water upload policy fixtures attain their pinned byte/count/backlog/drain ceilings without graphics calls or clock reads and require current queued revisions. SimBudgetGateContract pins fixture values, counter producers and registration; all capture consumers refuse malformed work-item extensions while accepting older artifacts that omit them. Native execution remains pending.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "SimBudgetGateContract"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DeterministicWorkBudget.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "FoliageRebuildTest.DeterministicWorkBudgetMovementEditDrainAndIdle"
+    },
+    {
+      "kind": "ctest",
+      "ref": "FoliageRebuildTest.OutdatedRevisionReadbackIsDiscardedBeforeAdoption"
+    },
+    {
+      "kind": "script",
+      "ref": "test/fixtures/deterministic-work-budgets.json"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/deterministic-work-budgets.md",
+      "planned": "Run the registered native work-budget and foliage fixtures on standard CI; owner: maintainers"
+    }
+  ],
+  "requirements": []
+}

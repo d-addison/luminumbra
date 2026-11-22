@@ -1,0 +1,38 @@
+{
+  "id": "render.legacy-refusal-fallback",
+  "source": "docs/far-world-horizon-v2.md#legacy-refusal-fallback",
+  "statement": "Ladder preparation refusal advances effective Legacy in the same frame, preserving suppression and avoiding Legacy work after successful Ladder preparation. Existing region-scoped freshness and terrain residency checks protect Legacy terrain/water uploads and impostor support. Native preview and archipelago horizon re-capture remains pending for issue #867; no native visual qualification is claimed.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "FarWorldLegacyIsolation.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "FarLodPersistence.RenderSnapshotsIgnoreUnrelatedAuthorityButRetainHaloAndInputChecks"
+    },
+    {
+      "kind": "ctest",
+      "ref": "FarLodWorker.CameraRegionCoveragePreservesLiveTerrainAndWaterOwnership",
+      "planned": "Run the registered terrain/water GL regression and re-capture the native preview and archipelago horizon before closing issue #867; owner: maintainers"
+    },
+    {
+      "kind": "ctest",
+      "ref": "RenderSmokeTest.StaticPropCollectionGatesOnlyFarImpostorsAndKeepsMeshFallback"
+    },
+    {
+      "kind": "ctest",
+      "ref": "RenderSmokeTest.RefusedTreeImpostorsSubmitAvailableMeshLods"
+    },
+    {
+      "kind": "script",
+      "ref": "test/rendering/test_upload_budget_wiring.py"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/far-world-horizon-v2.md"
+    }
+  ],
+  "requirements": []
+}

@@ -1,0 +1,18 @@
+{
+  "id": "render.visual-diagnostic-capture-integration",
+  "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+  "statement": "Native execution, completed-frame GL readback and scenario integration remain pending.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticCaptureIntegration.*",
+      "planned": "Add and run GPU attribution and scenario capture bundle regressions; owner: maintainers"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development/visual-diagnostics.md"
+    }
+  ],
+  "requirements": []
+}

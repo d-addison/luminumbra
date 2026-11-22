@@ -1,0 +1,22 @@
+{
+  "id": "render.visual-diagnostic-validation",
+  "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+  "statement": "The standard-library schema-1 diagnostic reader validates a bundle directory, completion JSON or bounded capture tree. It checks completion status, final file-list position and payload timestamps, exact dimension-derived PFM and LVID sizes, little-endian encodings, ordered draw/mesh joins, explicit unsupported coverage, capture-manifest camera and resolution, and same-pixel probes in every plane. Nonfinite samples are invalid findings reported per plane. Reads use verified regular-file handles and bounded buffers; unknown versions, partial payloads and descendant links are refused. Equal timestamps are accepted; schema 1 has no recorded sizes or checksums and cannot prove historical write order. Registered synthetic Python regressions run without a renderer. Render-health comparison optionally validates an associated capture when its completion sidecar exists. Runtime bundle integration remains pending; ROI image metrics are recorded separately; no required CI check is added.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "script",
+      "ref": "tools/gates/test_diagnostic_capture.py",
+      "command": "python3 -I -B tools/gates/test_diagnostic_capture.py"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticCapturePython"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development/visual-diagnostics.md"
+    }
+  ],
+  "requirements": []
+}

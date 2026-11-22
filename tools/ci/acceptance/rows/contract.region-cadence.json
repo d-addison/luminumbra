@@ -1,0 +1,40 @@
+{
+  "id": "contract.region-cadence",
+  "source": "docs/active-regions.md#activation-and-ordering",
+  "statement": "Absolute cadence, checked shifts/ticks and bounded resume keep frozen simulation content fixed. Resume caps use one recorded elapsed calendar day (162,000 ticks for new worlds), independent of the solar daylight fraction; ARL1 bytes and timestamps are unchanged.",
+  "status": "covered",
+  "requirements": [
+    "ar.activation.041",
+    "ar.activation.042",
+    "ar.activation.043",
+    "ar.activation.044",
+    "ar.activation.045",
+    "ar.activation.046",
+    "ar.activation.047",
+    "ar.activation.057",
+    "ar.activation.058",
+    "ar.activation.059",
+    "dw.calendar.031",
+    "ar.activation.065",
+    "ar.activation.066",
+    "ar.activation.067"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.CadenceAndAbsoluteTickLimitsAreChecked"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.CadenceRunsOnlyAtDerivedPhaseAndFailedFreezeLeavesLedgerIntact"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.FrozenContentsAndCursorDoNotAdvanceAndResumeIsBounded"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.CanonicalLayoutAndObservationalExclusion"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "id": "contract.dw.tier-api.03",
+  "source": "docs/distant-world.md#far-range-declaration-and-compatibility",
+  "statement": "Acceptance obligations: No frontier capture or wider-radius qualification is claimed by this declaration. / Runtime constants, gate assertions, payloads, world hashes and configuration remain unchanged.",
+  "status": "planned",
+  "requirements": [
+    "dw.tier-api.023",
+    "dw.tier-api.024"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwTierApiContract.Requirements03",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.tier-api.03.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: fw"
+    }
+  ]
+}

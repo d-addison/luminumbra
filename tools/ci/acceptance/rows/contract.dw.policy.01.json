@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.policy.01",
+  "source": "docs/distant-world.md#per-system-distant-policy",
+  "statement": "Acceptance obligations: | Terrain edits | Full lattice | Persisted chunk records plus far authority bricks | Unchanged on disk | / | Plants, soil, irrigation, living-world ladder | Every tick | Coarse cadence; / each system's coarse rule is specified in its slice (rounding order, saturation, threshold crossings, environmental sampling, event multiplicity); / integer-linear paths must equal k single ticks exactly, and every other path is qualified to at most one stage transition or one event of divergence per cadence period against the full-rate trajectory, with resume hooks capped at one calendar day | No advance; / bounded resume hook | / | Wildlife | Full utility AI, physics avatars | Persisted;",
+  "status": "planned",
+  "requirements": [
+    "dw.policy.001",
+    "dw.policy.002",
+    "dw.policy.003",
+    "dw.policy.004",
+    "dw.policy.005",
+    "dw.policy.006"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwPolicyContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.policy.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

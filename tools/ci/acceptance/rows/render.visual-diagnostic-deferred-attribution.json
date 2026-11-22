@@ -1,0 +1,38 @@
+{
+  "id": "render.visual-diagnostic-deferred-attribution",
+  "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+  "statement": "Deferred attribution producers are implemented through an explicit render-thread scope, guarded integer shader outputs and capture-local submission identities, including actual legacy far terrain/water tiers. A scoped G-buffer ID attachment ensures storage before acquiring an AttachmentLease and retains it through deferred submission until detachment and caller-state restoration, including incomplete-FBO rollback, recreation, registry retirement, capture destruction and exceptional teardown. Capability, extent and occupied-attachment refusal preserve caller state and record unsupported coverage. Uploaded plant/marker batches resume the deferred plane. Invalid labels or identities refuse without throwing; sticky registry refusal stops further table work. Current-program writes clear mismatched IDs without throwing; shader variants include bounded feedback signatures. Completion requires successful attachment, detachment, lease release and complete deferred coverage without sticky failure or refusal. Missing base programs, unavailable skinned programs even with empty views, and queued tree impostors with invalid programs invalidate coverage. Registered DiagnosticAttribution and GBufferLeaseGl source-contract and hidden-GL regressions cover attachment scope, full state restoration, lease ordering, detached writers and unavailable programs. The existing Python attribution wiring suite evaluates all completion-predicate states and guards producer refusal ordering. Registry exhaustion sets a sticky capture refusal without throwing or growing the table; later writes upload zero IDs. Registered DiagnosticAttributionGl hidden-GL regressions cover bounded exhaustion, repeated refusal, invalid static metadata with skipped unrepresentable index counts and preserved geometry for unrecordable identity paths, and caller culling, VAO and framebuffer restoration on normal and exceptional exits; live MDI, ladder backend, procedural static meshes and authored surfaces attribute their original submissions, while tree impostors and uninstrumented later contributors remain incomplete.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticAttribution.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticAttributionGl.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "UnavailableImpostorGl.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GBufferLeaseGl.*"
+    },
+    {
+      "kind": "script",
+      "ref": "test/rendering/test_frame_attribution_wiring.py"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticCaptureIntegration.*",
+      "planned": "Add and run GPU attribution and scenario capture bundle regressions; owner: maintainers"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development/visual-diagnostics.md"
+    }
+  ],
+  "requirements": []
+}

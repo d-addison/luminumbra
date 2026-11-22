@@ -1,0 +1,29 @@
+{
+  "id": "render.temporal-sweep-protocol",
+  "source": "docs/development/visual-diagnostics.md#ordered-delivery",
+  "statement": "The GL-free fixed-camera sweep adapter validates feature/camera compatibility, immutable plans and output budgets before transport access and retains one transport across exact simulation ticks, rational presentation steps, frozen retries and capture/publication. Shipping execution uses only ParseTemporalAuditRuntimeOptions and RuntimeTemporalAudit with --scenario=temporal_audit, fixed spawn/full-frame, canonical fresh-world 30 Hz timing and admitted A4 diagnostics. Both startup parsers reject competing drivers and invalid plans before save-root output. The sweep transport checks the resolved clock/calendar and retains creature and particle state through physics, normal session/weather ticks, streaming/water and authority promotion. Weather-cycle input uses the existing identity-bearing schedule before world creation. The existing app render loop supplies completed frames; RGB/A4 bundles use verified-file acknowledgements and publish sequence.json only after every payload succeeds within the existing frame/manifest/aggregate reservations. Frozen retries advance neither simulation nor presentation. There is no second RGB-only startup path or completion-directory convention. The legacy still matrix checks its original camera/TOD/weather catalogue against the adapter pins at compile time and retains settle counts, order and pre-write all-features refusal, including environment launches. Registered TemporalSweep and TemporalSweepRuntime regressions cover all spans, real creature progression, modeled particle continuity, admission, camera/profile/clock mismatches, readiness exhaustion and transport/output failures. Native capture and fixed-site qualification remain pending; unsupported A4 contributors retain refusal. Offline manifest assembly remains available through the shared sequence format; no all-features presence is claimed.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "TemporalSweep.*"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/ci/test_replay_source_contract.py"
+    },
+    {
+      "kind": "ctest",
+      "ref": "TemporalSweepRuntime.*"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development/visual-diagnostics.md"
+    },
+    {
+      "kind": "script",
+      "ref": "test/rendering/test_frame_attribution_wiring.py"
+    }
+  ],
+  "requirements": []
+}

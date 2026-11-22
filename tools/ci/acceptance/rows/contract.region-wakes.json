@@ -1,0 +1,30 @@
+{
+  "id": "contract.region-wakes",
+  "source": "docs/active-regions.md#activation-and-ordering",
+  "statement": "Edit/pin pending wakes persist; empty replicated anchors do not use fallback; walking feet survive noclip and reload.",
+  "status": "covered",
+  "requirements": [
+    "ar.activation.010",
+    "ar.activation.015",
+    "ar.activation.016",
+    "ar.activation.017"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.EditAndPinWakeFrozenRegionsAfterPersistence"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.VoxelGroundObjectAndPinInputsActivateOnlyTheirRegions"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.EmptyReplicatedAnchorsNeverUseLocalSpawnFallback"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.WalkingAnchorSurvivesNoclipAndReloadWithoutCameraInputs"
+    }
+  ]
+}

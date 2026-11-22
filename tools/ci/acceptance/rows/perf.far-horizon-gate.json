@@ -1,0 +1,20 @@
+{
+  "id": "perf.far-horizon-gate",
+  "source": "docs/distant-world.md#performance-measurement-contract",
+  "statement": "The far horizon gate requires complete per-tier coverage against an independently computed wanted set, below-horizon sky at most 2 percent, no seam band and no edge at the outer radius.",
+  "status": "planned",
+  "evidence": [
+    {
+      "kind": "native",
+      "ref": "tools/gates/validate-engine-frontier.ps1",
+      "planned": "Ladder qualification refuses until immutable fixture authority is supported; owner: fw",
+      "command": "pwsh tools/gates/validate-engine-frontier.ps1 -Mode FarLodHorizon -FarWorldRenderer Ladder",
+      "receipt_schema": "luminumbra.farlod_horizon.v2"
+    }
+  ],
+  "requirements": [
+    "dw.perf.014",
+    "dw.perf.015",
+    "dw.mappings.015"
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.regions.03",
+  "source": "docs/distant-world.md#persistent-active-regions",
+  "statement": "Acceptance obligations: when reduction is insufficient they freeze: state is persisted with the freezing tick, nothing advances, and nothing catches up on resume except a per-system opt-in bounded elapsed-time hook. / A frozen region thaws when it regains proximity, is edited, is pinned, or when budget is available again in order. / The per-tick schedule digest is part of the replay trace, and a diagnostic panel shows the ledger, budgets and recent transitions. / Budgets are measured on representative worlds before any cap is enforced. / The opt-in [simulation budget telemetry](sim-budget-telemetry.md) defines the observational stage counts, replay comparison and additive headless artifact used to collect that evidence; / it implements no active-region scheduling.",
+  "status": "planned",
+  "requirements": [
+    "dw.regions.013",
+    "dw.regions.014",
+    "dw.regions.015",
+    "dw.regions.016",
+    "dw.regions.017",
+    "dw.regions.018"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwRegionsContract.Requirements03",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.regions.03.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}
