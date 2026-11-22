@@ -19,6 +19,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/animation/MorphMesh.cpp
 
     # Core
+    ${CMAKE_CURRENT_LIST_DIR}/core/CommandRegistry.cpp
     # Shared exact-byte SHA-256 for content and capture manifests.
     ${CMAKE_CURRENT_LIST_DIR}/authoring/PrefabDigest.cpp
     ${CMAKE_CURRENT_LIST_DIR}/mods/NativePluginLoader.cpp

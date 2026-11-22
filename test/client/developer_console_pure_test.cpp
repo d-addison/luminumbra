@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <limits>
 #include <map>
 #include <thread>
 
@@ -443,6 +444,347 @@ TEST(DeveloperCommands, UnavailableExecutionAndDuplicateDefinitions) {
     commands.Seal();
     def.name = "late";
     EXPECT_FALSE(commands.Register(def));
+}
+
+namespace Engine = Luminumbra::Commands;
+
+struct EngineCommandsFixture : testing::Test {
+    Engine::Registry registry;
+    int effects = 0;
+    int availability_queries = 0;
+    bool enabled = true;
+    std::string reason = "Service offline";
+    Engine::Result next_result{Engine::Status::Ok, "applied"};
+    std::vector<Engine::Value> received;
+    Engine::Context received_context;
+
+    Engine::Definition Definition(const std::string& name = "test.adjust") {
+        return {name,
+                "Adjust local diagnostics",
+                {{"enabled", Engine::ArgumentType::Bool},
+                 {"gain", Engine::ArgumentType::Float, false, {}, 0, 16},
+                 {"mode", Engine::ArgumentType::Enum, false, {"off", "on"}},
+                 {"label", Engine::ArgumentType::String, true}},
+                Engine::Authority::Local,
+                this,
+                [](void* state) {
+                    auto& fixture = *static_cast<EngineCommandsFixture*>(state);
+                    ++fixture.availability_queries;
+                    return Engine::Availability{fixture.enabled, fixture.reason};
+                },
+                [](void* state, const Engine::Invocation& invocation) {
+                    auto& fixture = *static_cast<EngineCommandsFixture*>(state);
+                    ++fixture.effects;
+                    fixture.received.assign(invocation.arguments.begin(),
+                                            invocation.arguments.end());
+                    fixture.received_context = invocation.context;
+                    return fixture.next_result;
+                }};
+    }
+};
+
+TEST_F(EngineCommandsFixture, TextAndStructuredEntryPointsHaveEqualTypedResults) {
+    ASSERT_TRUE(registry.Register(Definition()));
+    registry.Seal();
+    const auto text = registry.Submit("test.adjust true 0 on \"a \\\"label\\\" \\\\\"",
+                                      {Engine::EntryPoint::Console, Engine::Authority::Local});
+    ASSERT_EQ(text.status, Engine::Status::Ok);
+    const auto typed = received;
+    const auto direct = registry.Dispatch("test.adjust",
+                                          {"true", "0", "on", "a \"label\" \\"},
+                                          {Engine::EntryPoint::Panel, Engine::Authority::Local});
+    EXPECT_EQ(text, direct);
+    EXPECT_EQ(received, typed);
+    EXPECT_EQ(received_context.entry, Engine::EntryPoint::Panel);
+    EXPECT_EQ(std::get<float>(received[1]), 0.0f);
+    ASSERT_EQ(registry.History().size(), 2u);
+    EXPECT_EQ(registry.History()[0].context.entry, Engine::EntryPoint::Console);
+    EXPECT_EQ(registry.History()[1].context.entry, Engine::EntryPoint::Panel);
+    EXPECT_EQ(registry.History()[0].result, registry.History()[1].result);
+    EXPECT_EQ(registry.History()[0].arguments, registry.History()[1].arguments);
+    EXPECT_EQ(registry.Submit("test.adjust false 16 off").status, Engine::Status::Ok);
+    EXPECT_EQ(std::get<float>(received[1]), 16.0f);
+    EXPECT_EQ(received.size(), 3u);
+    EXPECT_EQ(received_context.entry, Engine::EntryPoint::Headless);
+    EXPECT_EQ(registry.Submit("test.adjust false 1 off \"\"").status, Engine::Status::Ok);
+    ASSERT_EQ(received.size(), 4u);
+    EXPECT_TRUE(std::get<std::string>(received[3]).empty());
+}
+
+TEST_F(EngineCommandsFixture, InvalidInputNeverQueriesAvailabilityOrExecutes) {
+    ASSERT_TRUE(registry.Register(Definition()));
+    registry.Seal();
+    for (const std::string line : {"test.adjust",
+                                   "test.adjust yes 1 on",
+                                   "test.adjust true -1 on",
+                                   "test.adjust true 17 on",
+                                   "test.adjust true nan on",
+                                   "test.adjust true inf on",
+                                   "test.adjust true 1e38 on",
+                                   "test.adjust true 1e999 on",
+                                   "test.adjust true 1x on",
+                                   "test.adjust true \"\" on",
+                                   "test.adjust true 1 unknown",
+                                   "test.adjust true 1 on x extra",
+                                   "test.adjust true 1 on \"unterminated",
+                                   "test.adjust true 1 on \"escape\\q\"",
+                                   "test.adjust true 1 on \"escape\\",
+                                   "test.adjust true 1 on\n",
+                                   "test.adjust true 1 on\r"}) {
+        EXPECT_EQ(registry.Submit(line).status, Engine::Status::InvalidInput) << line;
+    }
+    EXPECT_EQ(registry.Submit(std::string("test.adjust true 1 on\0tail", 26)).status,
+              Engine::Status::InvalidInput);
+    EXPECT_EQ(registry.Submit(std::string(Engine::Registry::MaxInput + 1, 'x')).status,
+              Engine::Status::InvalidInput);
+    EXPECT_EQ(registry.Dispatch("test.adjust", {"true", "1", "on\n"}).status,
+              Engine::Status::InvalidInput);
+    EXPECT_EQ(registry.Dispatch("test.adjust", {"true", "1", "on", std::string(4096, 'x')}).status,
+              Engine::Status::InvalidInput);
+    EXPECT_EQ(registry.Dispatch("test.adjust", std::vector<std::string>(17, "x")).status,
+              Engine::Status::InvalidInput);
+    std::string many = "test.adjust";
+    for (std::size_t i = 0; i < Engine::Registry::MaxArguments + 1; ++i) {
+        many += " x";
+    }
+    EXPECT_EQ(registry.Submit(many).status, Engine::Status::InvalidInput);
+    EXPECT_EQ(registry.Submit(many + " ").status, Engine::Status::InvalidInput);
+    EXPECT_EQ(registry.Dispatch(std::string(129, 'x')).status, Engine::Status::InvalidInput);
+    EXPECT_EQ(registry.Dispatch("test.unknown").status, Engine::Status::UnknownCommand);
+    EXPECT_EQ(registry.Submit(" \t ").status, Engine::Status::Ok);
+    EXPECT_EQ(availability_queries, 0);
+    EXPECT_EQ(effects, 0);
+}
+
+TEST_F(EngineCommandsFixture, UnavailableAndDeniedCommandsExplainWithoutEffects) {
+    ASSERT_TRUE(registry.Register(Definition()));
+    auto authoritative = Definition("world.change");
+    authoritative.authority = Engine::Authority::Authoritative;
+    ASSERT_TRUE(registry.Register(authoritative));
+    EXPECT_EQ(registry.Submit("test.adjust true 1 on").status, Engine::Status::Denied);
+    registry.Seal();
+    enabled = false;
+    const auto unavailable = registry.Submit("test.adjust true 1 on");
+    EXPECT_EQ(unavailable.status, Engine::Status::Unavailable);
+    EXPECT_EQ(unavailable.message, reason);
+    EXPECT_NE(registry.Help("test.adjust").find(reason), std::string::npos);
+    reason.clear();
+    EXPECT_EQ(registry.Submit("test.adjust true 1 on").message, "Command unavailable");
+    EXPECT_NE(registry.Help("test.adjust").find("Command unavailable"), std::string::npos);
+    enabled = true;
+    for (const auto authority : {Engine::Authority::Local, Engine::Authority::Authoritative}) {
+        const auto denied =
+            registry.Submit("world.change true 1 on", {Engine::EntryPoint::Headless, authority});
+        EXPECT_EQ(denied.status, Engine::Status::Denied);
+        EXPECT_FALSE(denied.message.empty());
+    }
+    EXPECT_NE(registry.Help("world.change").find("Authoritative execution"), std::string::npos);
+    EXPECT_EQ(registry
+                  .Submit("test.adjust true 1 on",
+                          {Engine::EntryPoint::Console, Engine::Authority::Authoritative})
+                  .status,
+              Engine::Status::Denied);
+    EXPECT_EQ(registry
+                  .Submit("test.adjust true 1 on",
+                          {static_cast<Engine::EntryPoint>(99), Engine::Authority::Local})
+                  .status,
+              Engine::Status::Denied);
+    EXPECT_EQ(effects, 0);
+    EXPECT_EQ(registry.History().back().result.status, Engine::Status::Denied);
+}
+
+TEST_F(EngineCommandsFixture, HelpAndCompletionExposeTypesRangesAndStableNames) {
+    ASSERT_TRUE(registry.Register(Definition("test.zebra")));
+    ASSERT_TRUE(registry.Register(Definition("test.adjust")));
+    registry.Seal();
+    const auto help = registry.Help("test.adjust");
+    EXPECT_NE(help.find("<enabled:true|false>"), std::string::npos);
+    EXPECT_NE(help.find("<gain:float 0..16>"), std::string::npos);
+    EXPECT_NE(help.find("<mode:off|on|>"), std::string::npos);
+    EXPECT_NE(help.find("[label:string]"), std::string::npos);
+    EXPECT_EQ(registry.Complete("test."), (std::vector<std::string>{"test.adjust", "test.zebra"}));
+    EXPECT_EQ(registry.Complete("test.a"), (std::vector<std::string>{"test.adjust"}));
+    EXPECT_EQ(registry.Complete(""), registry.Complete("test."));
+    EXPECT_TRUE(registry.Complete("missing").empty());
+    EXPECT_TRUE(registry.Complete(std::string(129, 'x')).empty());
+    EXPECT_TRUE(registry.Help("missing").empty());
+    EXPECT_EQ(effects, 0);
+}
+
+TEST_F(EngineCommandsFixture, DefinitionValidationIsAtomicAndSealingIsFinal) {
+    auto definition = Definition();
+    EXPECT_TRUE(registry.Register(definition));
+    EXPECT_FALSE(registry.Register(definition));
+    for (const std::string name : {"", "bare", ".prefix", "suffix.", "two..dots", "has space.x"}) {
+        definition.name = name;
+        EXPECT_FALSE(registry.Register(definition));
+    }
+    definition.name = std::string(129, 'x');
+    EXPECT_FALSE(registry.Register(definition));
+    definition = Definition("test.invalid");
+    definition.arguments[0].optional = true;
+    EXPECT_FALSE(registry.Register(definition));
+    definition = Definition("test.invalid");
+    definition.arguments[1].minimum = 17;
+    EXPECT_FALSE(registry.Register(definition));
+    definition.arguments[1].minimum = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_FALSE(registry.Register(definition));
+    definition.arguments[1].minimum = 0;
+    definition.arguments[1].maximum = std::numeric_limits<float>::infinity();
+    EXPECT_FALSE(registry.Register(definition));
+    definition = Definition("test.invalid");
+    definition.arguments[2].choices.clear();
+    EXPECT_FALSE(registry.Register(definition));
+    definition.arguments[2].choices = {""};
+    EXPECT_FALSE(registry.Register(definition));
+    definition.arguments[2].choices = {"new\nline"};
+    EXPECT_FALSE(registry.Register(definition));
+    definition.arguments[2].choices.assign(65, "choice");
+    EXPECT_FALSE(registry.Register(definition));
+    definition = Definition("test.invalid");
+    definition.arguments[0].choices = {"unexpected"};
+    EXPECT_FALSE(registry.Register(definition));
+    definition.arguments[0].choices.clear();
+    definition.arguments[0].name.clear();
+    EXPECT_FALSE(registry.Register(definition));
+    definition = Definition("test.invalid");
+    definition.arguments[0].type = static_cast<Engine::ArgumentType>(99);
+    EXPECT_FALSE(registry.Register(definition));
+    definition = Definition("test.invalid");
+    definition.arguments.resize(17);
+    EXPECT_FALSE(registry.Register(definition));
+    definition = Definition("test.invalid");
+    definition.description.assign(Engine::Registry::MaxInput + 1, 'x');
+    EXPECT_FALSE(registry.Register(definition));
+    definition.description.assign(Engine::Registry::MaxInput, 'x');
+    EXPECT_FALSE(registry.Register(definition));
+    definition = Definition("test.invalid");
+    definition.arguments[2].choices = {std::string(4096, 'x')};
+    EXPECT_FALSE(registry.Register(definition));
+    definition = Definition("test.invalid");
+    definition.execute = nullptr;
+    EXPECT_FALSE(registry.Register(definition));
+    definition = Definition("test.invalid");
+    definition.authority = static_cast<Engine::Authority>(99);
+    EXPECT_FALSE(registry.Register(definition));
+    EXPECT_EQ(registry.Complete(""), (std::vector<std::string>{"test.adjust"}));
+    EXPECT_TRUE(registry.Register(Definition("test.invalid")));
+    registry.Seal();
+    EXPECT_FALSE(registry.Register(Definition("test.late")));
+    EXPECT_EQ(effects, 0);
+}
+
+TEST_F(EngineCommandsFixture, CommandCountAndHistoryPayloadsStayBounded) {
+    for (std::size_t i = 0; i < Engine::Registry::MaxCommands; ++i) {
+        ASSERT_TRUE(registry.Register(Definition("test.command" + std::to_string(i))));
+    }
+    EXPECT_FALSE(registry.Register(Definition("test.overflow")));
+    EXPECT_EQ(registry.Complete("").size(), Engine::Registry::MaxCommands);
+    registry.Seal();
+    next_result.message.assign(Engine::Registry::MaxInput + 1, 'x');
+    const std::size_t label_size = Engine::Registry::MaxInput -
+                                   std::string("test.command0").size() -
+                                   std::string("true1on").size() - 4;
+    const std::string label(label_size, 'x');
+    for (std::size_t i = 0; i < Engine::Registry::MaxHistory + 5; ++i) {
+        const std::string name = "test.command" + std::to_string(i);
+        const std::string entry_label(
+            label_size - (name.size() - std::string("test.command0").size()), 'x');
+        const auto result = registry.Dispatch(name, {"true", "1", "on", entry_label});
+        ASSERT_EQ(result.status, Engine::Status::Ok);
+        EXPECT_EQ(result.message.size(), Engine::Registry::MaxInput);
+        EXPECT_LE(registry.History().size(), Engine::Registry::MaxHistory);
+    }
+    ASSERT_EQ(registry.History().size(), Engine::Registry::MaxHistory);
+    EXPECT_EQ(registry.History().front().name, "test.command5");
+    EXPECT_EQ(registry.History().back().name, "test.command132");
+    for (const auto& entry : registry.History()) {
+        std::size_t input_bytes = entry.name.size();
+        for (const auto& argument : entry.arguments) {
+            input_bytes += 1 + argument.size();
+        }
+        EXPECT_EQ(input_bytes, Engine::Registry::MaxInput);
+        EXPECT_EQ(entry.result.message.size(), Engine::Registry::MaxInput);
+    }
+    next_result = {Engine::Status::Failed, "Host refused"};
+    EXPECT_EQ(registry.Submit("test.command1 true 1 on"), next_result);
+    ASSERT_EQ(registry.History().size(), Engine::Registry::MaxHistory);
+    EXPECT_EQ(registry.History().back().name, "test.command1");
+    EXPECT_EQ(registry.History().back().result, next_result);
+    EXPECT_EQ(registry.Dispatch("test.command0", {"true", "1", "on", label + "x"}).status,
+              Engine::Status::InvalidInput);
+    EXPECT_EQ(registry.History().back().name, "test.command1");
+}
+
+TEST_F(ConsoleFixture, LogCommandsUseEngineValidationHistoryAndPreserveConsoleResults) {
+    const auto& local = console.Commands().LocalCommands();
+    EXPECT_EQ(local.Complete("log."), (std::vector<std::string>{"log.clear", "log.level"}));
+    EXPECT_NE(local.Help("log.level").find("info"), std::string::npos);
+    console.Log()->Push(LogSeverity::Info, "retained");
+    const auto before = console.Log()->Snapshot().size();
+    const auto invalid = console.Commands().Dispatch("log clear", {"extra"});
+    EXPECT_FALSE(invalid.success);
+    EXPECT_EQ(invalid.message, "Invalid arity: " + console.Commands().Help("log clear"));
+    EXPECT_EQ(console.Log()->Snapshot().size(), before);
+    const auto text = console.Submit("log level error");
+    const auto panel = console.Commands().Dispatch("log level", {"error"});
+    EXPECT_EQ(text.success, panel.success);
+    EXPECT_EQ(text.message, panel.message);
+    ASSERT_EQ(local.History().size(), 3u);
+    EXPECT_EQ(local.History()[0].result.status, Engine::Status::InvalidInput);
+    EXPECT_EQ(local.History()[1].context.entry, Engine::EntryPoint::Console);
+    EXPECT_EQ(local.History()[2].context.entry, Engine::EntryPoint::Panel);
+    EXPECT_EQ(local.History()[1].result, local.History()[2].result);
+    EXPECT_FALSE(console.Log()->Snapshot().empty());
+    EXPECT_TRUE(console.Commands().Dispatch("log clear").success);
+    EXPECT_TRUE(console.Log()->Snapshot().empty());
+    EXPECT_TRUE(console.Submit("log clear").success);
+    EXPECT_TRUE(console.Log()->Snapshot().empty());
+    EXPECT_EQ(effects, 0);
+    EXPECT_EQ(saves, 0);
+}
+
+TEST(DeveloperCommands, LocalRegistrationRollbackAndShortcutContext) {
+    DeveloperBindings bindings;
+    DeveloperWidgetRegistry widgets(bindings);
+    DeveloperCommandRegistry commands(widgets, bindings);
+    int effects = 0;
+    CommandDef definition{"test effect", "Local effect", {}, {}, [&](const CommandArguments&) {
+                              ++effects;
+                              return CommandResult{};
+                          }};
+    auto invalid = definition;
+    for (const auto type :
+         {ArgumentType::WidgetId, ArgumentType::ActionId, ArgumentType::KeyChord}) {
+        invalid.arguments = {{"id", type}};
+        EXPECT_FALSE(commands.RegisterLocal(invalid));
+    }
+    invalid.arguments = {{"choice", ArgumentType::Enum}};
+    EXPECT_FALSE(commands.RegisterLocal(invalid));
+    EXPECT_TRUE(commands.List().empty());
+    EXPECT_TRUE(commands.LocalCommands().Complete("").empty());
+    ASSERT_TRUE(commands.RegisterLocal(definition));
+    EXPECT_FALSE(commands.RegisterLocal(definition));
+    invalid = definition;
+    invalid.name = "test.effect";
+    EXPECT_FALSE(commands.RegisterLocal(invalid));
+    EXPECT_EQ(commands.List().size(), 1u);
+    invalid = definition;
+    invalid.name = "test typed";
+    invalid.arguments = {{"enabled", ArgumentType::Bool}, {"scale", ArgumentType::Float}};
+    ASSERT_TRUE(commands.RegisterLocal(invalid));
+    ASSERT_TRUE(bindings.Register({"test.action", std::nullopt}));
+    ASSERT_TRUE(commands.BindAction("test.action", "test effect"));
+    commands.Seal();
+    EXPECT_FALSE(commands.RegisterLocal(definition));
+    EXPECT_TRUE(commands.InvokeAction("test.action").success);
+    EXPECT_EQ(effects, 1);
+    ASSERT_EQ(commands.LocalCommands().History().size(), 1u);
+    EXPECT_EQ(commands.LocalCommands().History().back().context.entry,
+              Engine::EntryPoint::Shortcut);
+    EXPECT_TRUE(commands.Submit("test typed true 1").success);
+    EXPECT_FALSE(commands.Submit("test typed false 17").success);
+    EXPECT_EQ(effects, 2);
 }
 
 TEST(DeveloperHistory, BoundariesDuplicatesBlankAndEditedDraftRestoration) {

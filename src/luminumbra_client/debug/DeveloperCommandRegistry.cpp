@@ -7,6 +7,27 @@
 #include <sstream>
 
 namespace Luminumbra::Client::Debug {
+namespace {
+std::string LocalName(std::string name) {
+    std::replace(name.begin(), name.end(), ' ', '.');
+    return name;
+}
+Commands::Availability LocalAvailability(void* state) {
+    const auto& def = *static_cast<const CommandDef*>(state);
+    const auto availability = def.available ? def.available() : Availability{};
+    return {availability.available, availability.reason};
+}
+Commands::Result ExecuteLocal(void* state, const Commands::Invocation& invocation) {
+    const auto& def = *static_cast<const CommandDef*>(state);
+    CommandArguments arguments;
+    arguments.reserve(invocation.arguments.size());
+    for (const auto& value : invocation.arguments) {
+        std::visit([&](const auto& typed) { arguments.emplace_back(typed); }, value);
+    }
+    const auto result = def.execute(arguments);
+    return {result.success ? Commands::Status::Ok : Commands::Status::Failed, result.message};
+}
+} // namespace
 DeveloperCommandRegistry::DeveloperCommandRegistry(DeveloperWidgetRegistry& widgets,
                                                    DeveloperBindings& bindings)
     : m_widgets(widgets)
@@ -26,14 +47,83 @@ bool DeveloperCommandRegistry::Register(CommandDef def) {
     m_commands.push_back(std::move(def));
     return true;
 }
+bool DeveloperCommandRegistry::RegisterLocal(CommandDef def) {
+    if (m_sealed || def.name.size() > Commands::Registry::MaxName ||
+        def.description.size() > Commands::Registry::MaxInput ||
+        def.arguments.size() > Commands::Registry::MaxArguments ||
+        m_localCommands.size() == Commands::Registry::MaxCommands) {
+        return false;
+    }
+    Commands::Definition definition;
+    definition.name = LocalName(def.name);
+    definition.description = def.description;
+    for (const auto& argument : def.arguments) {
+        if (argument.name.size() > Commands::Registry::MaxName ||
+            argument.values.size() > Commands::Registry::MaxChoices ||
+            std::any_of(argument.values.begin(), argument.values.end(), [](const auto& value) {
+                return value.size() > Commands::Registry::MaxInput;
+            })) {
+            return false;
+        }
+        Commands::ArgumentType type;
+        switch (argument.type) {
+            case ArgumentType::Bool:
+                type = Commands::ArgumentType::Bool;
+                break;
+            case ArgumentType::Float:
+                type = Commands::ArgumentType::Float;
+                break;
+            case ArgumentType::Enum:
+                type = Commands::ArgumentType::Enum;
+                break;
+            default:
+                return false;
+        }
+        definition.arguments.push_back({argument.name,
+                                        type,
+                                        argument.optional,
+                                        argument.values,
+                                        argument.minimum,
+                                        argument.maximum});
+    }
+    if (!Register(def)) {
+        return false;
+    }
+    m_localCommands.push_back(std::move(def));
+    definition.state = &m_localCommands.back();
+    definition.available = LocalAvailability;
+    definition.execute = ExecuteLocal;
+    if (!m_localRegistry.Register(definition)) {
+        m_localCommands.pop_back();
+        m_commands.pop_back();
+        return false;
+    }
+    return true;
+}
+const Commands::Registry& DeveloperCommandRegistry::LocalCommands() const {
+    return m_localRegistry;
+}
 void DeveloperCommandRegistry::Seal() {
     m_sealed = true;
+    m_localRegistry.Seal();
 }
 const std::vector<CommandDef>& DeveloperCommandRegistry::List() const {
     return m_commands;
 }
 CommandResult DeveloperCommandRegistry::Dispatch(const std::string& name,
-                                                 const std::vector<std::string>& arguments) const {
+                                                 const std::vector<std::string>& arguments,
+                                                 Commands::Context context) const {
+    const bool local = std::any_of(m_localCommands.begin(),
+                                   m_localCommands.end(),
+                                   [&](const auto& def) { return def.name == name; });
+    if (local) {
+        const auto result = m_localRegistry.Dispatch(LocalName(name), arguments, context);
+        if (result.status == Commands::Status::InvalidInput &&
+            result.message.starts_with("Invalid arity:")) {
+            return {false, "Invalid arity: " + Help(name)};
+        }
+        return {result.status == Commands::Status::Ok, result.message};
+    }
     const auto it = std::find_if(m_commands.begin(), m_commands.end(), [&](const CommandDef& def) {
         return def.name == name;
     });
@@ -151,7 +241,8 @@ CommandResult DeveloperCommandRegistry::Submit(const std::string& line) const {
     if (!selected)
         return {false, "Unknown command: " + tokens.front()};
     return Dispatch(selected->name,
-                    {tokens.begin() + static_cast<std::ptrdiff_t>(prefix), tokens.end()});
+                    {tokens.begin() + static_cast<std::ptrdiff_t>(prefix), tokens.end()},
+                    {Commands::EntryPoint::Console, Commands::Authority::Local});
 }
 std::string DeveloperCommandRegistry::Help(const std::string& name) const {
     std::ostringstream out;
@@ -196,6 +287,8 @@ CommandResult DeveloperCommandRegistry::InvokeAction(const std::string& id) cons
     const auto it = m_actions.find(id);
     if (it == m_actions.end())
         return {false, "Unknown action: " + id};
-    return Dispatch(it->second.first, it->second.second);
+    return Dispatch(it->second.first,
+                    it->second.second,
+                    {Commands::EntryPoint::Shortcut, Commands::Authority::Local});
 }
 } // namespace Luminumbra::Client::Debug
