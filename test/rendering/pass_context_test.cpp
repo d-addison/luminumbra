@@ -51,6 +51,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -1681,6 +1682,11 @@ TEST(PassContext, SsaoReinitializationKeepsExactlyTheOriginalKernelAndNoise) {
 }
 
 namespace {
+std::size_t ReplayTargetBytes(const Luminumbra::Rendering::RenderResourceRegistry& resources) {
+    const auto* desc = resources.owned_texture_desc("taau_replay_output");
+    return desc ? static_cast<std::size_t>(desc->width) * desc->height * 8u : 0u;
+}
+
 void ExpectReplayAllocationFailure(Luminumbra::Rendering::TaauPass& pass,
                                    Luminumbra::Rendering::RenderResourceRegistry& resources) {
     const auto original = pass.history_state();
@@ -1734,6 +1740,67 @@ bool PrepareReplayPreservingBindings(Luminumbra::Rendering::TaauPass& pass,
 }
 } // namespace
 
+TEST(PassContext, TaauReplayTargetBytesReturnToZeroAfterCompletionAndUnwind) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+    using namespace Luminumbra::Rendering;
+    RenderResourceRegistry resources;
+    TaauPass pass;
+    struct Cleanup {
+        TaauPass& pass;
+        RenderResourceRegistry& resources;
+        ~Cleanup() {
+            pass.destroy(resources);
+        }
+    } cleanup{pass, resources};
+    pass.release_replay(resources);
+    EXPECT_EQ(ReplayTargetBytes(resources), 0u);
+    // Reinitialize while armed, then rearm against the new output extent.
+    for (const unsigned width : {4u, 7u}) {
+        pass.destroy(resources);
+        pass.init(resources, width, 3);
+        EXPECT_EQ(ReplayTargetBytes(resources), 0u);
+        ASSERT_TRUE(pass.prepare_replay(resources));
+        EXPECT_EQ(ReplayTargetBytes(resources), width * 3u * 8u);
+    }
+    pass.release_replay(resources);
+    EXPECT_EQ(ReplayTargetBytes(resources), 0u);
+    const auto history = pass.history_state();
+    for (const bool interrupted : {false, true}) {
+        GLuint scratch = 0;
+        try {
+            const ReplayRollback release([&]() noexcept { pass.release_replay(resources); });
+            auto access = MakeFarWorldReplayGlAccess();
+            RunFarWorldReplay(
+                *access,
+                [] {
+                    return []() noexcept {
+                    };
+                },
+                [] {},
+                [&] {
+                    EXPECT_TRUE(pass.prepare_replay(resources));
+                    scratch = resources.texture("taau_replay_output").id;
+                    EXPECT_NE(scratch, 0u);
+                    EXPECT_EQ(ReplayTargetBytes(resources), 7u * 3u * 8u);
+                    if (interrupted) {
+                        throw std::runtime_error("interrupted replay");
+                    }
+                });
+            EXPECT_FALSE(interrupted);
+        } catch (const std::runtime_error&) {
+            EXPECT_TRUE(interrupted);
+        }
+        EXPECT_EQ(ReplayTargetBytes(resources), 0u);
+        EXPECT_FALSE(pass.replay_available());
+        EXPECT_FALSE(glIsTexture(scratch));
+        EXPECT_EQ(pass.history_state(), history);
+        pass.release_replay(resources);
+        EXPECT_EQ(ReplayTargetBytes(resources), 0u);
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
 TEST(PassContext, TaauReplayStorageIsLazyReusableAndMatchesNormalResolveAfterResize) {
     HiddenGlContext gl;
     ASSERT_TRUE(gl.ready()) << gl.error();
@@ -1779,6 +1846,7 @@ TEST(PassContext, TaauReplayStorageIsLazyReusableAndMatchesNormalResolveAfterRes
         pass.init(resources, output_width, 8);
         ASSERT_FALSE(pass.replay_available());
         ASSERT_EQ(resources.texture("taau_replay_output").id, 0u);
+        EXPECT_EQ(ReplayTargetBytes(resources), 0u);
         const unsigned input_width = output_width == 8 ? output_width : output_width / 2;
         const unsigned input_height = output_width == 8 ? 8u : 4u;
         std::vector<float> pixels(input_width * input_height * 4);
@@ -1810,10 +1878,11 @@ TEST(PassContext, TaauReplayStorageIsLazyReusableAndMatchesNormalResolveAfterRes
             ASSERT_EQ(frozen.valid, valid);
             pass.execute(ctx);
             const auto after_normal = pass.history_state();
-            std::vector<float> expected(output_width * 8 * 4);
+            const auto expected_lighting = ReadTarget(cleanup.target);
+            std::vector<std::uint16_t> expected(output_width * 8 * 4);
             const auto write_index = static_cast<std::size_t>(frozen.write_index);
             glBindTexture(GL_TEXTURE_2D, frozen.textures[write_index]);
-            glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_FLOAT, expected.data());
+            glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_HALF_FLOAT, expected.data());
             if (!valid) {
                 ASSERT_EQ(resources.texture("taau_replay_output").id, 0u);
                 ExpectReplayAllocationFailure(pass, resources);
@@ -1831,16 +1900,23 @@ TEST(PassContext, TaauReplayStorageIsLazyReusableAndMatchesNormalResolveAfterRes
             EXPECT_EQ(desc->width, output_width);
             EXPECT_EQ(desc->height, 8u);
             EXPECT_EQ(desc->internal_format, static_cast<unsigned>(GL_RGBA16F));
+            EXPECT_EQ(ReplayTargetBytes(resources), output_width * 8u * 8u);
             pass.execute(ctx, &frozen);
             EXPECT_EQ(pass.history_state(), after_normal);
-            std::vector<float> actual(expected.size());
+            EXPECT_EQ(ReadTarget(cleanup.target), expected_lighting);
+            std::vector<std::uint16_t> actual(expected.size());
             glBindTexture(GL_TEXTURE_2D, scratch);
-            glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_FLOAT, actual.data());
+            glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_HALF_FLOAT, actual.data());
             EXPECT_EQ(actual, expected);
-            EXPECT_TRUE(std::any_of(actual.begin(), actual.end(), [](float v) { return v > 0; }));
+            EXPECT_TRUE(std::any_of(actual.begin(), actual.end(), [](auto v) { return v != 0; }));
             glBindTexture(GL_TEXTURE_2D, frozen.textures[write_index]);
-            glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_FLOAT, actual.data());
+            glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_HALF_FLOAT, actual.data());
             EXPECT_EQ(actual, expected);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            pass.release_replay(resources);
+            EXPECT_EQ(ReplayTargetBytes(resources), 0u);
+            EXPECT_FALSE(glIsTexture(scratch));
+            EXPECT_EQ(pass.history_state(), after_normal);
         }
         pass.destroy(resources);
         EXPECT_FALSE(pass.prepare_replay(resources));
