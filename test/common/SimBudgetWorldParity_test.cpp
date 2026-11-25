@@ -323,8 +323,12 @@ TEST_P(SimBudgetWorldParity, EcologyScheduleVisitsOnlyExecutedTicksWithEmptyRost
     expected.record("phase", "Ecology", "ecology.pollination");
     expected.record("phase", "Ecology", "ecology.disease");
     EXPECT_EQ(session->GetEcologyScheduleTraceHash(), expected.hash());
-    ASSERT_EQ(session->TickSimulation(fixed_dt * 3.0), 3u);
-    for (std::uint64_t tick = 0; tick < 3; ++tick) {
+    // The session clamps catch-up below the shared clock default. Request one
+    // tick past that cap, so only the executed batch may reach the trace.
+    const std::uint32_t cap = session->GetSimulationClock().max_catch_up_ticks();
+    ASSERT_GE(cap, 2u);
+    ASSERT_EQ(session->TickSimulation(fixed_dt * static_cast<double>(cap + 1)), cap);
+    for (std::uint32_t tick = 0; tick < cap; ++tick) {
         expected.record("phase", "Ecology", "ecology.pollination");
         expected.record("phase", "Ecology", "ecology.disease");
     }
