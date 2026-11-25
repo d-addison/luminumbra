@@ -3422,6 +3422,184 @@ TEST(RenderSmokeTest, ReversedDepthSoftParticlesFadeAgainstGeometry) {
     glDeleteProgram(program);
 }
 
+// Integrate the visible area of the continuous four-texel box independently of
+// the shader's 25 discrete taps. Anything beyond the map has white visibility.
+float ShadowBoxVisibility(const glm::vec3& projected,
+                          const glm::ivec2& extent,
+                          const std::vector<float>& depths,
+                          int layer,
+                          float bias) {
+    for (int axis = 0; axis < 3; ++axis)
+        if (projected[axis] < 0 || projected[axis] > 1)
+            return 1;
+    const glm::vec2 start = glm::vec2(projected) * glm::vec2(extent) - glm::vec2(2);
+    const glm::vec2 finish = start + glm::vec2(4);
+    float occluded_area = 0;
+    // Test maps are at most 32 by 16; no scene-sized staging or traversal.
+    for (int y = 0; y < extent.y; ++y) {
+        const float overlap_y = std::max(0.0f,
+                                         std::min(finish.y, static_cast<float>(y + 1)) -
+                                             std::max(start.y, static_cast<float>(y)));
+        for (int x = 0; x < extent.x; ++x) {
+            const auto index = static_cast<std::size_t>((layer * extent.y + y) * extent.x + x);
+            if (projected.z - bias > depths[index]) {
+                const float overlap_x = std::max(0.0f,
+                                                 std::min(finish.x, static_cast<float>(x + 1)) -
+                                                     std::max(start.x, static_cast<float>(x)));
+                occluded_area += overlap_x * overlap_y;
+            }
+        }
+    }
+    return 1 - occluded_area / 16;
+}
+
+TEST(RenderSmokeTest, ShadowFilterFractionalFootprintCascadesBiasAndWhiteBorders) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const std::string source = ReadTextFile(SourceRoot() / "res/shaders/lighting_pass.frag");
+    const auto begin = source.find("float filteredShadow(");
+    ASSERT_NE(begin, std::string::npos);
+    const auto end = source.find("\n// sample the tinted transmission", begin);
+    ASSERT_NE(end, std::string::npos);
+    // As in the historical shadow probe, compile the shipping filter. Include
+    // CalculateShadow too so layer selection and the production bias are exercised.
+    const std::string fragment_source = R"(#version 450 core
+out vec4 FragColor;
+uniform sampler2DArray u_shadowCascades;
+uniform mat4 u_lightSpaceMatrices[4];
+uniform vec4 u_cascadeSplits;
+uniform vec3 u_points[32];
+uniform int u_layer;
+uniform float u_bias;
+)" + source.substr(begin, end - begin) + R"(
+void main() {
+    vec3 point = u_points[int(gl_FragCoord.x)];
+    vec3 normal = vec3(0, 1, 0);
+    FragColor = vec4(filteredShadow(point, u_layer, u_bias),
+        CalculateShadow(point * 2 - 1, normal, normal, float(u_layer) + 0.5),
+        CalculateShadow(point * 2 - 1, normal, normal, float(u_layer) + 1.0), 1);
+})";
+    const GLuint fragment = glCreateShader(GL_FRAGMENT_SHADER);
+    const char* fragment_text = fragment_source.c_str();
+    glShaderSource(fragment, 1, &fragment_text, nullptr);
+    glCompileShader(fragment);
+    GLint compiled = GL_FALSE;
+    glGetShaderiv(fragment, GL_COMPILE_STATUS, &compiled);
+    ASSERT_EQ(compiled, GL_TRUE) << GetShaderInfoLog(fragment);
+    const GLuint vertex = CompileShader(SourceRoot() / "res/shaders/ssao.vert", GL_VERTEX_SHADER);
+    ASSERT_NE(vertex, 0u);
+    const GLuint program = glCreateProgram();
+    glAttachShader(program, vertex);
+    glAttachShader(program, fragment);
+    glLinkProgram(program);
+    glDeleteShader(vertex);
+    glDeleteShader(fragment);
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    ASSERT_EQ(linked, GL_TRUE) << GetProgramInfoLog(program);
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "u_shadowCascades"), 0);
+    glUniform4f(glGetUniformLocation(program, "u_cascadeSplits"), 1, 2, 3, 4);
+    const glm::mat4 identity(1);
+    for (int layer = 0; layer < 4; ++layer) {
+        const auto name = "u_lightSpaceMatrices[" + std::to_string(layer) + "]";
+        glUniformMatrix4fv(
+            glGetUniformLocation(program, name.c_str()), 1, GL_FALSE, &identity[0][0]);
+    }
+    FullscreenFloatProbe probe;
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    GLuint shadows = 0;
+    glGenTextures(1, &shadows);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, shadows);
+    // Match ShadowPass: nearest depth, comparison in GLSL, white border.
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+    constexpr std::array<float, 4> border = {1, 1, 1, 1};
+    glTexParameterfv(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BORDER_COLOR, border.data());
+    for (const glm::ivec2 extent : {glm::ivec2(8, 8), glm::ivec2(16, 8), glm::ivec2(32, 16)}) {
+        SCOPED_TRACE(::testing::Message() << extent.x << 'x' << extent.y);
+        // Four layers of at most 32 by 16 floats: 8 KiB of CPU staging.
+        std::vector<float> depths(static_cast<std::size_t>(extent.x * extent.y * 4));
+        for (int layer = 0; layer < 4; ++layer)
+            for (int y = 0; y < extent.y; ++y)
+                for (int x = 0; x < extent.x; ++x)
+                    depths[static_cast<std::size_t>((layer * extent.y + y) * extent.x + x)] =
+                        static_cast<float>(1 + (x * 3 + y * 5 + layer * 7) % 11 % 3) * 0.25f;
+        glTexImage3D(GL_TEXTURE_2D_ARRAY,
+                     0,
+                     GL_DEPTH_COMPONENT32F,
+                     extent.x,
+                     extent.y,
+                     4,
+                     0,
+                     GL_DEPTH_COMPONENT,
+                     GL_FLOAT,
+                     depths.data());
+        std::array<glm::vec3, FullscreenFloatProbe::width> points{};
+        std::size_t next = 0;
+        for (const float offset_y : {-0.75f, -0.25f, 0.25f, 0.75f})
+            for (const float offset_x : {-0.75f, -0.25f, 0.25f, 0.75f})
+                points[next++] = glm::vec3(0.5f + offset_x / static_cast<float>(extent.x),
+                                           0.5f + offset_y / static_cast<float>(extent.y),
+                                           0.5f);
+        for (int axis = 0; axis < 2; ++axis)
+            for (const float edge : {0.0f, 1.0f}) {
+                glm::vec3 point(0.5f);
+                point[axis] = edge;
+                points[next++] = point;
+            }
+        for (const float coord_y : {0.0f, 1.0f})
+            for (const float coord_x : {0.0f, 1.0f})
+                points[next++] = glm::vec3(coord_x, coord_y, 0.5f);
+        for (int axis = 0; axis < 3; ++axis)
+            for (const float outside : {-0.125f, 1.125f}) {
+                glm::vec3 point(0.5f);
+                point[axis] = outside;
+                points[next++] = point;
+            }
+        points[next++] = glm::vec3(0.5f, 0.5f, 0);
+        points[next++] = glm::vec3(0.5f, 0.5f, 1);
+        ASSERT_EQ(next, points.size());
+        // Flatten explicitly so aligned GLM configurations have identical uniforms.
+        std::array<float, FullscreenFloatProbe::width * 3> coordinates{};
+        for (std::size_t index = 0; index < points.size(); ++index)
+            for (int axis = 0; axis < 3; ++axis)
+                coordinates[index * 3 + static_cast<std::size_t>(axis)] = points[index][axis];
+        glUniform3fv(glGetUniformLocation(program, "u_points[0]"),
+                     FullscreenFloatProbe::width,
+                     coordinates.data());
+        // 36 draws total, each checking 32 positions against an area oracle.
+        for (int layer = 0; layer < 4; ++layer) {
+            SCOPED_TRACE(layer);
+            glUniform1i(glGetUniformLocation(program, "u_layer"), layer);
+            for (const float bias : {0.0f, 0.001f, 0.25f}) {
+                SCOPED_TRACE(bias);
+                glUniform1f(glGetUniformLocation(program, "u_bias"), bias);
+                const auto pixels = probe.draw();
+                for (std::size_t index = 0; index < points.size(); ++index) {
+                    SCOPED_TRACE(index);
+                    EXPECT_NEAR(pixels[index].r,
+                                ShadowBoxVisibility(points[index], extent, depths, layer, bias),
+                                1e-6f);
+                    const float expected =
+                        ShadowBoxVisibility(points[index], extent, depths, layer, 0.001f);
+                    EXPECT_NEAR(pixels[index].g, expected, 1e-6f);
+                    EXPECT_NEAR(pixels[index].b, expected, 1e-6f);
+                }
+            }
+        }
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteTextures(1, &shadows);
+    glUseProgram(0);
+    glDeleteProgram(program);
+}
+
 TEST(RenderSmokeTest, GrassAndTerrainSampleTheSameProjectedCloudShadow) {
     HiddenGlContext context;
     if (!context.ready())
