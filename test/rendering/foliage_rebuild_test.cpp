@@ -646,7 +646,8 @@ TEST_F(FoliageRebuildTest, ComputeRecreationRefreshesUniformsAndScratchStorage) 
         RebuildGlCalls calls;
         pass.init_compute(LUMINUMBRA_SOURCE_ROOT);
         ASSERT_TRUE(pass.gpu_scatter_active());
-        EXPECT_EQ(calls.uniform_queries(), 12u);
+        // Includes the parallel prefix scan's u_pass lookup.
+        EXPECT_EQ(calls.uniform_queries(), 13u);
         calls.reset_scratch_allocations();
         calls.uploaded_bytes = 0;
         Attribution::FoliageFrameScope frame(true);
@@ -657,7 +658,7 @@ TEST_F(FoliageRebuildTest, ComputeRecreationRefreshesUniformsAndScratchStorage) 
             nullptr,
             kCamera); // Cached exact surface inputs must be reused.
         EXPECT_EQ(calls.scratch_allocations(), 3u);
-        EXPECT_EQ(calls.uniform_queries(), 12u);
+        EXPECT_EQ(calls.uniform_queries(), 13u);
         EXPECT_EQ(calls.surface_uploads, 2u);
         EXPECT_EQ(frame.snapshot().rebuild.surface_misses, 0u);
         EXPECT_EQ(frame.snapshot().rebuild.dirty_columns, 2u);
