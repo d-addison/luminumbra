@@ -1878,7 +1878,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertEqual(value(shard, "needs", 4), "[changes, fast-lane]")
         self.assertEqual(value(shard, "if", 4), "${{ !cancelled() && ((github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) != 'false') || needs.changes.outputs.needs_cpp != 'false') && (github.event_name != 'pull_request' || toJSON(github.event.pull_request.draft) != 'false' || needs.fast-lane.result == 'success') }}")
         self.assertEqual(value(shard, "runs-on", 4), "ubuntu-24.04")
-        self.assertEqual(value(shard, "timeout-minutes", 4), "75")
+        self.assertEqual(value(shard, "timeout-minutes", 4), "90")
         self.assertEqual(value(shard, "fail-fast", 6), "false")
         self.assertEqual(value(shard, "shard", 8), "[1, 2, 3]")
         self.assertIsNone(value(shard, "continue-on-error", 4))

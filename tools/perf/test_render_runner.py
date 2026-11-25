@@ -112,6 +112,11 @@ def _report_timeout(receipt, log):
         pass
 
 
+# Per-client-process limit. ASan builds pass a scaled limit through CMake,
+# because the shared boot water settle (#1210) runs about 12x slower there.
+PROCESS_TIMEOUT_SECONDS = 180
+
+
 def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_path,
                  expected_exit=0):
     # Retire only this case's exact outputs, including a repeated invocation in
@@ -120,7 +125,7 @@ def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_
         path.unlink(missing_ok=True)
     receipt = dict(schema='luminumbra.render_runner_process.v1', command=command,
                    cwd=str(cwd), binary_path=command[0], binary_sha256=None,
-                   timeout_seconds=180, elapsed_seconds=None, outcome='spawn_error',
+                   timeout_seconds=PROCESS_TIMEOUT_SECONDS, elapsed_seconds=None, outcome='spawn_error',
                    return_code=None, capture_status='missing', capture_path=None,
                    capture_sha256=None, evidence_errors=[])
     try:
@@ -134,7 +139,7 @@ def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_
                                            evidence_parent=receipt_path.parent, expected_exit=expected_exit,
                                            cwd=cwd, env=environment,
                                            stdout=output, stderr=subprocess.STDOUT,
-                                           timeout=180, check=False)
+                                           timeout=PROCESS_TIMEOUT_SECONDS, check=False)
                 receipt.update(outcome='returned', return_code=result.returncode)
             finally:
                 receipt['elapsed_seconds'] = time.perf_counter() - started
@@ -541,6 +546,11 @@ if __name__ == '__main__':
     parser.add_argument('--assets', type=Path, required=True,
                         help='Synthetic content root containing config/ and game-assets/')
     parser.add_argument('--artifacts', type=Path, required=True)
+    parser.add_argument('--process-timeout', type=int, default=PROCESS_TIMEOUT_SECONDS,
+                        help='seconds allowed for each client process')
     OPTIONS, remaining = parser.parse_known_args()
+    if OPTIONS.process_timeout <= 0:
+        parser.error('--process-timeout must be positive')
+    PROCESS_TIMEOUT_SECONDS = OPTIONS.process_timeout
     OPTIONS.artifacts.mkdir(parents=True, exist_ok=True)
     unittest.main(argv=[__file__, *remaining])
