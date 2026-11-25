@@ -213,10 +213,16 @@ rosters should not be confused with missing simulation wiring.
 
 ## Packaging
 
-- **No stable SDK.** The build does not yet install a versioned public SDK;
-  the supported extension paths are documented in the
-  [engine guide](engine-guide.md). Binary releases are dormant by policy —
-  releases are source-only.
+- **Header-contract SDK only.** The versioned `Luminumbra::ABI` and
+  `Luminumbra::ModuleContracts` targets install the C ABI and C++ module/scheduling
+  declarations. Module and scheduler runtime implementations are not linked by
+  these targets; a stable engine runtime SDK remains undelivered. Configure
+  `cmake -S tools/sdk -B build/sdk` and install with
+  `cmake --install build/sdk --prefix /your/install --component SDK` without
+  configuring game or content dependencies. Consumers use
+  `find_package(Luminumbra CONFIG REQUIRED COMPONENTS ABI ModuleContracts)`.
+  The [engine guide](engine-guide.md) documents the other extension paths.
+  Binary releases are dormant by policy — releases are source-only.
 
 Regional water continuation remains behind the test-only authority profile; the
 active-region switch alone does not select it. Its current planning, publication

@@ -84,7 +84,7 @@ jobs:
       CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
       CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
       CCACHE_COMPILERCHECK: content
-      CCACHE_MAXSIZE: 1200M
+      CCACHE_MAXSIZE: 4G
       # Only the main configure opts in via command-line launchers. Captures
       # and packaging must not inherit a launcher from the environment.
       CMAKE_C_COMPILER_LAUNCHER: ""

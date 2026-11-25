@@ -743,7 +743,7 @@ jobs:
           cmake -C scratch/fast-gcc-init.cmake -S . -B build/fast-gcc -G Ninja "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_TESTING=ON \
             -DLUMINUMBRA_SHADER_SCENES="${{ steps.shader-scenes.outputs.needs_shader_scenes }}" \
-            -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON \
+            -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON -DLUMINUMBRA_BUILD_TOOLS=ON \
             -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON \
             -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
           cmake --build build/fast-gcc --target glad --parallel 2
@@ -751,7 +751,7 @@ jobs:
           cmake -C scratch/fast-clang-init.cmake -S . -B build/fast-clang -G Ninja "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_TESTING=ON \
             -DLUMINUMBRA_SHADER_SCENES="${{ steps.shader-scenes.outputs.needs_shader_scenes }}" \
-            -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON \
+            -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON -DLUMINUMBRA_BUILD_TOOLS=ON \
             -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON \
             -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18
           cmake --build build/fast-clang --target glad --parallel 2

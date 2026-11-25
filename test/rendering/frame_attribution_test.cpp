@@ -1,5 +1,6 @@
 #include "luminumbra_client/app/FrameAttribution.h"
 #include "luminumbra_client/rendering/PixelIo.h"
+#include "luminumbra_client/rendering/RenderPassMetadata.h"
 #include "luminumbra_common/core/WaterAttribution.h"
 
 #include <gtest/gtest.h>
@@ -11,6 +12,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <ios>
 #include <limits>
 #include <optional>
@@ -1031,5 +1033,215 @@ TEST_F(FrameRecorderTest, RecordsEveryShortFrameAndDrainsBufferOnClose) {
     EXPECT_EQ(fields(last).at(51 + kPhaseCount), "501");
     for (std::size_t index = 51; index < 51 + kPhaseCount; ++index)
         EXPECT_EQ(fields(last).at(index), "0.000000");
+}
+} // namespace
+
+namespace {
+using Luminumbra::Rendering::RenderPassMetadata;
+using Luminumbra::Rendering::RenderPassMetadataCache;
+
+std::vector<RenderPassMetadata>
+BuildReferencePassMetadata(std::uint32_t width,
+                           std::uint32_t height,
+                           std::uint32_t shadow_resolution,
+                           bool authored,
+                           const std::array<std::size_t, 9>& draws) {
+    std::vector<RenderPassMetadata> result;
+    auto add_pass = [&result](std::string name,
+                              std::vector<std::string> inputs,
+                              std::vector<std::string> outputs,
+                              std::uint32_t pass_width,
+                              std::uint32_t pass_height,
+                              std::string clear,
+                              std::string load_store,
+                              size_t draw_count,
+                              size_t dispatch_count = 0u) {
+        RenderPassMetadata metadata;
+        metadata.name = std::move(name);
+        metadata.inputs = std::move(inputs);
+        metadata.outputs = std::move(outputs);
+        metadata.width = pass_width;
+        metadata.height = pass_height;
+        metadata.clear = std::move(clear);
+        metadata.load_store = std::move(load_store);
+        metadata.draw_count = draw_count;
+        metadata.dispatch_count = dispatch_count;
+        result.push_back(std::move(metadata));
+    };
+
+    add_pass("shadow",
+             {"terrain_depth"},
+             {"shadow.depth_texture_array"},
+             shadow_resolution,
+             shadow_resolution,
+             "depth",
+             "store depth cascades",
+             draws[0]);
+    add_pass("gbuffer",
+             {"terrain_meshes",
+              "farlod_region_meshes",
+              "static_meshes",
+              "skinned_meshes",
+              "material_lut",
+              "terrain_texture_array",
+              "terrain_normal_array"},
+             {"gbuffer.position",
+              "gbuffer.normal_material",
+              "gbuffer.albedo_roughness",
+              "gbuffer.metallic_ao",
+              "gbuffer.depth"},
+             width,
+             height,
+             "color+depth",
+             "store deferred attachments",
+             draws[1]);
+    if (authored) {
+        result.back().inputs.push_back("authored_static_meshes");
+        result.back().outputs.push_back("gbuffer.authored_surface");
+    }
+    add_pass("ssao",
+             {"gbuffer.position", "gbuffer.normal_material", "ssao.noise"},
+             {"ssao.raw"},
+             width,
+             height,
+             "color",
+             "store ambient occlusion",
+             draws[2]);
+    add_pass("ssao_blur",
+             {"ssao.raw"},
+             {"ssao.blur"},
+             width,
+             height,
+             "color",
+             "store blurred ambient occlusion",
+             draws[3]);
+    add_pass("lighting",
+             {"gbuffer.*",
+              "shadow.depth_texture_array",
+              "ssao.blur",
+              "terrain_texture_array",
+              "material_lut",
+              "lighting.environment_brdf",
+              "water.fallback.black"},
+             {"lighting.color", "lighting.depth"},
+             width,
+             height,
+             "color+depth",
+             "store lit scene",
+             draws[4]);
+    add_pass("skybox",
+             {"skybox_vertices"},
+             {"lighting.color"},
+             width,
+             height,
+             "load lighting",
+             "store sky contribution",
+             draws[5]);
+    add_pass("water",
+             {"lighting.opaque_color_copy", "gbuffer.depth", "water_meshes", "water.fallback.*"},
+             {"lighting.color"},
+             width,
+             height,
+             "load sky+lighting",
+             "blend water over sky+lighting",
+             draws[6]);
+    add_pass("particles",
+             {"particle_instances", "gbuffer.depth"},
+             {"lighting.color"},
+             width,
+             height,
+             "load lighting",
+             "blend forward-lit particles",
+             draws[7]);
+    add_pass("final_blit",
+             {"lighting.color"},
+             {"swapchain.color"},
+             width,
+             height,
+             "default color+depth",
+             "present-ready color",
+             draws[8]);
+    return result;
+}
+
+std::string PassMetadataBytes(const std::vector<RenderPassMetadata>& passes) {
+    std::ostringstream bytes;
+    for (const auto& pass : passes) {
+        bytes << std::quoted(pass.name) << ':' << pass.inputs.size() << ':';
+        for (const auto& input : pass.inputs) {
+            bytes << std::quoted(input);
+        }
+        bytes << ':' << pass.outputs.size() << ':';
+        for (const auto& output : pass.outputs) {
+            bytes << std::quoted(output);
+        }
+        bytes << ':' << pass.width << ':' << pass.height << ':' << std::quoted(pass.clear) << ':'
+              << std::quoted(pass.load_store) << ':' << pass.draw_count << ':'
+              << pass.dispatch_count << '\n';
+    }
+    return bytes.str();
+}
+
+TEST(RenderPassMetadata, WarmedFramesAndAttachmentChangesBuildNoSchemas) {
+    RenderPassMetadataCache cache;
+    const std::array<std::size_t, 9> draws{1, 2, 3, 4, 5, 6, 7, 8, 9};
+    cache.Refresh(1920, 1080, 2048, false, draws);
+    ASSERT_EQ(cache.schema_build_count(), 1u);
+    ASSERT_EQ(cache.passes().size(), 9u);
+    const auto* pass_storage = cache.passes().data();
+    const auto* ordinary_inputs = cache.passes()[1].inputs.data();
+    cache.Refresh(1920, 1080, 2048, true, draws);
+    const auto* authored_inputs = cache.passes()[1].inputs.data();
+    const auto builds_before = cache.schema_build_count();
+    for (std::size_t frame = 0; frame < 128; ++frame) {
+        const bool authored = frame % 2 != 0;
+        cache.Refresh(1280, 720, 1024, authored, draws);
+        EXPECT_EQ(cache.passes().data(), pass_storage);
+        EXPECT_EQ(cache.passes()[1].inputs.data(), authored ? authored_inputs : ordinary_inputs);
+    }
+    EXPECT_EQ(cache.schema_build_count() - builds_before, 0u);
+}
+
+TEST(RenderPassMetadata, RefreshMatchesEagerMetadataBytes) {
+    RenderPassMetadataCache cache;
+    constexpr auto maximum_dimension = std::numeric_limits<std::uint32_t>::max();
+    constexpr auto maximum_draws = std::numeric_limits<std::size_t>::max();
+    const std::array<std::array<std::uint32_t, 3>, 4> dimensions{
+        {{0, 0, 0}, {1920, 1080, 2048}, {1, maximum_dimension, 1}, {maximum_dimension, 1, 4096}}};
+    const std::array<std::array<std::size_t, 9>, 3> counts{
+        {{},
+         {1, 2, 3, 4, 5, 6, 7, 8, 9},
+         {maximum_draws, 0, maximum_draws, 1, maximum_draws, 2, maximum_draws, 3, maximum_draws}}};
+    for (const auto& size : dimensions) {
+        for (const auto& draws : counts) {
+            for (const bool authored : {true, false, false, true}) {
+                cache.Refresh(size[0], size[1], size[2], authored, draws);
+                EXPECT_EQ(PassMetadataBytes(cache.passes()),
+                          PassMetadataBytes(BuildReferencePassMetadata(
+                              size[0], size[1], size[2], authored, draws)));
+            }
+        }
+    }
+    EXPECT_EQ(cache.schema_build_count(), 1u);
+}
+
+TEST(RenderPassMetadata, ClearRemovesMetadataAndRestartBuildsOnce) {
+    RenderPassMetadataCache cache;
+    EXPECT_TRUE(cache.passes().empty());
+    EXPECT_EQ(cache.schema_build_count(), 0u);
+    for (const bool authored : {true, false}) {
+        cache.Clear();
+        cache.Clear();
+        EXPECT_TRUE(cache.passes().empty());
+        const auto builds_before = cache.schema_build_count();
+        cache.Refresh(640, 480, 512, authored, {});
+        EXPECT_EQ(cache.schema_build_count() - builds_before, 1u);
+        EXPECT_EQ(PassMetadataBytes(cache.passes()),
+                  PassMetadataBytes(BuildReferencePassMetadata(640, 480, 512, authored, {})));
+        cache.Refresh(640, 480, 512, authored, {});
+        EXPECT_EQ(cache.schema_build_count() - builds_before, 1u);
+    }
+    cache.Clear();
+    EXPECT_TRUE(cache.passes().empty());
 }
 } // namespace

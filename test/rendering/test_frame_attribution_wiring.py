@@ -619,6 +619,35 @@ class GpuStageAttributionWiring(unittest.TestCase):
             self.assertNotIn('glClientWaitSync', source)
 
 
+class RenderPassMetadataWiring(unittest.TestCase):
+    def test_frame_refresh_uses_retained_schema_and_exact_draw_totals(self):
+        source = read(CLIENT / "rendering/RenderPipeline.cpp")
+        refresh = compact(block(source, "void RenderPipeline::refresh_render_pass_metadata()"))
+        self.assertEqual(refresh, compact("""
+            m_render_pass_metadata.Refresh(
+                m_screen_width, m_screen_height, m_shadow_pass->shadow_map().resolution,
+                m_gbuffer_pass->gbuffer().authored_texture != 0,
+                {m_last_render_pass_stats.shadow_draws,
+                 m_last_render_pass_stats.terrain_draws + m_last_render_pass_stats.far_region_draws +
+                     m_last_render_pass_stats.skinned_draws + m_last_render_pass_stats.authored_draws,
+                 m_last_render_pass_stats.ssao_draws, m_last_render_pass_stats.ssao_blur_draws,
+                 m_last_render_pass_stats.lighting_draws, m_last_render_pass_stats.skybox_draws,
+                 m_last_render_pass_stats.water_draws, m_last_render_pass_stats.particle_draws,
+                 m_last_render_pass_stats.final_blits});
+        """))
+        header = read(CLIENT / "rendering/RenderPipeline.h")
+        self.assertIn("return m_render_pass_metadata.passes();",
+                      block(header, "get_last_render_pass_metadata()"))
+        self.assertIn("snapshot.passes = m_render_pass_metadata.passes();", source)
+        self.assertEqual(source.count("m_render_pass_metadata.Clear();"), 1)
+        cache = read(CLIENT / "rendering/RenderPassMetadata.h")
+        refresh_cache = block(cache, "void Refresh(")
+        self.assertEqual(refresh_cache.count("BuildSchema();"), 1)
+        self.assertIn("BuildSchema();", block(refresh_cache, "if (passes_.empty())"))
+        self.assertNotIn("clear()", refresh_cache)
+        self.assertIn("++schema_build_count_;", block(cache, "void BuildSchema()"))
+
+
 class FrameAttributionWiring(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -988,7 +1017,7 @@ class FrameAttributionWiring(unittest.TestCase):
             ("m_scatter_uniforms", ("chunk_count", "archetype_count", "total_weight",
                                      "max_candidates", "max_instances", "density_scale",
                                      "camera_xz", "fade_end_m", "wind_xz", "emit")),
-            ("m_prefix_uniforms", ("group_count", "max_instances")),
+            ("m_prefix_uniforms", ("group_count", "max_instances", "pass")),
         ):
             self.assertIn(f"{cache} = {{", init)
             self.assertIn(f"{cache} = {{}};", destroy)
@@ -2097,8 +2126,7 @@ class FrameAttributionWiring(unittest.TestCase):
                            "first_vertex = 0u;", "base_instance = 0u;"):
             self.assertIn(assignment, prefix)
         dispatch = compact(block(self.foliage, "void FoliagePass::dispatch_scatter()"))
-        self.assertIn("Luminumbra::Rendering::AttributedGl::Submit(glDispatchCompute, 1u, 1u, 1u); "
-                      "glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT); "
+        self.assertIn("glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, m_chunk_ssbo); "
                       "m_scatter_gpu_timers[1].end(); m_scatter_gpu_timers[2].begin(); "
                       "Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_compute_prog); "
                       "glUniform1i(m_scatter_uniforms.emit, GL_TRUE);", dispatch)
@@ -2733,6 +2761,30 @@ class CloudRenderingWiring(unittest.TestCase):
                           "ctx.internal_w()": dest_w, "ctx.internal_h()": dest_h}
                 rectangle = [cpp_expression(arg, **values) for arg in arguments[:8]]
                 self.assertEqual(rectangle, [0, 0, width, height, 0, 0, dest_w, dest_h])
+
+
+class TaauReplayLifetimeWiring(unittest.TestCase):
+    def test_replay_storage_is_released_outside_the_gl_guard_on_every_exit(self):
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        pair = block(pipeline, "bool RenderPipeline::render_far_world_off_pair(")
+        release = block(pair, "const ReplayRollback release_replay(")
+        self.assertIn("[this]() noexcept", pair)
+        self.assertIn("m_taau_pass->release_replay(m_render_registry);", release)
+        self.assertLess(pair.index("const ReplayRollback release_replay("),
+                        pair.index("RunFarWorldReplay("))
+        self.assertLess(pair.index("RunFarWorldReplay("),
+                        pair.index("m_taau_pass->prepare_replay(m_render_registry)"))
+        taau = read(CLIENT / "rendering/passes/TaauPass.cpp")
+        release = block(taau, "void TaauPass::release_replay(")
+        self.assertIn("if (!m_replay_output)", release)
+        self.assertIn("glIsFramebuffer(m_replay_fbo)", release)
+        detach = "glNamedFramebufferTexture(m_replay_fbo, GL_COLOR_ATTACHMENT0, 0, 0)"
+        destroy = 'registry.destroy_owned("taau_replay_output")'
+        self.assertLess(release.index(detach), release.index(destroy))
+        self.assertLess(release.index(destroy), release.index("m_replay_output = 0"))
+        self.assertNotIn("create_texture", block(taau, "void TaauPass::execute("))
+        self.assertNotIn("taau_replay_output", block(taau, "void TaauPass::init("))
+
 
 class StormLightningWiring(unittest.TestCase):
     def test_every_scenario_projects_world_geometry_without_screen_remapping(self):

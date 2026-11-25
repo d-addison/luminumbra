@@ -49,10 +49,14 @@ with CMake scripts on all platforms. On Windows with CMake 3.21+, `NetworkingRun
 (labels `ci;tools;net`, timeout 90 seconds) configures and builds a small DLL
 fixture through the real staging module and PE scanner. It tests the current
 generator and Ninja Multi-Config, building both Debug and Release for the latter.
+The inner configure installs the outer compiler metadata before enabling C++
+and reuses its binary-inspection tools, avoiding repeated compiler and tool discovery.
 The fixture checks generated input files, configuration-specific stamps, and
 staged DLL hashes, then deletes a scanned transitive DLL and rebuilds only the
 application to require repair without relinking. Both Windows CI lanes run these
 labels in their full test suite and provide the compiler and Ninja.
+UCRT64 speed qualification remains pending: the timeout stays at 90 seconds until
+configure, build and the complete test fit a 30-second deadline over 20 consecutive runs.
 
 The earlier post-build-only wiring cannot repair a deleted DLL when the
 application is already up to date. Its combined configuration inputs also admit
@@ -77,8 +81,9 @@ ctest --preset release -L manual \
 ## Continuous integration
 
 The Linux/GCC and ASan lanes use bounded ccache at 400M and 1200M respectively.
-Diligent RHI, preview-frame and paired performance use 250M each; UCRT64 and MSVC
-use 1200M (1.2 GB) each on the daily runner's disk. Qualification captures bypass
+Diligent RHI, preview-frame and paired performance use 250M each; UCRT64 uses
+1200M (1.2 GB) and MSVC 4G on the daily runner's disk, outside the repository
+cache limit. Qualification captures bypass
 the cache. Hosted lanes' immutable save keys include
 the commit SHA; restores prefer the matching CMake configuration prefix where
 available, then the lane prefix. Caches are trimmed with `ccache --cleanup`
@@ -272,6 +277,59 @@ selected coverage succeeds, and then print `heavy subset deferred:` with a reaso
 ASan also supports light and keeps both heavy cases together on the full route.
 Full native validation and the existing platform limits remain required after
 merge; offline policy tests do not establish hosted-runner qualification.
+
+### Linux worker admission tooling
+
+`tools/ci/self_hosted_admission.py` supplies a one-shot admission component for a
+trusted Linux listener adapter. No workflow calls it and no Linux job is routed
+to a self-hosted runner. The existing Windows daily runner is unchanged.
+`LUM_SELF_HOSTED` remains an opt-in and kill switch: the host-owned launch plan
+defaults to disabled and accepts only the case-insensitive string `true`.
+Changing a workflow, its environment or its runner labels cannot supply that plan.
+
+The threat model treats workflow code, action code, shell startup files, event
+files and the job account as hostile, including leftovers from an earlier job.
+The operating system, root supervisor, separately privileged listener, installed
+worker adapter and their configuration are trusted. The supervisor must start
+with an absolute protected Python interpreter, `-I -B`, a clean environment and
+root-protected imports outside the checkout. This Python module cannot protect
+its own interpreter startup. A stock job-start hook cannot enforce admission:
+`always()`, `failure()` and shell startup can execute despite hook denial.
+
+The listener must authenticate the service assignment, derive its normalized
+metadata, and supply the corresponding private `LaunchPlan` before job code can
+execute. The supervisor verifies Linux Unix-stream peer PID and UID against that
+plan, then reads a four-byte network-order length, at most 65536 UTF-8 JSON bytes,
+and EOF from the listener's write-half closure. One channel carries one assignment.
+Duplicate keys, unknown or missing fields, invalid identities, external head/base
+repositories and cancellation refuse execution. Job UUID, run ID and attempt must
+match the private plan. Only same-repository push and pull-request events are
+accepted; other events fail closed. Pull requests bind head and execution revisions
+and their merge ref; pushes bind matching head/execution revisions and their ref.
+Reads and the final pre-launch decision share a five-second monotonic deadline.
+
+Before creating a worker, the supervisor opens a fixed native ELF executable
+through retained directory descriptors, refuses symlinks and job-writable or
+non-root-owned components, and executes that same descriptor. The exact admitted
+JSON bytes become sealed anonymous stdin. The child receives only fixed PATH and
+LANG settings, no supplementary groups, a separate non-root account, a private
+session and a restrictive umask. No shell, checkout import or job environment is
+consulted. Any exception is a terminal refusal; the listener must never fall back
+to an alternate worker. The returned process belongs to the trusted listener.
+The worker adapter must consume this stdin contract; a stock Runner.Worker is
+not compatible with it. The registered `SelfHostedAdmissionContract` covers policy,
+refusals, process creation, descriptor binding and shell-startup sentinels; it
+models privileged ownership and account transitions and is not host qualification.
+
+Activation still requires a pinned listener/worker adapter with no alternate
+launch path, authenticated assignment normalization, supervisor credential and
+filesystem isolation, and per-job descendant containment established before
+launch. The listener must enforce cancellation, startup and lifetime deadlines,
+stop and reap every job descendant, and prevent replay before taking another job.
+Host qualification must exercise direct label requests, status and cancellation
+conditions, action preparation, containers, pre/post actions, startup injection,
+prior-job tampering and independent runner instances. Keep Linux instances offline
+and `LUM_SELF_HOSTED` unset until that integrated qualification succeeds.
 
 For ready pull requests needing native validation, ASan first runs a Python-only
 fast lane with the `ChangedTranslationUnitsContract` and

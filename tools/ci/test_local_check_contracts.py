@@ -29,7 +29,7 @@ def workflow_sources():
 
 
 class RegistrationTests(unittest.TestCase):
-    def test_networking_fixture_reuses_outer_compiler_probes_before_project(self):
+    def test_networking_fixture_reuses_outer_compiler_without_discovery(self):
         production = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
         start = production.index("    if(WIN32 AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.21)")
         end = production.index("    endif()", start) + len("    endif()")
@@ -39,22 +39,32 @@ class RegistrationTests(unittest.TestCase):
             root = Path(temporary)
             info = root / "outer compiler" / "CMakeCXXCompiler.cmake"
             info.parent.mkdir()
-            info.write_text(
-                'set(CMAKE_CXX_COMPILER "outer-compiler")\n'
-                'set(CMAKE_CXX_COMPILER_ID "outer-id")\n'
+            metadata = (
+                'set(CMAKE_CXX_COMPILER "${CMAKE_COMMAND}")\n'
+                'set(CMAKE_CXX_COMPILER_ID GNU)\n'
+                'set(CMAKE_CXX_COMPILER_VERSION 15.1)\n'
+                'set(CMAKE_CXX_STANDARD_COMPUTED_DEFAULT 17)\n'
+                'set(CMAKE_CXX_EXTENSIONS_COMPUTED_DEFAULT ON)\n'
                 'set(CMAKE_CXX_COMPILER_ID_RUN TRUE)\n'
                 'set(CMAKE_CXX_COMPILER_LOADED TRUE)\n'
                 'set(CMAKE_CXX_COMPILER_WORKS TRUE)\n'
                 'set(CMAKE_CXX_ABI_COMPILED TRUE)\n'
-                'set(CMAKE_CXX_COMPILE_FEATURES "outer-features")\n'
-                'set(CMAKE_CXX_IMPLICIT_LINK_LIBRARIES "outer-libraries")\n', encoding="utf-8")
+                'set(CMAKE_CXX_SIZEOF_DATA_PTR 8)\n'
+                'set(CMAKE_CXX_SOURCE_FILE_EXTENSIONS cpp)\n'
+                'set(CMAKE_CXX_LINKER_PREFERENCE 30)\n'
+                'set(CMAKE_CXX_COMPILE_FEATURES "cxx_std_17")\n'
+                'set(CMAKE_CXX_IMPLICIT_LINK_LIBRARIES "outer-libraries")\n')
+            info.write_text(metadata, encoding="utf-8")
             block = production[start:end].replace("${CMAKE_CURRENT_SOURCE_DIR}",
                                                    (ROOT / "tools").as_posix())
             (root / "CMakeLists.txt").write_text(
                 'cmake_minimum_required(VERSION 3.20)\n'
                 'project(NetworkRegistration LANGUAGES NONE)\nenable_testing()\n'
                 'set(WIN32 TRUE)\nset(CMAKE_VERSION 3.21)\n'
-                'set(CMAKE_CXX_COMPILER "outer-compiler")\n'
+                'set(CMAKE_CXX_COMPILER "${CMAKE_COMMAND}")\n'
+                'set(CMAKE_OBJDUMP "outer tools/objdump")\n'
+                'set(CMAKE_DUMPBIN "outer tools/dumpbin")\n'
+                'set(CMAKE_NM "outer tools/nm")\n'
                 f'set(CMAKE_PLATFORM_INFO_DIR [==[{info.parent.as_posix()}]==])\n'
                 + block, encoding="utf-8")
             build = root / "build"
@@ -64,15 +74,18 @@ class RegistrationTests(unittest.TestCase):
                                        check=True, capture_output=True, text=True)
             test, = json.loads(discovery.stdout)["tests"]
             self.assertEqual(test["name"], "NetworkingRuntimeBuildIntegration")
+            properties = {item["name"]: item["value"] for item in test["properties"]}
+            self.assertEqual(properties["TIMEOUT"], 90)
+            self.assertEqual(properties["LABELS"], ["ci", "net", "tools"])
             command = test["command"]
             info_argument = f"-DNETWORK_TEST_COMPILER_INFO={info.as_posix()}"
             self.assertIn(info_argument, command)
             self.assertEqual(command[-2:], ["-P", driver.as_posix()])
+            for tool in ("OBJDUMP", "DUMPBIN", "NM"):
+                self.assertIn(f"-DNETWORK_TEST_{tool}=outer tools/{tool.lower()}", command)
 
-            # Stop at the first configure launch, before any native work. This
-            # intercepts the real driver's expanded argv inside its subprocess.
-            # Only pre-project script commands run, so the boundary checks also
-            # work on CMake 3.20 hosts without generating the Windows fixture.
+            # Intercept the real driver's expanded configure argv in its child
+            # process. No compiler, build tool or fixture binary is executed.
             boundary = (
                 'cmake_minimum_required(VERSION 3.20)\n'
                 'macro(cmake_minimum_required)\n'
@@ -88,50 +101,99 @@ class RegistrationTests(unittest.TestCase):
                 f'  if(NOT [==[{info_argument}]==] IN_LIST _arguments)\n'
                 '    message(FATAL_ERROR "Compiler information was not forwarded")\n'
                 '  endif()\n'
-                '  message(FATAL_ERROR "Configure received outer compiler information")\n'
+                '  foreach(_tool IN ITEMS OBJDUMP DUMPBIN NM)\n'
+                '    string(TOLOWER "${_tool}" _name)\n'
+                '    if(NOT "-DCMAKE_${_tool}=outer tools/${_name}" IN_LIST _arguments)\n'
+                '      message(FATAL_ERROR "Binary inspector was not forwarded: ${_tool}")\n'
+                '    endif()\n'
+                '  endforeach()\n'
+                '  message(FATAL_ERROR "Configure received outer compiler information and tools")\n'
                 'endmacro()\n'
                 f'include([==[{driver.as_posix()}]==])\n', encoding="utf-8")
             result = subprocess.run(command[:-2] + ["-P", str(wrapper)],
                                     capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Configure received outer compiler information", result.stderr)
+            self.assertIn("Configure received outer compiler information and tools", result.stderr)
             result = subprocess.run([arg for arg in command[:-2] if arg != info_argument]
                                     + ["-P", str(wrapper)], capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Pass NETWORK_TEST_COMPILER_INFO", result.stderr)
 
-            # Inspect restored metadata at project(), which normally enables
-            # CXX. Replacing only that boundary keeps this contract compiler-free.
-            wrapper = root / "project boundary.cmake"
-            wrapper.write_text(
-                boundary +
-                'macro(project)\n'
-                '  if(NOT CMAKE_CXX_COMPILER STREQUAL "outer-compiler"\n'
-                '     OR NOT CMAKE_CXX_COMPILER_ID STREQUAL "outer-id"\n'
-                '     OR NOT CMAKE_CXX_COMPILER_ID_RUN OR CMAKE_CXX_COMPILER_LOADED\n'
-                '     OR NOT CMAKE_CXX_COMPILER_WORKS OR NOT CMAKE_CXX_ABI_COMPILED\n'
-                '     OR NOT CMAKE_CXX_COMPILE_FEATURES STREQUAL "outer-features"\n'
-                '     OR NOT CMAKE_CXX_IMPLICIT_LINK_LIBRARIES STREQUAL "outer-libraries"\n'
-                '     OR NOT CMAKE_CXX_COMPILER_FORCED)\n'
-                '    message(FATAL_ERROR "Outer compiler information was not restored")\n'
-                '  endif()\n'
-                '  message(FATAL_ERROR "Project received outer compiler information")\n'
-                'endmacro()\n'
-                f'include([==[{fixture.as_posix()}]==])\n', encoding="utf-8")
-            result = subprocess.run(["cmake", info_argument, "-P", str(wrapper)],
-                                    capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Project received outer compiler information", result.stderr)
-            for contents in (None, 'set(CMAKE_CXX_COMPILER "outer-compiler")\n'):
-                with self.subTest(contents=contents):
-                    if contents is None:
+            # Run the unchanged production preamble through real project and
+            # enable_language commands. Synthetic metadata identifies CMake as
+            # the compiler, so any attempt to probe/compile is a test failure.
+            prefix = fixture.read_text(encoding="utf-8").split(
+                'set(CMAKE_RUNTIME_OUTPUT_DIRECTORY', 1)[0]
+            self.assertTrue(prefix.startswith('cmake_minimum_required(VERSION 3.21)'))
+            # The reuse commands also work on compiler-free CMake 3.20 hosts;
+            # Windows registration still requires the fixture's actual 3.21.
+            prefix = prefix.replace('cmake_minimum_required(VERSION 3.21)',
+                                    'cmake_minimum_required(VERSION 3.20)', 1)
+            source = root / "language fixture"
+            source.mkdir()
+            (source / "empty.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+            (source / "CMakeLists.txt").write_text(
+                prefix +
+                'if(NOT CMAKE_CXX_COMPILER_WORKS OR NOT CMAKE_CXX_ABI_COMPILED\n'
+                '   OR NOT CMAKE_CXX_COMPILE_FEATURES STREQUAL "cxx_std_17"\n'
+                '   OR NOT CMAKE_CXX_IMPLICIT_LINK_LIBRARIES STREQUAL "outer-libraries"\n'
+                '   OR NOT CMAKE_CXX_COMPILE_OBJECT OR NOT CMAKE_CXX_LINK_EXECUTABLE)\n'
+                '  message(FATAL_ERROR "Compiler metadata or language rules were not restored")\n'
+                'endif()\n'
+                'add_executable(language_fixture empty.cpp)\n', encoding="utf-8")
+            # CMake still runs the synthetic "compiler" (CMake itself) for its
+            # linker probe. Give it an empty working directory so the probe
+            # cannot configure whatever project the test was launched from.
+            probe_cwd = root / "compiler probe cwd"
+            probe_cwd.mkdir()
+            for generator in ("Ninja", "Ninja Multi-Config"):
+                with self.subTest(generator=generator):
+                    build = root / generator
+                    trace = root / (generator + ".jsonl")
+                    result = subprocess.run(
+                        ["cmake", "-S", str(source), "-B", str(build), "-G", generator,
+                         info_argument, "-DCMAKE_SYSTEM_NAME=Generic",
+                         "--trace-format=json-v1", f"--trace-redirect={trace}"],
+                        cwd=probe_cwd, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    events = [json.loads(line) for line in trace.read_text(
+                        encoding="utf-8").splitlines()[1:]]
+                    modules = {Path(event["file"]).name for event in events}
+                    self.assertNotIn("CMakeDetermineCXXCompiler.cmake", modules)
+                    self.assertNotIn("CMakeFindBinUtils.cmake", modules)
+                    self.assertNotIn("CMakeTestCXXCompiler.cmake", modules)
+                    self.assertIn("CMakeCXXInformation.cmake", modules)
+                    self.assertTrue(any(event["cmd"] == "enable_language" for event in events))
+                    installed, = (build / "CMakeFiles").glob("*/CMakeCXXCompiler.cmake")
+                    self.assertEqual(installed.read_bytes(), info.read_bytes())
+                    self.assertTrue((build / "build.ninja").is_file())
+
+            # A missing or partial outer result must refuse before discovery
+            # can turn this compiler-free check into native work.
+            for missing in (None, "empty", "compiler-only", "CMAKE_CXX_COMPILER", "CMAKE_CXX_COMPILER_ID",
+                            "CMAKE_CXX_COMPILER_LOADED", "CMAKE_CXX_COMPILER_ID_RUN",
+                            "CMAKE_CXX_COMPILER_WORKS", "CMAKE_CXX_ABI_COMPILED"):
+                with self.subTest(missing=missing):
+                    if missing is None:
                         info.unlink()
+                    elif missing == "empty":
+                        info.write_text("", encoding="utf-8")
+                    elif missing == "compiler-only":
+                        info.write_text(metadata.splitlines()[0] + "\n", encoding="utf-8")
                     else:
-                        info.write_text(contents, encoding="utf-8")
-                    result = subprocess.run(["cmake", info_argument, "-P", str(wrapper)],
-                                            capture_output=True, text=True)
+                        info.write_text(re.sub(r"(?m)^set\(" + missing + r" .*\)$",
+                                               f"set({missing} FALSE)", metadata), encoding="utf-8")
+                    trace = root / "refusal.jsonl"
+                    result = subprocess.run(
+                        ["cmake", "-S", str(source), "-B", str(root / str(missing)),
+                         "-G", "Ninja", info_argument, "-DCMAKE_SYSTEM_NAME=Generic",
+                         "--trace-format=json-v1",
+                         f"--trace-redirect={trace}"], cwd=probe_cwd, capture_output=True, text=True)
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertNotIn("Project received outer compiler information", result.stderr)
+                    self.assertIn("Outer CXX compiler information is incomplete", result.stderr)
+                    events = [json.loads(line) for line in trace.read_text(
+                        encoding="utf-8").splitlines()[1:]]
+                    self.assertFalse(any(event["cmd"] == "enable_language" for event in events))
 
     def test_borrowed_source_contracts_share_an_effective_resource_lock(self):
         production = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")

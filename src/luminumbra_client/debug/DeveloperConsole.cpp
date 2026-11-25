@@ -402,23 +402,26 @@ void DeveloperConsole::RegisterCommands() {
                 m_batch_preferences = false;
                 return CommandResult{SavePreferences(), {}};
             });
-    command("log clear", "Clear console records", {}, [this](const CommandArguments&) {
-        m_log->Clear();
-        return CommandResult{};
-    });
-    command("log level",
-            "Filter console display only",
-            {{"level",
-              ArgumentType::Enum,
-              false,
-              {"trace", "debug", "info", "warning", "error", "critical"}}},
-            [this](const CommandArguments& args) {
-                const std::vector<std::string> levels{
-                    "trace", "debug", "info", "warning", "error", "critical"};
-                m_minimum = static_cast<LogSeverity>(
-                    std::find(levels.begin(), levels.end(), Text(args, 0)) - levels.begin());
-                return CommandResult{};
-            });
+    m_commands.RegisterLocal(
+        {"log clear", "Clear console records", {}, {}, [this](const CommandArguments&) {
+             m_log->Clear();
+             return CommandResult{};
+         }});
+    m_commands.RegisterLocal({"log level",
+                              "Filter console display only",
+                              {{"level",
+                                ArgumentType::Enum,
+                                false,
+                                {"trace", "debug", "info", "warning", "error", "critical"}}},
+                              {},
+                              [this](const CommandArguments& args) {
+                                  const std::vector<std::string> levels{
+                                      "trace", "debug", "info", "warning", "error", "critical"};
+                                  m_minimum = static_cast<LogSeverity>(
+                                      std::find(levels.begin(), levels.end(), Text(args, 0)) -
+                                      levels.begin());
+                                  return CommandResult{};
+                              }});
     m_bindings.Register({"console.toggle", KeyChord{290, 0}});
     m_commands.BindAction("console.toggle", "console toggle");
     m_commands.BindAction("shader.reload", "shader reload");

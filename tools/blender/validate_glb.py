@@ -564,6 +564,12 @@ class Validator:
                     self._check_accessor_shape(
                         ref, "MAT4", {5126}, "inverseBindMatrices", mesh=-1, primitive=-1
                     )
+                    if ref[1].get("normalized") is True:
+                        self.add(
+                            "skin.inverse_bind",
+                            "inverse-bind float matrices must not be normalized",
+                            accessor=ref[0],
+                        )
                     if self._count(ref) != joint_count:
                         self.add(
                             "skin.inverse_bind",

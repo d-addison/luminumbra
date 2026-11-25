@@ -1773,7 +1773,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn('error.find("Saved-input admission refused:") == 0', reader)
         self.assertNotIn('error.find("oversized")', reader)
         metadata_admission = self.function(source, "admit_metadata_bytes", "WorldSaveService::")
-        self.assertLess(metadata_admission.index("clock.write_metadata(metadata)"),
+        self.assertLess(metadata_admission.index("Game::WorldClockAuthorityAdapter::WriteMetadata(clock, metadata)"),
                         metadata_admission.index("BoundedJsonDump("))
         pair = self.function(source, "save_metadata_and_active_regions", "WorldSaveService::")
         self.assertLess(pair.index("admit_metadata_bytes(bytes"), pair.index("save_active_regions("))

@@ -879,12 +879,14 @@ nlohmann::json ChunkToJson(const Chunk& chunk,
                            bool sim_only = false,
                            bool omit_arrays = false,
                            bool preserve_authority = false,
-                           bool omit_pending = false) {
+                           bool omit_pending = false,
+                           AuthoritySubHashMask requested = AuthoritySubHashMask::All,
+                           AuthorityHashWork* work = nullptr) {
     // The v0.3.0 cave router produces more render geometry. Hashing must not
     // materialize that geometry only to discard it in the residency projection.
     // Keep every key for the coverage audit; skipped arrays are erased below.
     // Snapshot callers retain the complete canonical representation.
-    const auto array_field = [sim_only, omit_arrays, omit_pending](
+    const auto array_field = [sim_only, omit_arrays, omit_pending, requested, work](
                                  const char* field, const auto& build) -> nlohmann::json {
         if (omit_arrays || (omit_pending && std::string_view(field).starts_with("pending_")))
             return nlohmann::json::array();
@@ -896,21 +898,34 @@ nlohmann::json ChunkToJson(const Chunk& chunk,
                 }
             }
         }
-        return build();
+        const std::string_view name(field);
+        const bool mesh = name.ends_with("_vertices") || name.ends_with("_indices");
+        const auto slot = mesh ? AuthoritySubHashMask::Mesh : AuthoritySubHashMask::Water;
+        if (!RequestsSubHash(requested, slot)) {
+            return nlohmann::json::array();
+        }
+        auto result = build();
+        if (work && mesh) {
+            work->serialized_mesh_elements += result.size();
+        }
+        return result;
     };
+    const bool omit_terrain =
+        omit_arrays || !RequestsSubHash(requested, AuthoritySubHashMask::Terrain);
+    const bool omit_water = omit_arrays || !RequestsSubHash(requested, AuthoritySubHashMask::Water);
     const ChunkState state = chunk.get_state();
     nlohmann::json result{
         {"coords", IVec3ToJson(chunk.get_coords())},
         {"chunk_id", chunk.get_id()},
         {"state", ChunkStateName(state)},
         {"state_value", static_cast<int>(state)},
-        {"sdf_data", omit_arrays ? nlohmann::json::array() : nlohmann::json(chunk.sdf_data)},
+        {"sdf_data", omit_terrain ? nlohmann::json::array() : nlohmann::json(chunk.sdf_data)},
         {"heightmap_data",
-         omit_arrays ? nlohmann::json::array() : nlohmann::json(chunk.heightmap_data)},
+         omit_terrain ? nlohmann::json::array() : nlohmann::json(chunk.heightmap_data)},
         // per-voxel structure material channel. Empty for non-structure
         // chunks => serializes as [] => byte-identical for structures-off worlds.
         {"material_data",
-         omit_arrays ? nlohmann::json::array() : nlohmann::json(chunk.material_data)},
+         omit_terrain ? nlohmann::json::array() : nlohmann::json(chunk.material_data)},
         {"mesh_vertices",
          array_field("mesh_vertices",
                      [&]() -> nlohmann::json { return MeshVerticesToJson(chunk.mesh_vertices); })},
@@ -958,15 +973,14 @@ nlohmann::json ChunkToJson(const Chunk& chunk,
         // render-only mirrors; these are what the sim continues from on load (no re-seed from
         // worldgen).
         {"water_depth_mm",
-         omit_arrays ? nlohmann::json::array() : nlohmann::json(chunk.water_depth_mm)},
-        {"water_bed_mm",
-         omit_arrays ? nlohmann::json::array() : nlohmann::json(chunk.water_bed_mm)},
+         omit_water ? nlohmann::json::array() : nlohmann::json(chunk.water_depth_mm)},
+        {"water_bed_mm", omit_water ? nlohmann::json::array() : nlohmann::json(chunk.water_bed_mm)},
         // / (authoritative-state change): water_edge_flux is the solver's flow MOMENTUM —
         // evolution-relevant sim truth. Dropping it on load made the heavy oracle's
         // resim leg diverge (the loaded session restarted from zero momentum while the
         // original carried its flux), so it is persisted + hashed like depth/bed.
         {"water_edge_flux",
-         omit_arrays ? nlohmann::json::array() : nlohmann::json(chunk.water_edge_flux)},
+         omit_water ? nlohmann::json::array() : nlohmann::json(chunk.water_edge_flux)},
         {"has_water_sim", chunk.has_water_sim.load(std::memory_order_acquire)},
         {"water_mesh_generated", chunk.water_mesh_generated.load(std::memory_order_acquire)},
         {"current_water_resolution",
@@ -2784,7 +2798,8 @@ std::string WaterCursorHashInput(std::uint64_t cursor) {
     return bytes;
 }
 
-std::string SerializeWorldStreamingStateSimTruthForHash(const WorldStreamingState& state) {
+std::string SerializeWorldStreamingStateSimTruthForHash(const WorldStreamingState& state,
+                                                        AuthorityHashWork* work) {
     auto chunks = state.snapshot_chunks();
     std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
         if (!lhs || !rhs) {
@@ -2798,7 +2813,8 @@ std::string SerializeWorldStreamingStateSimTruthForHash(const WorldStreamingStat
         if (!chunk) {
             continue;
         }
-        nlohmann::json cj = ChunkToJson(*chunk, true);
+        nlohmann::json cj =
+            ChunkToJson(*chunk, true, false, false, false, AuthoritySubHashMask::All, work);
         VerifyChunkFieldResidencyCoverage(cj);
         for (const auto& entry : luminumbra::core::kChunkFieldResidency) {
             if (!luminumbra::core::MayFeedWorldHash(entry.residency)) {
@@ -2825,11 +2841,12 @@ std::string SerializeWorldStreamingStateSimTruthForHash(const WorldStreamingStat
 } // namespace
 
 std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state,
-                                           std::uint64_t water_sim_cursor) {
+                                           std::uint64_t water_sim_cursor,
+                                           AuthorityHashWork* work) {
     // Determinism oracle over SIM TRUTH only (render mesh excluded — see
     // kRenderMeshHashExcludedFields). The save/load snapshot remains the full
     // SerializeWorldStreamingStateSnapshotJson; only the HASH scope changes.
-    return Checksum(SerializeWorldStreamingStateSimTruthForHash(state),
+    return Checksum(SerializeWorldStreamingStateSimTruthForHash(state, work),
                     WaterCursorHashInput(water_sim_cursor));
 }
 
@@ -2939,13 +2956,23 @@ std::string ComputeRegionContentHash(const WorldStreamingState& state) {
 }
 
 WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state,
-                                                                 std::uint64_t water_sim_cursor) {
+                                                                 std::uint64_t water_sim_cursor,
+                                                                 AuthoritySubHashMask requested,
+                                                                 AuthorityHashWork* work) {
     // project the SAME canonical snapshot the top-level hash uses into
     // per-subsystem field groups, then checksum each group with the SAME
     // Checksum and the SAME chunk-id-ascending ordering. Nonzero scheduling
     // cursors add a separate checksum to the water group; zero keeps every
     // legacy projection byte-identical.
-    auto chunks = state.snapshot_chunks();
+    if (!IsValidSubHashMask(requested)) {
+        throw std::invalid_argument("Unknown authority sub-hash mask");
+    }
+    const bool want_terrain = RequestsSubHash(requested, AuthoritySubHashMask::Terrain);
+    const bool want_mesh = RequestsSubHash(requested, AuthoritySubHashMask::Mesh);
+    const bool want_water = RequestsSubHash(requested, AuthoritySubHashMask::Water);
+    // Snapshot and sort at most the existing resident chunk set, only for chunk slots.
+    auto chunks = want_terrain || want_mesh || want_water ? state.snapshot_chunks()
+                                                          : std::vector<std::shared_ptr<Chunk>>{};
     std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
         if (!lhs || !rhs) {
             return static_cast<bool>(rhs);
@@ -2961,44 +2988,47 @@ WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStre
         if (!chunk) {
             continue;
         }
-        // Full per-chunk JSON (identical to the bytes the top-level hash sees),
-        // then slice the fields into subsystem groups. Each group carries the
-        // chunk identity so a per-chunk divergence is attributable.
-        const nlohmann::json full = ChunkToJson(*chunk);
+        // Requested arrays keep their canonical encoding; skipped arrays are never built.
+        const nlohmann::json full =
+            ChunkToJson(*chunk, false, false, false, false, requested, work);
 
         // Terrain: worldgen field + heightmap + chunk identity/state.
-        terrain_array.push_back(nlohmann::json{
-            {"coords", full.at("coords")},
-            {"chunk_id", full.at("chunk_id")},
-            {"state", full.at("state")},
-            {"state_value", full.at("state_value")},
-            {"sdf_data", full.at("sdf_data")},
-            {"heightmap_data", full.at("heightmap_data")},
-            // structure material channel is terrain worldgen output.
-            // Empty vector => [] => byte-zero contribution for structures-off.
-            {"material_data", full.at("material_data")},
-        });
+        if (want_terrain) {
+            terrain_array.push_back(nlohmann::json{
+                {"coords", full.at("coords")},
+                {"chunk_id", full.at("chunk_id")},
+                {"state", full.at("state")},
+                {"state_value", full.at("state_value")},
+                {"sdf_data", full.at("sdf_data")},
+                {"heightmap_data", full.at("heightmap_data")},
+                // structure material channel is terrain worldgen output.
+                // Empty vector => [] => byte-zero contribution for structures-off.
+                {"material_data", full.at("material_data")},
+            });
+        }
 
         // Mesh: surface + water mesh geometry and meshing bookkeeping.:
         // water_mesh_generated / water_mesh_dirty_ticks moved here from the water
         // group — they are meshing bookkeeping mutated by the render-side mesh
         // pipeline (the loaded-boot remesh flips them while water is paused), so
         // hashing them under `water` made the save/load water round-trip impossible.
-        mesh_array.push_back(nlohmann::json{
-            {"chunk_id", full.at("chunk_id")},
-            {"mesh_vertices", full.at("mesh_vertices")},
-            {"mesh_indices", full.at("mesh_indices")},
-            {"water_mesh_vertices", full.at("water_mesh_vertices")},
-            {"water_mesh_indices", full.at("water_mesh_indices")},
-            {"pending_mesh_vertices", full.at("pending_mesh_vertices")},
-            {"pending_mesh_indices", full.at("pending_mesh_indices")},
-            {"pending_water_mesh_vertices", full.at("pending_water_mesh_vertices")},
-            {"pending_water_mesh_indices", full.at("pending_water_mesh_indices")},
-            {"mesh_version", full.at("mesh_version")},
-            {"water_mesh_version", full.at("water_mesh_version")},
-            {"water_mesh_generated", full.at("water_mesh_generated")},
-            {"water_mesh_dirty_ticks", full.at("water_mesh_dirty_ticks")},
-        });
+        if (want_mesh) {
+            mesh_array.push_back(nlohmann::json{
+                {"chunk_id", full.at("chunk_id")},
+                {"mesh_vertices", full.at("mesh_vertices")},
+                {"mesh_indices", full.at("mesh_indices")},
+                {"water_mesh_vertices", full.at("water_mesh_vertices")},
+                {"water_mesh_indices", full.at("water_mesh_indices")},
+                {"pending_mesh_vertices", full.at("pending_mesh_vertices")},
+                {"pending_mesh_indices", full.at("pending_mesh_indices")},
+                {"pending_water_mesh_vertices", full.at("pending_water_mesh_vertices")},
+                {"pending_water_mesh_indices", full.at("pending_water_mesh_indices")},
+                {"mesh_version", full.at("mesh_version")},
+                {"water_mesh_version", full.at("water_mesh_version")},
+                {"water_mesh_generated", full.at("water_mesh_generated")},
+                {"water_mesh_dirty_ticks", full.at("water_mesh_dirty_ticks")},
+            });
+        }
 
         // Water: the AUTHORITATIVE fixed-point sim state + solver bookkeeping.
         //  (authoritative-state change) put depth/bed mm + edge flux IN the group; water residency
@@ -3007,35 +3037,43 @@ WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStre
         // writer now regenerates them one-way FROM mm, so they are derived render
         // state — hashing them double-counted the same truth through float
         // derivation. The mm arrays + flags are the complete hashed water truth.
-        water_array.push_back(nlohmann::json{
-            {"chunk_id", full.at("chunk_id")},
-            {"water_depth_mm", full.at("water_depth_mm")},
-            {"water_bed_mm", full.at("water_bed_mm")},
-            {"water_edge_flux", full.at("water_edge_flux")},
-            {"has_water_sim", full.at("has_water_sim")},
-            {"current_water_resolution", full.at("current_water_resolution")},
-            {"is_water_sleeping", full.at("is_water_sleeping")},
-            {"max_water_delta_last_tick", full.at("max_water_delta_last_tick")},
-            {"ticks_below_threshold", full.at("ticks_below_threshold")},
-        });
+        if (want_water) {
+            water_array.push_back(nlohmann::json{
+                {"chunk_id", full.at("chunk_id")},
+                {"water_depth_mm", full.at("water_depth_mm")},
+                {"water_bed_mm", full.at("water_bed_mm")},
+                {"water_edge_flux", full.at("water_edge_flux")},
+                {"has_water_sim", full.at("has_water_sim")},
+                {"current_water_resolution", full.at("current_water_resolution")},
+                {"is_water_sleeping", full.at("is_water_sleeping")},
+                {"max_water_delta_last_tick", full.at("max_water_delta_last_tick")},
+                {"ticks_below_threshold", full.at("ticks_below_threshold")},
+            });
+        }
     }
 
     WorldStreamingStateSubHashes sub;
-    sub.terrain = Checksum(StableDump(nlohmann::json{{"section", "terrain"},
-                                                     {"order_contract", kOrderContract},
-                                                     {"chunk_count", terrain_array.size()},
-                                                     {"chunks", std::move(terrain_array)}}));
-    sub.mesh = Checksum(StableDump(nlohmann::json{{"section", "mesh"},
-                                                  {"order_contract", kOrderContract},
-                                                  {"chunk_count", mesh_array.size()},
-                                                  {"chunks", std::move(mesh_array)}}));
-    sub.water = Checksum(StableDump(nlohmann::json{{"section", "water"},
-                                                   {"order_contract", kOrderContract},
-                                                   {"chunk_count", water_array.size()},
-                                                   {"chunks", std::move(water_array)}}));
+    if (want_terrain) {
+        sub.terrain = Checksum(StableDump(nlohmann::json{{"section", "terrain"},
+                                                         {"order_contract", kOrderContract},
+                                                         {"chunk_count", terrain_array.size()},
+                                                         {"chunks", std::move(terrain_array)}}));
+    }
+    if (want_mesh) {
+        sub.mesh = Checksum(StableDump(nlohmann::json{{"section", "mesh"},
+                                                      {"order_contract", kOrderContract},
+                                                      {"chunk_count", mesh_array.size()},
+                                                      {"chunks", std::move(mesh_array)}}));
+    }
+    if (want_water) {
+        sub.water = Checksum(StableDump(nlohmann::json{{"section", "water"},
+                                                       {"order_contract", kOrderContract},
+                                                       {"chunk_count", water_array.size()},
+                                                       {"chunks", std::move(water_array)}}));
+    }
     // entities filled by the overload below from the ECS snapshot (no chunk source).
     sub.entities = std::string();
-    if (water_sim_cursor != 0) {
+    if (want_water && water_sim_cursor != 0) {
         sub.water += kWaterCursorHashLabel;
         sub.water += Checksum(WaterCursorHashInput(water_sim_cursor));
     }
@@ -3045,9 +3083,14 @@ WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStre
 WorldStreamingStateSubHashes
 ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state,
                                     const std::string& entity_snapshot_json,
-                                    std::uint64_t water_sim_cursor) {
-    WorldStreamingStateSubHashes sub = ComputeWorldStreamingStateSubHashes(state, water_sim_cursor);
-    sub.entities = Checksum(entity_snapshot_json);
+                                    std::uint64_t water_sim_cursor,
+                                    AuthoritySubHashMask requested,
+                                    AuthorityHashWork* work) {
+    WorldStreamingStateSubHashes sub =
+        ComputeWorldStreamingStateSubHashes(state, water_sim_cursor, requested, work);
+    if (RequestsSubHash(requested, AuthoritySubHashMask::Entities)) {
+        sub.entities = Checksum(entity_snapshot_json);
+    }
     return sub;
 }
 

@@ -1,13 +1,23 @@
 cmake_minimum_required(VERSION 3.21)
 
-# Reuse the outer configure's compiler identity, ABI, features and tools.
-# The outer project has already tested this compiler; the DLLs and executable
-# below still have to compile, link and run through the real staging module.
-include("${NETWORK_TEST_COMPILER_INFO}")
-# Still initialize this build's language rules and binary inspector paths.
-unset(CMAKE_CXX_COMPILER_LOADED)
-set(CMAKE_CXX_COMPILER_FORCED TRUE)
-project(NetworkingRuntimeFixture LANGUAGES CXX)
+# Initialize the platform directory before installing the outer compiler's
+# identity, ABI, features and tools. Enabling CXX then uses CMake's configured
+# compiler path, avoiding repeated compiler and binutils discovery. Language
+# rules still initialize; the fixture must still compile, link, stage and run.
+project(NetworkingRuntimeFixture LANGUAGES NONE)
+function(reuse_outer_compiler)
+    # Inspect in a function scope so enable_language loads the installed file.
+    include("${NETWORK_TEST_COMPILER_INFO}" OPTIONAL RESULT_VARIABLE _compiler_info)
+    if(NOT _compiler_info OR NOT CMAKE_CXX_COMPILER OR NOT CMAKE_CXX_COMPILER_ID
+       OR NOT CMAKE_CXX_COMPILER_LOADED OR NOT CMAKE_CXX_COMPILER_ID_RUN OR NOT CMAKE_CXX_COMPILER_WORKS
+       OR NOT CMAKE_CXX_ABI_COMPILED)
+        message(FATAL_ERROR "Outer CXX compiler information is incomplete")
+    endif()
+    configure_file("${NETWORK_TEST_COMPILER_INFO}"
+        "${CMAKE_PLATFORM_INFO_DIR}/CMakeCXXCompiler.cmake" COPYONLY)
+endfunction()
+reuse_outer_compiler()
+enable_language(CXX)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin")
 set(LUMINUMBRA_ENABLE_GNS ON)

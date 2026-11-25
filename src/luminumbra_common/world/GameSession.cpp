@@ -5,6 +5,8 @@
 #include "../components/ForagingComponents.h"
 #include "../components/ScavengerComponent.h"
 #include "../components/ThirstComponents.h"
+#include "../core/ModuleRegistry.h"
+#include "../core/PhaseScheduler.h"
 #include "../core/SystemConfig.h"
 #include "../persistence/WorkerBoundary.h"
 #include "../simulation/SimBudgetTelemetry.h"
@@ -65,6 +67,7 @@
 #include "../core/JobSystem.h"
 #include "../core/Log.h"
 #include "../fields/EnergyFieldState.h"
+#include "../game/WorldClockAuthorityAdapter.h"
 #include "../persistence/CreatedWorldArtifacts.h"
 #include "../persistence/PlantPersistence.h"
 #include "../persistence/SaveTransaction.h"
@@ -85,7 +88,8 @@
 #include "../systems/PhysicsSystem.h"
 #include "../systems/PlantDiseaseSystem.h" // Plant disease propagation.
 #include "../systems/PlantGrowthSystem.h"  // Plant growth tick.
-#include "../systems/PollinationSystem.h"  // Cross-pollination.
+#include "../systems/PlantTerrainCache.h"
+#include "../systems/PollinationSystem.h" // Cross-pollination.
 #include "../systems/RegionalFoliage.h"
 #include "../systems/SHIELD_WorldSystem.h" // This includes TerrainGenParams
 #include "../systems/SoilNutrientSystem.h" // Soil-nutrient cycling.
@@ -1656,6 +1660,9 @@ std::uint64_t GameSession::GetFoliageReplayCellVisits() const {
 std::uint64_t GameSession::GetFoliageReplayPreparationPages() const {
     return m_foliageStep ? m_foliageStep->preparation_pages : 0;
 }
+std::uint64_t GameSession::GetPlantTerrainQueryMisses() const {
+    return m_plantTerrainCache ? m_plantTerrainCache->misses() : 0;
+}
 const luminumbra::foliage::SoilGrid* GameSession::GetFoliageSoilGrid() const {
     return m_soilGrid.get();
 }
@@ -1790,6 +1797,37 @@ bool GameSession::AdoptPreparedWorld(const std::shared_ptr<WorldPreparation>& pr
     return prepared->create ? AdoptCreatedWorld(*prepared, artifacts) : AdoptLoadedWorld(*prepared);
 }
 
+// Session composition only: systems remain owned by the session. No stored hooks or
+// borrowed callbacks survive execution of a tick.
+struct GameSession::EcologySchedule {
+    ModuleRegistry modules;
+    PhaseScheduler scheduler;
+
+    EcologySchedule() {
+        // Two fixed tasks. Dependency order deliberately differs from ASCII order.
+        const std::vector<PhaseTask> tasks{{"ecology.disease", "Ecology", {"ecology.pollination"}},
+                                           {"ecology.pollination", "Ecology", {}}};
+        for (const auto& task : tasks) {
+            if (modules.register_module({.id = task.id,
+                                         .provides = {task.id},
+                                         .requires_services = task.after,
+                                         .startup = nullptr,
+                                         .shutdown = nullptr,
+                                         .context = nullptr}) != ModuleResult::Ok) {
+                throw std::logic_error("Invalid ecology module registration");
+            }
+        }
+        if (scheduler.compile({"Ecology"}, tasks) != ScheduleResult::Ok ||
+            modules.startup() != ModuleResult::Ok) {
+            throw std::logic_error("Invalid ecology schedule");
+        }
+    }
+};
+
+std::uint64_t GameSession::GetEcologyScheduleTraceHash() const {
+    return m_ecologySchedule->scheduler.execution_trace_hash();
+}
+
 GameSession::GameSession()
     : GameSession(AuthorityProfileOptions{}, AuthorityProfileTag{}) {}
 
@@ -1797,7 +1835,8 @@ GameSession::GameSession()
 // (see GameSession.h); its only definition is the test seam source.
 GameSession::GameSession(const AuthorityProfileOptions& authority_profile,
                          AuthorityProfileTag /*tag*/)
-    : m_authorityProfile(authority_profile) {
+    : m_authorityProfile(authority_profile)
+    , m_ecologySchedule(std::make_unique<EcologySchedule>()) {
     m_scriptState = std::make_unique<Luminumbra::scripting::LuaState>();
     m_registry.on_destroy<Luminumbra::Components::CreaturePhysicsComponent>()
         .connect<&RemoveCreatureAvatar>(*this);
@@ -1830,6 +1869,7 @@ void GameSession::ResetWorldSystems() {
     m_regionalEnergyStep.reset();
     m_registry.ctx().erase<luminumbra::foliage::FarmingReplayGate>();
     m_foliageStep.reset();
+    m_plantTerrainCache.reset();
     m_worldUsable = false;
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
@@ -2603,6 +2643,11 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             // growth runs AFTER weather. Integer/fixed-point + id-ordered = run==replay.
             // Temperature, light, soil, weather, and irrigation are sampled below.
             if (!foliage_registry.view<const Luminumbra::Components::PlantTag>().empty()) {
+                if (!m_plantTerrainCache) {
+                    m_plantTerrainCache =
+                        std::make_unique<luminumbra::foliage::PlantTerrainCache>();
+                }
+                m_plantTerrainCache->BeginTick(m_worldSystem.get());
                 const auto plant_env = [this, current_tick](
                                            const Luminumbra::Components::TransformComponent& tf) {
                     luminumbra::foliage::PlantEnvSample s;
@@ -2619,36 +2664,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         s.moisture = luminumbra::foliage::clamp01(
                             s.moisture + static_cast<float>(moist) / 1000.0f * 0.5f);
                     }
-                    // Soil + temperature from the TERRAIN: surface-material favourability
-                    // (grass/soil rich, sand/stone poor) and an altitude lapse (higher
-                    // ground is colder -> alpine vs lowland growth). The real atmospheric/
-                    // terrain coupling. (Only runs for opt-in sim plants, so the per-plant
-                    // world queries are bounded.)
-                    float soil = 0.5f, temp = 0.55f;
-                    if (m_worldSystem) {
-                        const float th = m_worldSystem->GetTerrainHeightAt(p.x, p.z);
-                        switch (m_worldSystem->SurfaceVertexMaterial(p.x, p.z, th)) {
-                            case Luminumbra::MaterialType::Grass:
-                                soil = 0.95f;
-                                break;
-                            case Luminumbra::MaterialType::Soil:
-                                soil = 0.85f;
-                                break;
-                            case Luminumbra::MaterialType::Sand:
-                                soil = 0.45f;
-                                break;
-                            case Luminumbra::MaterialType::Stone:
-                                soil = 0.30f;
-                                break;
-                            default:
-                                soil = 0.25f;
-                                break;
-                        }
-                        const float altitude = th - static_cast<float>(Luminumbra::SEA_LEVEL);
-                        temp = luminumbra::foliage::clamp01(
-                            0.60f - (altitude > 0.0f ? altitude : 0.0f) * 0.00045f);
-                    }
-                    s.soil_quality = soil;
+                    const auto terrain = m_plantTerrainCache->At(m_worldSystem.get(), p.x, p.z);
+                    s.soil_quality = terrain.soil;
                     // fold the freshly-updated SOIL-NUTRIENT grid (milli 0..1000) into soil
                     // quality. Foragers/feeders DEPLETE the cell, so a monoculture on one cell
                     // starves itself (monoculture-starves). No grid -> unchanged terrain
@@ -2666,7 +2683,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         s.soil_quality =
                             luminumbra::foliage::clamp01(s.soil_quality * 0.5f + nutFrac * 0.5f);
                     }
-                    s.temperature = temp;
+                    s.temperature = terrain.temperature;
                     // Real day/night light from the sim clock. Triangular day
                     // curve peaking at noon, with a twilight floor so growth slows (not halts)
                     // at night. kTicksPerDay = 20-min day @30Hz (mirrors the circadian slot).
@@ -2702,6 +2719,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 };
                 luminumbra::foliage::RunPlantGrowthSystemOnTick(
                     foliage_registry, current_tick, plant_env, foliage_gate);
+                m_plantTerrainCache->EndTick();
             }
 
             // 7. LIVING-WORLD SYSTEMS: pollination / disease / fire / wildlife-grazing /
@@ -2721,28 +2739,36 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     m_windFieldSystem ? m_windFieldSystem->SampleWind(m_metadata.spawnPoint)
                                       : ::Luminumbra::Vec2(0.0f);
 
-                budget.Next(Stage::Pollination, [&] {
-                    return SimParticipantCount<TelemetryComp::PollinationTag,
-                                               TelemetryComp::PlantGenomeComponent,
-                                               TelemetryComp::PlantGrowthComponent,
-                                               TelemetryComp::TransformComponent,
-                                               TelemetryComp::PollinationComponent>(
-                        foliage_registry);
+                // Compile once at session startup; dispatch only these two tasks per tick.
+                m_ecologySchedule->scheduler.execute(0, [&](std::string_view id) {
+                    if (id == "ecology.pollination") {
+                        budget.Next(Stage::Pollination, [&] {
+                            return SimParticipantCount<TelemetryComp::PollinationTag,
+                                                       TelemetryComp::PlantGenomeComponent,
+                                                       TelemetryComp::PlantGrowthComponent,
+                                                       TelemetryComp::TransformComponent,
+                                                       TelemetryComp::PollinationComponent>(
+                                foliage_registry);
+                        });
+                        if (!foliage_registry.view<Comp::PlantGenomeComponent>().empty())
+                            fol::RunPollinationOnTick(foliage_registry,
+                                                      current_tick,
+                                                      windXZ,
+                                                      0,
+                                                      m_plantMutationRate,
+                                                      foliage_gate);
+                    } else {
+                        budget.Next(Stage::Disease, [&] {
+                            return SimParticipantCount<TelemetryComp::PlantTag,
+                                                       TelemetryComp::PlantHealthComponent,
+                                                       TelemetryComp::TransformComponent>(
+                                foliage_registry);
+                        });
+                        if (!foliage_registry.view<Comp::PlantHealthComponent>().empty())
+                            fol::RunPlantDiseaseOnTick(
+                                foliage_registry, current_tick, 0, foliage_gate);
+                    }
                 });
-                if (!foliage_registry.view<Comp::PlantGenomeComponent>().empty())
-                    fol::RunPollinationOnTick(foliage_registry,
-                                              current_tick,
-                                              windXZ,
-                                              0,
-                                              m_plantMutationRate,
-                                              foliage_gate);
-                budget.Next(Stage::Disease, [&] {
-                    return SimParticipantCount<TelemetryComp::PlantTag,
-                                               TelemetryComp::PlantHealthComponent,
-                                               TelemetryComp::TransformComponent>(foliage_registry);
-                });
-                if (!foliage_registry.view<Comp::PlantHealthComponent>().empty())
-                    fol::RunPlantDiseaseOnTick(foliage_registry, current_tick, 0, foliage_gate);
                 //  germination: ripe plants senesce -> annual dies + reseeds, perennial
                 // resets + reseeds (child genome = the pollination cross, computed just above, or
                 // self). Runs AFTER pollination so next_genome is fresh. Opt-in via
@@ -2882,9 +2908,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             const auto deliver_events = [&] {
                 budget.Next(Stage::Events, [&] { return m_simulationEventBus.pending_count(); });
                 if (m_activeRegionsEnabled) {
-                    m_simulationEventBus.drain(current_tick, [this] { return !m_regionFault; });
+                    m_simulationEventBus.drain_without_capture(current_tick,
+                                                               [this] { return !m_regionFault; });
                 } else {
-                    m_simulationEventBus.drain(current_tick);
+                    m_simulationEventBus.drain_without_capture(current_tick);
                 }
                 budget.Finish();
             };
@@ -4973,9 +5000,15 @@ std::string GameSession::ComputeChunkStateHash() {
 
 Persistence::AuthorityCaptureResult
 GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
-                                    Persistence::AuthorityCaptureParts parts) {
+                                    Persistence::AuthorityCaptureParts parts,
+                                    Persistence::AuthoritySubHashMask requested,
+                                    Persistence::AuthorityHashWork* work) {
     using Persistence::AuthorityCaptureParts;
     using Persistence::AuthorityCaptureStatus;
+    using Persistence::AuthoritySubHashMask;
+    if (!Persistence::IsValidSubHashMask(requested)) {
+        return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+    }
     // The regional projection only feeds the chunk slot; scent, ecology and plant only
     // feed the composite. Consumers that discard them skip the work.
     const bool want_chunk = parts == AuthorityCaptureParts::All ||
@@ -4983,7 +5016,12 @@ GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
                             parts == AuthorityCaptureParts::Chunk;
     const bool want_composite =
         parts == AuthorityCaptureParts::All || parts == AuthorityCaptureParts::Composite;
-    const bool want_runtime = parts != AuthorityCaptureParts::Chunk;
+    const bool want_sub = parts == AuthorityCaptureParts::All ||
+                          parts == AuthorityCaptureParts::SubHashes ||
+                          parts == AuthorityCaptureParts::StreamedAndSubHashes;
+    const auto want_runtime = [&](AuthoritySubHashMask slot) {
+        return want_composite || (want_sub && Persistence::RequestsSubHash(requested, slot));
+    };
     if (!want_chunk && parts != AuthorityCaptureParts::SubHashes &&
         parts != AuthorityCaptureParts::StreamedAndSubHashes) {
         return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
@@ -5066,30 +5104,55 @@ GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
             projection = std::move(regional);
         }
         Persistence::AuthorityRuntimeHashes runtime;
-        if (want_runtime) {
-            const std::string aether_state = ComputeAetherStateSubHash();
-            const std::string aether =
-                m_aetherFieldSystem ? m_aetherFieldSystem->ComputeAetherSubHash() : std::string();
-            runtime = {
-                .wind = m_windFieldSystem ? m_windFieldSystem->ComputeWindSubHash() : std::string(),
-                .weather =
-                    m_weatherSystem ? m_weatherSystem->ComputeWeatherSubHash() : std::string(),
-                .aether = aether_state.empty()
-                              ? aether
-                              : Persistence::StableChecksum(aether + "|state:" + aether_state),
-                .scent = want_composite ? ComputeScentSubHash() : std::string(),
-                .ecology = want_composite ? FoldClockIntoEcologyHash(
-                                                luminumbra::ai::ComputeEcologySubHash(m_registry))
-                                          : std::string(),
-                .plant = want_composite ? ComputePlantSubHash() : std::string(),
-                .aether_state = aether_state};
+        const auto record_runtime = [&] {
+            if (work) {
+                ++work->runtime_hashes;
+            }
+        };
+        if (want_runtime(AuthoritySubHashMask::Wind) && m_windFieldSystem) {
+            runtime.wind = m_windFieldSystem->ComputeWindSubHash();
+            record_runtime();
+        }
+        if (want_runtime(AuthoritySubHashMask::Weather) && m_weatherSystem) {
+            runtime.weather = m_weatherSystem->ComputeWeatherSubHash();
+            record_runtime();
+        }
+        if (want_runtime(AuthoritySubHashMask::Aether) ||
+            (want_sub &&
+             Persistence::RequestsSubHash(requested, AuthoritySubHashMask::AetherState))) {
+            runtime.aether_state = ComputeAetherStateSubHash();
+            record_runtime();
+        }
+        if (want_runtime(AuthoritySubHashMask::Aether)) {
+            std::string aether;
+            if (m_aetherFieldSystem) {
+                aether = m_aetherFieldSystem->ComputeAetherSubHash();
+                record_runtime();
+            }
+            runtime.aether =
+                runtime.aether_state.empty()
+                    ? aether
+                    : Persistence::StableChecksum(aether + "|state:" + runtime.aether_state);
+        }
+        if (want_composite) {
+            runtime.scent = ComputeScentSubHash();
+            runtime.ecology =
+                FoldClockIntoEcologyHash(luminumbra::ai::ComputeEcologySubHash(m_registry));
+            runtime.plant = ComputePlantSubHash();
         }
         return Persistence::CaptureAuthorityHashes(
-            state, cursor, projection, entity_snapshot_json, runtime, parts);
+            state, cursor, projection, entity_snapshot_json, runtime, parts, requested, work);
     } catch (const std::exception& error) {
         LatchRegionFault(m_worldClock.tick(), error.what());
         return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
     }
+}
+
+Persistence::AuthorityCaptureResult
+GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
+                                    Persistence::AuthorityCaptureParts parts) {
+    return CaptureAuthorityHashes(
+        entity_snapshot_json, parts, Persistence::AuthoritySubHashMask::All);
 }
 
 Persistence::AuthorityCaptureResult
@@ -5099,11 +5162,11 @@ GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json) {
 
 std::string GameSession::FoldClockIntoEcologyHash(const std::string& ecology_hash) const {
     return m_activeRegionsEnabled
-               ? Persistence::StableChecksum(ecology_hash + m_worldClock.canonical_bytes() +
-                                             m_activeRegionLedger.canonical_bytes() +
-                                             m_groundObjects.canonical_bytes() +
-                                             CaptureGroundNotifications().canonical_bytes() +
-                                             m_fieldPages.canonical_bytes())
+               ? Persistence::StableChecksum(
+                     ecology_hash + Game::WorldClockAuthorityAdapter::CanonicalBytes(m_worldClock) +
+                     m_activeRegionLedger.canonical_bytes() + m_groundObjects.canonical_bytes() +
+                     CaptureGroundNotifications().canonical_bytes() +
+                     m_fieldPages.canonical_bytes())
                : ecology_hash;
 }
 
@@ -5656,7 +5719,7 @@ bool GameSession::PrepareWorldMetadataTo(const fs::path& save_dir,
     if (!m_activeRegionsEnabled && m_renderCalendar)
         metadata_json["renderCalendar"] = WorldClock(0, *m_renderCalendar).calendar_metadata();
     if (m_activeRegionsEnabled) {
-        m_worldClock.write_metadata(metadata_json);
+        Game::WorldClockAuthorityAdapter::WriteMetadata(m_worldClock, metadata_json);
         metadata_json["ambientFieldAnchor"] = {{"x", m_ambientFieldAnchor.x},
                                                {"y", m_ambientFieldAnchor.y},
                                                {"z", m_ambientFieldAnchor.z}};
@@ -6653,6 +6716,7 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     // All refusing readers have passed; publish the staged state together.
     m_registry.ctx().erase<luminumbra::foliage::FarmingReplayGate>();
     m_foliageStep.reset();
+    m_plantTerrainCache.reset();
     m_lastLoadedChunkCount = 0;
     if (m_activeRegionsEnabled && m_authorityProfile.regional_water) {
         m_worldSystem->clear_world(m_physicsSystem.get());

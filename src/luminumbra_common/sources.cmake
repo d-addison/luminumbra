@@ -19,6 +19,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/animation/MorphMesh.cpp
 
     # Core
+    ${CMAKE_CURRENT_LIST_DIR}/core/CommandRegistry.cpp
     # Shared exact-byte SHA-256 for content and capture manifests.
     ${CMAKE_CURRENT_LIST_DIR}/authoring/PrefabDigest.cpp
     ${CMAKE_CURRENT_LIST_DIR}/mods/NativePluginLoader.cpp
@@ -90,6 +91,7 @@ set(COMMON_SOURCES
 
     # Simulation
     ${CMAKE_CURRENT_LIST_DIR}/simulation/SimulationEventBus.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/simulation/DeterministicUniformGrid.cpp
     ${CMAKE_CURRENT_LIST_DIR}/simulation/SimBudgetProfile.cpp
 
     # Shield
@@ -130,6 +132,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/world/WaterShare.cpp
     ${CMAKE_CURRENT_LIST_DIR}/replay/RegionScheduleTrace.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldClock.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/game/WorldClockAuthorityAdapter.h
     ${CMAKE_CURRENT_LIST_DIR}/world/GameSession.cpp
     #  semantic-knob -> generation_params response table + persisted layer.
     ${CMAKE_CURRENT_LIST_DIR}/world/KnobLayer.cpp

@@ -1076,7 +1076,8 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                 self.assertEqual(value(job, "shell", 8), "bash")
             else:
                 self.assertIn("$env:LOCALAPPDATA", job)
-                self.assertEqual(value(job, "CCACHE_MAXSIZE", 6), "1200M")
+                self.assertEqual(value(job, "CCACHE_MAXSIZE", 6),
+                                 "4G" if job_id == "windows-msvc" else "1200M")
                 self.assertLess(job.index(preflight), job.index("      - name: Stage software OpenGL"))
                 self.assertIn("try { Remove-Item -Recurse -Force $mesaRoot -ErrorAction Stop }", job)
         ucrt = jobs(reusable)["windows-ucrt64"]
@@ -1370,7 +1371,9 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
             self.assertIn(f"cmake --build build/fast-{compiler} --target glad --parallel 2", fast)
         self.assertEqual(fast.count("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"), 2)
         for flag in ("-DLUMINUMBRA_WARNINGS_AS_ERRORS=ON", "-DBUILD_TESTING=ON",
-                     "-DCMAKE_BUILD_TYPE=Release", "-DLUMINUMBRA_ENABLE_DILIGENT=OFF"):
+                     "-DCMAKE_BUILD_TYPE=Release", "-DLUMINUMBRA_ENABLE_DILIGENT=OFF",
+                     # Optional content tools (lumpack) are only compiled and tidied here.
+                     "-DLUMINUMBRA_BUILD_TOOLS=ON"):
             self.assertEqual(fast.count(flag), 2)
         for flag in ("-DCMAKE_C_COMPILER=gcc", "-DCMAKE_CXX_COMPILER=g++",
                      "-DCMAKE_C_COMPILER=clang-18", "-DCMAKE_CXX_COMPILER=clang++-18"):
@@ -1534,7 +1537,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         # Retain whole-job pins after moving the full Windows coverage out of CI.
         expected = {
             "changes": "719c7357c8f60592b41f4299e01d25ded1e320489601aef0e79a279ff43000de",
-            "windows-msvc": "b96064f047734fd564a75694ae7bfa08eb329d0896e66f612d95da83c6e78a45",
+            "windows-msvc": "7d9390c04323d060602c7a6c37bf22bfb8fd7809135f536b6c26e4df1ef05245",
             "windows-ucrt64": "6ac45a8cc93bea871e9557351708e6b23d0314cfa20fdea4875cfdc909610b36",
             "windows-msvc-result": "2af91683329c582ac65a4b73b975bb19f2a83350dcd268be0c9039df2c3723b2",
             "windows-ucrt64-result": "a8564410c6e255d3968c3a4d95ff6129dc3a5ba34cbae43f1a4a25c3bfcedd3f",

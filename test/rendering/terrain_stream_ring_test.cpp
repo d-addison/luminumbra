@@ -1,4 +1,6 @@
+#include "luminumbra_client/rendering/RenderPreparationScratch.h"
 #include "luminumbra_client/rendering/TerrainStreamRing.h"
+#include "luminumbra_client/rendering/UploadBudget.h"
 
 #include <gtest/gtest.h>
 
@@ -120,5 +122,123 @@ TEST(TerrainStreamRing, CapacityAndExactSizesRejectOverflowBeforeAllocation) {
     EXPECT_THROW((void)TerrainStreamRing::storage_bytes(1, 0, size_limit), std::length_error);
     EXPECT_THROW((void)TerrainStreamRing::storage_bytes(maximum + 1u, 1, size_limit),
                  std::length_error);
+}
+} // namespace
+
+namespace {
+using namespace Luminumbra::Rendering;
+
+TEST(RenderPreparationScratch, AllocatorCountsGrowthAndRejectsOverflowBeforeAllocation) {
+    std::uint64_t allocations = 0;
+    RenderScratchAllocator<std::uint64_t> allocator(allocations);
+    std::vector<std::uint64_t, decltype(allocator)> scratch(allocator);
+    scratch.reserve(64);
+    EXPECT_EQ(allocations, 1u);
+    for (std::uint64_t frame = 0; frame < 8; ++frame) {
+        scratch.clear();
+        for (std::uint64_t item = 0; item < 64; ++item) {
+            scratch.push_back(frame + item);
+        }
+    }
+    EXPECT_EQ(allocations, 1u);
+    EXPECT_EQ(scratch.back(), 70u);
+    EXPECT_THROW((void)allocator.allocate(std::numeric_limits<std::size_t>::max()),
+                 std::bad_array_new_length);
+    EXPECT_EQ(allocations, 1u);
+    // Rebinding for node containers must charge the same owner's counter.
+    RenderScratchAllocator<std::uint32_t> rebound(allocator);
+    auto* storage = rebound.allocate(1);
+    EXPECT_EQ(allocations, 2u);
+    rebound.deallocate(storage, 1);
+}
+
+TEST(RenderPreparationScratch, ExactMembershipIgnoresOrderAndDetectsSameSizeReplacement) {
+    std::uint64_t allocations = 0;
+    TerrainResidencyRevision membership(allocations);
+    membership.begin_frame();
+    membership.end_frame();
+    EXPECT_EQ(membership.revision(), 0u);
+    for (std::uint64_t frame = 0; frame < 8; ++frame) {
+        membership.begin_frame();
+        for (std::uint64_t item = 0; item < 64; ++item) {
+            membership.mark(frame % 2 == 0 ? item : 63 - item);
+        }
+        membership.mark(0); // Repeated observations do not change membership.
+        membership.end_frame();
+        EXPECT_EQ(membership.size(), 64u);
+        EXPECT_EQ(membership.revision(), 64u);
+        if (frame == 0) {
+            EXPECT_GT(allocations, 0u);
+        }
+    }
+    const auto warmed_allocations = allocations;
+    membership.begin_frame();
+    for (std::uint64_t item = 0; item < 64; ++item) {
+        membership.mark(item);
+    }
+    membership.end_frame();
+    EXPECT_EQ(allocations, warmed_allocations);
+    membership.begin_frame();
+    for (std::uint64_t item = 1; item <= 64; ++item) {
+        membership.mark(item);
+    }
+    membership.end_frame();
+    EXPECT_EQ(membership.size(), 64u);
+    EXPECT_NE(membership.revision(), 64u);
+    const auto replaced_revision = membership.revision();
+    membership.begin_frame();
+    membership.end_frame();
+    EXPECT_EQ(membership.size(), 0u);
+    EXPECT_NE(membership.revision(), replaced_revision);
+    const auto empty_revision = membership.revision();
+    membership.begin_frame();
+    membership.end_frame();
+    EXPECT_EQ(membership.revision(), empty_revision);
+    membership.begin_frame();
+    membership.mark(0);
+    membership.end_frame();
+    EXPECT_EQ(membership.size(), 1u);
+    EXPECT_NE(membership.revision(), empty_revision);
+}
+
+TEST(RenderPreparationScratch, StampWrapCannotKeepAnUnvisitedRecordAlive) {
+    struct Record {
+        std::uint64_t last_seen_frame = 0;
+    };
+    std::unordered_map<std::uint64_t, Record> records{
+        {1, {.last_seen_frame = 1}},
+        {2, {.last_seen_frame = std::numeric_limits<std::uint64_t>::max()}}};
+    EXPECT_EQ(NextRenderFrameStamp(0, records), 1u);
+    EXPECT_EQ(NextRenderFrameStamp(12, records), 13u);
+    EXPECT_EQ(records.at(1).last_seen_frame, 1u);
+    const auto wrapped = NextRenderFrameStamp(std::numeric_limits<std::uint64_t>::max(), records);
+    EXPECT_EQ(wrapped, 1u);
+    for (const auto& [id, record] : records) {
+        (void)id;
+        EXPECT_EQ(record.last_seen_frame, 0u);
+        EXPECT_NE(record.last_seen_frame, wrapped);
+    }
+    records.clear();
+    EXPECT_EQ(NextRenderFrameStamp(std::numeric_limits<std::uint64_t>::max(), records), 1u);
+}
+
+TEST(RenderPreparationScratch, EmptyRefreshPrunesBacklogWithEitherCandidateAllocator) {
+    UploadQueue<std::uint64_t> queue;
+    queue.refresh(1, 1);
+    std::uint64_t allocations = 0;
+    std::vector<std::uint64_t, RenderScratchAllocator<std::uint64_t>> candidates{
+        RenderScratchAllocator<std::uint64_t>(allocations)};
+    const auto key = [](std::uint64_t id) {
+        return id;
+    };
+    refresh_uploads(queue, candidates, key, key);
+    EXPECT_EQ(queue.size(), 0u);
+    EXPECT_EQ(allocations, 0u);
+    refresh_uploads(queue, std::vector<std::uint64_t>{}, key, key);
+    EXPECT_EQ(queue.size(), 0u);
+    candidates.push_back(7);
+    refresh_uploads(queue, candidates, key, key);
+    ASSERT_EQ(queue.size(), 1u);
+    EXPECT_EQ(queue.front(), 7u);
 }
 } // namespace

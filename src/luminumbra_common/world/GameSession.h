@@ -47,6 +47,8 @@ class CreatedWorldArtifacts;
 struct AuthorityCaptureResult;
 struct OwnerContinuation;
 enum class AuthorityCaptureParts;
+enum class AuthoritySubHashMask : std::uint16_t;
+struct AuthorityHashWork;
 } // namespace Luminumbra::Persistence
 
 namespace luminumbra::fields {
@@ -62,6 +64,7 @@ class CreatureSpeciesRegistry; // per-world species definition table
 } // namespace luminumbra::ai
 
 namespace luminumbra::foliage {
+class PlantTerrainCache;
 class SoilGrid;       // soil nutrient field (systems/SoilNutrientSystem.h)
 class IrrigationGrid; // soil-moisture field (systems/IrrigationSystem.h)
 } // namespace luminumbra::foliage
@@ -662,6 +665,8 @@ public:
     [[nodiscard]] const FieldPageState& GetFieldPages() const {
         return m_fieldPages;
     }
+    // Session-lifetime executed ecology schedule trace; excluded from identity and saves.
+    [[nodiscard]] std::uint64_t GetEcologyScheduleTraceHash() const;
     // Observational foliage preparation/publication counts; excluded from identity and saves.
     [[nodiscard]] std::uint64_t GetFoliageSelectionVisits() const;
     [[nodiscard]] std::uint64_t GetFoliageRegistryStageVisits() const;
@@ -673,6 +678,8 @@ public:
     [[nodiscard]] std::uint32_t GetFoliageReplayRemainingSteps() const;
     [[nodiscard]] std::uint64_t GetFoliageReplayCellVisits() const;
     [[nodiscard]] std::uint64_t GetFoliageReplayPreparationPages() const;
+    // Lifetime terrain height/material query pairs; derived cache work, never hashed or saved.
+    [[nodiscard]] std::uint64_t GetPlantTerrainQueryMisses() const;
     // Read-only diagnostics of the live legacy foliage grids.
     [[nodiscard]] const luminumbra::foliage::SoilGrid* GetFoliageSoilGrid() const;
     [[nodiscard]] const luminumbra::foliage::IrrigationGrid* GetFoliageIrrigationGrid() const;
@@ -769,6 +776,11 @@ public:
     [[nodiscard]] Persistence::AuthorityCaptureResult
     CaptureAuthorityHashes(const std::string& entity_snapshot_json,
                            Persistence::AuthorityCaptureParts parts);
+    [[nodiscard]] Persistence::AuthorityCaptureResult
+    CaptureAuthorityHashes(const std::string& entity_snapshot_json,
+                           Persistence::AuthorityCaptureParts parts,
+                           Persistence::AuthoritySubHashMask requested,
+                           Persistence::AuthorityHashWork* work = nullptr);
     [[nodiscard]] bool IsSimulationTickBoundary() const {
         return !m_activeRegionsEnabled || (!m_simulationBatchInProgress && m_regionWork.empty());
     }
@@ -824,7 +836,9 @@ private:
     // The single real constructor; the default and the test-only constructors delegate here.
     GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTag);
 
+    struct EcologySchedule;
     const AuthorityProfileOptions m_authorityProfile;
+    std::unique_ptr<EcologySchedule> m_ecologySchedule;
     OwnerContinuationOptions m_continuationOptions;
     const std::vector<World::PlayerAvatar>* m_ownerAvatarSources = nullptr;
     std::optional<std::uint32_t> m_ownerRosterCount;
@@ -844,6 +858,7 @@ private:
     entt::registry m_registry;
     struct FoliageStep;
     std::unique_ptr<FoliageStep> m_foliageStep;
+    std::unique_ptr<luminumbra::foliage::PlantTerrainCache> m_plantTerrainCache;
     luminumbra::ai::EcologyTuning m_ecologyTuning{}; // Defaults match compiled constants.
     luminumbra::ai::WildlifeFoliageTuning
         m_wildlifeFoliageTuning{}; // full-control: defaults preserved

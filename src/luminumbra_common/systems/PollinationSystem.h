@@ -33,7 +33,9 @@
 // creature-reproduction+16 are taken. POLLINATION CLAIMS +19.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 #include <entt/entity/registry.hpp>
@@ -45,6 +47,7 @@
 #include "../components/PollinationComponents.h"
 #include "../core/DeterministicMath.h" // Sqrt (libm-free / IEEE-deterministic)
 #include "../core/DeterministicRng.h"
+#include "../simulation/DeterministicUniformGrid.h"
 
 #include "RegionConsumerGate.h"
 
@@ -71,9 +74,10 @@ inline constexpr float kPollinationWindReach = 0.5f;
 inline constexpr float kPollinationMutationFrac = 0.05f;
 
 struct PollinationStats {
-    int considered = 0; // plants with the opt-in examined this tick
-    int donors = 0;     // plants that were flowering/fruiting (eligible to donate)
-    int crossed = 0;    // receivers that received pollen this tick
+    int considered = 0;                // plants with the opt-in examined this tick
+    int donors = 0;                    // plants that were flowering/fruiting (eligible to donate)
+    int crossed = 0;                   // receivers that received pollen this tick
+    std::uint64_t candidate_tests = 0; // broad-phase source inspections (or fallback pairs)
 };
 
 // A plant donates pollen only once it has reached a reproductive stage.
@@ -82,27 +86,65 @@ inline bool IsPollenDonor(const Comp::PlantGrowthComponent& g) {
            g.stage == static_cast<std::uint8_t>(Comp::PlantStage::Fruiting);
 }
 
-// Wind-biased effective distance from donor `d` to receiver `r`. `wind_xz` is the
-// wind direction*strength in the XZ plane (need not be normalized). With zero wind
-// this is plain Euclidean XZ distance.
-inline float PollinationEffectiveDistance(const ::Luminumbra::Vec3& d,
-                                          const ::Luminumbra::Vec3& r,
-                                          const ::Luminumbra::Vec2& wind_xz) {
+struct PollinationWind {
+    ::Luminumbra::Vec2 direction{0.0f};
+    bool active = false;
+    bool indexable = true;
+};
+
+inline PollinationWind NormalizePollinationWind(const ::Luminumbra::Vec2& wind_xz) {
+    const float wlen =
+        ::Luminumbra::DeterministicMath::Sqrt(wind_xz.x * wind_xz.x + wind_xz.y * wind_xz.y);
+    if (wlen <= 0.0f) {
+        return {};
+    }
+    // Preserve the original divisions, including exceptional float behaviour.
+    // Subnormal squared lengths can enlarge the normalized vector appreciably;
+    // use the original scan in that domain instead of assuming a unit vector.
+    return {{wind_xz.x / wlen, wind_xz.y / wlen}, true, std::isfinite(wlen) && wlen >= 1.0e-18f};
+}
+
+inline float PollinationDistanceWithWind(const ::Luminumbra::Vec3& d,
+                                         const ::Luminumbra::Vec3& r,
+                                         const PollinationWind& wind) {
     const float dx = r.x - d.x;
     const float dz = r.z - d.z;
     const float dist = ::Luminumbra::DeterministicMath::Sqrt(dx * dx + dz * dz);
 
-    // Project (r - d) onto the wind direction. Normalize the wind with the
-    // deterministic Sqrt; zero wind => zero bias.
-    const float wlen =
-        ::Luminumbra::DeterministicMath::Sqrt(wind_xz.x * wind_xz.x + wind_xz.y * wind_xz.y);
-    if (wlen <= 0.0f)
+    if (!wind.active)
         return dist;
-    const float wx = wind_xz.x / wlen;
-    const float wz = wind_xz.y / wlen;     // wind_xz.y is the Z component
+    const float wx = wind.direction.x;
+    const float wz = wind.direction.y;     // wind_xz.y is the Z component
     const float along = dx * wx + dz * wz; // >0 => receiver is downwind of donor
     float eff = dist - kPollinationWindReach * along;
     return eff < 0.0f ? 0.0f : eff;
+}
+
+// Wind-biased effective distance; unnormalized wind uses the original pair math.
+inline float PollinationEffectiveDistance(const ::Luminumbra::Vec3& d,
+                                          const ::Luminumbra::Vec3& r,
+                                          const ::Luminumbra::Vec2& wind_xz) {
+    return PollinationDistanceWithWind(d, r, NormalizePollinationWind(wind_xz));
+}
+
+struct PollinationSpatialScratch {
+    simulation::DeterministicUniformGrid grid;
+    std::vector<simulation::DeterministicUniformGrid::Point> points;
+    std::vector<entt::entity> donors;
+};
+
+inline bool PollinationGridPoint(const ::Luminumbra::Vec3& position,
+                                 simulation::DeterministicUniformGrid::Point& point) {
+    // A deliberately bounded integer projection. Other float inputs retain the
+    // original scan, including NaNs and subtraction/square overflow behaviour.
+    constexpr float coordinate_limit = 536870912.0f;
+    if (!std::isfinite(position.x) || !std::isfinite(position.z) ||
+        std::abs(position.x) > coordinate_limit || std::abs(position.z) > coordinate_limit) {
+        return false;
+    }
+    point = {static_cast<std::int64_t>(std::floor(position.x)),
+             static_cast<std::int64_t>(std::floor(position.z))};
+    return true;
 }
 
 // Build the pair seed from the SORTED ids so the cross is symmetric/order-independent.
@@ -183,6 +225,42 @@ RunPollinationOnTick(entt::registry& reg,
                          Comp::TransformComponent,
                          Comp::PollinationComponent>();
     const auto ents = CollectPollinationParticipants(reg, gate);
+    if (ents.empty()) {
+        return stats;
+    }
+    auto* scratch_pointer = reg.ctx().find<PollinationSpatialScratch>();
+    if (scratch_pointer == nullptr) {
+        scratch_pointer = &reg.ctx().emplace<PollinationSpatialScratch>();
+    }
+    auto& scratch = *scratch_pointer;
+    scratch.points.clear();
+    scratch.donors.clear();
+    // Scratch is retained by this registry and bounded by admitted participants.
+    scratch.points.reserve(ents.size());
+    scratch.donors.reserve(ents.size());
+    const auto wind = NormalizePollinationWind(wind_xz);
+    bool indexed = wind.indexable;
+    for (const auto entity : ents) {
+        simulation::DeterministicUniformGrid::Point point;
+        indexed =
+            PollinationGridPoint(view.get<Comp::TransformComponent>(entity).position, point) &&
+            indexed;
+        if (IsPollenDonor(view.get<Comp::PlantGrowthComponent>(entity))) {
+            scratch.points.push_back(point);
+            scratch.donors.push_back(entity);
+            ++stats.donors;
+        }
+    }
+    if (scratch.donors.empty()) {
+        for (const auto entity : ents) {
+            (void)entity;
+            ++stats.considered;
+        }
+        return stats;
+    }
+    if (indexed) {
+        scratch.grid.Build(scratch.points, 16);
+    }
 
     //  (read): for each receiver pick its best donor (smallest wind-biased
     // effective distance within reach; ties -> lowest donor id). Snapshot the cross.
@@ -214,16 +292,31 @@ RunPollinationOnTick(entt::registry& reg,
         float best_eff = kPollinationRadius; // strictly within reach to qualify
         bool found = false;
 
-        for (auto d : ents) { // already id-ordered -> deterministic tie-break
+        std::span<const std::size_t> candidates;
+        if (indexed) {
+            simulation::DeterministicUniformGrid::Point center;
+            (void)PollinationGridPoint(r_tf.position, center);
+            // Exact still-air reach is 6; wind expands it to 6/(1-0.5)=12.
+            // One integer metre covers floor projection and float boundary
+            // rounding (normalization's squared length is normal here).
+            static_assert(kPollinationRadius == 6.0f && kPollinationWindReach == 0.5f,
+                          "Update the pollination query extents with the reach constants");
+            const std::int64_t extent = wind.active ? 13 : 7;
+            candidates = scratch.grid.Query({center.x - extent, center.z - extent},
+                                            {center.x + extent, center.z + extent});
+        }
+        const auto count = indexed ? candidates.size() : scratch.donors.size();
+        for (std::size_t candidate = 0; candidate < count; ++candidate) {
+            const auto d = scratch.donors[indexed ? candidates[candidate] : candidate];
+            if (!indexed) {
+                ++stats.candidate_tests;
+            }
             if (d == r)
                 continue;
             const std::uint64_t did = participant_id(d);
-            const auto& d_growth = view.get<Comp::PlantGrowthComponent>(d);
-            if (!IsPollenDonor(d_growth))
-                continue; // only reproductive plants donate
 
             const auto& d_tf = view.get<Comp::TransformComponent>(d);
-            const float eff = PollinationEffectiveDistance(d_tf.position, r_tf.position, wind_xz);
+            const float eff = PollinationDistanceWithWind(d_tf.position, r_tf.position, wind);
             if (eff > kPollinationRadius)
                 continue; // out of (still-air) reach
             // Strictly closer wins; equal effective distance -> lower id (ents order
@@ -248,10 +341,8 @@ RunPollinationOnTick(entt::registry& reg,
         crosses.push_back(c);
     }
 
-    // Count donors for telemetry (independent of whether they pollinated anyone).
-    for (auto d : ents) {
-        if (IsPollenDonor(view.get<Comp::PlantGrowthComponent>(d)))
-            ++stats.donors;
+    if (indexed) {
+        stats.candidate_tests = scratch.grid.CandidateTests();
     }
 
     //  (apply): write the mixed next-generation genome onto each receiver's

@@ -135,7 +135,9 @@ CaptureAuthorityHashes(const WorldStreamingState& state,
                        const std::optional<std::string>& regional_projection = std::nullopt,
                        const std::string& entity_snapshot_json = {},
                        const AuthorityRuntimeHashes& runtime = {},
-                       AuthorityCaptureParts parts = AuthorityCaptureParts::All);
+                       AuthorityCaptureParts parts = AuthorityCaptureParts::All,
+                       AuthoritySubHashMask requested = AuthoritySubHashMask::All,
+                       AuthorityHashWork* work = nullptr);
 
 // Caller-selected participating regions, in canonical (x,z) order with no duplicates.
 // Frozen digests bypass preparation, matching the settled ledger's existing projection.
@@ -158,7 +160,9 @@ CaptureAuthorityHashes(const WorldStreamingState& state,
                        const AuthorityRegionalInputs& regional,
                        const std::string& entity_snapshot_json = {},
                        const AuthorityRuntimeHashes& runtime = {},
-                       AuthorityCaptureParts parts = AuthorityCaptureParts::All);
+                       AuthorityCaptureParts parts = AuthorityCaptureParts::All,
+                       AuthoritySubHashMask requested = AuthoritySubHashMask::All,
+                       AuthorityHashWork* work = nullptr);
 
 // One owner-thread digest operation admits the index once. Durable authority is cached by
 // publication revision and native file versions; live and parked inputs are always projected.

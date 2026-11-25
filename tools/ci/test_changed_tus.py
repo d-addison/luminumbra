@@ -566,6 +566,20 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         with self.assertRaisesRegex(tus.SelectionError, "incomplete selection"):
             self.select([fixture])
 
+    def test_standalone_static_scene_test_uses_excluded_source_full_selection(self):
+        fixture = self.root / "test/static_scene/static_scene_test.cpp"
+        fixture.parent.mkdir(parents=True)
+        fixture.write_text("// standalone tools/static_scene build only\n")
+        selected, report = self.select([fixture])
+        self.assertEqual({entry["file"] for entry in selected}, {self.a, self.b})
+        self.assertTrue(report["full_selection"])
+        self.assertEqual(report["included_sources"], [])
+        # Exemption is exact: a sibling source still needs a database command.
+        sibling = fixture.with_name("static_scene_other_test.cpp")
+        sibling.write_text("// needs a database command\n")
+        with self.assertRaisesRegex(tus.SelectionError, "missing compile database"):
+            self.select([sibling])
+
     def test_native_python_generators_invalidate_selection(self):
         selected, report = self.select([self.root / "tools/config_codegen.py"])
         self.assertEqual(len(selected), 2)

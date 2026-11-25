@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -91,6 +92,24 @@ class ValidateGlbTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, report)
                 self.assertFalse(report["valid"])
                 self.assertIn(rule_id, {finding["rule_id"] for finding in report["findings"]})
+                self.assert_report_shape(report)
+
+    def test_inverse_bind_float_normalization_flag(self) -> None:
+        fixture = runpy.run_path(str(FIXTURE_GENERATOR))
+        for normalized in (False, True):
+            with self.subTest(normalized=normalized):
+                document, binary = fixture["make_document"](skinned=True)
+                accessor = document["skins"][0]["inverseBindMatrices"]
+                document["accessors"][accessor]["normalized"] = normalized
+                path = self.fixture_dir / "inverse_bind_flag.glb"
+                fixture["write_glb"](path, document, binary)
+                result, report = self.validate(path.name)
+                self.assertEqual(result.returncode, 1 if normalized else 0, report)
+                self.assertEqual(report["valid"], not normalized)
+                self.assertEqual(
+                    [finding["rule_id"] for finding in report["findings"]],
+                    ["skin.inverse_bind"] if normalized else [],
+                )
                 self.assert_report_shape(report)
 
     def test_usage_error(self) -> None:

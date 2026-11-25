@@ -1,24 +1,65 @@
 #version 450 core
-// One bounded scan of at most 512 * 128 group counts. No candidate records or
-// atomics: capped membership and output order are independent of scheduling.
-layout(local_size_x = 1) in;
+// At most 512 * 128 group counts: 256 blocks of 256 lanes, then one
+// block-sum scan and an add pass. Integer sums preserve stable capped order.
+layout(local_size_x = 256) in;
 layout(std430, binding = 3) buffer BladeCount {
     uint accepted_count; uint vertex_count; uint instance_count;
     uint first_vertex; uint base_instance;
 };
 layout(std430, binding = 5) readonly buffer GroupCounts { uint counts[]; };
-layout(std430, binding = 6) writeonly buffer GroupOffsets { uint offsets[]; };
+layout(std430, binding = 6) buffer GroupOffsets { uint offsets[]; };
+// Fixed scratch bound: 256 block sums followed by 256 exclusive block bases.
+layout(std430, binding = 7) buffer BlockScan { uint sums[256]; uint bases[256]; };
+#ifdef PREFIX_MEASURE_WORK
+layout(std430, binding = 4) buffer ScanWork { uint max_additions[3]; };
+#endif
 uniform uint u_group_count;
 uniform uint u_max_instances;
+uniform uint u_pass;
+shared uint scan[256];
 void main() {
-    uint total = 0u;
-    for (uint group = 0u; group < u_group_count; ++group) {
-        offsets[group] = total;
-        total += counts[group];
+    uint lane = gl_LocalInvocationID.x;
+    uint group = gl_GlobalInvocationID.x;
+    uint block_count = (u_group_count + 255u) / 256u;
+    uint additions = 0u;
+    if (u_pass == 2u) {
+        if (group < u_group_count) {
+            offsets[group] += bases[gl_WorkGroupID.x];
+            additions = 1u;
+        }
+    } else {
+        uint value = 0u;
+        if (u_pass == 0u) {
+            if (group < u_group_count) value = counts[group];
+        } else {
+            if (lane < block_count) value = sums[lane];
+        }
+        scan[lane] = value;
+        barrier();
+        // Every lane, including padded lanes, reaches every shared-memory barrier.
+        for (uint step = 1u; step < 256u; step *= 2u) {
+            uint addend = lane >= step ? scan[lane - step] : 0u;
+            barrier();
+            scan[lane] += addend;
+            ++additions;
+            barrier();
+        }
+        if (u_pass == 0u) {
+            if (group < u_group_count) offsets[group] = scan[lane] - value;
+            if (lane == 255u) sums[gl_WorkGroupID.x] = scan[lane];
+        } else {
+            bases[lane] = scan[lane] - value;
+            if (lane == 255u) {
+                uint total = scan[lane];
+                accepted_count = total;
+                vertex_count = 12u;
+                instance_count = min(total, u_max_instances);
+                first_vertex = 0u;
+                base_instance = 0u;
+            }
+        }
     }
-    accepted_count = total;
-    vertex_count = 12u;
-    instance_count = min(total, u_max_instances);
-    first_vertex = 0u;
-    base_instance = 0u;
+#ifdef PREFIX_MEASURE_WORK
+    atomicMax(max_additions[u_pass], additions);
+#endif
 }

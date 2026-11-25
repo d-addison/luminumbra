@@ -605,10 +605,15 @@ void FoliagePass::init_compute(const std::filesystem::path& root_path) {
     m_prefix_uniforms = {
         .group_count = glGetUniformLocation(m_prefix_prog, "u_group_count"),
         .max_instances = glGetUniformLocation(m_prefix_prog, "u_max_instances"),
+        .pass = glGetUniformLocation(m_prefix_prog, "u_pass"),
     };
     PassGl::label_gl_object(GL_PROGRAM, m_compute_prog, "shader.grass_scatter");
     glGenBuffers(1, &m_group_counts_ssbo);
     glGenBuffers(1, &m_group_offsets_ssbo);
+    glGenBuffers(1, &m_block_scan_ssbo);
+    // Fixed bound: 256 block sums and 256 exclusive block bases.
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_block_scan_ssbo);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, 512 * sizeof(GLuint), nullptr, GL_DYNAMIC_DRAW);
 
     glGenBuffers(1, &m_chunk_ssbo);
     glGenBuffers(1, &m_surf_ssbo);
@@ -685,7 +690,8 @@ void FoliagePass::destroy_compute() {
                      m_count_ssbo,
                      m_arch_ssbo,
                      m_group_counts_ssbo,
-                     m_group_offsets_ssbo};
+                     m_group_offsets_ssbo,
+                     m_block_scan_ssbo};
     for (GLuint& b : bufs) {
         if (b)
             glDeleteBuffers(1, &b);
@@ -696,7 +702,7 @@ void FoliagePass::destroy_compute() {
     // (so the ring's destructor shutdown is a safe no-op even if FoliagePass is
     // destroyed after the GL context is gone).
     m_readback_ring.shutdown();
-    m_group_counts_ssbo = m_group_offsets_ssbo = 0;
+    m_group_counts_ssbo = m_group_offsets_ssbo = m_block_scan_ssbo = 0;
     m_gpu_scatter = false;
     m_gpu_generated_count.reset();
     m_gpu_count_generation = 0;
@@ -1863,11 +1869,20 @@ void FoliagePass::dispatch_scatter() {
     m_scatter_gpu_timers[0].end();
     m_scatter_gpu_timers[1].begin();
     Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_prefix_prog);
-    glUniform1ui(m_prefix_uniforms.group_count,
-                 groups_x * static_cast<GLuint>(m_uploaded_chunk_count));
+    const GLuint group_count = groups_x * static_cast<GLuint>(m_uploaded_chunk_count);
+    constexpr GLuint scan_width = 256;
+    static_assert(kMaxGpuChunks * groups_x <= scan_width * scan_width);
+    const GLuint block_count = (group_count + scan_width - 1) / scan_width;
+    glUniform1ui(m_prefix_uniforms.group_count, group_count);
     glUniform1ui(m_prefix_uniforms.max_instances, kMaxInstances);
-    Luminumbra::Rendering::AttributedGl::Submit(glDispatchCompute, 1u, 1u, 1u);
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, m_block_scan_ssbo);
+    for (GLuint pass = 0; pass < 3; ++pass) {
+        glUniform1ui(m_prefix_uniforms.pass, pass);
+        Luminumbra::Rendering::AttributedGl::Submit(
+            glDispatchCompute, pass == 1 ? 1u : block_count, 1u, 1u);
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    }
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, m_chunk_ssbo);
     m_scatter_gpu_timers[1].end();
     m_scatter_gpu_timers[2].begin();
     Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_compute_prog);

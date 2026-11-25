@@ -19,6 +19,7 @@
 #include "core/FilesystemPath.h"
 #include "core/Log.h"
 #include "core/NativeFileOwner.h"
+#include "game/WorldClockAuthorityAdapter.h"
 #include "luminumbra/core/Types.h"
 #include "world/ActiveRegionLedger.h"
 #include "world/Chunk.h"
@@ -3923,7 +3924,7 @@ std::string CheckMetadataValue(const nlohmann::json& metadata,
         std::string error;
         std::optional<Vec3> anchor;
         std::optional<world::WorldCalendar> render_calendar;
-        if (!world::WorldClock::from_metadata(metadata, clock, error) ||
+        if (!Game::WorldClockAuthorityAdapter::ReadMetadata(metadata, clock, error) ||
             !ReadAmbientAnchor(metadata, anchor, error) ||
             !world::WorldClock::read_render_calendar(metadata, render_calendar, error))
             return error;
@@ -4586,14 +4587,14 @@ bool WorldSaveService::admit_metadata_bytes(const std::string& bytes,
         std::string error;
         std::optional<Vec3> anchor;
         std::optional<world::WorldCalendar> calendar;
-        if (!world::WorldClock::from_metadata(metadata, clock, error) ||
+        if (!Game::WorldClockAuthorityAdapter::ReadMetadata(metadata, clock, error) ||
             !ReadAmbientAnchor(metadata, anchor, error) ||
             !world::WorldClock::read_render_calendar(metadata, calendar, error)) {
             AddError(errors, error);
             return false;
         }
         if (has_clock)
-            clock.write_metadata(metadata);
+            Game::WorldClockAuthorityAdapter::WriteMetadata(clock, metadata);
         if (calendar)
             metadata["renderCalendar"] = world::WorldClock(0, *calendar).calendar_metadata();
         std::string normalized;
@@ -4762,7 +4763,7 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
     std::optional<Vec3> ambient_anchor;
     const bool has_render_calendar = metadata.contains("renderCalendar");
     if ((has_clock || has_render_calendar) &&
-        (!world::WorldClock::from_metadata(metadata, clock, clock_error) ||
+        (!Game::WorldClockAuthorityAdapter::ReadMetadata(metadata, clock, clock_error) ||
          !ReadAmbientAnchor(metadata, ambient_anchor, clock_error))) {
         AddError(errors, clock_error);
         return false;
@@ -4788,7 +4789,7 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
     }
     // Explicit writes normalize supported calendar encodings; reads never rewrite.
     if (has_clock)
-        clock.write_metadata(metadata);
+        Game::WorldClockAuthorityAdapter::WriteMetadata(clock, metadata);
     if (has_render_calendar) {
         std::optional<world::WorldCalendar> calendar;
         if (!world::WorldClock::read_render_calendar(metadata, calendar, clock_error)) {
@@ -4871,7 +4872,7 @@ bool WorldSaveService::save_metadata_active_regions_and_ground_objects(
     {
         world::WorldClock clock;
         std::string clock_error;
-        if (!world::WorldClock::from_metadata(
+        if (!Game::WorldClockAuthorityAdapter::ReadMetadata(
                 nlohmann::json::parse(bytes, nullptr, false), clock, clock_error)) {
             AddError(errors, clock_error);
             return false;
@@ -4909,7 +4910,7 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
     world::WorldClock clock;
     std::optional<Vec3> ambient_anchor;
     std::string error;
-    if (!world::WorldClock::from_metadata(metadata, clock, error) ||
+    if (!Game::WorldClockAuthorityAdapter::ReadMetadata(metadata, clock, error) ||
         !ReadAmbientAnchor(metadata, ambient_anchor, error)) {
         AddError(errors, error);
         return false;
@@ -5076,7 +5077,7 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
         }
         std::string error;
         std::optional<Vec3> anchor;
-        if (!world::WorldClock::from_metadata(metadata, clock, error) ||
+        if (!Game::WorldClockAuthorityAdapter::ReadMetadata(metadata, clock, error) ||
             !ReadAmbientAnchor(metadata, anchor, error)) {
             AddError(errors, error);
             return false;
@@ -6115,7 +6116,12 @@ AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
                                               const std::optional<std::string>& regional_projection,
                                               const std::string& entity_snapshot_json,
                                               const AuthorityRuntimeHashes& runtime,
-                                              AuthorityCaptureParts parts) try {
+                                              AuthorityCaptureParts parts,
+                                              AuthoritySubHashMask requested,
+                                              AuthorityHashWork* work) try {
+    if (!IsValidSubHashMask(requested)) {
+        return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+    }
     if (!water_sim_cursor.has_value()) {
         return {AuthorityCaptureStatus::MissingCursor, std::nullopt};
     }
@@ -6134,20 +6140,29 @@ AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
     }
     const auto cursor = water_sim_cursor.value();
     const std::string streamed =
-        want_streamed ? ComputeWorldStreamingStateHash(state, cursor) : std::string();
+        want_streamed ? ComputeWorldStreamingStateHash(state, cursor, work) : std::string();
     const std::string chunk =
         want_chunk ? (regional_projection ? StableChecksum(*regional_projection) : streamed)
                    : std::string();
     WorldStreamingStateSubHashes sub;
     if (want_sub) {
-        sub = ComputeWorldStreamingStateSubHashes(state, cursor);
-        if (!entity_snapshot_json.empty()) {
+        sub = ComputeWorldStreamingStateSubHashes(state, cursor, requested, work);
+        if (RequestsSubHash(requested, AuthoritySubHashMask::Entities) &&
+            !entity_snapshot_json.empty()) {
             sub.entities = StableChecksum(entity_snapshot_json);
         }
-        sub.wind = runtime.wind;
-        sub.weather = runtime.weather;
-        sub.aether = runtime.aether;
-        sub.aether_state = runtime.aether_state;
+        if (RequestsSubHash(requested, AuthoritySubHashMask::Wind)) {
+            sub.wind = runtime.wind;
+        }
+        if (RequestsSubHash(requested, AuthoritySubHashMask::Weather)) {
+            sub.weather = runtime.weather;
+        }
+        if (RequestsSubHash(requested, AuthoritySubHashMask::Aether)) {
+            sub.aether = runtime.aether;
+        }
+        if (RequestsSubHash(requested, AuthoritySubHashMask::AetherState)) {
+            sub.aether_state = runtime.aether_state;
+        }
     }
     return {AuthorityCaptureStatus::Ready,
             AuthorityHashCapture{streamed,
@@ -6170,13 +6185,24 @@ AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
                                               const AuthorityRegionalInputs& regional,
                                               const std::string& entity_snapshot_json,
                                               const AuthorityRuntimeHashes& runtime,
-                                              AuthorityCaptureParts parts) try {
+                                              AuthorityCaptureParts parts,
+                                              AuthoritySubHashMask requested,
+                                              AuthorityHashWork* work) try {
+    if (!IsValidSubHashMask(requested)) {
+        return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+    }
     if (!water_sim_cursor.has_value()) {
         return {AuthorityCaptureStatus::MissingCursor, std::nullopt};
     }
     if (!NeedsRegionalAuthority(parts)) {
-        return CaptureAuthorityHashes(
-            state, water_sim_cursor, std::nullopt, entity_snapshot_json, runtime, parts);
+        return CaptureAuthorityHashes(state,
+                                      water_sim_cursor,
+                                      std::nullopt,
+                                      entity_snapshot_json,
+                                      runtime,
+                                      parts,
+                                      requested,
+                                      work);
     }
     if (HasIncompleteAuthority(state.snapshot_chunks())) {
         return {AuthorityCaptureStatus::IncompleteOwner, std::nullopt};
@@ -6230,7 +6256,9 @@ AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
                                   std::optional{std::move(projection)},
                                   entity_snapshot_json,
                                   runtime,
-                                  parts);
+                                  parts,
+                                  requested,
+                                  work);
 } catch (const std::exception&) {
     return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
 }
@@ -7524,7 +7552,7 @@ bool WorldSaveService::member_digest_cancellable(const std::filesystem::path& sa
                 world::ActiveRegionLedger ledger;
                 world::WorldClock clock;
                 if (load_active_regions(ledger, save_dir, &diagnostics) &&
-                    world::WorldClock::from_metadata(document, clock, error) &&
+                    Game::WorldClockAuthorityAdapter::ReadMetadata(document, clock, error) &&
                     ledger.header_tick() > clock.tick()) {
                     error = world::ActiveRegionLedger::kCorruptMessage;
                     return false;

@@ -1,15 +1,10 @@
 #pragma once
 
-#include <cstdint>
+#include "app/UiInputService.h"
+
 #include <set>
 
 namespace Luminumbra::Client::App {
-enum class InputOwner {
-    Gameplay,
-    Developer,
-    RmlUi,
-    Unfocused
-};
 enum class KeyRoute {
     Capture,
     ConsoleToggle,
@@ -36,6 +31,10 @@ struct UiInputOwnership {
 // No window/UI dependencies: the host updates explicit ownership within each event batch.
 class UiInputRouter {
 public:
+    UiInputRouter();
+    // Reserves two registrations for the legacy host and console. External scoped
+    // contexts must be destroyed before this router.
+    UiInputService& Contexts();
     bool SetOwnership(UiInputOwnership ownership);
     InputOwner Owner() const;
     KeyRoute Key(int key, int action, bool console_toggle, bool developer_shortcut);
@@ -50,10 +49,11 @@ public:
 
 private:
     UiInputOwnership m_ownership;
-    std::set<int> m_held;
-    std::set<int> m_quarantined;
+    UiInputService m_contexts;
+    ScopedInputContext m_legacyContext;
+    ScopedInputContext m_consoleContext;
     std::set<int> m_consumedShortcutKeys;
-    std::uint64_t m_revision = 0;
+    std::uint64_t m_seenRevision = 0;
     bool m_suppressCharacter = false;
 };
 } // namespace Luminumbra::Client::App

@@ -276,7 +276,7 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         writer = (PERSISTENCE / "WorldSaveService.cpp").read_text(encoding="utf-8")
         metadata = body(writer, "bool WorldSaveService::save_metadata(")
         self.assertIn("const SaveGuard guard;", metadata)
-        self.assertIn("clock.write_metadata(metadata);", metadata)
+        self.assertIn("Game::WorldClockAuthorityAdapter::WriteMetadata(clock, metadata);", metadata)
         self.assertIn('metadata["renderCalendar"] = world::WorldClock(0, *calendar).calendar_metadata();',
                       metadata)
         self.assertRegex(metadata, r"WriteDurableRegionTemp\(destination, output_bytes, temp, errors, artifacts\)")

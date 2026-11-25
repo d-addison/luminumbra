@@ -7199,7 +7199,8 @@ bool SHIELD_WorldSystem::capture_resident_chunk_ids(std::vector<ChunkID>& ids,
     return true;
 }
 
-void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coords) {
+void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coords,
+                                                         bool terrain_changed) {
     const auto floor_div = [](int value, int divisor) {
         const int quotient = value / divisor;
         const int remainder = value % divisor;
@@ -7231,6 +7232,10 @@ void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coor
     // Recursive ownership permits notification inside an existing session save;
     // no jobs are dispatched or awaited while these locks are held.
     const Persistence::WorldSaveService::SaveOwnership ownership;
+    const auto terrain_revision = m_terrain_edit_revision.load(std::memory_order_relaxed);
+    if (terrain_changed && terrain_revision != std::numeric_limits<u64>::max()) {
+        m_terrain_edit_revision.store(terrain_revision + 1u, std::memory_order_release);
+    }
     const u64 revision = m_far_lod_authority_revision.fetch_add(1u, std::memory_order_acq_rel) + 1u;
     LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>,
                        lock,
@@ -8359,7 +8364,7 @@ void SHIELD_WorldSystem::sync_water_authority() {
             return;
         }
         if (chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited) {
-            bump_far_lod_authority_revision(chunk->get_coords());
+            bump_far_lod_authority_revision(chunk->get_coords(), false);
         }
         chunk->set_water_authority();
         chunk->mark_water_data_dirty();

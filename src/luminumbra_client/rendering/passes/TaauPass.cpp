@@ -76,7 +76,7 @@ bool TaauPass::prepare_replay(RenderResourceRegistry& registry) {
         static_cast<std::size_t>(history->width) >
             std::numeric_limits<std::size_t>::max() / history->height / 8u)
         return false;
-    // One output-sized RGBA16F texture (8 bytes/texel), reused until resize.
+    // One output-sized RGBA16F texture (8 bytes/texel), retained only during replay.
     auto replay = *history;
     replay.debug_label = "taau.replay_output";
     // Null storage data must not be interpreted as an offset into a caller's PBO.
@@ -85,7 +85,19 @@ bool TaauPass::prepare_replay(RenderResourceRegistry& registry) {
     return replay_available();
 }
 
+void TaauPass::release_replay(RenderResourceRegistry& registry) {
+    if (!m_replay_output)
+        return;
+    // Deletion alone can retain storage on an unbound framebuffer attachment.
+    // A prepared but undispatched replay has not instantiated its FBO yet.
+    if (glIsFramebuffer(m_replay_fbo))
+        glNamedFramebufferTexture(m_replay_fbo, GL_COLOR_ATTACHMENT0, 0, 0);
+    registry.destroy_owned("taau_replay_output");
+    m_replay_output = 0;
+}
+
 void TaauPass::destroy(RenderResourceRegistry& registry) {
+    release_replay(registry);
     if (m_fbo) {
         glDeleteFramebuffers(1, &m_fbo);
         m_fbo = 0;
@@ -97,8 +109,6 @@ void TaauPass::destroy(RenderResourceRegistry& registry) {
     // The history textures are registry-owned.
     registry.destroy_owned("taau_history_0");
     registry.destroy_owned("taau_history_1");
-    registry.destroy_owned("taau_replay_output");
-    m_replay_output = 0;
     m_history[0] = 0;
     m_history[1] = 0;
     m_history_valid = false;

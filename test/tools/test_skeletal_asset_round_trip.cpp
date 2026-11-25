@@ -746,3 +746,91 @@ TEST(SkeletalSceneImport, RefusesMultipleActiveSkinsBeforeOutput) {
     EXPECT_FALSE(process_gltf_checked(source.string(), output.string()));
     EXPECT_FALSE(std::filesystem::exists(output));
 }
+
+TEST(SkinImportQualification, ImportedPoseChecksumsAndMalformedRigRefusal) {
+    using namespace luminumbra::animation;
+    struct Case {
+        const char* mode;
+        AnimInterpolation interpolation;
+        float duration;
+        std::array<float, 7> translations;
+        uint64_t checksum;
+    };
+    const std::array<Case, 3> cases = {{
+        {"STEP", AnimInterpolation::Step, 1, {0, 0, 0, 0, 0, 0.25f, 0.25f}, 420054656908606632ull},
+        {"LINEAR",
+         AnimInterpolation::Linear,
+         1,
+         {0, 0, 0.0625f, 0.125f, 0.1875f, 0.25f, 0.25f},
+         549896588770089375ull},
+        {"CUBICSPLINE",
+         AnimInterpolation::CubicSpline,
+         2,
+         {0, 0, 0.3203125f, 0.375f, 0.3046875f, 0.25f, 0.25f},
+         9290243922556326714ull},
+    }};
+    constexpr std::array<float, 7> phases = {-1, 0, 0.25f, 0.5f, 0.75f, 1, 2};
+    for (const auto& sample : cases) {
+        SCOPED_TRACE(sample.mode);
+        const TempDirectory temp;
+        const auto source = temp.path() / "rig.gltf";
+        const auto output = temp.path() / "rig.lmesh";
+        const auto animation = temp.path() / "rig.wiggle.lanim";
+        std::vector<char> expectedMesh;
+        std::vector<char> expectedClip;
+        for (const bool childFirst : {false, true}) {
+            SCOPED_TRACE(childFirst);
+            WriteRiggedTriangleGltf(source, childFirst, sample.mode);
+            // Isolate exact dyadic translation samples; quaternion accuracy and
+            // its fixed-key checksum have separate runtime coverage.
+            ASSERT_TRUE(ChangeRig(
+                source, R"({"sampler": 0, "target": {"node": 1, "path": "rotation"}},)", ""));
+            ASSERT_TRUE(process_gltf_checked(source.string(), output.string()));
+            if (!childFirst) {
+                expectedMesh = ReadAllBytes(output);
+                expectedClip = ReadAllBytes(animation);
+            }
+            ASSERT_FALSE(expectedMesh.empty());
+            ASSERT_FALSE(expectedClip.empty());
+            EXPECT_EQ(ReadAllBytes(output), expectedMesh);
+            EXPECT_EQ(ReadAllBytes(animation), expectedClip);
+            SkinnedMeshAsset mesh;
+            AnimClipAsset clip;
+            ASSERT_TRUE(LoadSkinnedMeshAsset(output.string(), mesh));
+            ASSERT_TRUE(LoadAnimClipAsset(animation.string(), clip));
+            ASSERT_EQ(mesh.joints.size(), 2u);
+            ASSERT_EQ(clip.tracks.size(), 1u);
+            EXPECT_EQ(clip.header.version, 2u);
+            EXPECT_EQ(clip.tracks[0].interpolation, sample.interpolation);
+            EXPECT_FLOAT_EQ(clip.header.duration, sample.duration);
+            const auto skeleton = BuildSkeleton(mesh);
+            const auto runtime = BuildClip(clip);
+            uint64_t checksum = 14695981039346656037ull;
+            for (size_t i = 0; i < phases.size(); ++i) {
+                const auto pose = SamplePose(skeleton, runtime, phases[i] * sample.duration);
+                Pose expected;
+                expected.joints.resize(2);
+                expected.joints[0].translation[1] = sample.translations[i];
+                expected.joints[1].translation[1] = 1;
+                EXPECT_EQ(PoseChecksum(pose), PoseChecksum(expected));
+                checksum = PoseChecksum(pose, checksum);
+            }
+            EXPECT_EQ(checksum, sample.checksum);
+            ASSERT_TRUE(ChangeRig(source,
+                                  R"("bufferView": 6, "componentType": 5126)",
+                                  R"("bufferView": 6, "componentType": 5126, "normalized": true)"));
+            const auto freshOutput = temp.path() / "refused.lmesh";
+            const auto freshClip = temp.path() / "refused.wiggle.lanim";
+            EXPECT_FALSE(process_gltf_checked(source.string(), freshOutput.string()));
+            EXPECT_FALSE(std::filesystem::exists(freshOutput));
+            EXPECT_FALSE(std::filesystem::exists(freshClip));
+            EXPECT_FALSE(process_gltf_checked(source.string(), output.string()));
+            EXPECT_EQ(ReadAllBytes(output), expectedMesh);
+            EXPECT_EQ(ReadAllBytes(animation), expectedClip);
+            ASSERT_TRUE(ChangeRig(source, R"("normalized": true)", R"("normalized": false)"));
+            ASSERT_TRUE(process_gltf_checked(source.string(), output.string()));
+            EXPECT_EQ(ReadAllBytes(output), expectedMesh);
+            EXPECT_EQ(ReadAllBytes(animation), expectedClip);
+        }
+    }
+}
