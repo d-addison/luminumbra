@@ -8945,6 +8945,7 @@ TEST(RenderSmokeTest, RemainingPassLayoutsControlDrawSubmission) {
                 check_execute(pass);
                 EXPECT_EQ(pass.history_valid(), !rejects);
                 const auto history = pass.history_state();
+                ASSERT_TRUE(pass.prepare_replay(targets.registry));
                 LayoutDrawCapture draws;
                 pass.execute(targets.ctx, &history);
                 EXPECT_EQ(LayoutDrawCapture::Current().count, rejects ? 0u : 1u);

@@ -10,6 +10,8 @@
 #include "rendering/passes/LightingPass.h"
 #include "rendering/passes/PassGlHelpers.h"
 #include <glad/glad.h>
+#include <glm/gtc/packing.hpp>
+#include <glm/vec2.hpp>
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -797,8 +799,16 @@ void CheckShadowFetchEquivalence(const std::array<GLuint, 9>& textures,
                     }
                     const auto actual = draw(normal, Pass::None, GL_COLOR_ATTACHMENT0, light);
                     const auto expected = draw(scalar, Pass::None, GL_COLOR_ATTACHMENT0, light);
-                    EXPECT_EQ((std::bit_cast<std::array<std::uint32_t, 4>>(actual)),
-                              (std::bit_cast<std::array<std::uint32_t, 4>>(expected)));
+                    // The shipping shader and the scalar reference are separate programs, so
+                    // GLSL does not make their float32 results bit-identical (llvmpipe differs by
+                    // a few ULPs between compiles). The lighting target stores RGBA16F, so compare
+                    // the bits that the shipping pass actually writes.
+                    const auto stored = [](const std::array<float, 4>& color) {
+                        return std::array<std::uint32_t, 2>{
+                            glm::packHalf2x16(glm::vec2(color[0], color[1])),
+                            glm::packHalf2x16(glm::vec2(color[2], color[3]))};
+                    };
+                    EXPECT_EQ(stored(actual), stored(expected));
                 }
             }
         }
