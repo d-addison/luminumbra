@@ -380,15 +380,16 @@ protected:
         const std::array<std::string_view, 4> outputs{
             "out VS_OUT { vec3 world_pos; vec3 world_normal; } v;",
             "out vec3 FragPos; out vec3 Normal;",
-            "out VS_OUT { vec2 texCoord; vec4 color; flat float atlasLayer; float "
-            "distanceToCamera; "
+            "out VS_OUT { vec2 texCoord; vec4 color; flat float atlasLayer; flat uint ambientMote; "
+            "float distanceToCamera; "
             "float viewDepth; vec3 worldPos; flat float streakAspect; } v;",
             "out VS_OUT { vec2 texCoord; vec4 color; float fade; float heightT; vec3 worldPos; "
             "vec3 worldNormal; } v;"};
         const std::array<std::string_view, 4> assignments{
             "v.world_pos=vec3(0,1,0); v.world_normal=vec3(0,1,0);",
             "FragPos=vec3(0,0.5,0); Normal=vec3(0,0,1);",
-            "v.texCoord=vec2(0.5); v.color=vec4(1); v.atlasLayer=0; v.distanceToCamera=1; "
+            "v.texCoord=vec2(0.5); v.color=vec4(1); v.atlasLayer=0; v.ambientMote=0u; "
+            "v.distanceToCamera=1; "
             "v.viewDepth=1; v.worldPos=vec3(0); v.streakAspect=1;",
             "v.texCoord=vec2(0.5); v.color=vec4(1); v.fade=1; v.heightT=0.5; "
             "v.worldPos=vec3(0); v.worldNormal=vec3(0,1,0);"};

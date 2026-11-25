@@ -393,6 +393,7 @@ TEST(WorldDurableResidency, ClientRefusalGatesDueAndPressureSaves) {
             input.close();
             Luminumbra::world::WorldClock(9000).write_metadata(metadata);
             auto ledger = fx.session->GetActiveRegionLedger();
+            ledger.restore_clock(Luminumbra::world::WorldClock(9000));
             ASSERT_TRUE(Luminumbra::Persistence::WorldSaveService::save_metadata_and_active_regions(
                 metadata.dump(), ledger, fx.session->GetWorldSaveDir()));
             ASSERT_TRUE(fx.session->LoadWorldState());

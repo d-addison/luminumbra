@@ -1960,7 +1960,8 @@ TEST(FieldPageStateTest, DenseScentBatchPreservesBytesAcrossEraseInsertAndMoving
             for (int x = -8 - tick; x < 8 - tick; ++x) {
                 ScentCell value{};
                 if ((x + z + tick) % 3 != 0)
-                    value[tick % 4] = std::bit_cast<std::uint64_t>(1.0 + tick);
+                    value[static_cast<std::size_t>(tick % 4)] =
+                        std::bit_cast<std::uint64_t>(1.0 + tick);
                 updates.emplace_back(ScentCellKey{x, z}, value);
                 ASSERT_TRUE(reference.set_scent({x, z}, value));
             }

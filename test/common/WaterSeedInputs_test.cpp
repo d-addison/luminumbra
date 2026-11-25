@@ -1000,6 +1000,15 @@ TEST(WaterSeedInputs, WorldSurfaceProbesAndPersistenceKeepWideSurface) {
     chunk.water_edge_flux.assign(512, std::numeric_limits<std::int32_t>::min());
     chunk.sdf_data.resize(17u * 17u * 17u);
     const float surface = static_cast<float>(std::int64_t{2} * kMax) / 1000.0f;
+    // Diagnostics require editable terrain at the bed, independently of the
+    // Y=0 water owner (issue #478). Keep the wide-surface arithmetic exercised.
+    EXPECT_EQ(fixture.world().debug_deepest_water_pos(nullptr), Vec3(0));
+    auto terrain = std::make_shared<Chunk>(IVec3(
+        chunk.get_coords().x,
+        SHIELD_WorldSystem::world_to_chunk_coords(Vec3(0, static_cast<float>(kMax) / 1000.0f, 0)).y,
+        chunk.get_coords().z));
+    terrain->sdf_data.assign(17u * 17u * 17u, 1.0f);
+    ASSERT_TRUE(fixture.world().adopt_streamed_chunk(terrain));
     EXPECT_FLOAT_EQ(fixture.world().debug_deepest_water_pos(nullptr).y, surface);
     Vec3 water_pos(0);
     float land_x = 0, land_z = 0, water_surface = 0, bank_height = 0;

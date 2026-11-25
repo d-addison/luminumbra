@@ -1409,6 +1409,10 @@ public:
         std::optional<std::string> preset_json_override;
         int surface_radius = 12;
         int collision_radius = 4;
+        // Test harness only: cap ongoing streaming as well as the initial horizon.
+        // Zero preserves normal residency. The client must use the same cap before
+        // initial preparation; this diagnostic is not part of the replay format.
+        int test_streaming_radius_cap = 0;
     };
 
     NetworkedSessionDriver();

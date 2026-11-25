@@ -270,7 +270,7 @@ void CheckSolverAllocations(bool diffuse, bool gated, bool advect) {
         std::size_t scalar_calls = 0;
         if (diffuse) {
             const AllocationScope scope;
-            (void)scalar.diffuse(iterations, 0.125);
+            scalar.advance(iterations, 0.125);
             scalar_calls = scope.calls();
         }
         std::size_t calls = 0;
@@ -279,8 +279,8 @@ void CheckSolverAllocations(bool diffuse, bool gated, bool advect) {
             field.Step(0.125, iterations, 0.05, wind_x, wind_z, participants, exchange);
             calls = scope.calls();
         }
-        // The scalar solver still allocates its report and iteration buffers. Scent's
-        // advection and smoothing snapshots add no requests beyond that public baseline.
+        // Issue #242 advances scent without allocating a diagnostic report. Compare
+        // the same scalar path; advection and smoothing add no snapshot allocations.
         EXPECT_EQ(calls, static_cast<std::size_t>(field.channels()) * scalar_calls);
         if (gated) {
             EXPECT_DOUBLE_EQ(field.Sample(0, 6, 2), 0.0);

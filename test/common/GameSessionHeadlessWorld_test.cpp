@@ -20204,7 +20204,7 @@ TEST(GameSessionHeadlessWorldTest, EnergyWriteFailureRefusesBothRegionModesAndDi
             ASSERT_NE(energy, nullptr);
             energy->SetAnchorCell(0, 0);
             energy->QueueDeposit(1, 0, 0, 0, 60000);
-            energy->Tick(0);
+            ASSERT_NO_FATAL_FAILURE(ApplySnapshotTestEnergy(session, 0));
             ASSERT_GT(energy->page_count(), 0u);
             if (dirty) {
                 const auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
@@ -20342,13 +20342,19 @@ TEST(GameSessionHeadlessWorldTest, InvalidEnergyRecordsRefuseBothLoadEntriesAndD
         ASSERT_TRUE(source.SaveWorldState());
         const auto save = source.GetWorldSaveDir();
         const auto payload = save / "aether_state.efs";
+        const std::string diagnostic =
+            active_regions
+                ? "Corrupt regional energy record: expected EFS1 cadence offset 0 with matching "
+                  "ARL energy ages."
+                : "Saved-input admission refused: malformed energy record or compatibility limit "
+                  "(16 channels, 8192 pages, 360218644 bytes).";
         for (const char* record : {"",
                                    "broken",
                                    "EFS1",
                                    "EFS1 +",
-                                   "EFS1 2 0\n",
+                                   "EFS1 2 9\n",
                                    "EFS1 2 8\nP 0\n",
-                                   "EFS1 1 8\n",
+                                   "EFS1 0 8\n",
                                    "EFS1 2147483647 8\nP 0 0\n"}) {
             SCOPED_TRACE(record);
             std::ofstream(payload, std::ios::binary | std::ios::trunc) << record;
@@ -20363,13 +20369,23 @@ TEST(GameSessionHeadlessWorldTest, InvalidEnergyRecordsRefuseBothLoadEntriesAndD
                 if (full_open) {
                     EXPECT_FALSE(loaded.LoadWorld(source.GetMetadata().worldId));
                 } else {
-                    ASSERT_TRUE(loaded.CreateTransientWorld("Energy reload", "1337", "default"));
+                    ASSERT_TRUE(loaded.CreateWorld("Energy reload", "1337", "default"));
                     EXPECT_FALSE(loaded.LoadWorldStateFrom(save));
                 }
-                EXPECT_EQ(loaded.GetWorldOpenError(), "Corrupt or unreadable aether state record.");
-                EXPECT_TRUE(loaded.GetWorldSystem()->snapshot_streamed_chunks().empty());
+                EXPECT_EQ(loaded.GetWorldOpenError(), diagnostic);
                 EXPECT_TRUE(loaded.GetRegistry().view<C::PlantTag>().empty());
-                EXPECT_FALSE(loaded.SaveWorldStateTo(save));
+                // Preparation refusal never adopts a world. A replacement refusal
+                // preserves the already usable session (issue #1056).
+                if (full_open) {
+                    EXPECT_EQ(loaded.GetWorldSystem(), nullptr);
+                    EXPECT_FALSE(loaded.SaveWorldStateTo(save));
+                } else {
+                    ASSERT_NE(loaded.GetWorldSystem(), nullptr);
+                    EXPECT_TRUE(loaded.GetWorldSystem()->snapshot_streamed_chunks().empty());
+                    const auto copy = root.path() / "retained-energy-session";
+                    ASSERT_TRUE(loaded.SaveWorldStateTo(copy));
+                    fs::remove_all(copy);
+                }
                 EXPECT_EQ(SavedPresetTestDiskBytes(save), before);
             }
         }
@@ -20377,8 +20393,11 @@ TEST(GameSessionHeadlessWorldTest, InvalidEnergyRecordsRefuseBothLoadEntriesAndD
         ASSERT_TRUE(fs::create_directory(payload));
         const auto before = SavedPresetTestDiskBytes(save);
         EXPECT_FALSE(source.LoadWorldStateFrom(save));
-        EXPECT_EQ(source.GetWorldOpenError(), "Corrupt or unreadable aether state record.");
-        EXPECT_FALSE(source.SaveWorldState());
+        EXPECT_EQ(source.GetWorldOpenError(), diagnostic);
+        EXPECT_EQ(SavedPresetTestDiskBytes(save), before);
+        const auto copy = root.path() / "retained-energy-session";
+        EXPECT_TRUE(source.SaveWorldStateTo(copy));
+        fs::remove_all(copy);
         EXPECT_EQ(SavedPresetTestDiskBytes(save), before);
     }
 }
@@ -20404,24 +20423,48 @@ TEST(GameSessionHeadlessWorldTest, MissingEnergyRecordClearsOldStateAndDisabledL
         ASSERT_FALSE(fs::exists(save / "aether_state.efs"));
         ASSERT_TRUE(source.LoadWorldStateFrom(save));
         EXPECT_EQ(energy->page_count(), 0u);
-        std::ofstream(save / "aether_state.efs", std::ios::binary)
-            << " \tEFS1 +2 8\r\nP 0 0 0:1000\r\n";
+        if (active_regions) {
+            // Regional energy must carry the ledger's matching owners and ages.
+            energy->QueueDeposit(1, 0, 0, 0, 1000);
+            ASSERT_NO_FATAL_FAILURE(Luminumbra::TestSupport::ApplySnapshotTestEnergy(source, 0));
+            ASSERT_TRUE(source.SaveWorldState());
+        } else {
+            std::ofstream(save / "aether_state.efs", std::ios::binary)
+                << " \tEFS1 2 8\r\nP 0 0 0:1000\r\n";
+        }
         GameSession historical;
         historical.SetRootPath(root.root_string());
         historical.SetJobSystem(&jobs);
         historical.SetActiveRegionsEnabled(active_regions);
         historical.SetAetherStateEnabled(true);
-        ASSERT_TRUE(historical.LoadWorld(source.GetMetadata().worldId));
+        ASSERT_TRUE(historical.LoadWorld(source.GetMetadata().worldId))
+            << historical.GetWorldOpenError();
         ASSERT_NE(historical.GetEnergyFieldState(), nullptr);
         EXPECT_EQ(historical.GetEnergyFieldState()->total_raw(), 1000u);
-        std::ofstream(save / "aether_state.efs", std::ios::binary) << "broken";
         GameSession disabled;
         disabled.SetRootPath(root.root_string());
         disabled.SetJobSystem(&jobs);
         disabled.SetActiveRegionsEnabled(active_regions);
         disabled.SetAetherStateEnabled(false);
-        ASSERT_TRUE(disabled.LoadWorld(source.GetMetadata().worldId));
-        EXPECT_EQ(disabled.GetEnergyFieldState(), nullptr);
+        if (active_regions) {
+            // Regional records and their owner ages must be enabled together (issue #720).
+            EXPECT_FALSE(disabled.LoadWorld(source.GetMetadata().worldId));
+            EXPECT_EQ(
+                disabled.GetWorldOpenError(),
+                "Incompatible configuration: regional energy state requires sim.aether_state.");
+            EXPECT_EQ(disabled.GetWorldSystem(), nullptr);
+            std::ofstream(save / "aether_state.efs", std::ios::binary) << "broken";
+            // Indexed admission validates all members before feature compatibility.
+            EXPECT_FALSE(disabled.LoadWorld(source.GetMetadata().worldId));
+            EXPECT_EQ(disabled.GetWorldOpenError(),
+                      "Corrupt regional energy record: expected EFS1 cadence offset 0 with "
+                      "matching ARL energy ages.");
+            EXPECT_EQ(disabled.GetWorldSystem(), nullptr);
+        } else {
+            std::ofstream(save / "aether_state.efs", std::ios::binary) << "broken";
+            ASSERT_TRUE(disabled.LoadWorld(source.GetMetadata().worldId));
+            EXPECT_EQ(disabled.GetEnergyFieldState(), nullptr);
+        }
         EXPECT_EQ(ReadClockTestFile(save / "aether_state.efs"), "broken");
     }
 }
@@ -20453,7 +20496,7 @@ TEST(GameSessionHeadlessWorldTest, AuthoritySnapshotsKeepTerrainWaterAndRegenera
             if (terrain_edited)
                 chunk->mark_voxel_data_dirty();
             if (water_owned)
-                chunk->mark_water_data_dirty();
+                chunk->publish_water_state();
             const auto snapshot = P::SerializeChunkAuthoritySnapshotJson(*chunk);
             Luminumbra::WorldStreamingState loaded;
             std::vector<std::string> errors;
@@ -20506,7 +20549,8 @@ TEST(GameSessionHeadlessWorldTest, WaterAuthorityMetadataRefusesUnknownAndPartia
     chunk->mark_sdf_generated_current_params();
     chunk->mark_water_data_dirty();
     state.insert_chunk(chunk);
-    const auto snapshot = nlohmann::json::parse(P::SerializeWorldStreamingStateSnapshotJson(state));
+    const auto snapshot =
+        nlohmann::json::parse(P::SerializeWorldStreamingStateSnapshotJson(state, true));
     EXPECT_EQ(snapshot.at("chunks").at(0).at("water_authority"), "generated");
     for (const auto& invalid : {nlohmann::json("unknown"),
                                 nlohmann::json(nullptr),
@@ -20523,90 +20567,107 @@ TEST(GameSessionHeadlessWorldTest, WaterAuthorityMetadataRefusesUnknownAndPartia
     }
 }
 
+namespace {
+void CheckSchedulerRoundTrip(bool regions, int resolution, std::size_t count) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, fresh, changed;
+    for (auto* session : {&original, &fresh, &changed}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(regions);
+        session->SetWaterHighResEnabled(resolution == 16);
+        session->SetWeatherRainEnabled(false);
+        session->SetWeatherEventsEnabled(false);
+        session->SetFiniteHydrologyEnabled(true);
+    }
+    ASSERT_TRUE(original.CreateWorld("Scheduler continuation", "1337", "default"));
+    auto original_chunks =
+        Luminumbra::TestSupport::InstallSchedulerChunks(original, resolution, count);
+    original.GetWorldSystem()->SetWaterSimWindowCursor(count - 1);
+    const auto clock = original.GetWorldClock().canonical_bytes();
+    const auto ledger = original.GetActiveRegionLedger().canonical_bytes();
+    const auto identity = original.SystemConfigIdentity();
+    const auto restore_chunks = [&](GameSession& session) {
+        if (!regions)
+            return;
+        for (std::size_t index = 0; index < count; ++index) {
+            ASSERT_TRUE(session.GetWorldSystem()->restore_authoritative_chunk(
+                {static_cast<int>(index) * 2, 0, 0}));
+        }
+    };
+    const auto before = SchedulerSessionCapture(original);
+    ASSERT_TRUE(original.SaveWorldStateTo(original.GetWorldSaveDir(), nullptr, true));
+    ASSERT_TRUE(original.SaveWorld());
+    const auto save = original.GetWorldSaveDir();
+    const auto metadata_path = save / "world_info.json";
+    const auto metadata_bytes = ReadClockTestFile(metadata_path);
+    ASSERT_TRUE(fresh.LoadWorld(original.GetMetadata().worldId));
+    ASSERT_NO_FATAL_FAILURE(restore_chunks(fresh));
+    EXPECT_EQ(fresh.GetWorldSystem()->GetWaterSimWindowCursor(), count - 1);
+    EXPECT_EQ(SchedulerSessionCapture(fresh).sub.water, before.sub.water);
+    EXPECT_EQ(SchedulerSessionCapture(fresh).composite, before.composite);
+    EXPECT_EQ(fresh.SystemConfigIdentity(), identity);
+    EXPECT_EQ(fresh.GetWorldClock().canonical_bytes(), clock);
+    EXPECT_EQ(fresh.GetActiveRegionLedger().canonical_bytes(), ledger);
+    original.GetWorldSystem()->SetWaterSimWindowCursor(0);
+    ASSERT_TRUE(original.LoadWorldStateFrom(save));
+    EXPECT_EQ(original.GetWorldSystem()->GetWaterSimWindowCursor(), count - 1);
+    EXPECT_EQ(SchedulerSessionCapture(original).sub.water, before.sub.water);
+    EXPECT_EQ(SchedulerSessionCapture(original).composite, before.composite);
+    auto metadata = nlohmann::json::parse(metadata_bytes);
+    metadata["waterSimCursor"] = 0u;
+    ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), save));
+    ASSERT_TRUE(changed.LoadWorld(original.GetMetadata().worldId));
+    ASSERT_NO_FATAL_FAILURE(restore_chunks(changed));
+    EXPECT_EQ(changed.GetWorldSystem()->GetWaterSimWindowCursor(), 0u);
+    EXPECT_EQ(changed.SystemConfigIdentity(), identity);
+    EXPECT_EQ(changed.GetWorldClock().canonical_bytes(), clock);
+    EXPECT_EQ(changed.GetActiveRegionLedger().canonical_bytes(), ledger);
+    EXPECT_EQ(SchedulerSessionCapture(changed).sub.terrain, before.sub.terrain);
+    EXPECT_NE(SchedulerSessionCapture(changed).sub.water, before.sub.water);
+    EXPECT_NE(SchedulerSessionCapture(changed).composite, before.composite);
+    const auto chunks_for = [](GameSession& session) {
+        Luminumbra::TestSupport::SchedulerChunks chunks;
+        for (const auto& chunk : session.GetWorldSystem()->snapshot_streamed_chunks())
+            chunks.emplace(chunk->get_id(), chunk);
+        return chunks;
+    };
+    original_chunks = chunks_for(original);
+    auto fresh_chunks = chunks_for(fresh);
+    auto changed_chunks = chunks_for(changed);
+    for (int step = 0; step < 3; ++step) {
+        for (const auto& pair : {std::pair{&original, &original_chunks},
+                                 std::pair{&fresh, &fresh_chunks},
+                                 std::pair{&changed, &changed_chunks}}) {
+            pair.first->GetWaterSystem()->SetBootPaused(false);
+            pair.first->GetWaterSystem()->SetHydrology(true, 0, 0);
+            pair.first->GetWaterSystem()->update(pair.first->GetRegistry(), *pair.second, regions);
+        }
+        EXPECT_EQ(SchedulerSessionCapture(original).composite,
+                  SchedulerSessionCapture(fresh).composite);
+        EXPECT_EQ(original.GetWorldSystem()->GetWaterSimWindowCursor(),
+                  fresh.GetWorldSystem()->GetWaterSimWindowCursor());
+        if (step == 0) {
+            std::size_t different = 0;
+            for (const auto& [id, chunk] : original_chunks)
+                different += chunk->water_depth_mm != changed_chunks.at(id)->water_depth_mm;
+            EXPECT_GT(different, 0u);
+        }
+    }
+    // Reading or selecting the current projection never rewrites saved metadata.
+    EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(metadata_path)), metadata);
+}
+} // namespace
+
 TEST(GameSessionHeadlessWorldTest, NonzeroSchedulerRoundTripsBothLoadPathsAndChangesContinuation) {
     for (const bool regions : {false, true}) {
         for (const auto& [resolution, count] :
              {std::pair{8, std::size_t{65}}, std::pair{16, std::size_t{17}}}) {
-            const HeadlessRoot root;
-            JobSystem jobs;
-            jobs.startup(1);
-            GameSession original, fresh, changed;
-            for (auto* session : {&original, &fresh, &changed}) {
-                session->SetRootPath(root.root_string());
-                session->SetJobSystem(&jobs);
-                session->SetActiveRegionsEnabled(regions);
-                session->SetWaterHighResEnabled(resolution == 16);
-                session->SetWeatherRainEnabled(false);
-                session->SetWeatherEventsEnabled(false);
-                session->SetFiniteHydrologyEnabled(true);
-            }
-            ASSERT_TRUE(original.CreateWorld("Scheduler continuation", "1337", "default"));
-            auto original_chunks =
-                Luminumbra::TestSupport::InstallSchedulerChunks(original, resolution, count);
-            original.GetWorldSystem()->SetWaterSimWindowCursor(count - 1);
-            const auto clock = original.GetWorldClock().canonical_bytes();
-            const auto ledger = original.GetActiveRegionLedger().canonical_bytes();
-            const auto identity = original.SystemConfigIdentity();
-            const auto before = SchedulerSessionCapture(original);
-            ASSERT_TRUE(original.SaveWorldStateTo(original.GetWorldSaveDir(), nullptr, true));
-            ASSERT_TRUE(original.SaveWorld());
-            const auto save = original.GetWorldSaveDir();
-            const auto metadata_path = save / "world_info.json";
-            const auto metadata_bytes = ReadClockTestFile(metadata_path);
-            ASSERT_TRUE(fresh.LoadWorld(original.GetMetadata().worldId));
-            EXPECT_EQ(fresh.GetWorldSystem()->GetWaterSimWindowCursor(), count - 1);
-            EXPECT_EQ(SchedulerSessionCapture(fresh).sub.water, before.sub.water);
-            EXPECT_EQ(SchedulerSessionCapture(fresh).composite, before.composite);
-            EXPECT_EQ(fresh.SystemConfigIdentity(), identity);
-            EXPECT_EQ(fresh.GetWorldClock().canonical_bytes(), clock);
-            EXPECT_EQ(fresh.GetActiveRegionLedger().canonical_bytes(), ledger);
-            original.GetWorldSystem()->SetWaterSimWindowCursor(0);
-            ASSERT_TRUE(original.LoadWorldStateFrom(save));
-            EXPECT_EQ(original.GetWorldSystem()->GetWaterSimWindowCursor(), count - 1);
-            EXPECT_EQ(SchedulerSessionCapture(original).sub.water, before.sub.water);
-            EXPECT_EQ(SchedulerSessionCapture(original).composite, before.composite);
-            auto metadata = nlohmann::json::parse(metadata_bytes);
-            metadata["waterSimCursor"] = 0u;
-            WriteSavedPresetTestJson(metadata_path, metadata);
-            ASSERT_TRUE(changed.LoadWorld(original.GetMetadata().worldId));
-            EXPECT_EQ(changed.GetWorldSystem()->GetWaterSimWindowCursor(), 0u);
-            EXPECT_EQ(changed.SystemConfigIdentity(), identity);
-            EXPECT_EQ(changed.GetWorldClock().canonical_bytes(), clock);
-            EXPECT_EQ(changed.GetActiveRegionLedger().canonical_bytes(), ledger);
-            EXPECT_EQ(SchedulerSessionCapture(changed).sub.terrain, before.sub.terrain);
-            EXPECT_NE(SchedulerSessionCapture(changed).sub.water, before.sub.water);
-            EXPECT_NE(SchedulerSessionCapture(changed).composite, before.composite);
-            const auto chunks_for = [](GameSession& session) {
-                Luminumbra::TestSupport::SchedulerChunks chunks;
-                for (const auto& chunk : session.GetWorldSystem()->snapshot_streamed_chunks())
-                    chunks.emplace(chunk->get_id(), chunk);
-                return chunks;
-            };
-            original_chunks = chunks_for(original);
-            auto fresh_chunks = chunks_for(fresh);
-            auto changed_chunks = chunks_for(changed);
-            for (int step = 0; step < 3; ++step) {
-                for (const auto& pair : {std::pair{&original, &original_chunks},
-                                         std::pair{&fresh, &fresh_chunks},
-                                         std::pair{&changed, &changed_chunks}}) {
-                    pair.first->GetWaterSystem()->SetBootPaused(false);
-                    pair.first->GetWaterSystem()->SetHydrology(true, 0, 0);
-                    pair.first->GetWaterSystem()->update(
-                        pair.first->GetRegistry(), *pair.second, regions);
-                }
-                EXPECT_EQ(SchedulerSessionCapture(original).composite,
-                          SchedulerSessionCapture(fresh).composite);
-                EXPECT_EQ(original.GetWorldSystem()->GetWaterSimWindowCursor(),
-                          fresh.GetWorldSystem()->GetWaterSimWindowCursor());
-                if (step == 0) {
-                    std::size_t different = 0;
-                    for (const auto& [id, chunk] : original_chunks)
-                        different += chunk->water_depth_mm != changed_chunks.at(id)->water_depth_mm;
-                    EXPECT_GT(different, 0u);
-                }
-            }
-            // Reading or selecting the current projection never rewrites saved metadata.
-            EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(metadata_path)), metadata);
+            SCOPED_TRACE(regions);
+            SCOPED_TRACE(resolution);
+            ASSERT_NO_FATAL_FAILURE(CheckSchedulerRoundTrip(regions, resolution, count));
         }
     }
 }
@@ -20680,6 +20741,9 @@ TEST(GameSessionHeadlessWorldTest, ExplicitFullSnapshotHandlesAnEmptyCleanWorld)
     EXPECT_TRUE(fs::exists(P::WorldSaveService::world_manifest_path(save)));
     EXPECT_FALSE(P::WorldSaveService::has_chunk_snapshot(save));
     const auto before = ReadClockTestFile(save / "world_info.json");
+    // Identical members need no replacement. Change the cursor to exercise a
+    // real metadata publication while keeping the resident world empty.
+    session.GetWorldSystem()->SetWaterSimWindowCursor(1);
     P::WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
     const bool saved = session.SaveWorldStateTo(session.GetWorldSaveDir(), nullptr, true);
     P::WorldSaveService::set_interrupt_before_region_replace_for_testing(false);

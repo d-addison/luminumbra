@@ -148,9 +148,10 @@ Chunk::capture_far_lod_sdf(std::size_t& bytes_copied) const {
         static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
     if (sdf_data.size() != kSamples || (!material_data.empty() && material_data.size() != kSamples))
         return nullptr;
-    const auto kind = sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited
-                          ? World::FarLodBrickSourceKind::Authoritative
-                          : World::FarLodBrickSourceKind::RegenerableCache;
+    // Water ownership shares save provenance with edited terrain, but its
+    // generated SDF remains regenerable and must not become a terrain overlay.
+    const auto kind = has_terrain_authority() ? World::FarLodBrickSourceKind::Authoritative
+                                              : World::FarLodBrickSourceKind::RegenerableCache;
     const std::size_t sdf_bytes = kSamples * sizeof(f32);
     // Byte comparison also handles generation resetting revision to zero,
     // material-only replacement, NaNs and signed zero without changing results.
