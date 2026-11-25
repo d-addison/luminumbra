@@ -25,6 +25,14 @@ const std::vector<PassShaderLayout>& AllPassShaderLayouts() {
                          return e;
                      }()});
 
+        v.push_back({"post", "res/shaders/ssao.vert", "res/shaders/post.frag", [] {
+                         ExpectedLayout expected;
+                         expected.pass_name = "post";
+                         expected.samplers = {{"u_scene", GL_SAMPLER_2D, -1},
+                                              {"u_lookLut", GL_SAMPLER_3D, -1}};
+                         return expected;
+                     }()});
+
         // --- GBufferPass ----------------------------------------------------
         // Constant terrain UVs eliminate the derivative normal-map branch. Validate
         // the mesh programs separately so their authored normal maps remain active.
