@@ -13,6 +13,7 @@
 #include "luminumbra_client/core/IsolationConfig.h"
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/FarWorldReplayGl.h"
+#include "luminumbra_client/rendering/GBufferInstanceData.h"
 #include "luminumbra_client/rendering/Mesh.h"
 #include "luminumbra_client/rendering/RenderContext.h"
 #include "luminumbra_client/rendering/RenderPipeline.h"
@@ -36,6 +37,8 @@
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/core/GraphicsPresets.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <luminumbra/rendering/RenderView.h>
 #include <luminumbra/rendering/StaticScene.h>
@@ -57,6 +60,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -447,6 +451,180 @@ TEST(PassContext, FoliageKnownAndExternalEntriesAreEquivalentOnBothBackends) {
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
 
+TEST(GBufferInstances, NewAndExistingBatchesRetryAbortedAppends) {
+    using namespace Luminumbra::Rendering;
+    struct Batch {
+        StaticPropStreamSelection selection;
+        std::vector<glm::mat4> matrices;
+        std::vector<glm::vec3> tints;
+    };
+    for (const bool existing : {false, true}) {
+        for (const bool matrix_written : {false, true}) {
+            std::unordered_map<std::uint64_t, Batch> batches;
+            if (existing) {
+                auto& previous = BeginStaticPropBatch(batches, 1);
+                ASSERT_TRUE(previous.selection.Select(2));
+                previous.matrices.emplace_back(1.0f);
+                previous.tints.emplace_back(1.0f);
+                previous.selection.Finish();
+                previous.selection.Begin();
+            }
+            auto& interrupted = BeginStaticPropBatch(batches, 1);
+            ASSERT_TRUE(interrupted.selection.Select(7));
+            interrupted.matrices.clear();
+            interrupted.tints.clear();
+            if (matrix_written)
+                interrupted.matrices.emplace_back(1.0f);
+            // Abort after selecting the ID, before either append or between
+            // the two appends. The next frame must rewrite both streams.
+            interrupted.selection.Begin();
+            auto& retry = BeginStaticPropBatch(batches, 1);
+            ASSERT_TRUE(retry.selection.Select(7));
+            retry.matrices.resize(retry.selection.size() - 1);
+            retry.tints.resize(retry.selection.size() - 1);
+            retry.matrices.emplace_back(2.0f);
+            retry.tints.emplace_back(0.5f);
+            EXPECT_TRUE(retry.selection.Finish());
+            ASSERT_EQ(retry.matrices.size(), 1u);
+            ASSERT_EQ(retry.tints.size(), 1u);
+            EXPECT_EQ(retry.matrices[0], glm::mat4(2.0f));
+            EXPECT_EQ(retry.tints[0], glm::vec3(0.5f));
+            retry.selection.Begin();
+            EXPECT_FALSE(BeginStaticPropBatch(batches, 1).selection.Select(7));
+            EXPECT_FALSE(retry.selection.Finish());
+            retry.selection.Begin();
+            EXPECT_TRUE(retry.selection.Finish()); // removal to an empty batch
+        }
+    }
+}
+
+TEST(GBufferInstances, TransformChangesRefreshCacheWithoutPopulationChanges) {
+    using namespace Luminumbra::Rendering;
+    namespace C = Luminumbra::Components;
+    entt::registry registry;
+    GBufferPass pass;
+    const auto entity = registry.create();
+    registry.emplace<C::TransformComponent>(entity).position = glm::vec3(0, -1000, 0);
+    registry.emplace<C::StaticMeshComponent>(entity).meshPath = "arrow";
+    EXPECT_EQ(pass.prepare_static_props(registry), 1u);
+    ASSERT_NE(pass.cached_static_prop_model(entity), nullptr);
+    EXPECT_EQ(glm::vec3((*pass.cached_static_prop_model(entity))[3]), glm::vec3(0, -1000, 0));
+    registry.patch<C::TransformComponent>(entity, [](auto& transform) {
+        transform.position = glm::vec3(2, 3, 4);
+        transform.rotation = glm::angleAxis(glm::radians(90.0f), glm::vec3(0, 1, 0));
+        transform.scale = glm::vec3(-2, 3, 4);
+    });
+    // Frozen replays must refuse pending changes without acknowledging them.
+    EXPECT_THROW(pass.prepare_static_props(registry, true), std::logic_error);
+    EXPECT_EQ(glm::vec3((*pass.cached_static_prop_model(entity))[3]), glm::vec3(0, -1000, 0));
+    EXPECT_EQ(registry.view<C::StaticMeshComponent>().size(), 1u);
+    EXPECT_EQ(pass.prepare_static_props(registry), 1u);
+    const auto& transform = registry.get<C::TransformComponent>(entity);
+    const glm::mat4 expected = glm::scale(glm::translate(glm::mat4(1), transform.position) *
+                                              glm::mat4_cast(transform.rotation),
+                                          transform.scale);
+    ASSERT_NE(pass.cached_static_prop_model(entity), nullptr);
+    EXPECT_EQ(*pass.cached_static_prop_model(entity), expected);
+    // The returned rebuild count is a visited-instance oracle. Repeated frames
+    // and edits to unrelated entities must never visit cached prop transforms.
+    const auto unrelated = registry.create();
+    registry.emplace<C::TransformComponent>(unrelated);
+    for (int frame = 0; frame < 64; ++frame) {
+        registry.patch<C::TransformComponent>(unrelated);
+        EXPECT_EQ(pass.prepare_static_props(registry), 0u);
+    }
+    EXPECT_EQ(pass.prepare_static_props(registry, true), 0u);
+    registry.remove<C::TransformComponent>(entity);
+    EXPECT_EQ(pass.prepare_static_props(registry), 0u);
+    EXPECT_EQ(pass.cached_static_prop_model(entity), nullptr);
+    registry.emplace<C::TransformComponent>(entity);
+    EXPECT_EQ(pass.prepare_static_props(registry), 1u);
+    registry.patch<C::StaticMeshComponent>(entity, [](auto& mesh) {
+        mesh.meshPath = "replacement";
+        mesh.materialId = 5;
+    });
+    EXPECT_EQ(pass.prepare_static_props(registry), 1u);
+    registry.remove<C::StaticMeshComponent>(entity);
+    registry.emplace<C::StaticMeshComponent>(unrelated);
+    EXPECT_EQ(pass.prepare_static_props(registry), 1u);
+    EXPECT_EQ(pass.cached_static_prop_model(entity), nullptr);
+    EXPECT_NE(pass.cached_static_prop_model(unrelated), nullptr);
+    registry.destroy(unrelated);
+    EXPECT_EQ(pass.prepare_static_props(registry), 0u);
+    EXPECT_EQ(pass.cached_static_prop_model(unrelated), nullptr);
+    registry.emplace<C::StaticMeshComponent>(entity);
+    EXPECT_EQ(pass.prepare_static_props(registry), 1u);
+    // Each pass tracks its own acknowledgement, and registry identity matters
+    // even when its population and revision happen to match another registry.
+    GBufferPass second_pass;
+    EXPECT_EQ(second_pass.prepare_static_props(registry), 1u);
+    EXPECT_EQ(pass.prepare_static_props(registry), 0u);
+    entt::registry replacement;
+    const auto replacement_entity = replacement.create();
+    replacement.emplace<C::StaticMeshComponent>(replacement_entity);
+    replacement.emplace<C::TransformComponent>(replacement_entity).position = glm::vec3(9);
+    EXPECT_EQ(pass.prepare_static_props(replacement), 1u);
+    ASSERT_NE(pass.cached_static_prop_model(replacement_entity), nullptr);
+    EXPECT_EQ(glm::vec3((*pass.cached_static_prop_model(replacement_entity))[3]), glm::vec3(9));
+}
+
+TEST(GBufferInstances, EmptyCachesAndBothRegistryLifetimesRemainValid) {
+    using namespace Luminumbra::Rendering;
+    namespace C = Luminumbra::Components;
+    GBufferPass survivor;
+    {
+        entt::registry registry;
+        EXPECT_THROW(survivor.prepare_static_props(registry, true), std::logic_error);
+        EXPECT_EQ(survivor.prepare_static_props(registry), 0u);
+        EXPECT_EQ(survivor.prepare_static_props(registry, true), 0u);
+        {
+            GBufferPass temporary;
+            EXPECT_EQ(temporary.prepare_static_props(registry), 0u);
+        }
+        const auto entity = registry.create();
+        registry.emplace<C::StaticMeshComponent>(entity);
+        registry.emplace<C::TransformComponent>(entity);
+        EXPECT_EQ(survivor.prepare_static_props(registry), 1u);
+    }
+    entt::registry replacement;
+    EXPECT_EQ(survivor.prepare_static_props(replacement), 0u);
+    EXPECT_EQ(survivor.prepare_static_props(replacement, true), 0u);
+}
+
+TEST(GBufferInstances, OffCentreSkinnedSphereUsesDrawRotationAndAbsoluteScale) {
+    using namespace Luminumbra::Rendering;
+    glm::vec4 planes[6];
+    std::fill_n(planes, 6, glm::vec4(0, 0, 0, 1));
+    planes[0] = glm::vec4(1, 0, 0, 0); // visible half-space: x >= 0
+    const glm::vec4 local_sphere(0, 0, 2, 0.25f);
+    for (const float axis_scale : {-4.0f, 4.0f}) {
+        const auto rotation = glm::mat4_cast(
+            glm::angleAxis(glm::radians(axis_scale < 0 ? -90.0f : 90.0f), glm::vec3(0, 1, 0)));
+        glm::mat4 model =
+            glm::scale(glm::translate(glm::mat4(1), glm::vec3(-8.5f, 0, 0)) * rotation,
+                       glm::vec3(1, 2, axis_scale));
+        const auto sphere = TransformInstanceSphere(model, local_sphere, 1.5f);
+        EXPECT_NEAR(sphere.x, -0.5f, 0.00001f);
+        EXPECT_FLOAT_EQ(sphere.w, 1.5f);
+        EXPECT_FALSE(InstanceSphereCulled(sphere, planes));
+        // The old centre (translation + local offset) would reject this draw.
+        EXPECT_TRUE(InstanceSphereCulled(glm::vec4(-8.5f, 0, 2, 1.5f), planes));
+        model[3].x -= 3.0f;
+        EXPECT_TRUE(
+            InstanceSphereCulled(TransformInstanceSphere(model, local_sphere, 1.5f), planes));
+    }
+    glm::mat4 collapsed(1.0f);
+    collapsed = glm::scale(collapsed, glm::vec3(0));
+    EXPECT_EQ(TransformInstanceSphere(collapsed, local_sphere, 1.5f), glm::vec4(0));
+    EXPECT_FALSE(InstanceSphereCulled(glm::vec4(-1, 0, 0, 1), planes)); // tangent
+    EXPECT_TRUE(InstanceSphereCulled(glm::vec4(-1.01f, 0, 0, 1), planes));
+    for (glm::length_t axis = 0; axis < 3; ++axis) {
+        glm::vec3 scale(0.5f);
+        scale[axis] = -4.0f;
+        EXPECT_FLOAT_EQ(InstanceAxisScale(glm::scale(glm::mat4(1), scale)), 4.0f);
+    }
+}
+
 TEST(PassContext, GBufferKnownAndExternalEntriesAreEquivalentOnBothBackends) {
     HiddenGlContext gl;
     ASSERT_TRUE(gl.ready()) << gl.error();
@@ -567,6 +745,36 @@ TEST(PassContext, GBufferKnownAndExternalEntriesAreEquivalentOnBothBackends) {
                         }
                     }
                 }
+            }
+        }
+    }
+    // Movement must invalidate both the spatial bounds (underground -> visible)
+    // and retained selection bytes (visible -> another visible pose).
+    ctx.frozen_replay = false;
+    isolation.layer_mask = SH::IsolationLayer::All;
+    planes[0] = glm::vec4(0, 1, 0, 2);
+    for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+        camera.SelectFarWorldPlane(mode);
+        ctx.far_world_ladder = mode == FarWorldMode::Ladder;
+        ctx.gbuffer_projection = camera.GetProjectionMatrix(extent, extent);
+        input.far_selection = SelectFarWorld(mode, FarWorldPurpose::World, FarWorldRefusal::None);
+        for (const float height : {-1000.0f, 0.0f, 0.25f}) {
+            for (const auto entity : entities.view<Luminumbra::Components::StaticMeshComponent>()) {
+                entities.patch<Luminumbra::Components::TransformComponent>(
+                    entity, [height](auto& transform) { transform.position.y = height; });
+            }
+            pass.execute_external(ctx, entities, input);
+            const auto data = readback();
+            const auto depth_begin = data.begin() + extent * extent * 20;
+            const auto covered =
+                std::count_if(depth_begin, data.end(), [](float depth) { return depth > 0; });
+            EXPECT_EQ(covered > 0, height >= 0);
+            EXPECT_EQ(pass.static_prop_work().instances, height >= 0 ? 2u : 0u);
+            if (height >= 0) {
+                glm::mat4 uploaded(0);
+                glGetNamedBufferSubData(
+                    pass.instance_matrix_vbo(), 0, sizeof(uploaded), glm::value_ptr(uploaded));
+                EXPECT_FLOAT_EQ(uploaded[3].y, height);
             }
         }
     }

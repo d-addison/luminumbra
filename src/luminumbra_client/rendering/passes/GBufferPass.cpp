@@ -1,6 +1,7 @@
 #include "GBufferPass.h"
 #include "../DiagnosticDrawTable.h"
 #include "../FarWorldReplay.h"
+#include "../GBufferInstanceData.h"
 #include "../GBufferTargets.h"
 #include "DebugViewPass.h"
 #include "StaticDrawPass.h"
@@ -63,6 +64,20 @@ namespace Luminumbra::Rendering {
 static constexpr GLsizei kStaticInstanceCapacity = 131072;
 
 namespace {
+// Registry-owned signal state survives either registry/pass destruction order.
+// No per-frame transform scan and no callback into a destroyed pass is needed.
+struct StaticPropCacheEvents {
+    std::uint64_t revision = 1;
+    bool connected = false;
+    static void Changed(entt::registry& registry, entt::entity) {
+        ++registry.ctx().get<std::shared_ptr<StaticPropCacheEvents>>()->revision;
+    }
+    static void TransformChanged(entt::registry& registry, entt::entity entity) {
+        if (registry.all_of<Components::StaticMeshComponent>(entity))
+            Changed(registry, entity);
+    }
+};
+
 // Registry-owned signal targets outlive the pass and contain only weak observers.
 // Each queue holds at most one record per changed entity between preparations.
 struct MeshInventoryChanges {
@@ -133,6 +148,8 @@ struct GBufferPass::MeshPreparation {
     // own a CPU payload or a dispatched job, bounding decoded backlog to one.
     std::deque<Pending> pending;
     std::uint64_t generation = 1;
+    std::weak_ptr<StaticPropCacheEvents> staticProps;
+    std::uint64_t staticPropsRevision = 0;
 };
 
 GBufferPass::GBufferPass()
@@ -930,11 +947,54 @@ StaticPropSpatialIndex BuildStaticPropSpatialIndex(const Props& props,
 }
 } // namespace
 
-//  (re)build the cached static-prop instance data. Runs once
-// (props are scattered once and never move) and again only if the static-mesh
-// population changes. Precomputes the per-instance model matrix + albedo tint +
-// base-mesh hash so the per-frame draw path no longer rebuilds them for ALL
-// ~84k instances every frame (the measured CPU-submit bottleneck)..
+std::size_t GBufferPass::prepare_static_props(entt::registry& registry, bool frozen) {
+    using Events = std::shared_ptr<StaticPropCacheEvents>;
+    auto* events = registry.ctx().find<Events>();
+    if (!events)
+        events = &registry.ctx().emplace<Events>(std::make_shared<StaticPropCacheEvents>());
+    if (!(*events)->connected) {
+        // EnTT reconnects a matching target rather than duplicating it. Retry
+        // the whole set if allocation interrupted an earlier installation.
+        registry.on_construct<Components::StaticMeshComponent>()
+            .connect<&StaticPropCacheEvents::Changed>();
+        registry.on_update<Components::StaticMeshComponent>()
+            .connect<&StaticPropCacheEvents::Changed>();
+        registry.on_destroy<Components::StaticMeshComponent>()
+            .connect<&StaticPropCacheEvents::Changed>();
+        registry.on_construct<Components::TransformComponent>()
+            .connect<&StaticPropCacheEvents::TransformChanged>();
+        registry.on_update<Components::TransformComponent>()
+            .connect<&StaticPropCacheEvents::TransformChanged>();
+        registry.on_destroy<Components::TransformComponent>()
+            .connect<&StaticPropCacheEvents::TransformChanged>();
+        (*events)->connected = true;
+    }
+    auto& preparation = *m_mesh_preparation;
+    const auto population = registry.view<const Components::StaticMeshComponent>().size();
+    if (preparation.staticProps.lock() == *events &&
+        preparation.staticPropsRevision == (*events)->revision &&
+        population == m_staticPropCachePopulation)
+        return 0;
+    if (frozen)
+        throw std::logic_error("Replay cannot rebuild static residency");
+    // Publish the acknowledgement last. A partial rebuild must be retried even
+    // when the component population and event revision have not changed again.
+    m_staticPropCachePopulation = SIZE_MAX;
+    build_static_prop_cache(registry);
+    preparation.staticProps = *events;
+    preparation.staticPropsRevision = (*events)->revision;
+    return m_staticPropCache.size();
+}
+
+const glm::mat4* GBufferPass::cached_static_prop_model(entt::entity entity) const {
+    const auto entry = std::find_if(m_staticPropCache.begin(),
+                                    m_staticPropCache.end(),
+                                    [entity](const auto& prop) { return prop.entity == entity; });
+    return entry == m_staticPropCache.end() ? nullptr : &entry->model;
+}
+
+// Rebuild only after relevant ECS changes; all dependent bounds and retained
+// streams are invalidated together before any instance indices can be reused.
 void GBufferPass::build_static_prop_cache(entt::registry& registry) {
     m_staticPropCache.clear();
     m_staticPropIndexValid = false;
@@ -969,12 +1029,13 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
         auto const& transform = view.get<const Components::TransformComponent>(entity);
         auto const& mesh_info = view.get<const Components::StaticMeshComponent>(entity);
         CachedStaticProp cp;
+        cp.entity = entity;
         cp.position = transform.position;
-        cp.maxScale = glm::max(glm::max(transform.scale.x, transform.scale.y), transform.scale.z);
         glm::mat4 model = glm::translate(glm::mat4(1.0f), transform.position);
         model *= glm::mat4_cast(transform.rotation);
         model = glm::scale(model, transform.scale);
         cp.model = model;
+        cp.maxScale = InstanceAxisScale(model);
         // Per-instance tint — IDENTICAL to the legacy per-frame computation so the
         // rendered colour is unchanged. LEAF: green->autumn-gold genetic variation;
         // BARK: subtle warm-brown; everything else white (no-op).
@@ -1204,16 +1265,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                   ctx.terrain_roughness.id ? ctx.terrain_roughness.id : ctx.terrain_textures.id);
     shader->setInt("u_terrainRoughness", 4);
     shader->setInt("u_terrainRoughnessValid", ctx.terrain_roughness_valid);
-    //  refresh the cached prop instance data only when the
-    // static-mesh population changes (props are scattered once -> usually a no-op).
-    {
-        const std::size_t pop = registry.view<const Components::StaticMeshComponent>().size();
-        if (pop != m_staticPropCachePopulation) {
-            if (ctx.frozen_replay)
-                throw std::logic_error("Replay cannot rebuild static residency");
-            build_static_prop_cache(registry);
-        }
-    }
+    prepare_static_props(registry, ctx.frozen_replay);
     // groups carry the material id (per-group uniform). tree rendering: each
     // instance picks a LOD bucket from its camera distance (SelectTreeLod) and the
     // group is keyed by the RESOLVED LOD mesh path so distant trees draw a coarser
@@ -1350,12 +1402,12 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         // Group by a cheap uint64 (no per-instance string alloc/copy/compare).
         const std::uint64_t gkey =
             rkey ^ (static_cast<std::uint64_t>(cp.materialId) * std::uint64_t{0x100000001B3ull});
-        auto& batch = m_visibleGroups[gkey];
+        auto& batch = BeginStaticPropBatch(m_visibleGroups, gkey);
         if (batch.mesh != mesh) { // adoption can replace a temporary LOD fallback
-            batch.mesh = mesh;
             batch.drawPath = rit->second.second;
             batch.basePath = m_propMeshPaths[cp.pathIndex];
             batch.materialId = cp.materialId;
+            batch.mesh = mesh; // acknowledge only after the allocating string assignments
         }
         batch.active = true;
         if (batch.selection.Select(propIndex)) {
@@ -1698,23 +1750,14 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
         if (player.palette.size() != expected_floats)
             continue;
 
-        // Sphere culling: bounds are bind-pose, padded for animation sway.
-        glm::vec3 world_sphere_center = transform.position + glm::vec3(mesh->boundingSphere);
-        float radius = 1.5f * mesh->boundingSphere.w *
-                       glm::max(glm::max(transform.scale.x, transform.scale.y), transform.scale.z);
-        bool culled = false;
-        for (int i = 0; i < 6; i++) {
-            if (glm::dot(glm::vec4(world_sphere_center, 1.0f), frustum_planes[i]) < -radius) {
-                culled = true;
-                break;
-            }
-        }
-        if (culled)
-            continue;
-
         glm::mat4 model = glm::translate(glm::mat4(1.0f), transform.position);
         model *= glm::mat4_cast(transform.rotation);
         model = glm::scale(model, transform.scale);
+        // Bind-pose bounds share the draw's complete model transform, with
+        // the existing animation-sway padding applied to the world radius.
+        if (InstanceSphereCulled(TransformInstanceSphere(model, mesh->boundingSphere, 1.5f),
+                                 frustum_planes))
+            continue;
         shader->setMat4("model", model);
         shader->setInt("u_materialId", static_cast<int>(mesh_info.materialId));
         //  per-creature albedo tint from the species base_color (white = no-op).

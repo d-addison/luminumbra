@@ -2353,6 +2353,7 @@ void ScenarioRunnerImpl::captureShowcaseVideo(std::chrono::steady_clock::time_po
                     const glm::vec3 d(dir.x, 0.0f, dir.z);
                     if (glm::length(d) > 0.01f)
                         tf.rotation = glm::angleAxis(std::atan2(d.x, d.z), glm::vec3(0, 1, 0));
+                    reg.patch<Luminumbra::Components::TransformComponent>(e);
                 };
                 glm::vec3 to_water = wildlife_water - wildlife_animal;
                 to_water.y = 0.0f;
