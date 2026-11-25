@@ -6635,6 +6635,8 @@ TEST(WorldSaveService, LedgerClockMismatchRefusesEmptyAndPopulatedSavesBeforeWri
                 ledger, WorldClock(tick), destination.path()));
             EXPECT_FALSE(WorldSaveService::save_metadata_and_active_regions(
                 metadata.dump(), ledger, destination.path()));
+            EXPECT_FALSE(WorldSaveService::save_metadata_active_regions_and_ground_objects(
+                metadata.dump(), ledger, {}, {}, destination.path()));
             EXPECT_EQ(ledger.encode(), original_ledger);
             EXPECT_FALSE(std::filesystem::exists(destination.path() / "world_info.json"));
             EXPECT_FALSE(
@@ -6659,6 +6661,8 @@ TEST(WorldSaveService, LedgerClockMismatchRefusesEmptyAndPopulatedSavesBeforeWri
                 metadata.dump(), ledger, destination.path()));
             EXPECT_FALSE(WorldSaveService::save_active_regions(
                 ledger, WorldClock(tick), destination.path()));
+            EXPECT_FALSE(WorldSaveService::save_metadata_active_regions_and_ground_objects(
+                metadata.dump(), ledger, {}, {}, destination.path()));
             EXPECT_EQ(read(destination.path() / "world_info.json"), saved_metadata);
             EXPECT_EQ(read(WorldSaveService::active_regions_path(destination.path())),
                       saved_ledger);
@@ -6721,6 +6725,8 @@ TEST(WorldSaveService, WaterCursorValidationPrecedesMetadataAndLedgerReplacement
         auto candidate = rewound;
         EXPECT_FALSE(WorldSaveService::save_metadata_and_active_regions(
             metadata.dump(), candidate, destination.path()));
+        EXPECT_FALSE(WorldSaveService::save_metadata_active_regions_and_ground_objects(
+            metadata.dump(), candidate, {}, {}, destination.path()));
         EXPECT_EQ(read(metadata_path), metadata_bytes);
         EXPECT_EQ(read(ledger_path), ledger_bytes);
         EXPECT_EQ(candidate.encode(), rewound_bytes);
@@ -6773,9 +6779,13 @@ TEST(WorldSaveService, WaterCursorValidationPrecedesMetadataAndLedgerReplacement
 TEST(WorldSaveService, InterruptedInitialPayloadLeavesNoDirectoriesAndRetrySucceeds) {
     // All callers share the actual durable producer, including flush/close,
     // and refuse only after it finishes. No destination directories may leak.
-    for (const int kind : {0, 1, 2, 3}) {
+    for (const int kind : {0, 1, 2, 3, 4, 5}) {
         SCOPED_TRACE(kind);
         const TempSaveDir root("initial-payload-refusal");
+        const TempSaveDir source_root("initial-payload-source");
+        const auto source = source_root.path() / "source";
+        if (kind == 5)
+            std::ofstream(source, std::ios::binary) << "original";
         auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
         chunk->heightmap_data = {42.0f};
         chunk->mark_voxel_data_dirty();
@@ -6783,15 +6793,20 @@ TEST(WorldSaveService, InterruptedInitialPayloadLeavesNoDirectoriesAndRetrySucce
         if (kind == 1 || kind == 2) {
             state.insert_chunk(chunk);
         }
-        const auto destination = kind == 0 ? root.path() / "nested" / "payload.bin"
-                                 : kind == 3
-                                     ? WorldSaveService::world_manifest_path(root.path())
-                                     : WorldSaveService::region_file_path(root.path(), 0, 0);
+        const auto destination =
+            kind == 0 || kind == 4 || kind == 5 ? root.path() / "nested" / "deeper" / "payload.bin"
+            : kind == 3                         ? WorldSaveService::world_manifest_path(root.path())
+                        : WorldSaveService::region_file_path(root.path(), 0, 0);
         const auto write = [&] {
             if (kind == 0)
                 return WorldSaveService::write_file_durably(destination, "payload");
             if (kind == 1)
-                return WorldSaveService{}.save_world(state, root.path());
+                return WorldSaveService{}.save_dirty_chunks(state, root.path()).saved;
+            if (kind == 4)
+                return WorldSaveService::create_file_durably(destination, "payload");
+            if (kind == 5)
+                return WorldSaveService::rename_file_durably(
+                    source, destination, "original", "payload");
             return WorldSaveService{}.save_world(state, root.path());
         };
         WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
@@ -6800,10 +6815,16 @@ TEST(WorldSaveService, InterruptedInitialPayloadLeavesNoDirectoriesAndRetrySucce
         EXPECT_FALSE(saved);
         EXPECT_TRUE(std::filesystem::is_empty(root.path()));
         EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        if (kind == 5) {
+            EXPECT_EQ(ReadFileBytes(source), "original");
+        }
         ASSERT_TRUE(write());
         EXPECT_TRUE(std::filesystem::is_regular_file(destination));
         if (kind == 1) {
             EXPECT_FALSE(chunk->is_voxel_data_dirty());
+        }
+        if (kind == 5) {
+            EXPECT_FALSE(std::filesystem::exists(source));
         }
     }
 }

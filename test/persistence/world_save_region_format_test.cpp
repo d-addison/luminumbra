@@ -1552,7 +1552,7 @@ TEST(WorldSaveRegionFormat, NormalizedMetadataLimitIsAdmittedBeforeEitherPairedW
     using Luminumbra::world::WorldClock;
     for (const bool over : {false, true}) {
         TempSaveDir directory("normalized_metadata_limits");
-        ActiveRegionLedger installed_ledger;
+        ActiveRegionLedger installed_ledger({}, WorldClock(100, WorldCalendar::Legacy()));
         ASSERT_TRUE(installed_ledger.try_set_local_anchor(Vec3{}));
         nlohmann::json installed = {{"container_version", 2}};
         WorldClock(100, WorldCalendar::Legacy()).write_metadata(installed);

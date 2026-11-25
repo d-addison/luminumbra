@@ -1811,11 +1811,15 @@ GameSession::GameSession(const OwnerContinuationOptions& options)
 GameSession::~GameSession() {
     m_registry.ctx().erase<luminumbra::foliage::FarmingReplayGate>();
     DisableFarWorldAuthorityProducer();
-    m_registry.on_destroy<Luminumbra::Components::CreaturePhysicsComponent>()
-        .disconnect<&RemoveCreatureAvatar>(*this);
+    m_regionalEnergyStep.reset();
+    m_foliageStep.reset();
     // Jobs can read world, water, weather and physics. Drain before member destruction.
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
+    // Component destructors and destruction signals borrow world and physics services.
+    m_registry.clear();
+    m_registry.on_destroy<Luminumbra::Components::CreaturePhysicsComponent>()
+        .disconnect<&RemoveCreatureAvatar>(*this);
     if (m_physicsSystem)
         m_physicsSystem->set_world_system(nullptr);
     m_worldSystem.reset();
@@ -1829,6 +1833,7 @@ void GameSession::ResetWorldSystems() {
     m_worldUsable = false;
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
+    m_registry.clear();
     // Keep all dependencies alive while the world destructor fences admitted work.
     if (m_physicsSystem)
         m_physicsSystem->set_world_system(nullptr);
@@ -1836,7 +1841,6 @@ void GameSession::ResetWorldSystems() {
     m_worldSystem.reset();
     m_physicsSystem.reset();
     m_waterSystem.reset();
-    m_registry.clear();
     m_restoredOwnerContinuation.reset();
     m_ownerStreamTick = 0;
     m_ownerAnchorSet = false;

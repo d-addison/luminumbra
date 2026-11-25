@@ -2961,7 +2961,7 @@ TEST_F(ReplayStreamTest, FrozenThreeFourEmptyStreamBytes) {
         0,   0,   0,   0,   0,   0,   0,   0, // config identity, content hash
         'L', 'R', 'E', 'C', 'E', 'N', 'D', '1', 0,  0, 0, 0, 0, 0, 0, 0, 0, 0,
         0,   0,   0,   0,   0,   0,   0,   0,   0,  0, 0, 0, 0, 0};
-    for (const std::uint16_t version : {3, 4}) {
+    for (const std::uint16_t version : {std::uint16_t{3}, std::uint16_t{4}}) {
         auto expected = frozen;
         expected[6] = static_cast<std::uint8_t>(version);
         replay::ReplayHeader header;
@@ -3009,7 +3009,8 @@ TEST_F(ReplayStreamTest, AuthorityBootVersionsRoundtripEveryField) {
 }
 
 TEST_F(ReplayStreamTest, BoundedAuthorityBootPreservesFamilyAndDescriptorBytes) {
-    for (const std::uint16_t version : {3, 4, 5, 6}) {
+    for (const std::uint16_t version :
+         {std::uint16_t{3}, std::uint16_t{4}, std::uint16_t{5}, std::uint16_t{6}}) {
         for (const bool rotate : {false, true}) {
             SCOPED_TRACE(version);
             SCOPED_TRACE(rotate);

@@ -1160,7 +1160,6 @@ TEST_F(HostSchedulerFault, ClientMetadataSaveFailureSuppressesSuccessAndAllowsRe
 TEST_F(HostSchedulerFault, FailedEntryReleasesRegistryBeforePhysics) {
     Luminumbra::JobSystem jobs;
     jobs.startup(1);
-    bool released = false;
     struct PhysicsLifetimeProbe {
         GameSession* session = nullptr;
         bool* released = nullptr;
@@ -1174,24 +1173,32 @@ TEST_F(HostSchedulerFault, FailedEntryReleasesRegistryBeforePhysics) {
             *released = true;
         }
     };
-    {
-        GameSession session;
-        session.SetJobSystem(&jobs);
-        session.SetRootPath(root.generic_string() + "/");
-        session.SetActiveRegionsEnabled(true);
-        ASSERT_TRUE(session.CreateTransientWorld("Failed entry cleanup", "1337", "default"));
-        auto probe = std::make_shared<PhysicsLifetimeProbe>();
-        probe->session = &session;
-        probe->released = &released;
-        session.GetRegistry().emplace<std::shared_ptr<PhysicsLifetimeProbe>>(
-            session.GetRegistry().create(), std::move(probe));
-        const auto directory = root / "corrupt-entry";
-        const auto spawn = session.GetMetadata().spawnPoint;
-        const auto key = Luminumbra::world::ActiveRegionLedger::region_at(spawn);
-        WriteHostFile(WorldSaveService::region_file_path(directory, key.x, key.z), "partial");
-        EXPECT_FALSE(session.LoadWorldStateFrom(directory));
-        EXPECT_FALSE(session.GetWorldOpenError().empty());
-        EXPECT_EQ(session.GetSimulationTickCount(), 0u);
+    for (const bool reset : {false, true}) {
+        SCOPED_TRACE(reset);
+        bool released = false;
+        {
+            GameSession session;
+            session.SetJobSystem(&jobs);
+            session.SetRootPath(root.generic_string() + "/");
+            session.SetActiveRegionsEnabled(true);
+            ASSERT_TRUE(session.CreateTransientWorld("Failed entry cleanup", "1337", "default"));
+            auto probe = std::make_shared<PhysicsLifetimeProbe>();
+            probe->session = &session;
+            probe->released = &released;
+            session.GetRegistry().emplace<std::shared_ptr<PhysicsLifetimeProbe>>(
+                session.GetRegistry().create(), std::move(probe));
+            const auto directory = root / "corrupt-entry";
+            const auto spawn = session.GetMetadata().spawnPoint;
+            const auto key = Luminumbra::world::ActiveRegionLedger::region_at(spawn);
+            WriteHostFile(WorldSaveService::region_file_path(directory, key.x, key.z), "partial");
+            EXPECT_FALSE(session.LoadWorldStateFrom(directory));
+            EXPECT_FALSE(session.GetWorldOpenError().empty());
+            EXPECT_EQ(session.GetSimulationTickCount(), 0u);
+            if (reset) {
+                ASSERT_TRUE(session.CreateTransientWorld("Replacement", "1337", "default"));
+                EXPECT_TRUE(released);
+            }
+        }
+        EXPECT_TRUE(released);
     }
-    EXPECT_TRUE(released);
 }
