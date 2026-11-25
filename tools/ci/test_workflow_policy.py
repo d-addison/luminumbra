@@ -1371,7 +1371,9 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
             self.assertIn(f"cmake --build build/fast-{compiler} --target glad --parallel 2", fast)
         self.assertEqual(fast.count("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"), 2)
         for flag in ("-DLUMINUMBRA_WARNINGS_AS_ERRORS=ON", "-DBUILD_TESTING=ON",
-                     "-DCMAKE_BUILD_TYPE=Release", "-DLUMINUMBRA_ENABLE_DILIGENT=OFF"):
+                     "-DCMAKE_BUILD_TYPE=Release", "-DLUMINUMBRA_ENABLE_DILIGENT=OFF",
+                     # Optional content tools (lumpack) are only compiled and tidied here.
+                     "-DLUMINUMBRA_BUILD_TOOLS=ON"):
             self.assertEqual(fast.count(flag), 2)
         for flag in ("-DCMAKE_C_COMPILER=gcc", "-DCMAKE_CXX_COMPILER=g++",
                      "-DCMAKE_C_COMPILER=clang-18", "-DCMAKE_CXX_COMPILER=clang++-18"):

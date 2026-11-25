@@ -134,6 +134,8 @@ TEST(RequestedSubHashes, NetworkCaptureSerializesZeroMeshElementsAndKeepsWorldBy
             P::AuthorityHashWork full_work;
             const auto full = capture(Mask::All, full_work);
             ASSERT_TRUE(full.capture.has_value());
+            if (!full.capture)
+                return;
             const bool sub = parts == P::AuthorityCaptureParts::All ||
                              parts == P::AuthorityCaptureParts::SubHashes ||
                              parts == P::AuthorityCaptureParts::StreamedAndSubHashes;
@@ -142,6 +144,8 @@ TEST(RequestedSubHashes, NetworkCaptureSerializesZeroMeshElementsAndKeepsWorldBy
             P::AuthorityHashWork network_work;
             const auto network = capture(kNetworkSlots, network_work);
             ASSERT_TRUE(network.capture.has_value());
+            if (!network.capture)
+                return;
             EXPECT_EQ(network_work.serialized_mesh_elements, 0u);
             EXPECT_EQ(network.capture->streamed, full.capture->streamed);
             EXPECT_EQ(network.capture->chunk, full.capture->chunk);
@@ -171,6 +175,8 @@ TEST(RequestedSubHashes, SessionSkipsUnrequestedRuntimeWorkAndPreservesComposite
     ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(PopulatedChunk(IVec3(0, 0, 0))));
     const auto full = session.CaptureAuthorityHashes("entities");
     ASSERT_TRUE(full.capture.has_value());
+    if (!full.capture)
+        return;
     for (const auto parts : {P::AuthorityCaptureParts::StreamedAndSubHashes,
                              P::AuthorityCaptureParts::SubHashes,
                              P::AuthorityCaptureParts::All,
@@ -180,6 +186,8 @@ TEST(RequestedSubHashes, SessionSkipsUnrequestedRuntimeWorkAndPreservesComposite
         const auto selected =
             session.CaptureAuthorityHashes("entities", parts, kNetworkSlots, &work);
         ASSERT_TRUE(selected.capture.has_value());
+        if (!selected.capture)
+            return;
         EXPECT_EQ(work.serialized_mesh_elements, 0u);
         const bool composite =
             parts == P::AuthorityCaptureParts::All || parts == P::AuthorityCaptureParts::Composite;
@@ -202,6 +210,8 @@ TEST(RequestedSubHashes, SessionSkipsUnrequestedRuntimeWorkAndPreservesComposite
     EXPECT_EQ(refused_work.serialized_mesh_elements, 0u);
     const auto repeated = session.CaptureAuthorityHashes("entities");
     ASSERT_TRUE(repeated.capture.has_value());
+    if (!repeated.capture)
+        return;
     EXPECT_EQ(repeated.capture->composite, full.capture->composite);
     ExpectSelected(repeated.capture->sub, full.capture->sub, Mask::All);
     // Runtime singleton masks exercise the state-only aether dependency separately.
@@ -210,6 +220,8 @@ TEST(RequestedSubHashes, SessionSkipsUnrequestedRuntimeWorkAndPreservesComposite
         const auto selected =
             session.CaptureAuthorityHashes("entities", P::AuthorityCaptureParts::SubHashes, mask);
         ASSERT_TRUE(selected.capture.has_value());
+        if (!selected.capture)
+            return;
         ExpectSelected(selected.capture->sub, full.capture->sub, mask);
     }
 }
