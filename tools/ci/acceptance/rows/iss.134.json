@@ -1,0 +1,19 @@
+{
+  "id": "iss.134",
+  "source": "issue #134",
+  "statement": "Server autosave records absolute tick 45, full snapshot reload preserves the tick and default world-clock bytes, and wind, weather, aether and world-clock state match after five further ticks. Negative simulationTick metadata refuses load and save without changing disk bytes. These tests do not establish client rendering or custom-calendar unification.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "WorldOpenRefusal.ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldOpenRefusal.CorruptClockMetadataOnlySaveRefusesBeforeFirstChunkSave"
+    }
+  ],
+  "requirements": [
+    "dw.mappings.036"
+  ]
+}

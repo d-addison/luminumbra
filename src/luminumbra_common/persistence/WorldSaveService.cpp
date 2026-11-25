@@ -1748,9 +1748,11 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
     if (written_version)
         *written_version = {};
     LUMIN_PROFILE_ZONE_N("File save write");
+    // At most one probe per path component, plus 128 occupied temporary names.
+    auto staging = destination;
     HANDLE file = INVALID_HANDLE_VALUE;
-    for (int attempt = 0; attempt < 128; ++attempt) {
-        out_temp = NextRegionTempPath(destination);
+    for (int attempt = 0; attempt < 128;) {
+        out_temp = NextRegionTempPath(staging);
         if (artifacts)
             artifacts->reserve_file(out_temp);
         file = ::CreateFileW(out_temp.c_str(),
@@ -1774,13 +1776,22 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
         const DWORD error = ::GetLastError();
         if (artifacts)
             artifacts->abandon_file_reservation();
-        if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) {
-            AddError(errors,
-                     "failed to create temporary region file: " +
-                         Filesystem::GenericUtf8PathString(out_temp) + ": " +
-                         WindowsErrorMessage(error));
-            return false;
+        if (!artifacts && (error == ERROR_PATH_NOT_FOUND || error == ERROR_FILE_NOT_FOUND)) {
+            const auto parent = staging.parent_path();
+            if (!parent.empty() && parent != parent.parent_path()) {
+                staging = parent.parent_path() / staging.filename();
+                continue;
+            }
         }
+        if (error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS) {
+            ++attempt;
+            continue;
+        }
+        AddError(errors,
+                 "failed to create temporary region file: " +
+                     Filesystem::GenericUtf8PathString(out_temp) + ": " +
+                     WindowsErrorMessage(error));
+        return false;
     }
     if (file == INVALID_HANDLE_VALUE) {
         AddError(errors,
@@ -1957,9 +1968,11 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
     if (written_version)
         *written_version = {};
     LUMIN_PROFILE_ZONE_N("File save write");
+    // At most one probe per path component, plus 128 occupied temporary names.
+    auto staging = destination;
     int file = -1;
-    for (int attempt = 0; attempt < 128; ++attempt) {
-        out_temp = NextRegionTempPath(destination);
+    for (int attempt = 0; attempt < 128;) {
+        out_temp = NextRegionTempPath(staging);
         if (artifacts)
             artifacts->reserve_file(out_temp);
         file = ::open(out_temp.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0666);
@@ -1977,13 +1990,21 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
         const int error = errno;
         if (artifacts)
             artifacts->abandon_file_reservation();
-        if (error != EEXIST) {
-            AddError(errors,
-                     "failed to create temporary region file: " +
-                         Filesystem::GenericUtf8PathString(out_temp) + ": " +
-                         PosixErrorMessage(error));
-            return false;
+        if (!artifacts && error == ENOENT) {
+            const auto parent = staging.parent_path();
+            if (!parent.empty() && parent != parent.parent_path()) {
+                staging = parent.parent_path() / staging.filename();
+                continue;
+            }
         }
+        if (error == EEXIST) {
+            ++attempt;
+            continue;
+        }
+        AddError(errors,
+                 "failed to create temporary region file: " +
+                     Filesystem::GenericUtf8PathString(out_temp) + ": " + PosixErrorMessage(error));
+        return false;
     }
     if (file < 0) {
         AddError(errors,
@@ -2933,6 +2954,17 @@ bool DigestRegionRecords(const std::filesystem::path& path,
                          MemberDigest& out,
                          std::string& error);
 
+bool CreatePayloadDirectory(const std::filesystem::path& destination,
+                            std::vector<std::string>* errors) {
+    std::error_code error;
+    if (destination.has_parent_path())
+        std::filesystem::create_directories(destination.parent_path(), error);
+    if (!error)
+        return true;
+    AddError(errors, "cannot create publication directory: " + error.message());
+    return false;
+}
+
 bool WriteRegionFile(const std::filesystem::path& path,
                      std::vector<RegionRecord>& records,
                      std::vector<std::string>* errors) {
@@ -3007,6 +3039,10 @@ bool WriteRegionFile(const std::filesystem::path& path,
         return false;
     }
 
+    if (!CreatePayloadDirectory(path, errors)) {
+        RemoveTemporaryFile(temp_path);
+        return false;
+    }
     if (!ReplaceMember(temp_path, path, errors, nullptr, nullptr, admitted ? &written : nullptr)) {
         RemoveTemporaryFile(temp_path);
         return false;
@@ -3787,6 +3823,16 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
     const bool unchanged = FileBytesEqual(manifest_path, bytes);
     if (!unchanged && !WriteDurableRegionTemp(staging, bytes, temp, errors))
         return false;
+    if (!unchanged &&
+        InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
+        RemoveTemporaryFile(temp);
+        AddError(errors, "interrupted before world manifest replacement");
+        return false;
+    }
+    if (!unchanged && !CreatePayloadDirectory(manifest_path, errors)) {
+        RemoveTemporaryFile(temp);
+        return false;
+    }
     if (!unchanged && !ReplaceMember(temp, manifest_path, errors)) {
         RemoveTemporaryFile(temp);
         return false;
@@ -4525,6 +4571,12 @@ bool WorldSaveService::admit_metadata_bytes(const std::string& bytes,
         AddError(errors, seed_error);
         return false;
     }
+    std::size_t cursor = 0;
+    std::string cursor_error;
+    if (!ReadWaterCursor(metadata, cursor, cursor_error)) {
+        AddError(errors, cursor_error);
+        return false;
+    }
     const bool has_clock = metadata.contains("simulationTick") || metadata.contains("calendar");
     const bool has_render_calendar = metadata.contains("renderCalendar");
     if (has_clock || has_render_calendar) {
@@ -4824,6 +4876,10 @@ bool WorldSaveService::save_metadata_active_regions_and_ground_objects(
             AddError(errors, clock_error);
             return false;
         }
+        if (ledger.header_tick() != clock.tick()) {
+            AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
+            return false;
+        }
         if (!GroundObjectsMatchLedger(store, ledger, clock.tick(), errors))
             return false;
     }
@@ -4860,6 +4916,11 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
     }
     if (!metadata.contains("simulationTick") && !metadata.contains("calendar")) {
         AddError(errors, "Corrupt world metadata: active regions require clock metadata.");
+        return false;
+    }
+    // Empty ledgers have no record stamps for decode to compare with the clock.
+    if (ledger.header_tick() != clock.tick()) {
+        AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
         return false;
     }
     auto saved = ledger;
@@ -5362,11 +5423,6 @@ bool WorldSaveService::PreparedPlantWrite::publish(const std::filesystem::path& 
             return false;
         }
         return FlushRemovalDirectory(path, errors) && scope.commit(errors);
-    }
-    std::filesystem::create_directories(path.parent_path(), ec);
-    if (ec) {
-        AddError(errors, "failed to create plant directory: " + ec.message());
-        return false;
     }
     return WriteFileDurably(path, m_bytes, staging, errors) && scope.commit(errors);
 }
@@ -5920,6 +5976,10 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
                                            std::vector<std::string>* errors,
                                            CreatedWorldArtifacts* artifacts) {
     const SaveGuard guard;
+    if (ledger.header_tick() != clock.tick()) {
+        AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
+        return false;
+    }
     bool has_ledger =
         !ledger.records().empty() || ledger.local_anchor() || ledger.next_persistent_id() != 1;
     {
@@ -6862,8 +6922,6 @@ bool WorldSaveService::upsert_container_records(const SaveOwnership&,
             ReclaimAbandonedStaging(region_staging_path(region_file));
             return !scope || scope->commit(errors);
         }
-        if (!parent.empty())
-            std::filesystem::create_directories(parent);
         return WriteRegionFile(region_file, raw_records, errors) &&
                (!scope || scope->commit(errors));
     } catch (const std::exception& e) {
@@ -7006,6 +7064,10 @@ bool WorldSaveService::durable_write_file(const std::filesystem::path& destinati
                                 nullptr,
                                 published_identity))
         return false;
+    if (!CreatePayloadDirectory(destination, errors)) {
+        RemoveTemporaryFile(temp);
+        return false;
+    }
     if (!ReplaceMember(temp, destination, errors)) {
         RemoveTemporaryFile(temp);
         return false;
@@ -7608,8 +7670,6 @@ bool WorldSaveService::write_member_bytes(const std::filesystem::path& save_dir,
     if (auto* transaction = SaveTransaction::active_for(save_dir);
         transaction && !transaction->protect({relative}, errors))
         return false;
-    std::error_code ec;
-    std::filesystem::create_directories(destination.parent_path(), ec);
     // Before registration, staging must be outside every strict save inventory.
     const auto staging = scope.engaged() ? save_dir / destination.filename() : destination;
     return durable_write_file(destination, bytes, errors, staging) && scope.commit(errors);
@@ -7645,17 +7705,6 @@ bool WriteFileDurably(const std::filesystem::path& destination,
                       FileIdentity* published_identity,
                       CreatedWorldArtifacts* artifacts) {
     // Callers hold SaveGuard and reclaim staging before reaching this helper.
-    std::error_code directory_error;
-    if (!artifacts && destination.has_parent_path()) {
-        std::filesystem::create_directories(destination.parent_path(), directory_error);
-    }
-    if (directory_error) {
-        AddError(errors,
-                 "cannot create directory " +
-                     Filesystem::GenericUtf8PathString(destination.parent_path()) + ": " +
-                     directory_error.message());
-        return false;
-    }
     if (artifacts)
         artifacts->reserve_file(destination);
     std::filesystem::path temp_path;
@@ -7674,6 +7723,10 @@ bool WriteFileDurably(const std::filesystem::path& destination,
         AddError(errors,
                  "file replacement interrupted by test seam before replacing: " +
                      Filesystem::GenericUtf8PathString(destination));
+        return false;
+    }
+    if (!artifacts && !CreatePayloadDirectory(destination, errors)) {
+        RemoveTemporaryFile(temp_path, artifacts);
         return false;
     }
     if (!ReplaceMember(temp_path, destination, errors, artifacts)) {
@@ -8206,13 +8259,6 @@ bool WorldSaveService::create_file_durably(const std::filesystem::path& destinat
                                            std::vector<std::string>* errors) {
     const SaveGuard guard;
     ReclaimAbandonedStaging(destination);
-    std::error_code error;
-    if (destination.has_parent_path())
-        std::filesystem::create_directories(destination.parent_path(), error);
-    if (error) {
-        AddError(errors, "cannot create publication directory: " + error.message());
-        return false;
-    }
     std::filesystem::path temp;
     if (!WriteDurableRegionTemp(destination, bytes, temp, errors))
         return false;
@@ -8221,6 +8267,8 @@ bool WorldSaveService::create_file_durably(const std::filesystem::path& destinat
         AddError(errors, "interrupted before exclusive file publication");
         return false;
     }
+    if (!CreatePayloadDirectory(destination, errors))
+        return false;
     if (!publication.Publish(errors))
         return false;
     publication.Commit();
@@ -8333,14 +8381,6 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
         return FlushRemovalDirectory(source, errors);
     }
     std::filesystem::path temp;
-    // Create the destination hierarchy using the same lexical spelling as the
-    // existing writer; parent aliases and UNC roots must retain their meaning.
-    if (destination.has_parent_path())
-        std::filesystem::create_directories(destination.parent_path(), error);
-    if (error) {
-        AddError(errors, "cannot create rename publication directory: " + error.message());
-        return false;
-    }
     if (!WriteDurableRegionTemp(destination, bytes, temp, errors))
         return false;
     NewFilePublication publication(temp, destination);
@@ -8348,6 +8388,8 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
         AddError(errors, "interrupted before rename publication");
         return false;
     }
+    if (!CreatePayloadDirectory(destination, errors))
+        return false;
     if (!publication.Publish(errors))
         return false;
     if (!std::filesystem::remove(source, error) || error) {
@@ -9827,7 +9869,6 @@ bool WorldSaveService::PreparedWorldWrite::publish(std::vector<std::string>* err
         TransactionScope scope(prepared->save_dir, members, errors);
         if (!scope.ok())
             return false;
-        std::filesystem::create_directories(region_directory(prepared->save_dir));
         const AncestorFlushBatch directory_flushes(prepared->save_dir);
         for (const auto& path : prepared->unchanged_regions)
             ReclaimAbandonedStaging(region_staging_path(path));

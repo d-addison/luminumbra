@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.regions.02",
+  "source": "docs/distant-world.md#persistent-active-regions",
+  "statement": "Acceptance obligations: the limits are calibrated from measured telemetry and recorded in the world's configuration identity. / Every transition-driving value (per-region pressure and hold counters, cadence shift and phase, the last decision tick) is persisted in the ledger record and hashed, so reduction and recovery reproduce after reload; / observational bookkeeping (last-save stamps, transaction generations, storage identities) is persisted but excluded from the hash projection. / Comparisons are strict greater-than against the limit, work units are summed per tick before any decision, at most one state step is applied per region per tick, transitions are applied in the total region order, and counters reset when a region changes state. / Regions are totally ordered by rank (pinned before edited before visited), then by ticks since last proximity, then by region coordinates. / When the counted work exceeds the limit, the lowest-ordered regions first drop to a reduced cadence (a power-of-two divisor with a per-region phase derived from the region key) after a hold of N consecutive over-budget ticks, and recover only after N consecutive under-budget ticks;",
+  "status": "planned",
+  "requirements": [
+    "dw.regions.007",
+    "dw.regions.008",
+    "dw.regions.009",
+    "dw.regions.010",
+    "dw.regions.011",
+    "dw.regions.012"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwRegionsContract.Requirements02",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.regions.02.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

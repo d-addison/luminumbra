@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.tiers.02",
+  "source": "docs/distant-world.md#tier-ladder",
+  "statement": "Acceptance obligations: the transition rule (finer wins by depth bias; / no stitching topology) must be proven on walls, ceilings, arches and overhangs, not only on open ground. / The live disc, its three live detail levels and the bounded full-lattice cave neighbourhood are unchanged; / long interior sightlines come from V1 and V2 bricks, which sample the same cave field. / One tier table replaces the separate far-range constants and the differing 1,536 m and 3,000 m horizon figures in code, comments and gates. / The table is declared first and adopted by runtime streaming and the gates in the slices that build the tiers, so the replacement is staged rather than optional.",
+  "status": "planned",
+  "requirements": [
+    "dw.tiers.014",
+    "dw.tiers.015",
+    "dw.tiers.016",
+    "dw.tiers.017",
+    "dw.tiers.018",
+    "dw.tiers.019"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwTiersContract.Requirements02",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.tiers.02.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: fw"
+    }
+  ]
+}

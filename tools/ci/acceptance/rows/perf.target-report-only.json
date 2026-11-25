@@ -1,0 +1,19 @@
+{
+  "id": "perf.target-report-only",
+  "source": "docs/distant-world.md#performance-measurement-contract",
+  "statement": "The Python budget evaluator reports the 8.33 ms target (p50 for Quality, p50 and p99 for Performance); its pass/fail decision uses only the floor verdict.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "RenderBudgetPython"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/perf/render_budget.py"
+    }
+  ],
+  "requirements": [
+    "dw.mappings.007"
+  ]
+}

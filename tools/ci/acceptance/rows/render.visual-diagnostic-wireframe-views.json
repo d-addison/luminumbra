@@ -1,0 +1,26 @@
+{
+  "id": "render.visual-diagnostic-wireframe-views",
+  "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+  "statement": "The wireframe toggle and named view replay participating opaque deferred draws once with reversed-Z GEQUAL and depth writes disabled. The replay guard restores raster, indexed blend, framebuffer and texture state on every exit; authored and impostor producers remain unavailable. Registered regressions cover opt-in replay and bounded storage; native execution remains pending.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticContributions.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticContributionsGl.*"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development/visual-diagnostics.md"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticCaptureIntegration.*",
+      "planned": "Add and run GPU attribution and scenario capture bundle regressions; owner: maintainers"
+    }
+  ],
+  "requirements": []
+}

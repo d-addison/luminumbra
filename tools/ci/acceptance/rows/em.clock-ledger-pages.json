@@ -1,0 +1,25 @@
+{
+  "id": "em.clock-ledger-pages",
+  "source": "docs/distant-world.md#evidence-map",
+  "statement": "Clock, ledger, pages, creatures and water persist and round-trip with negative controls.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "WorldOpenRefusal.ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldOpenRefusal.ActiveClockSaveRefusesWithFeatureOffThroughEveryOpenPath"
+    },
+    {
+      "kind": "ctest",
+      "ref": "HeadlessServerTickHeavy.SaveLoadEqualsUninterrupted",
+      "planned": "save/load versus uninterrupted simulation oracle; owner: ds"
+    }
+  ],
+  "requirements": [
+    "dw.evidence.005",
+    "dw.mappings.021"
+  ]
+}

@@ -98,6 +98,32 @@ public:
                                        std::size_t>)
     [[nodiscard]] ScalarDiffusionReport
     diffuse(std::size_t iterations, double diffusion_rate, const Gate& admits) {
+        return Evolve<true>(iterations, diffusion_rate, admits);
+    }
+
+    // Identical arithmetic without collecting diagnostics that simulation callers discard.
+    void advance(std::size_t iterations, double diffusion_rate) {
+        (void)Evolve<false>(iterations, diffusion_rate, EdgeGate{});
+    }
+    void advance(std::size_t iterations, double diffusion_rate, const EdgeGate& gate) {
+        (void)Evolve<false>(iterations, diffusion_rate, gate);
+    }
+    template<typename Gate>
+        requires(std::is_invocable_r_v<bool, const Gate&, std::size_t, std::size_t> ||
+                 std::is_invocable_r_v<bool,
+                                       const Gate&,
+                                       std::size_t,
+                                       std::size_t,
+                                       std::size_t,
+                                       std::size_t>)
+    void advance(std::size_t iterations, double diffusion_rate, const Gate& admits) {
+        (void)Evolve<false>(iterations, diffusion_rate, admits);
+    }
+
+private:
+    template<bool Report, typename Gate>
+    ScalarDiffusionReport
+    Evolve(std::size_t iterations, double diffusion_rate, const Gate& admits) {
         if (!std::isfinite(diffusion_rate) || diffusion_rate <= 0.0 || diffusion_rate > 0.25) {
             throw std::invalid_argument(
                 "scalar diffusion rate must be finite and in the stable range (0, 0.25]");
@@ -107,12 +133,15 @@ public:
         report.width = width_;
         report.height = height_;
         report.iterations = iterations;
-        report.initial_energy = total_energy();
-        report.steps.reserve(iterations);
+        if constexpr (Report) {
+            report.initial_energy = total_energy();
+            report.steps.reserve(iterations);
+        }
+        std::vector<double> next(energy_.size());
 
         for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
-            std::vector<double> next = energy_;
-            double max_delta = 0.0;
+            std::copy(energy_.begin(), energy_.end(), next.begin());
+            [[maybe_unused]] double max_delta = 0.0;
 
             const auto admitted = [&](const std::size_t lhs, const std::size_t rhs) -> bool {
                 if constexpr (kNullableGate<Gate>) {
@@ -136,7 +165,9 @@ public:
                 const double delta = (energy_[lhs] - energy_[rhs]) * diffusion_rate * conductance;
                 next[lhs] -= delta;
                 next[rhs] += delta;
-                max_delta = (std::max)(max_delta, std::abs(delta));
+                if constexpr (Report) {
+                    max_delta = (std::max)(max_delta, std::abs(delta));
+                }
             };
 
             for (std::size_t y = 0; y < height_; ++y) {
@@ -150,27 +181,30 @@ public:
                 }
             }
 
-            energy_ = std::move(next);
-            const double total = total_energy();
-            const double conservation_error = std::abs(total - report.initial_energy);
+            energy_.swap(next);
+            if constexpr (Report) {
+                const double total = total_energy();
+                const double conservation_error = std::abs(total - report.initial_energy);
 
-            report.steps.push_back(ScalarDiffusionStep{
-                iteration + 1,
-                total,
-                conservation_error,
-                max_delta,
-                conservation_error <= 1.0e-9 && std::isfinite(max_delta),
-            });
+                report.steps.push_back(ScalarDiffusionStep{
+                    iteration + 1,
+                    total,
+                    conservation_error,
+                    max_delta,
+                    conservation_error <= 1.0e-9 && std::isfinite(max_delta),
+                });
+            }
         }
 
-        report.final_energy = total_energy();
-        report.conservation_error = std::abs(report.final_energy - report.initial_energy);
-        report.maximum_cell_energy = maximum_cell_energy();
-        report.passed = ScalarDiffusionMeetsGate(report);
+        if constexpr (Report) {
+            report.final_energy = total_energy();
+            report.conservation_error = std::abs(report.final_energy - report.initial_energy);
+            report.maximum_cell_energy = maximum_cell_energy();
+            report.passed = ScalarDiffusionMeetsGate(report);
+        }
         return report;
     }
 
-private:
     [[nodiscard]] std::size_t index(const std::size_t x, const std::size_t y) const {
         if (x >= width_ || y >= height_) {
             throw std::out_of_range("scalar field coordinate out of range");

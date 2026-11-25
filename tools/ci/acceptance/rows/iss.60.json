@@ -1,0 +1,19 @@
+{
+  "id": "iss.60",
+  "source": "issue #60",
+  "statement": "AsyncSavedWorldCatalog coalesces refreshes and discards stale results. With the saved-world fixture, owning-thread Request and Poll calls each return within 1000 ms and the scan finishes within 120 s; corrupt region files are refused. These tests exercise the catalog API, not the client UI event loop.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "AsyncSavedWorldCatalogTest.CoalescesRefreshesAndDiscardsLateResults"
+    },
+    {
+      "kind": "ctest",
+      "ref": "SavedWorldCatalogResponsiveness.*"
+    }
+  ],
+  "requirements": [
+    "dw.mappings.027"
+  ]
+}

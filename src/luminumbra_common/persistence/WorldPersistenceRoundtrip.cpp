@@ -1292,11 +1292,196 @@ std::vector<T> EncodedArrayFromJson(const nlohmann::json& array, const char* fie
     return values;
 }
 
-// Plain JSON arrays keep every legacy tolerance for older saves.
+struct TerrainSampleArrays {
+    std::optional<std::vector<float>> sdf;
+    std::optional<std::vector<float>> heightmap;
+};
+
+// Keep the ordinary DOM for metadata and geometry, but deliver the two large
+// terrain arrays straight to their final native buffers. Save validation reads
+// every sample even when its caller retains zero chunks. Boxing those samples
+// and then converting them again adds work to every metadata save and shutdown.
+// SAX dispatch is statically typed; there is no per-sample erased callback.
+class SnapshotTerrainSax {
+public:
+    SnapshotTerrainSax(nlohmann::json& snapshot, std::vector<TerrainSampleArrays>& terrain)
+        : m_dom(snapshot, false)
+        , m_terrain(terrain) {}
+
+    bool null() {
+        return scalar_allowed() && m_dom.null();
+    }
+    bool boolean(bool value) {
+        return scalar_allowed() && m_dom.boolean(value);
+    }
+    bool string(std::string& value) {
+        return scalar_allowed() && m_dom.string(value);
+    }
+    bool binary(nlohmann::json::binary_t& value) {
+        return scalar_allowed() && m_dom.binary(value);
+    }
+    bool number_integer(nlohmann::json::number_integer_t value) {
+        return number(value);
+    }
+    bool number_unsigned(nlohmann::json::number_unsigned_t value) {
+        return number(value);
+    }
+    bool number_float(nlohmann::json::number_float_t value, const std::string&) {
+        return number(value);
+    }
+    bool start_object(std::size_t elements) {
+        if (m_samples)
+            return false;
+        Kind kind = Kind::Other;
+        if (m_stack.empty()) {
+            kind = Kind::Root;
+        } else if (m_stack.back().kind == Kind::Chunks) {
+            kind = Kind::Chunk;
+            m_terrain.emplace_back();
+        } else if (m_stack.back().kind == Kind::Root && m_stack.back().key == "chunks") {
+            return false;
+        }
+        m_stack.push_back({kind, {}, {}});
+        return m_dom.start_object(elements);
+    }
+    bool key(std::string& value) {
+        auto& frame = m_stack.back();
+        if (frame.kind == Kind::Root && value == "chunks") {
+            if (m_seenChunks)
+                return false;
+            m_seenChunks = true;
+        }
+        if (frame.kind == Kind::Chunk) {
+            const int field = terrain_field(value);
+            if (field >= 0) {
+                const auto index = static_cast<std::size_t>(field);
+                // The DOM's last-key-wins semantics also cover duplicate keys
+                // whose earlier value has an invalid type. Fall back intact.
+                if (frame.seen[index])
+                    return false;
+                frame.seen[index] = true;
+            }
+        }
+        frame.key = value;
+        return m_dom.key(value);
+    }
+    bool end_object() {
+        m_stack.pop_back();
+        return m_dom.end_object();
+    }
+    bool start_array(std::size_t elements) {
+        if (m_samples)
+            return false;
+        Kind kind = Kind::Other;
+        if (!m_stack.empty()) {
+            const auto& frame = m_stack.back();
+            if (frame.kind == Kind::Root && frame.key == "chunks") {
+                kind = Kind::Chunks;
+            } else if (frame.kind == Kind::Chunks) {
+                return false;
+            } else if (frame.kind == Kind::Chunk) {
+                const int field = terrain_field(frame.key);
+                if (field >= 0) {
+                    auto& captured = field == 0 ? m_terrain.back().sdf : m_terrain.back().heightmap;
+                    m_samples = &captured.emplace();
+                    kind = Kind::Samples;
+                }
+            }
+        }
+        m_stack.push_back({kind, {}, {}});
+        return m_dom.start_array(elements);
+    }
+    bool end_array() {
+        if (m_stack.back().kind == Kind::Samples)
+            m_samples = nullptr;
+        m_stack.pop_back();
+        return m_dom.end_array();
+    }
+    bool parse_error(std::size_t, const std::string&, const nlohmann::detail::exception&) {
+        return false;
+    }
+
+private:
+    enum class Kind : std::uint8_t {
+        Root,
+        Chunks,
+        Chunk,
+        Samples,
+        Other
+    };
+    struct Frame {
+        Kind kind;
+        std::string key;
+        std::array<bool, 2> seen;
+    };
+    static int terrain_field(const std::string& key) {
+        if (key == "sdf_data")
+            return 0;
+        return key == "heightmap_data" ? 1 : -1;
+    }
+    bool scalar_allowed() const {
+        return !m_samples && (m_stack.empty() || m_stack.back().kind != Kind::Chunks);
+    }
+    template<typename Number>
+    bool number(Number value) {
+        if (m_samples) {
+            // Only numeric SAX tokens reach here. Convert without boxing each
+            // float in a DOM value; fallback enforces the same numeric types.
+            // LMR1 bounds the input to 64 MiB; at most one float per input token.
+            m_samples->push_back(static_cast<float>(value));
+            return true;
+        }
+        if (!scalar_allowed())
+            return false;
+        if constexpr (std::is_same_v<Number, nlohmann::json::number_float_t>)
+            return m_dom.number_float(value, {});
+        else if constexpr (std::is_same_v<Number, nlohmann::json::number_integer_t>)
+            return m_dom.number_integer(value);
+        else
+            return m_dom.number_unsigned(value);
+    }
+
+    using TextInput = decltype(nlohmann::detail::input_adapter(std::declval<const std::string&>()));
+    nlohmann::detail::json_sax_dom_parser<nlohmann::json, TextInput> m_dom;
+    std::vector<TerrainSampleArrays>& m_terrain;
+    // One frame per opened JSON container, bounded by the input extent.
+    std::vector<Frame> m_stack;
+    std::vector<float>* m_samples = nullptr;
+    bool m_seenChunks = false;
+};
+
+std::vector<float> NumericSamplesFromJson(const nlohmann::json& value) {
+    if (!value.is_array())
+        throw std::invalid_argument("sample data must be an array");
+    std::vector<float> samples;
+    // At most one float per JSON input element; check before reserving storage.
+    if (value.size() > samples.max_size())
+        throw std::invalid_argument("sample array exceeds native capacity");
+    samples.reserve(value.size());
+    for (const auto& sample : value) {
+        // json::get<float>() also converts booleans. Saved samples must be
+        // numeric in both the canonical SAX path and the last-key-wins DOM path.
+        if (!sample.is_number())
+            throw std::invalid_argument("sample data must contain only numeric values");
+        samples.push_back(sample.get<float>());
+    }
+    return samples;
+}
+
+// Plain JSON arrays retain legacy containers and insertion order.
 struct JsonChunkArrays {
     const nlohmann::json& value;
+    TerrainSampleArrays* terrain = nullptr;
     std::vector<float> floats(const char* key) const {
-        return value.at(key).get<std::vector<float>>();
+        if (terrain) {
+            auto& samples = std::string_view(key) == "sdf_data" ? terrain->sdf : terrain->heightmap;
+            if ((std::string_view(key) == "sdf_data" ||
+                 std::string_view(key) == "heightmap_data") &&
+                samples.has_value()) {
+                return std::move(samples.value());
+            }
+        }
+        return NumericSamplesFromJson(value.at(key));
     }
     std::vector<u8> materials() const {
         // tolerant read (default empty) so old saves without the field still
@@ -1613,8 +1798,9 @@ void ApplyChunkFields(const nlohmann::json& value,
 
 void ApplyChunkJson(const nlohmann::json& value,
                     Chunk& chunk,
-                    const ChunkAuthorityLoadPolicy& policy) {
-    ApplyChunkFields(value, JsonChunkArrays{value}, chunk, policy);
+                    const ChunkAuthorityLoadPolicy& policy,
+                    TerrainSampleArrays* terrain = nullptr) {
+    ApplyChunkFields(value, JsonChunkArrays{value, terrain}, chunk, policy);
 }
 
 std::string StableDump(const nlohmann::json& value) {
@@ -2385,10 +2571,11 @@ std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk, bool omit_wa
     return StableDump(snapshot);
 }
 
-bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
+bool WorldStreamingSnapshotDecoder::load(const std::string& json_text,
                                          WorldStreamingState& out_state,
                                          std::vector<std::string>& errors,
                                          const ChunkAuthorityLoadPolicy& authority) {
+    m_directTerrainSamples = 0;
     out_state.clear();
     if (authority.strict_water_valid)
         *authority.strict_water_valid = false;
@@ -2400,7 +2587,18 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
         return false;
     }
     try {
-        const nlohmann::json snapshot = nlohmann::json::parse(json_text);
+        nlohmann::json snapshot;
+        std::vector<TerrainSampleArrays> terrain;
+        bool direct = false;
+        {
+            SnapshotTerrainSax sax(snapshot, terrain);
+            direct = nlohmann::json::sax_parse(json_text, &sax);
+        }
+        if (!direct) {
+            terrain.clear();
+            snapshot = nullptr;
+            snapshot = nlohmann::json::parse(json_text);
+        }
         if (snapshot.at("schema").get<std::string>() != kSnapshotSchema) {
             errors.push_back("unexpected world snapshot schema");
             return false;
@@ -2439,6 +2637,9 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
             errors.push_back("chunk record must contain exactly one chunk");
             return reject();
         }
+        WorldStreamingState staged;
+        std::size_t chunk_index = 0;
+        std::size_t direct_samples = 0;
         for (const nlohmann::json& chunk_json : chunks) {
             if (authority.strict_water)
                 RequireWaterArrays(chunk_json, encoded_arrays);
@@ -2451,8 +2652,17 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                  EncodedChunkArrays{chunk_json, authority.strict_water},
                                  *chunk,
                                  authority);
-            else
-                ApplyChunkJson(chunk_json, *chunk, authority);
+            else {
+                auto* samples = direct ? &terrain.at(chunk_index) : nullptr;
+                if (samples) {
+                    if (samples->sdf.has_value())
+                        direct_samples += samples->sdf.value().size();
+                    if (samples->heightmap.has_value())
+                        direct_samples += samples->heightmap.value().size();
+                }
+                ApplyChunkJson(chunk_json, *chunk, authority, samples);
+            }
+            ++chunk_index;
             // Encoded i32 decoding enforces width; depth additionally excludes negative
             // values. Reuse these decoded cells for both admission and its cached proof.
             if (encoded_arrays && water_valid &&
@@ -2466,24 +2676,40 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                 errors.push_back("chunk id does not match serialized coordinates");
                 return reject();
             }
-            if (!out_state.insert_chunk(chunk)) {
+            if (!staged.insert_chunk(chunk)) {
                 errors.push_back("duplicate chunk id in world snapshot");
                 return reject();
             }
         }
 
-        if (out_state.size() != snapshot.at("chunk_count").get<std::size_t>()) {
+        if (staged.size() != snapshot.at("chunk_count").get<std::size_t>()) {
             errors.push_back("loaded chunk count does not match snapshot chunk_count");
             return reject();
         }
+        for (const auto& chunk_json : chunks) {
+            const auto chunk = staged.find_chunk(chunk_json.at("chunk_id").get<ChunkID>());
+            if (!out_state.insert_chunk(chunk)) {
+                errors.push_back("duplicate chunk id in world snapshot");
+                return reject();
+            }
+        }
         if (authority.strict_water_valid)
             *authority.strict_water_valid = water_valid;
+        m_directTerrainSamples = direct_samples;
         return true;
     } catch (const std::exception& e) {
         errors.push_back(std::string("failed to load world snapshot: ") + e.what());
         out_state.clear();
         return false;
     }
+}
+
+bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
+                                         WorldStreamingState& out_state,
+                                         std::vector<std::string>& errors,
+                                         const ChunkAuthorityLoadPolicy& authority) {
+    WorldStreamingSnapshotDecoder decoder;
+    return decoder.load(json_text, out_state, errors, authority);
 }
 
 bool ValidateWorldStreamingChunkFormatJson(const std::string& chunk_json,

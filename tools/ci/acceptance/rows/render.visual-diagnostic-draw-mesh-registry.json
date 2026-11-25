@@ -1,0 +1,22 @@
+{
+  "id": "render.visual-diagnostic-draw-mesh-registry",
+  "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+  "statement": "A standalone header-only helper adds a submission-ordered capture-local draw/mesh registry bounded to 65,536 entries each and 16 MiB escaped JSON with generic UTF-8 asset paths, separate bounded generated-geometry keys and explicit unsupported coverage. Registered registry regressions cover refusal, IDs, metadata, bounds and reset.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticDrawTable.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticCaptureIntegration.*",
+      "planned": "Add and run GPU attribution and scenario capture bundle regressions; owner: maintainers"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development/visual-diagnostics.md"
+    }
+  ],
+  "requirements": []
+}

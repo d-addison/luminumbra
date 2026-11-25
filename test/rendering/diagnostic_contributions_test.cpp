@@ -1,3 +1,4 @@
+#include "../support/UniqueTempPath.h"
 #include "rendering/AttributedGl.h"
 #include "rendering/Camera.h"
 #include "rendering/DiagnosticDrawTable.h"
@@ -9,13 +10,17 @@
 #include "rendering/passes/LightingPass.h"
 #include "rendering/passes/PassGlHelpers.h"
 #include <glad/glad.h>
+#include <glm/gtc/packing.hpp>
+#include <glm/vec2.hpp>
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <gtest/gtest.h>
+#include <luminumbra/rendering/RenderView.h>
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -257,6 +262,19 @@ TEST(DiagnosticContributions, LiveTermsNeverRequestIdentityReplayOrInspectorRead
     control.enabled = false;
     EXPECT_EQ(pass.mode(), Pass::None);
     control = {};
+}
+
+std::string ReferenceLightingSource() {
+    auto source = Source("res/shaders/lighting_pass.frag");
+    for (const std::string name : {"far_world_position.glsl", "config_constants.gen.glsl"}) {
+        const std::string directive = "#include \"" + name + "\"";
+        const auto include = source.find(directive);
+        if (include == std::string::npos) {
+            throw std::runtime_error("Missing lighting include");
+        }
+        source.replace(include, directive.size(), Source("res/shaders/" + name));
+    }
+    return source;
 }
 
 class ShadowFilterProbe {
@@ -576,7 +594,7 @@ TEST(DiagnosticContributions, CaptureOffLightingAndGBufferKeepEveryOriginalByte)
     const auto lighting = Source("res/shaders/lighting_pass.frag");
     EXPECT_NE(lighting.find("#ifdef LUMIN_DIAG_CONTRIBUTIONS\n"), std::string::npos);
     EXPECT_EQ(Hash(CaptureOff(lighting)), 0xf8fca67f768319eeULL);
-    // Remove only additive instrumentation, retaining the original, fixed off-byte oracle.
+    // Pin the production source outside additive diagnostic instrumentation.
     EXPECT_EQ(Hash(CaptureOff(Source("res/shaders/g_buffer.frag"), "#ifdef LUMIN_DIAG_SURFACE\n")),
               0x7289f9525f762361ULL);
 }
@@ -612,149 +630,15 @@ TEST(DiagnosticContributions, UnsupportedAndStaleInputsAreHatchedWithoutSampling
               lighting.find("glTexStorage2D"));
 }
 
-TEST_F(DiagnosticContributionsGl,
-       LightingVariantsIsolateMaterialEmissionAndLinearLightWithoutChangingColor) {
-    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / "res/shaders";
-    const auto vertex = (root / "lighting_pass.vert").string();
-    const auto fragment = (root / "lighting_pass.frag").string();
-    Shader normal(vertex.c_str(), fragment.c_str());
-    Shader diagnostic(vertex.c_str(), fragment.c_str(), {}, {"LUMIN_DIAG_CONTRIBUTIONS 1"});
-    Shader ladder(vertex.c_str(),
-                  fragment.c_str(),
-                  {},
-                  {"LUMIN_DIAG_CONTRIBUTIONS 1", "LUMINUMBRA_FAR_WORLD_LADDER 1"});
-    ASSERT_TRUE(normal.IsValid());
-    ASSERT_TRUE(diagnostic.IsValid());
-    ASSERT_TRUE(ladder.IsValid());
-    EXPECT_EQ(glGetUniformLocation(normal.Id(), "u_contributionMode"), -1);
-    EXPECT_GE(glGetUniformLocation(diagnostic.Id(), "u_contributionMode"), 0);
-
-    // Fixed 1x1 nearest fixtures, no simulation or temporal inputs.
-    std::array<GLuint, 9> textures{};
-    glGenTextures(static_cast<GLsizei>(textures.size()), textures.data());
-    const std::array<std::array<float, 4>, 7> data = {{{0, 0, -2, 1},
-                                                       {0.5f, 0.5f, 0, 1.0f / 255},
-                                                       {0.2f, 0.3f, 0.4f, 0.4f},
-                                                       {0.25f, 0.6f, 0, 0},
-                                                       {0.5f, 0, 0, 0},
-                                                       {0, 0, 0, 0},
-                                                       {0.1f, 0.2f, 0.3f, 1}}};
-    for (std::size_t index = 0; index < textures.size(); ++index) {
-        glBindTexture(GL_TEXTURE_2D, textures[index]);
-        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA32F, 1, 1);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        if (index < data.size()) {
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RGBA, GL_FLOAT, data[index].data());
-        }
-    }
-    GLuint fbo = 0;
-    GLuint vao = 0;
-    GLuint vbo = 0;
-    glGenFramebuffers(1, &fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    for (GLuint index = 0; index < 2; ++index) {
-        glFramebufferTexture2D(
-            GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + index, GL_TEXTURE_2D, textures[7 + index], 0);
-    }
-    constexpr std::array<GLenum, 2> outputs = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-    glDrawBuffers(2, outputs.data());
-    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER),
-              static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE));
-    // lighting_pass.vert consumes position at location 0 and UV at location 1.
-    constexpr std::array<float, 20> quad = {-1, -1, 0, 0, 0, 1, -1, 0, 1, 0,
-                                            -1, 1,  0, 0, 1, 1, 1,  0, 1, 1};
-    glGenVertexArrays(1, &vao);
-    glGenBuffers(1, &vbo);
-    glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad.data(), GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), nullptr);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(
-        1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
-    for (GLuint unit = 0; unit < 7; ++unit) {
-        glActiveTexture(GL_TEXTURE0 + unit);
-        glBindTexture(GL_TEXTURE_2D, textures[unit]);
-    }
-    bool cascade_case = false;
-    bool outside_selected = false;
-    bool outside_all = false;
-    bool before_light_near = false;
-    const auto configure = [&](Shader& shader) {
-        shader.use();
-        shader.setInt("gPosition", 0);
-        shader.setInt("gNormalMaterial", 1);
-        shader.setInt("gAlbedoRoughness", 2);
-        shader.setInt("gMetallicAO", 3);
-        shader.setInt("u_sceneDepth", 4);
-        shader.setInt("u_environmentBrdf", 5);
-        shader.setInt("u_authoredSurface", 6);
-        shader.setInt("u_ssao", 4);
-        shader.setInt("u_materialLUT", 5);
-        shader.setInt("u_shadowCascades", 7);
-        shader.setInt("u_shadowTintCascades", 7);
-        shader.setInt("u_authoredEnabled", 1);
-        shader.setInt("u_staticStudio", cascade_case ? 0 : 1);
-        shader.setVec4("u_cascadeSplits", glm::vec4(1, 2, 3, 4));
-        for (int index = 0; index < 4; ++index) {
-            glm::mat4 light(1);
-            light[0][0] = light[1][1] = 0.01f;
-            light[2][2] = 0;
-            light[3][2] = before_light_near ? -4.0f : 0.0f;
-            light[3][0] = (outside_all || (outside_selected && index == 0))
-                              ? 4.0f
-                              : static_cast<float>(index) * 0.2f;
-            shader.setMat4("u_lightSpaceMatrices[" + std::to_string(index) + "]", light);
-        }
-        shader.setMat4("u_inverseView", glm::mat4(1));
-        shader.setVec3("u_viewPos", glm::vec3(0));
-        shader.setVec3("u_sun.direction", glm::vec3(0, 0, -1));
-        shader.setVec3("u_sun.color", glm::vec3(0.5f));
-        shader.setVec3("u_skyAmbientColor", glm::vec3(0.4f));
-    };
-    glViewport(0, 0, 1, 1);
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_BLEND);
-    bool moon_case = false;
-    bool point_case = false;
-    bool rotated_case = false;
-    const auto draw = [&](Shader& shader, int mode, GLenum attachment) {
-        configure(shader);
-        shader.setInt("u_contributionMode", mode);
-        if (rotated_case) {
-            glm::mat4 rotation(1);
-            rotation[0] = glm::vec4(0, 0, -1, 0);
-            rotation[2] = glm::vec4(1, 0, 0, 0);
-            shader.setMat4("u_inverseView", rotation);
-        }
-        if (moon_case) {
-            shader.setInt("u_staticStudio", 0);
-            shader.setVec3("u_sun.color", glm::vec3(0));
-            shader.setVec3("u_moonDir", glm::vec3(0, 0, -1));
-            shader.setVec3("u_moonRadiance", glm::vec3(1));
-            shader.setFloat("u_moonIllum", 1);
-        }
-        if (&shader == &ladder) {
-            shader.setInt("u_farWorldLadder", 1);
-            glm::mat4 inverse(1);
-            inverse[2][2] = -1;
-            shader.setMat4("u_gbufferInverseProjection", inverse);
-        }
-        shader.setInt("u_pointLightCount", point_case ? 1 : 0);
-        if (point_case) {
-            shader.setVec3("u_pointLights[0].position", glm::vec3(0));
-            shader.setVec3("u_pointLights[0].color", glm::vec3(1));
-            shader.setFloat("u_pointLights[0].radius", 4);
-            shader.setFloat("u_pointLights[0].intensity", 2);
-        }
-        AttributedGl::Submit(glDrawArrays, static_cast<GLenum>(GL_TRIANGLE_STRIP), 0, 4);
-        glReadBuffer(attachment);
-        std::array<float, 4> result{};
-        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, result.data());
-        return result;
-    };
+template<typename Draw>
+void CheckLightingContributionTerms(const std::array<GLuint, 9>& textures,
+                                    const std::array<std::array<float, 4>, 7>& data,
+                                    Shader& normal,
+                                    Shader& diagnostic,
+                                    bool& moon_case,
+                                    bool& point_case,
+                                    bool& rotated_case,
+                                    const Draw& draw) {
     const auto reference = draw(normal, 0, GL_COLOR_ATTACHMENT0);
     for (int mode = Pass::DirectSun; mode <= Pass::ShadowPlane; ++mode) {
         SCOPED_TRACE(mode);
@@ -829,6 +713,281 @@ TEST_F(DiagnosticContributionsGl,
         EXPECT_NEAR(point_irradiance[channel], 0.102f + 1.0f / pi, 0.000001f);
         EXPECT_GT(combined_specular[channel], lunar_specular[channel]);
     }
+}
+
+template<typename Draw>
+void CheckShadowFetchEquivalence(const std::array<GLuint, 9>& textures,
+                                 GLuint& shadows,
+                                 const std::array<std::pair<float, int>, 8>& depths,
+                                 Shader& diagnostic,
+                                 Shader& scalar_diagnostic,
+                                 Shader& normal,
+                                 Shader& scalar,
+                                 const Draw& draw) {
+    for (const int size : {1024, 1536, 2048}) {
+        SCOPED_TRACE(size);
+        glDeleteTextures(1, &shadows);
+        glCreateTextures(GL_TEXTURE_2D_ARRAY, 1, &shadows);
+        glTextureStorage3D(shadows, 1, GL_DEPTH_COMPONENT32F, size, size, 4);
+        glTextureParameteri(shadows, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTextureParameteri(shadows, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTextureParameteri(shadows, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+        glTextureParameteri(shadows, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+        constexpr std::array<float, 4> border = {1, 1, 1, 1};
+        glTextureParameterfv(shadows, GL_TEXTURE_BORDER_COLOR, border.data());
+        glBindTextureUnit(7, shadows);
+        // At most 2048^2 depth floats (16 MiB) of CPU staging, reused per layer.
+        const auto extent = static_cast<std::size_t>(size);
+        std::vector<float> depth_samples(extent * extent);
+        for (int layer = 0; layer < 4; ++layer) {
+            for (int y = 0; y < size; ++y) {
+                for (int x = 0; x < size; ++x) {
+                    const int pattern = (x * 17 + y * 31 + layer * 7) % 23;
+                    depth_samples[static_cast<std::size_t>(y) * extent +
+                                  static_cast<std::size_t>(x)] =
+                        0.49f + static_cast<float>(pattern) * 0.0005f;
+                }
+            }
+            glTextureSubImage3D(shadows,
+                                0,
+                                0,
+                                0,
+                                layer,
+                                size,
+                                size,
+                                1,
+                                GL_DEPTH_COMPONENT,
+                                GL_FLOAT,
+                                depth_samples.data());
+        }
+        for (int light = 0; light < 3; ++light) {
+            SCOPED_TRACE(light);
+            for (const auto& [depth, selected] : depths) {
+                SCOPED_TRACE(selected);
+                for (const float coordinate : {-101.0f,
+                                               -100.0f,
+                                               -99.97f,
+                                               -0.03125f,
+                                               0.0f,
+                                               0.03125f,
+                                               99.97f,
+                                               100.0f,
+                                               101.0f}) {
+                    SCOPED_TRACE(coordinate);
+                    const std::array<float, 4> position = {coordinate, coordinate, -depth, 1};
+                    glTextureSubImage2D(
+                        textures[0], 0, 0, 0, 1, 1, GL_RGBA, GL_FLOAT, position.data());
+                    for (const int mode : {Pass::DirectSun,
+                                           Pass::DirectMoon,
+                                           Pass::ShadowFactor,
+                                           Pass::ShadowCascade,
+                                           Pass::ShadowFootprint}) {
+                        SCOPED_TRACE(mode);
+                        const auto actual = draw(diagnostic, mode, GL_COLOR_ATTACHMENT1, light);
+                        std::array<float, 4> actual_color{};
+                        glReadBuffer(GL_COLOR_ATTACHMENT0);
+                        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, actual_color.data());
+                        const auto expected =
+                            draw(scalar_diagnostic, mode, GL_COLOR_ATTACHMENT1, light);
+                        std::array<float, 4> expected_color{};
+                        glReadBuffer(GL_COLOR_ATTACHMENT0);
+                        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, expected_color.data());
+                        EXPECT_EQ((std::bit_cast<std::array<std::uint32_t, 4>>(actual_color)),
+                                  (std::bit_cast<std::array<std::uint32_t, 4>>(expected_color)));
+                        EXPECT_EQ((std::bit_cast<std::array<std::uint32_t, 4>>(actual)),
+                                  (std::bit_cast<std::array<std::uint32_t, 4>>(expected)));
+                    }
+                    const auto actual = draw(normal, Pass::None, GL_COLOR_ATTACHMENT0, light);
+                    const auto expected = draw(scalar, Pass::None, GL_COLOR_ATTACHMENT0, light);
+                    // The shipping shader and the scalar reference are separate programs, so
+                    // GLSL does not make their float32 results bit-identical (llvmpipe differs by
+                    // a few ULPs between compiles). The lighting target stores RGBA16F, so compare
+                    // the bits that the shipping pass actually writes.
+                    const auto stored = [](const std::array<float, 4>& color) {
+                        return std::array<std::uint32_t, 2>{
+                            glm::packHalf2x16(glm::vec2(color[0], color[1])),
+                            glm::packHalf2x16(glm::vec2(color[2], color[3]))};
+                    };
+                    EXPECT_EQ(stored(actual), stored(expected));
+                }
+            }
+        }
+    }
+}
+
+TEST_F(DiagnosticContributionsGl,
+       LightingVariantsIsolateMaterialEmissionAndLinearLightWithoutChangingColor) {
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / "res/shaders";
+    const auto vertex = (root / "lighting_pass.vert").string();
+    const auto fragment = (root / "lighting_pass.frag").string();
+    Luminumbra::TestSupport::ScopedTempFile reference_file("lighting_reference_", ".frag");
+    {
+        std::ofstream output(reference_file.Path());
+        output << ReferenceLightingSource();
+        output.close();
+        ASSERT_TRUE(output.good());
+    }
+    const auto reference_path = reference_file.Path().string();
+    Shader scalar(vertex.c_str(), reference_path.c_str());
+    Shader scalar_diagnostic(
+        vertex.c_str(), reference_path.c_str(), {}, {"LUMIN_DIAG_CONTRIBUTIONS 1"});
+    ASSERT_TRUE(scalar.IsValid()) << scalar.Diagnostic();
+    ASSERT_TRUE(scalar_diagnostic.IsValid()) << scalar_diagnostic.Diagnostic();
+    Shader composite(vertex.c_str(), (root / "cloud_composite.frag").string().c_str());
+    ASSERT_TRUE(composite.IsValid());
+    Shader normal(vertex.c_str(), fragment.c_str());
+    Shader diagnostic(vertex.c_str(), fragment.c_str(), {}, {"LUMIN_DIAG_CONTRIBUTIONS 1"});
+    Shader ladder(vertex.c_str(),
+                  fragment.c_str(),
+                  {},
+                  {"LUMIN_DIAG_CONTRIBUTIONS 1", "LUMINUMBRA_FAR_WORLD_LADDER 1"});
+    ASSERT_TRUE(normal.IsValid());
+    ASSERT_TRUE(diagnostic.IsValid());
+    ASSERT_TRUE(ladder.IsValid());
+    EXPECT_EQ(glGetUniformLocation(normal.Id(), "u_contributionMode"), -1);
+    EXPECT_GE(glGetUniformLocation(diagnostic.Id(), "u_contributionMode"), 0);
+
+    // Fixed 1x1 nearest fixtures, no simulation or temporal inputs.
+    std::array<GLuint, 9> textures{};
+    glGenTextures(static_cast<GLsizei>(textures.size()), textures.data());
+    const std::array<std::array<float, 4>, 7> data = {{{0, 0, -2, 1},
+                                                       {0.5f, 0.5f, 0, 1.0f / 255},
+                                                       {0.2f, 0.3f, 0.4f, 0.4f},
+                                                       {0.25f, 0.6f, 0, 0},
+                                                       {0.5f, 0, 0, 0},
+                                                       {0, 0, 0, 0},
+                                                       {0.1f, 0.2f, 0.3f, 1}}};
+    for (std::size_t index = 0; index < textures.size(); ++index) {
+        glBindTexture(GL_TEXTURE_2D, textures[index]);
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA32F, index < 7 ? 1 : 8, index < 7 ? 1 : 8);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        if (index < data.size()) {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RGBA, GL_FLOAT, data[index].data());
+        }
+    }
+    GLuint fbo = 0;
+    GLuint vao = 0;
+    GLuint vbo = 0;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    for (GLuint index = 0; index < 2; ++index) {
+        glFramebufferTexture2D(
+            GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + index, GL_TEXTURE_2D, textures[7 + index], 0);
+    }
+    constexpr std::array<GLenum, 2> outputs = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+    glDrawBuffers(2, outputs.data());
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER),
+              static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE));
+    // lighting_pass.vert consumes position at location 0 and UV at location 1.
+    constexpr std::array<float, 20> quad = {-1, -1, 0, 0, 0, 1, -1, 0, 1, 0,
+                                            -1, 1,  0, 0, 1, 1, 1,  0, 1, 1};
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(
+        1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    for (GLuint unit = 0; unit < 7; ++unit) {
+        glActiveTexture(GL_TEXTURE0 + unit);
+        glBindTexture(GL_TEXTURE_2D, textures[unit]);
+    }
+    bool cascade_case = false;
+    bool outside_selected = false;
+    bool outside_all = false;
+    bool before_light_near = false;
+    const auto configure = [&](Shader& shader) {
+        shader.use();
+        shader.setInt("gPosition", 0);
+        shader.setInt("gNormalMaterial", 1);
+        shader.setInt("gAlbedoRoughness", 2);
+        shader.setInt("gMetallicAO", 3);
+        shader.setInt("u_sceneDepth", 4);
+        shader.setInt("u_environmentBrdf", 5);
+        shader.setInt("u_authoredSurface", 6);
+        shader.setInt("u_ssao", 4);
+        shader.setInt("u_materialLUT", 5);
+        shader.setInt("u_shadowCascades", 7);
+        shader.setInt("u_shadowTintCascades", 7);
+        shader.setInt("u_authoredEnabled", 1);
+        shader.setInt("u_staticStudio", cascade_case ? 0 : 1);
+        shader.setVec4("u_cascadeSplits", glm::vec4(1, 2, 3, 4));
+        for (int index = 0; index < 4; ++index) {
+            glm::mat4 light(1);
+            light[0][0] = light[1][1] = 0.01f;
+            light[2][2] = 0;
+            light[3][2] = before_light_near ? -4.0f : 0.0f;
+            light[3][0] = (outside_all || (outside_selected && index == 0))
+                              ? 4.0f
+                              : static_cast<float>(index) * 0.2f;
+            shader.setMat4("u_lightSpaceMatrices[" + std::to_string(index) + "]", light);
+        }
+        shader.setMat4("u_inverseView", glm::mat4(1));
+        shader.setVec3("u_viewPos", glm::vec3(0));
+        shader.setVec3("u_sun.direction", glm::vec3(0, 0, -1));
+        shader.setVec3("u_sun.color", glm::vec3(0.5f));
+        shader.setVec3("u_skyAmbientColor", glm::vec3(0.4f));
+        shader.setVec3("u_moonRadiance", glm::vec3(0));
+        shader.setFloat("u_moonIllum", 0);
+    };
+    glViewport(0, 0, 1, 1);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    bool moon_case = false;
+    bool comparison_case = false;
+    bool twilight_case = false;
+    bool composite_sky = false;
+    bool ladder_comparison = false;
+    bool point_case = false;
+    bool rotated_case = false;
+    const auto draw = [&](Shader& shader, int mode, GLenum attachment) {
+        configure(shader);
+        shader.setInt("u_contributionMode", mode);
+        if (rotated_case) {
+            glm::mat4 rotation(1);
+            rotation[0] = glm::vec4(0, 0, -1, 0);
+            rotation[2] = glm::vec4(1, 0, 0, 0);
+            shader.setMat4("u_inverseView", rotation);
+        }
+        if (moon_case) {
+            shader.setInt("u_staticStudio", 0);
+            shader.setVec3("u_sun.color", glm::vec3(twilight_case ? 0.03f : 0.0f));
+            shader.setVec3("u_moonDir",
+                           comparison_case ? glm::vec3(0, -0.8f, -0.6f) : glm::vec3(0, 0, -1));
+            shader.setVec3("u_moonRadiance", glm::vec3(1));
+            shader.setFloat("u_moonIllum", 1);
+        }
+        shader.setInt("u_farWorldLadder", &shader == &ladder || ladder_comparison ? 1 : 0);
+        if (&shader == &ladder || ladder_comparison) {
+            glm::mat4 inverse(1);
+            inverse[2][2] = -1;
+            shader.setMat4("u_gbufferInverseProjection", inverse);
+        }
+        shader.setInt("u_pointLightCount", point_case ? 1 : 0);
+        if (point_case) {
+            shader.setVec3("u_pointLights[0].position", glm::vec3(0));
+            shader.setVec3("u_pointLights[0].color", glm::vec3(1));
+            shader.setFloat("u_pointLights[0].radius", 4);
+            shader.setFloat("u_pointLights[0].intensity", 2);
+        }
+        AttributedGl::Submit(glDrawArrays, static_cast<GLenum>(GL_TRIANGLE_STRIP), 0, 4);
+        if (composite_sky) {
+            composite.use();
+            composite.setInt("u_cloudColor", 6);
+            composite.setInt("u_sceneDepth", 4);
+            AttributedGl::Submit(glDrawArrays, static_cast<GLenum>(GL_TRIANGLE_STRIP), 0, 4);
+        }
+        glReadBuffer(attachment);
+        std::array<float, 4> result{};
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, result.data());
+        return result;
+    };
+    CheckLightingContributionTerms(
+        textures, data, normal, diagnostic, moon_case, point_case, rotated_case, draw);
     // Production selection and diagnostic payload share the exact index and projection.
     moon_case = point_case = false;
     cascade_case = true;
@@ -881,6 +1040,53 @@ TEST_F(DiagnosticContributionsGl,
     cascade_case = false; // studio bypass must never invent a cascade
     EXPECT_EQ(draw(diagnostic, Pass::ShadowCascade, GL_COLOR_ATTACHMENT1),
               (std::array<float, 4>{-2, -2, -2, 1}));
+    // Exact float bit patterns, including signed zero, across all shipping
+    // sizes, every layer, fractional footprints, borders and both light biases.
+    before_light_near = false;
+    cascade_case = comparison_case = true;
+    for (const bool ladder_mode : {false, true}) {
+        SCOPED_TRACE(ladder_mode);
+        ladder_comparison = ladder_mode;
+        CheckShadowFetchEquivalence(textures,
+                                    shadows,
+                                    depths,
+                                    diagnostic,
+                                    scalar_diagnostic,
+                                    normal,
+                                    scalar,
+                                    [&](Shader& shader, int mode, GLenum attachment, int light) {
+                                        moon_case = light != 0;
+                                        twilight_case = light == 1;
+                                        return draw(shader, mode, attachment);
+                                    });
+    }
+    ladder_comparison = false;
+    // A sky-heavy Legacy frame: the production depth-masked sky composite
+    // overwrites all 64 cleared pixels before any color consumer can sample them.
+    const std::array<float, 4> cleared = {0, 0, 0, 0};
+    glTextureSubImage2D(textures[0], 0, 0, 0, 1, 1, GL_RGBA, GL_FLOAT, cleared.data());
+    glTextureSubImage2D(textures[4], 0, 0, 0, 1, 1, GL_RGBA, GL_FLOAT, cleared.data());
+    glViewport(0, 0, 8, 8);
+    EXPECT_EQ(draw(normal, Pass::None, GL_COLOR_ATTACHMENT0),
+              draw(scalar, Pass::None, GL_COLOR_ATTACHMENT0));
+    EXPECT_EQ(draw(scalar, Pass::None, GL_COLOR_ATTACHMENT0)[3], 1);
+    composite_sky = true;
+    for (int light = 0; light < 3; ++light) {
+        moon_case = light != 0;
+        twilight_case = light == 1;
+        draw(normal, Pass::None, GL_COLOR_ATTACHMENT0);
+        std::array<std::uint32_t, 8 * 8 * 4> actual{};
+        glReadPixels(0, 0, 8, 8, GL_RGBA, GL_FLOAT, actual.data());
+        draw(scalar, Pass::None, GL_COLOR_ATTACHMENT0);
+        std::array<std::uint32_t, 8 * 8 * 4> expected{};
+        glReadPixels(0, 0, 8, 8, GL_RGBA, GL_FLOAT, expected.data());
+        EXPECT_EQ(actual, expected);
+    }
+    // Studio uses its existing background return.
+    composite_sky = false;
+    cascade_case = moon_case = false;
+    EXPECT_EQ(draw(normal, Pass::None, GL_COLOR_ATTACHMENT0),
+              draw(scalar, Pass::None, GL_COLOR_ATTACHMENT0));
     glDeleteTextures(1, &shadows);
     EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
     glDeleteBuffers(1, &vbo);
@@ -1168,7 +1374,7 @@ TEST_F(DiagnosticContributionsGl,
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, lighting.lighting_fbo().fbo_id);
     glColorMaski(1, GL_FALSE, GL_TRUE, GL_FALSE, GL_TRUE);
     glEnablei(GL_BLEND, 1);
-    lighting.execute(ctx);
+    lighting.execute(ctx, true);
     ASSERT_NE(control.contribution_texture, 0U);
     const GLuint retained = control.contribution_texture;
     EXPECT_EQ(control.contribution_view, Pass::Roughness);
@@ -1209,6 +1415,8 @@ TEST_F(DiagnosticContributionsGl,
     EXPECT_EQ(control.contribution_texture, 0U);
     ctx.frozen_replay = false;
     control.enabled = false;
+    lighting.execute(ctx, true);
+    EXPECT_EQ(glGetUniformLocation(lighting.shader()->Id(), "u_skipLegacySky"), -1);
     lighting.execute(ctx);
     EXPECT_EQ(control.contribution_texture, 0U);
     control.enabled = true;
@@ -1219,6 +1427,232 @@ TEST_F(DiagnosticContributionsGl,
     EXPECT_EQ(glIsTexture(retained), GL_FALSE);
     lighting.destroy_lighting_fbo(registry);
     glDeleteVertexArrays(1, &vao);
+    EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+}
+
+TEST_F(DiagnosticContributionsGl, FrameSkyDepthTestPreservesLitBitsAndGlState) {
+    RenderResourceRegistry registry;
+    LightingPass lighting;
+    lighting.init_shader(LUMINUMBRA_SOURCE_ROOT);
+    ASSERT_TRUE(lighting.shader()->IsValid());
+    lighting.init_lighting_fbo(registry, 2, 2);
+    std::array<GLuint, 8> textures{};
+    glCreateTextures(GL_TEXTURE_2D, static_cast<GLsizei>(textures.size()), textures.data());
+    constexpr std::array<std::array<float, 4>, 6> data = {{{0, 0, -2, 1},
+                                                           {0.5f, 0.5f, 0, 1.0f / 255},
+                                                           {0.2f, 0.3f, 0.4f, 0.4f},
+                                                           {0.25f, 0.6f, 0, 0},
+                                                           {1, 1, 1, 1},
+                                                           {0, 0, 0, 0}}};
+    for (std::size_t index = 0; index < 7; ++index) {
+        glTextureStorage2D(
+            textures[index], 1, GL_RGBA32F, index == 5 ? 256 : 2, index == 5 ? 4 : 2);
+        glTextureParameteri(textures[index], GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTextureParameteri(textures[index], GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        if (index < data.size()) {
+            glClearTexImage(textures[index], 0, GL_RGBA, GL_FLOAT, data[index].data());
+        }
+    }
+    constexpr std::array<float, 4> depths = {0, 0.5f, 0.25f, 1};
+    glTextureStorage2D(textures[7], 1, GL_DEPTH_COMPONENT32F, 2, 2);
+    glTextureParameteri(textures[7], GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTextureParameteri(textures[7], GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTextureSubImage2D(textures[7], 0, 0, 0, 2, 2, GL_DEPTH_COMPONENT, GL_FLOAT, depths.data());
+    GLuint source_fbo = 0;
+    glCreateFramebuffers(1, &source_fbo);
+    glNamedFramebufferTexture(source_fbo, GL_DEPTH_ATTACHMENT, textures[7], 0);
+    glNamedFramebufferDrawBuffer(source_fbo, GL_NONE);
+    glNamedFramebufferReadBuffer(source_fbo, GL_NONE);
+    ASSERT_EQ(glCheckNamedFramebufferStatus(source_fbo, GL_FRAMEBUFFER),
+              static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE));
+    const auto& target = lighting.lighting_fbo();
+    // Float32 preserves differences that the shipping half-float target could hide.
+    glNamedFramebufferTexture(target.fbo_id, GL_COLOR_ATTACHMENT0, textures[6], 0);
+    ASSERT_EQ(glCheckNamedFramebufferStatus(target.fbo_id, GL_FRAMEBUFFER),
+              static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE));
+    constexpr std::array<float, 20> quad = {-1, -1, 0, 0, 0, 1, -1, 0, 1, 0,
+                                            -1, 1,  0, 0, 1, 1, 1,  0, 1, 1};
+    GLuint vao = 0;
+    GLuint vbo = 0;
+    GLuint query = 0;
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glGenQueries(1, &query);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(
+        1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    Camera camera;
+    const std::vector<glm::mat4> matrices(4, glm::mat4(1));
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = ctx.screen_height = 8;
+    ctx.internal_width = ctx.internal_height = 2;
+    ctx.screen_quad_vao = vao;
+    ctx.light_space_matrices = &matrices;
+    ctx.gbuffer_fbo.id = source_fbo;
+    ctx.gbuffer_position.id = textures[0];
+    ctx.gbuffer_normal.id = textures[1];
+    ctx.gbuffer_albedo.id = textures[2];
+    ctx.gbuffer_material.id = textures[3];
+    ctx.ssao_blur.id = textures[4];
+    ctx.material_lut.id = textures[5];
+    ctx.gbuffer_depth.id = textures[7];
+    ctx.sky_ambient_color = glm::vec3(0.4f);
+    ctx.sun.direction = glm::vec3(0, 0, -1);
+    ctx.sun.color = glm::vec3(0.5f);
+    glDisable(GL_BLEND);
+    glClearColor(0.75f, 0.5f, 0.25f, 1);
+    glEnable(GL_STENCIL_TEST);
+    glStencilFuncSeparate(GL_FRONT, GL_ALWAYS, 3, 0x3f);
+    glStencilFuncSeparate(GL_BACK, GL_NOTEQUAL, 5, 0x7f);
+    glStencilMaskSeparate(GL_FRONT, 0x17);
+    glStencilMaskSeparate(GL_BACK, 0x29);
+    glStencilOpSeparate(GL_FRONT, GL_REPLACE, GL_INCR, GL_DECR);
+    glStencilOpSeparate(GL_BACK, GL_ZERO, GL_INVERT, GL_KEEP);
+    const auto stencil_state = [] {
+        std::array<GLint, 15> state{};
+        constexpr std::array<GLenum, 14> names = {GL_STENCIL_FUNC,
+                                                  GL_STENCIL_REF,
+                                                  GL_STENCIL_VALUE_MASK,
+                                                  GL_STENCIL_WRITEMASK,
+                                                  GL_STENCIL_FAIL,
+                                                  GL_STENCIL_PASS_DEPTH_FAIL,
+                                                  GL_STENCIL_PASS_DEPTH_PASS,
+                                                  GL_STENCIL_BACK_FUNC,
+                                                  GL_STENCIL_BACK_REF,
+                                                  GL_STENCIL_BACK_VALUE_MASK,
+                                                  GL_STENCIL_BACK_WRITEMASK,
+                                                  GL_STENCIL_BACK_FAIL,
+                                                  GL_STENCIL_BACK_PASS_DEPTH_FAIL,
+                                                  GL_STENCIL_BACK_PASS_DEPTH_PASS};
+        state[0] = glIsEnabled(GL_STENCIL_TEST);
+        for (std::size_t index = 0; index < names.size(); ++index) {
+            glGetIntegerv(names[index], &state[index + 1]);
+        }
+        return state;
+    };
+    const auto stencil_before = stencil_state();
+    const auto draw = [&](bool replace_sky, bool depth_enabled, GLuint expected_samples) {
+        if (depth_enabled) {
+            glEnable(GL_DEPTH_TEST);
+        } else {
+            glDisable(GL_DEPTH_TEST);
+        }
+        glDepthFunc(GL_GEQUAL);
+        glDepthMask(GL_FALSE);
+        glDepthRange(0.25, 0.75);
+        glClearDepth(0.625);
+        glBeginQuery(GL_SAMPLES_PASSED, query);
+        if (replace_sky) {
+            lighting.execute(ctx, true);
+        } else {
+            lighting.execute(ctx);
+        }
+        glEndQuery(GL_SAMPLES_PASSED);
+        GLuint samples = 0;
+        glGetQueryObjectuiv(query, GL_QUERY_RESULT, &samples);
+        EXPECT_EQ(samples, expected_samples);
+        EXPECT_EQ(lighting.depth_copied_from_gbuffer(), expected_samples == 3);
+        EXPECT_EQ(glIsEnabled(GL_DEPTH_TEST), depth_enabled ? GL_TRUE : GL_FALSE);
+        GLint function = 0;
+        GLboolean mask = GL_TRUE;
+        std::array<GLdouble, 2> range{};
+        GLdouble clear = 0;
+        glGetIntegerv(GL_DEPTH_FUNC, &function);
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &mask);
+        glGetDoublev(GL_DEPTH_RANGE, range.data());
+        glGetDoublev(GL_DEPTH_CLEAR_VALUE, &clear);
+        EXPECT_EQ(function, GL_GEQUAL);
+        EXPECT_EQ(mask, GL_FALSE);
+        EXPECT_EQ(range, (std::array<GLdouble, 2>{0.25, 0.75}));
+        EXPECT_EQ(clear, 0.625);
+        EXPECT_EQ(stencil_state(), stencil_before);
+        for (const auto& [slot, type, name] :
+             {std::array<GLint, 3>{
+                  GL_COLOR_ATTACHMENT0, GL_TEXTURE, static_cast<GLint>(textures[6])},
+              std::array<GLint, 3>{GL_DEPTH_ATTACHMENT,
+                                   GL_RENDERBUFFER,
+                                   static_cast<GLint>(target.depth_texture)}}) {
+            GLint actual_type = 0;
+            GLint actual_name = 0;
+            glGetNamedFramebufferAttachmentParameteriv(target.fbo_id,
+                                                       static_cast<GLenum>(slot),
+                                                       GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
+                                                       &actual_type);
+            glGetNamedFramebufferAttachmentParameteriv(target.fbo_id,
+                                                       static_cast<GLenum>(slot),
+                                                       GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+                                                       &actual_name);
+            EXPECT_EQ(actual_type, type);
+            EXPECT_EQ(actual_name, name);
+        }
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, target.fbo_id);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        std::array<std::uint32_t, 16> bits{};
+        glReadPixels(0, 0, 2, 2, GL_RGBA, GL_FLOAT, bits.data());
+        return bits;
+    };
+    for (const bool depth_enabled : {false, true}) {
+        const auto reference = draw(false, depth_enabled, 4);
+        const auto skipped = draw(true, depth_enabled, 3);
+        for (std::size_t channel = 0; channel < reference.size(); ++channel) {
+            EXPECT_EQ(skipped[channel], channel < 4 ? 0U : reference[channel]);
+        }
+        EXPECT_EQ(reference[3], std::bit_cast<std::uint32_t>(1.0f));
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, target.fbo_id);
+        std::array<float, 4> copied_depth{};
+        glReadPixels(0, 0, 2, 2, GL_DEPTH_COMPONENT, GL_FLOAT, copied_depth.data());
+        EXPECT_EQ(copied_depth, depths);
+        auto& control = Pass::controls();
+        control.enabled = true;
+        control.view = Pass::Roughness;
+        EXPECT_EQ(draw(true, depth_enabled, 4), reference);
+        ASSERT_NE(control.contribution_texture, 0U);
+        control.enabled = false;
+        ctx.far_world_ladder = true;
+        const auto ladder_reference = draw(false, depth_enabled, 4);
+        EXPECT_EQ(draw(true, depth_enabled, 4), ladder_reference);
+        ctx.far_world_ladder = false;
+        ctx.gbuffer_fbo.id = 0;
+        EXPECT_EQ(draw(true, depth_enabled, 4), reference);
+        ctx.gbuffer_fbo.id = source_fbo;
+    }
+    RenderViewDescription description;
+    description.width = description.height = 2;
+    description.revision = 1;
+    description.near_plane = camera.GetNearPlane();
+    description.far_plane = camera.GetFarPlane();
+    const auto projection = camera.GetProjectionMatrix(2, 2);
+    for (std::size_t index = 0; index < description.projection.size(); ++index) {
+        description.projection[index] = projection[index / 4][index % 4];
+    }
+    const auto view = RenderView::Validate(description);
+    ctx.render_view = &view;
+    ctx.static_studio = true;
+    ctx.authored_surface.id = textures[4];
+    const auto studio_reference = draw(false, false, 4);
+    EXPECT_EQ(draw(true, false, 4), studio_reference);
+    std::array<float, 4> source_depth{};
+    glGetTextureImage(textures[7],
+                      0,
+                      GL_DEPTH_COMPONENT,
+                      GL_FLOAT,
+                      static_cast<GLsizei>(sizeof(source_depth)),
+                      source_depth.data());
+    EXPECT_EQ(source_depth, depths);
+    glNamedFramebufferTexture(target.fbo_id, GL_COLOR_ATTACHMENT0, target.color_texture, 0);
+    lighting.reset_shader();
+    lighting.destroy_lighting_fbo(registry);
+    glDeleteQueries(1, &query);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteFramebuffers(1, &source_fbo);
+    glDeleteTextures(static_cast<GLsizei>(textures.size()), textures.data());
     EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
 }
 

@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.hash.02",
+  "source": "docs/active-regions.md#hash-and-replay",
+  "statement": "Acceptance obligations: details are specified alongside its implementation below. / The replay companion is `<recording>.regions.json`, with exact keys `schema`, `ticks`, `checksum`. / Schema is `luminumbra.region_schedule_trace.v1`. / Ticks is an array of exact `{tick, digest}` objects, consecutive unsigned ticks starting at 1, with a 16-character lowercase hexadecimal schedule digest. / Checksum is the existing StableChecksum of the compact sorted-key JSON object containing schema and ticks alone. / Writers append one LF and use binary streams.",
+  "status": "planned",
+  "requirements": [
+    "ar.hash.011",
+    "ar.hash.012",
+    "ar.hash.013",
+    "ar.hash.014",
+    "ar.hash.015",
+    "ar.hash.016"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArHashContract.Requirements02",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.hash.02.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

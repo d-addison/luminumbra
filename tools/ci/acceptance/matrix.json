@@ -1,0 +1,4 @@
+{
+  "schema": "luminumbra.acceptance_matrix.v2",
+  "description": "Requirement-to-evidence matrix for the expanded v0.3 contract. Rows are statements; evidence items are executable tests, scripts, native commands or documents. The planned field is descriptive text naming outstanding work and its owner; planned items are visible but never count as covered."
+}

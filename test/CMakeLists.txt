@@ -66,6 +66,7 @@ endforeach()
 # Add the world generation test executable
 add_executable(world_generation_test
     shield/test_world_generation.cpp
+    shield/water_column_diagnostics_test.cpp
     shield/test_meshing_determinism.cpp
     shield/worldgen_hardening_test.cpp
     shield/meshing_hardening_test.cpp
@@ -767,6 +768,7 @@ endif()
 
 add_executable(render_capture_test
     rendering/render_capture_test.cpp
+    rendering/capture_forward_presence_test.cpp
     # the capture-hooks TU under test (GL-free; direct source, same as
     # shader_reflection_test's ShaderReflection.cpp -- render_capture_test links
     # luminumbra_common, not luminumbra_client, so no duplicate symbols).
@@ -786,7 +788,9 @@ target_include_directories(render_capture_test PRIVATE
 
 target_link_libraries(render_capture_test PRIVATE
     gtest_main
+    capture_launch_test_support
     luminumbra_common
+    nlohmann_json::nlohmann_json
     glfw
     glad
 )
@@ -2274,6 +2278,12 @@ set_tests_properties(DiagnosticRoisPython PROPERTIES LABELS "tools" TIMEOUT 60)
 add_test(NAME DiagnosticChecksPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/tools/gates/test_diagnostic_checks.py")
 set_tests_properties(DiagnosticChecksPython PROPERTIES LABELS "tools" TIMEOUT 60)
+add_test(NAME TemporalCapturePython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/gates/test_temporal_capture.py")
+set_tests_properties(TemporalCapturePython PROPERTIES LABELS "tools" TIMEOUT 60)
+add_test(NAME TemporalMontagesPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/gates/test_temporal_montages.py")
+set_tests_properties(TemporalMontagesPython PROPERTIES LABELS "tools" TIMEOUT 60)
 
 set(LUMINUMBRA_GTEST_TARGETS
     content_vfs_test
@@ -3029,6 +3039,14 @@ add_test(NAME RenderBenchmarkAssets COMMAND "${Python3_EXECUTABLE}"
     ${CMAKE_SOURCE_DIR}/tools/perf/synthetic_render_content.py
     --root ${CMAKE_BINARY_DIR}/test-artifacts/render-synthetic-content)
 set_tests_properties(RenderBenchmarkAssets PROPERTIES FIXTURES_SETUP render_benchmark_assets TIMEOUT 30)
+# A fresh client entry runs the shared boot water settle (#1210), about 170 s
+# under ASan. Scale only the sanitizer build; other builds keep 180 s and 600 s.
+set(_render_runner_asan_args)
+set(_render_runner_ctest_timeout 600)
+if(LUMINUMBRA_ENABLE_ASAN)
+    set(_render_runner_asan_args --process-timeout 540)
+    set(_render_runner_ctest_timeout 1200)
+endif()
 foreach(case IN ITEMS
     "RenderTraversalIntegrated;test_traversal_twice"
     "RenderWorkloadSaveLoadIntegrated;test_v4_save_load_success"
@@ -3056,7 +3074,9 @@ foreach(case IN ITEMS
         --source ${CMAKE_SOURCE_DIR}
         --assets ${CMAKE_BINARY_DIR}/test-artifacts/render-synthetic-content
         --artifacts ${CMAKE_BINARY_DIR}/test-artifacts/render-runner
+        ${_render_runner_asan_args}
         RenderRunnerTests.${test_method})
-    set_tests_properties(${test_name} PROPERTIES TIMEOUT 600 FIXTURES_REQUIRED render_benchmark_assets
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT ${_render_runner_ctest_timeout}
+        FIXTURES_REQUIRED render_benchmark_assets
         RESOURCE_LOCK luminumbra_gl_context)
 endforeach()

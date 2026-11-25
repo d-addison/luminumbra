@@ -1,0 +1,26 @@
+{
+  "id": "iss.68",
+  "source": "issue #68",
+  "statement": "Serial loading, the networking soak and the performance gates are qualified together in one v0.3 acceptance receipt. Ordinary client startup has audio on; qualification commands pass `--no-audio` explicitly. Native startup/settings/package qualification remains pending under the amended audio policy.",
+  "status": "needs-native-run",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "NetSoak"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/ci/check_v03_receipt.py"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/gates/run-v03-acceptance.ps1",
+      "planned": "Align the historical default-null checklist with ordinary-startup audio-on acceptance, then qualify the exact package; owner: release",
+      "command": "pwsh tools/gates/run-v03-acceptance.ps1 -Package <dir> -FixtureDir <dir> -OutDir <dir> -BuildDir <dir> -PerfEvidence <file> -AudioChecklist <file>",
+      "receipt_schema": "luminumbra.v03_acceptance.v1"
+    }
+  ],
+  "requirements": [
+    "dw.mappings.031"
+  ]
+}

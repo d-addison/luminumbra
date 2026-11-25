@@ -1,0 +1,26 @@
+{
+  "id": "iss.163",
+  "source": "issue #163",
+  "statement": "Host-independent ambient field hashes require matching constructor and evolved receipts from at least two different hosts with different active ISA dispatch levels (SSE2 and AVX2 under the same dispatch ceiling). Current single-host receipts and the ASan-only comparison do not cover this requirement; cross-host qualification remains planned.",
+  "status": "needs-native-run",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "AmbientDeterminismReceipt.EmitsConstructorAndEvolvedHashes"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/ci/compare_ambient_receipts.py"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/ci/compare_ambient_receipts.py",
+      "planned": "collect JUnit receipts on separate SSE2 and AVX2 hosts, verify their host identities and active_simd values 4 and 256, then compare; the comparator alone does not attest host identity; owner: ac",
+      "command": "python3 tools/ci/compare_ambient_receipts.py sse2=<host-sse2.junit.xml> avx2=<host-avx2.junit.xml> --expect-labels sse2,avx2",
+      "receipt_schema": "luminumbra.ambient_receipt_comparison.v1"
+    }
+  ],
+  "requirements": [
+    "dw.mappings.038"
+  ]
+}

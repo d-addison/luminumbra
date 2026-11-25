@@ -1,0 +1,41 @@
+{
+  "id": "ci.changed-tus-partitions",
+  "source": "docs/ci/local-checks.md#python-helper-checks",
+  "statement": "Six disjoint whole-case selector partitions retain every assertion, ci/tools labels and 30-second deadlines. Selection, CI replay and publication, CMake fixtures, process-tree checks, base-ref subprocesses and locale subprocesses have separate entries in both engine and compiler-free CTest projects. Direct invocation and unittest discovery retain the complete suite. Roster and CLI regressions reject unknown, duplicate, missing and invalid selections and pin exact coverage. Windows retains four-slot reservations; hosted Windows deadline qualification remains pending. Publication failure still overrides pending replay exceptions and cancellation after cache namespace restoration, without returning from finally.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ChangedTranslationUnitsContract"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ChangedTranslationUnitsContractPart1"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ChangedTranslationUnitsContractPart2"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ChangedTranslationUnitsContractPart3"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ChangedTranslationUnitsContractPart4"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ChangedTranslationUnitsContractPart5"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/ci/test_changed_tus.py"
+    },
+    {
+      "kind": "ctest",
+      "ref": "LocalCheckRegistrationContract"
+    }
+  ],
+  "requirements": []
+}

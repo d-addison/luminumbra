@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.file.11",
+  "source": "docs/active-regions.md#file-and-compatibility",
+  "statement": "Acceptance obligations: Each record is exactly 104 bytes, sorted uniquely by signed X then Z: / | 0 | 8 | i32 region X, i32 region Z | / | 8 | 1 | flags: visited bit 0, edited 1, pinned 2, populated 3; / others zero | / | 9 | 1 | state: active 0, reduced 1, frozen 2 | / | 10 | 1 | cadence shift: zero when active, configured shift otherwise |",
+  "status": "planned",
+  "requirements": [
+    "ar.file.069",
+    "ar.file.070",
+    "ar.file.071",
+    "ar.file.072",
+    "ar.file.073",
+    "ar.file.074"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArFileContract.Requirements11",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.file.11.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

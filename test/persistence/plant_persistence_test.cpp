@@ -18,6 +18,7 @@
 #include "luminumbra_common/components/PlantComponents.h"
 #include "luminumbra_common/components/PollinationComponents.h"
 #include "luminumbra_common/components/SoilComponents.h"
+#include "luminumbra_common/core/WaterComponents.h"
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/PlantPersistence.h"
 #include "luminumbra_common/persistence/SavedJsonAdmission.h"
@@ -1481,5 +1482,47 @@ TEST(PlantPersistence, SnapshotParserPreservesFullUnsignedIdRange) {
         EXPECT_TRUE(errors.empty());
         ExpectSnapshotRecordsEqual(loaded, snapshot);
         EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), bytes);
+    }
+}
+
+TEST(PlantPersistence, PhysicalAndIrrigationSourcesKeepExistingProjectionBytes) {
+    entt::registry original;
+    const auto entity = barePlant(original, 0, 0, 0);
+    const auto legacy =
+        E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(original));
+    original.emplace<C::WaterSourceComponent>(entity).output = 65535;
+    original.emplace<C::FlowingWaterSourceComponent>(entity).flow_rate = .375f;
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(original)),
+              legacy);
+    Luminumbra::world::ActiveRegionLedger ledger;
+    ledger.mark_edited({0, 0}, Luminumbra::world::WorldClock{});
+    std::uint64_t id = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(id));
+    original.emplace<C::PlantRegionComponent>(entity).persistent_id = id;
+    original.get<C::PlantGrowthComponent>(entity).last_tick = 0;
+    original.get<C::PlantGrowthComponent>(entity).planted_tick = 0;
+    auto snapshot = F::BuildPlantEntitySnapshot(original, true);
+    std::string error;
+    ASSERT_TRUE(F::ValidatePlantEntitySnapshot(snapshot, ledger, {}, error)) << error;
+    const auto bytes = E::SerializeEntityRegistrySnapshotJson(snapshot);
+    original.get<C::FlowingWaterSourceComponent>(entity).flow_rate = .75f;
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(original, true)),
+              bytes);
+    E::EntityRegistrySnapshot loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(E::LoadEntityRegistrySnapshotJson(bytes, loaded, errors));
+    entt::registry restored;
+    F::ApplyPlantEntitySnapshot(restored, loaded);
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(restored, true)),
+              bytes);
+    for (const auto plant : restored.view<C::PlantTag>()) {
+        EXPECT_EQ(restored.get<C::WaterSourceComponent>(plant).output, 65535);
+        EXPECT_FALSE(restored.all_of<C::FlowingWaterSourceComponent>(plant));
+    }
+    for (const std::uint64_t bits : {0x3ec00000ull, 0x7fc00000ull, 0xbf800000ull, 0x100000000ull}) {
+        auto extended = snapshot;
+        extended.entities.front().components.push_back(
+            {"WaterFlowSource", {{"flow_rate_bits", bits}}});
+        EXPECT_FALSE(F::ValidatePlantEntitySnapshot(extended, ledger, {}, error));
     }
 }

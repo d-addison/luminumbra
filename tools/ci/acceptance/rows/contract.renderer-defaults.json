@@ -1,0 +1,20 @@
+{
+  "id": "contract.renderer-defaults",
+  "source": "docs/distant-world.md#deferred",
+  "statement": "Default Ladder selection, explicit Legacy opt-out and fallback diagnostics still require native qualification.",
+  "status": "planned",
+  "requirements": [
+    "dw.deferred.002",
+    "dw.deferred.003",
+    "dw.deferred.004",
+    "dw.deferred.005",
+    "dw.deferred.006"
+  ],
+  "evidence": [
+    {
+      "kind": "doc",
+      "ref": "docs/distant-world.md",
+      "planned": "map discriminating regression and qualification evidence for the updated contract; owner: ac"
+    }
+  ]
+}

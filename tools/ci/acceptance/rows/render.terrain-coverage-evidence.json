@@ -1,0 +1,22 @@
+{
+  "id": "render.terrain-coverage-evidence",
+  "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+  "statement": "Terrain coverage capture schema v1 retains lighting source planes and lighting/fog uniform snapshots. The expanded synthetic capture regression checks all nine available source kinds, every layer file header and payload size, explicit unavailable integrated volume records with volumetrics disabled, and uploaded lighting/fog uniform values. Source-contract regressions guard the three manifest records before completion. Native execution of the expanded checks remains pending.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "TerrainCoverageCaptureGl.SyntheticPlanesAndCallerStateSurviveReadback",
+      "planned": "Run the expanded lighting/fog capture assertions under native GL; owner: maintainers"
+    },
+    {
+      "kind": "script",
+      "ref": "test/rendering/test_frame_attribution_wiring.py"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development/visual-diagnostics.md"
+    }
+  ],
+  "requirements": []
+}

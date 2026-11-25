@@ -778,7 +778,7 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(const Systems::SHIELD_WorldSystem
                         outcome.error = "durable chunk record is outside its LMR1 home region";
                         return outcome;
                     }
-                    if (durable_chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited ||
+                    if (!durable_chunk->has_terrain_authority() ||
                         !is_halo_chunk(coords.x, coords.z, rx, rz)) {
                         continue;
                     }
@@ -808,6 +808,10 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(const Systems::SHIELD_WorldSystem
             return outcome;
         }
         const World::FarLodSdfSnapshot& reduction = entry.as_reduction_snapshot();
+        // Water-only ownership uses LoadedOrEdited save provenance too. Its
+        // generated terrain must follow the pristine heightfield path.
+        if (reduction.source_kind == World::FarLodBrickSourceKind::RegenerableCache)
+            continue;
         if (!overlay_authority(reduction, belongs_to_region(entry, rx, rz), "live authoritative")) {
             return outcome;
         }

@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.fixtures.01",
+  "source": "docs/active-regions.md#verification-fixtures",
+  "statement": "The legacy default-off fixture must retain the exact source bytes and capture identity documented in the requirement inventory, its pinned session inputs, independent world-hash comparison and metadata byte oracle. Missing or changed fixture bytes must fail.",
+  "status": "planned",
+  "requirements": [
+    "ar.fixtures.001",
+    "ar.fixtures.002",
+    "ar.fixtures.003",
+    "ar.fixtures.004",
+    "ar.fixtures.005",
+    "ar.fixtures.006"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArFixturesContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.fixtures.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

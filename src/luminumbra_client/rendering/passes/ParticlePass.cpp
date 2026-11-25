@@ -716,7 +716,17 @@ void ParticlePass::update(float dt) {
     m_frame_instance_count = written;
 }
 
-std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera) {
+ParticlePass::CallerState ParticlePass::CallerState::QueryExternal() {
+    return {.cull_enabled = glIsEnabled(GL_CULL_FACE)};
+}
+
+std::size_t ParticlePass::execute_external(const RenderContext& ctx, const Camera& camera) {
+    LUMIN_PROFILE_ZONE_N("GL ParticlePass.execute_external");
+    return execute(ctx, camera, CallerState::QueryExternal());
+}
+
+std::size_t
+ParticlePass::execute(const RenderContext& ctx, const Camera& camera, const CallerState& caller) {
     LUMIN_PROFILE_ZONE_N("GL ParticlePass.execute");
     // No-op (zero draw work) when nothing to render: keeps existing visual gates
     // byte-stable.
@@ -761,7 +771,7 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
     } else {
         glBlendFunc(GL_SRC_ALPHA, GL_ONE);
     }
-    const GLboolean cull_was_enabled = glIsEnabled(GL_CULL_FACE);
+    const GLboolean cull_was_enabled = caller.cull_enabled;
     if (cull_was_enabled) {
         glDisable(GL_CULL_FACE);
     }

@@ -1,0 +1,27 @@
+{
+  "id": "contract.regional-continuation-compatibility",
+  "source": "docs/active-regions.md#regional-continuation-compatibility",
+  "statement": "The current regional continuation implementations retain foliage integer pages, persistent plant ownership, bounded growth resume and conserving irrigation seams. Fixed-tick water remains behind its test-only profile. Authority revision 8, hash bindings and serialized layouts are unchanged; production activation and native qualification remain pending.",
+  "status": "partial",
+  "requirements": [
+    "ar.continuation.001",
+    "ar.continuation.002",
+    "ar.continuation.003",
+    "ar.continuation.004"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "FoliageFieldPages.BorderExchangeRejectsPartialEndpointsAndInvalidFluxBeforeAnyWrites"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.FoliageReplayAllowanceIsIndependentOfHostFrameBatching"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/regional-water-continuation.md",
+      "planned": "Qualify native continuation and obtain a separate owner decision before production activation or additional byte bindings; owner: ds"
+    }
+  ]
+}

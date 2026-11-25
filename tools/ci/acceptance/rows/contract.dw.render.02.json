@@ -1,0 +1,19 @@
+{
+  "id": "contract.dw.render.02",
+  "source": "docs/distant-world.md#depth-fog-shadows-horizon",
+  "statement": "Acceptance obligations: Far tiles neither cast nor receive cascaded shadows; / not receiving is implementation work (the lighting path needs a reliable far-surface discriminator), and the overlap between the cascade range and the V1 inner band is tested. / - There is no planetary curvature. / The far water sheet is emitted per tile from column flags.",
+  "status": "planned",
+  "requirements": [
+    "dw.render.007",
+    "dw.render.008",
+    "dw.render.009",
+    "dw.render.010"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwRenderContract.Requirements02",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.render.02.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: fw"
+    }
+  ]
+}

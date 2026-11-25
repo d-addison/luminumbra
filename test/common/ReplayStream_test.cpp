@@ -2961,7 +2961,7 @@ TEST_F(ReplayStreamTest, FrozenThreeFourEmptyStreamBytes) {
         0,   0,   0,   0,   0,   0,   0,   0, // config identity, content hash
         'L', 'R', 'E', 'C', 'E', 'N', 'D', '1', 0,  0, 0, 0, 0, 0, 0, 0, 0, 0,
         0,   0,   0,   0,   0,   0,   0,   0,   0,  0, 0, 0, 0, 0};
-    for (const std::uint16_t version : {3, 4}) {
+    for (const std::uint16_t version : {std::uint16_t{3}, std::uint16_t{4}}) {
         auto expected = frozen;
         expected[6] = static_cast<std::uint8_t>(version);
         replay::ReplayHeader header;
@@ -3009,7 +3009,8 @@ TEST_F(ReplayStreamTest, AuthorityBootVersionsRoundtripEveryField) {
 }
 
 TEST_F(ReplayStreamTest, BoundedAuthorityBootPreservesFamilyAndDescriptorBytes) {
-    for (const std::uint16_t version : {3, 4, 5, 6}) {
+    for (const std::uint16_t version :
+         {std::uint16_t{3}, std::uint16_t{4}, std::uint16_t{5}, std::uint16_t{6}}) {
         for (const bool rotate : {false, true}) {
             SCOPED_TRACE(version);
             SCOPED_TRACE(rotate);
@@ -4239,3 +4240,86 @@ TEST_F(ReplayStreamTest, Fnv1a64HexStable) {
 }
 
 } // namespace
+
+#include "../support/WaterSchedulerFixture.h"
+
+TEST_F(ReplayStreamTest, CurrentAndLegacyProfilesParseFrozenLayoutsAndRefusePlaybackBothWays) {
+    const Luminumbra::world::GameSession defaults;
+    for (const auto version : {replay::kLrec1Version, replay::kLrec1ElidedVersion}) {
+        for (const bool legacy : {false, true}) {
+            auto header = MakeHeader();
+            header.version = version;
+            header.system_config_identity = legacy ? defaults.LegacyRevision3SystemConfigIdentity()
+                                                   : defaults.SystemConfigIdentity();
+            if (version == replay::kLrec1Version) {
+                replay::ReplayWriter writer;
+                ASSERT_TRUE(writer.Open(m_path, header));
+                ASSERT_TRUE(writer.Finalize(0));
+            } else {
+                replay::BoundedReplayRecorder recorder;
+                ASSERT_TRUE(recorder.Configure(18, 0));
+                ASSERT_TRUE(recorder.Open(m_path, header)) << recorder.OpenRefusal();
+                // Two bounded segments rotate the first 1024 ticks into the
+                // version-4 prefix record, exercising the actual suffix parser.
+                for (std::uint64_t tick = 1; tick <= 2048; ++tick)
+                    ASSERT_TRUE(recorder.RecordTick(tick, {1}, nullptr, tick));
+                ASSERT_TRUE(recorder.Finalize(m_path, 2048, 2048));
+            }
+            const auto contents = replay::ReadReplay(m_path);
+            ASSERT_TRUE(contents.has_value());
+            if (!contents)
+                return;
+            EXPECT_EQ(contents->header.version, version);
+            EXPECT_EQ(contents->elided_through_tick, version == replay::kLrec1Version ? 0u : 1024u);
+            EXPECT_EQ(contents->header.system_config_identity, header.system_config_identity);
+            EXPECT_TRUE(replay::ConfigurationMatches(
+                contents->header, header.system_config_identity, header.preset_content_hash));
+            const auto other = legacy ? defaults.SystemConfigIdentity()
+                                      : defaults.LegacyRevision3SystemConfigIdentity();
+            EXPECT_FALSE(
+                replay::ConfigurationMatches(contents->header, other, header.preset_content_hash));
+        }
+    }
+}
+
+TEST_F(ReplayStreamTest, RealCursorOnlyCheckpointPreservesWaterLocalizationThroughReplay) {
+    for (const bool regions : {false, true}) {
+        for (const auto& [resolution, count] :
+             {std::pair{8, std::size_t{65}}, std::pair{16, std::size_t{17}}}) {
+            Luminumbra::TestSupport::SchedulerWorld first(regions, resolution, count);
+            Luminumbra::TestSupport::SchedulerWorld second(regions, resolution, count);
+            second.water.SetSimWindowCursor(count - 1);
+            const auto expected = first.Capture();
+            const auto live = second.Capture();
+            replay::ReplayWriter writer;
+            ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+            replay::CheckpointRecord checkpoint;
+            checkpoint.tick = 30;
+            checkpoint.world_hash = expected.world;
+            checkpoint.terrain = expected.sub.terrain;
+            checkpoint.water = expected.sub.water;
+            checkpoint.entities =
+                Luminumbra::Persistence::StableChecksum("empty scheduler fixture entities");
+            writer.RecordCheckpoint(checkpoint);
+            ASSERT_TRUE(writer.Finalize(30));
+            const auto contents = replay::ReadReplay(m_path);
+            ASSERT_TRUE(contents.has_value());
+            if (!contents)
+                return;
+            const auto* recorded = replay::FindCheckpoint(*contents, 30);
+            ASSERT_NE(recorded, nullptr);
+            EXPECT_EQ(recorded->water, expected.sub.water);
+            EXPECT_NE(recorded->world_hash, live.world);
+            EXPECT_EQ(recorded->terrain, live.sub.terrain);
+            EXPECT_NE(recorded->water, live.sub.water);
+            Luminumbra::HashCheckpoint live_checkpoint;
+            live_checkpoint.world_hash = live.world;
+            live_checkpoint.terrain = live.sub.terrain;
+            live_checkpoint.water = live.sub.water;
+            live_checkpoint.entities = checkpoint.entities;
+            EXPECT_EQ(
+                Luminumbra::WaterHashDifferenceSection(live_checkpoint.water, recorded->water),
+                "water/cursor");
+        }
+    }
+}

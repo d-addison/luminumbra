@@ -25,6 +25,14 @@
       "symbol": "RenderInterface_GL3::BeginFrame( )"
     },
     {
+      "construct": "glGetIntegerv ( GL_READ_FRAMEBUFFER_BINDING , & previous_read_fbo )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/GBufferPass.cpp",
+      "key": "02be6fe421d54316cf8d589e9eecdd3abc1510b09d28f4edbfc1a40cde626e65",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::GBufferPass::execute( const RenderContext & ctx , entt :: registry & registry , const GBufferPassInput & input , const CallerState & caller )"
+    },
+    {
       "construct": "glGetNamedFramebufferAttachmentParameteriv ( ctx . lit_scene . id , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE , & attachment_type )",
       "count": 1,
       "file": "src/luminumbra_client/rendering/passes/SkyboxPass.cpp",
@@ -55,14 +63,6 @@
       "key": "09bdba3162224987bf92074214be61fe16bc92e5d735305e23ee694537fe5be5",
       "rule": "hot-gl-query",
       "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
-    },
-    {
-      "construct": "glGetIntegerv ( GL_READ_FRAMEBUFFER_BINDING , & previous_read_fbo )",
-      "count": 1,
-      "file": "src/luminumbra_client/rendering/passes/GBufferPass.cpp",
-      "key": "0f5af3b095c65b8dbff1f00407f68eb98990f3669c01c7766fb8dfdff1750e22",
-      "rule": "hot-gl-query",
-      "symbol": "Luminumbra::Rendering::GBufferPass::execute( const RenderContext & ctx , entt :: registry & registry , const GBufferPassInput & input )"
     },
     {
       "construct": "glGetIntegerv ( GL_STENCIL_BACK_FUNC , & glstate_backup . stencil_back . func )",
@@ -169,14 +169,6 @@
       "symbol": "Luminumbra::Rendering::GroundDecalPass::execute( const RenderContext & ctx )"
     },
     {
-      "construct": "glIsEnabled ( GL_CULL_FACE )",
-      "count": 1,
-      "file": "src/luminumbra_client/rendering/passes/ParticlePass.cpp",
-      "key": "318e3f84c5313e48c424dc91d8d6d2c55f24d7c09a5ed9561571ab8964a752ff",
-      "rule": "hot-gl-query",
-      "symbol": "Luminumbra::Rendering::ParticlePass::execute( const RenderContext & ctx , const Camera & camera )"
-    },
-    {
       "construct": "glGetFloatv ( GL_COLOR_CLEAR_VALUE , glstate_backup . color_clear_value )",
       "count": 1,
       "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
@@ -201,12 +193,12 @@
       "symbol": "RenderInterface_GL3::BeginFrame( )"
     },
     {
-      "construct": "glGetIntegerv ( GL_VERTEX_ARRAY_BINDING , & previous_vao )",
+      "construct": "glGetNamedFramebufferAttachmentParameteriv ( ctx . lit_scene . id , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE , & attachment_type )",
       "count": 1,
-      "file": "src/luminumbra_client/rendering/passes/GBufferPass.cpp",
-      "key": "473ad6f68d211d07fb8db38f9af35e3474c1cb46182c6410d6212f1132ad0252",
+      "file": "src/luminumbra_client/rendering/passes/ParticlePass.cpp",
+      "key": "43bf1348f4f957945eaf33171aa8f4c2ab02173462ed731a24c17bbb73d561b4",
       "rule": "hot-gl-query",
-      "symbol": "Luminumbra::Rendering::GBufferPass::execute( const RenderContext & ctx , entt :: registry & registry , const GBufferPassInput & input )"
+      "symbol": "Luminumbra::Rendering::ParticlePass::execute( const RenderContext & ctx , const Camera & camera , const CallerState & caller )"
     },
     {
       "construct": "glGetUniformLocation ( m_inject_program , \"u_baseHeight\" )",
@@ -249,20 +241,20 @@
       "symbol": "RenderInterface_GL3::BeginFrame( )"
     },
     {
-      "construct": "glIsEnabled ( GL_CULL_FACE )",
+      "construct": "glGetIntegerv ( GL_VERTEX_ARRAY_BINDING , & previous_vao )",
       "count": 1,
       "file": "src/luminumbra_client/rendering/passes/GBufferPass.cpp",
-      "key": "54f34b2a988d02ce89d98eaf0a51bf4907bfc38f9f688f7ecd8e3a6f6424b926",
+      "key": "5423afd599174a33300d70026b773faaff2dd72eb459fea268e9cd2dcc70b63e",
       "rule": "hot-gl-query",
-      "symbol": "Luminumbra::Rendering::GBufferPass::execute( const RenderContext & ctx , entt :: registry & registry , const GBufferPassInput & input )"
+      "symbol": "Luminumbra::Rendering::GBufferPass::execute( const RenderContext & ctx , entt :: registry & registry , const GBufferPassInput & input , const CallerState & caller )"
     },
     {
-      "construct": "glGetNamedFramebufferAttachmentParameteriv ( ctx . lit_scene . id , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE , & attachment_type )",
+      "construct": "glGetNamedFramebufferAttachmentParameteriv ( ctx . lit_scene . id , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME , & color_texture )",
       "count": 1,
       "file": "src/luminumbra_client/rendering/passes/ParticlePass.cpp",
-      "key": "60db6ffab80c92e619c1ff9de0cf960913dbbc4fa02a6ec63a22dc049c4b63b6",
+      "key": "54dfc4e7ae37dc048fbbdf6a02bc7a3dca1c53753e416d9c41423716f25acc96",
       "rule": "hot-gl-query",
-      "symbol": "Luminumbra::Rendering::ParticlePass::execute( const RenderContext & ctx , const Camera & camera )"
+      "symbol": "Luminumbra::Rendering::ParticlePass::execute( const RenderContext & ctx , const Camera & camera , const CallerState & caller )"
     },
     {
       "construct": "glGetTexParameteriv ( GL_TEXTURE_3D , GL_TEXTURE_IMMUTABLE_FORMAT , & immutable )",
@@ -337,6 +329,14 @@
       "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
     },
     {
+      "construct": "glGetIntegerv ( GL_DRAW_FRAMEBUFFER_BINDING , & previous_draw_fbo )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/GBufferPass.cpp",
+      "key": "8814fe7114f456cc62cf2ae6ec8e8e2b2b69a0055da979e44ae8be6dd44352d3",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::GBufferPass::execute( const RenderContext & ctx , entt :: registry & registry , const GBufferPassInput & input , const CallerState & caller )"
+    },
+    {
       "construct": "glGetNamedFramebufferAttachmentParameteriv ( ctx . lit_scene . id , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME , & color_texture )",
       "count": 1,
       "file": "src/luminumbra_client/rendering/passes/WaterfallPass.cpp",
@@ -399,14 +399,6 @@
       "key": "a40d9ff773ae63f7256222a23b44be3e974f8a9015661f5f5f59b0e5c98f409b",
       "rule": "hot-gl-query",
       "symbol": "RenderInterface_GL3::BeginFrame( )"
-    },
-    {
-      "construct": "glGetIntegerv ( GL_DRAW_FRAMEBUFFER_BINDING , & previous_draw_fbo )",
-      "count": 1,
-      "file": "src/luminumbra_client/rendering/passes/GBufferPass.cpp",
-      "key": "ab1ba26e6f2f48cc9d57ead1c9b414fffcd0a87b4a590657ac725d73a4def078",
-      "rule": "hot-gl-query",
-      "symbol": "Luminumbra::Rendering::GBufferPass::execute( const RenderContext & ctx , entt :: registry & registry , const GBufferPassInput & input )"
     },
     {
       "construct": "glIsEnabled ( GL_DEPTH_TEST )",
@@ -551,14 +543,6 @@
       "key": "e199ef4e3f7501a5af8bdae8d9f7bac37ce22c7680738eb9cf87d25dc0b7b05e",
       "rule": "hot-gl-query",
       "symbol": "RenderInterface_GL3::BeginFrame( )"
-    },
-    {
-      "construct": "glGetNamedFramebufferAttachmentParameteriv ( ctx . lit_scene . id , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME , & color_texture )",
-      "count": 1,
-      "file": "src/luminumbra_client/rendering/passes/ParticlePass.cpp",
-      "key": "e1ff01a3a5a3060d61453dc1245bdb87248641ac0c4f712eb91d7337a4841acd",
-      "rule": "hot-gl-query",
-      "symbol": "Luminumbra::Rendering::ParticlePass::execute( const RenderContext & ctx , const Camera & camera )"
     },
     {
       "construct": "glIsEnabled ( GL_CULL_FACE )",

@@ -3653,8 +3653,9 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         gbuffer_input.tree_impostor_grid = tree_impostor_grid();
         gbuffer_input.tree_impostor_radius = tree_impostor_radius();
         gbuffer_input.tree_impostor_center = tree_impostor_center();
+        const GBufferPass::CallerState caller{.cull_enabled = GL_TRUE};
         const GBufferDrawStats gstats =
-            m_gbuffer_pass->execute(gbuffer_ctx, registry, gbuffer_input);
+            m_gbuffer_pass->execute(gbuffer_ctx, registry, gbuffer_input, caller);
         if (gstats.refusal != FarWorldRefusal::None)
             m_frame_far_selection.refusal = gstats.refusal;
         // Fold with the EXACT current policy: terrain_visible_chunks '=', rest '+='.
@@ -3794,7 +3795,9 @@ void RenderPipeline::execute_stage_lighting(const Camera& camera) {
     // G-buffer establishes depth testing; plant/decal stages retain or restore it,
     // SSAO only changes bindings, and diagnostic replay restores its entry state.
     const LightingPass::CallerState caller{.depth_test_enabled = GL_TRUE};
-    m_lighting_pass->execute(m_frame_lighting_ctx, caller);
+    const bool sky_replaces_color = m_cloud_quality > 0 && m_halfres_cloud.fbo &&
+                                    m_cloud_composite_shader && m_cloud_composite_shader->IsValid();
+    m_lighting_pass->execute(m_frame_lighting_ctx, caller, sky_replaces_color);
     end_gpu_pass_timer(GpuTimerPass::Lighting);
     glBindVertexArray(0); // Unbind after lighting pass
 }
@@ -3807,19 +3810,23 @@ void RenderPipeline::execute_stage_depth_blit_to_lighting(const Camera& camera) 
     begin_gpu_pass_timer(GpuTimerPass::DepthBlitToLighting);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
-    // both G-buffer and lighting are internal-sized; copy the internal depth rect
-    // (a screen-sized rect would leave the internal depth garbage at scale<1.0 -> the skybox
-    // depth-mask fails and the sky goes dark). At scale 1.0 internal==screen (byte-identical).
-    glBlitFramebuffer(0,
-                      0,
-                      static_cast<GLint>(m_internal_width),
-                      static_cast<GLint>(m_internal_height),
-                      0,
-                      0,
-                      static_cast<GLint>(m_internal_width),
-                      static_cast<GLint>(m_internal_height),
-                      GL_DEPTH_BUFFER_BIT,
-                      GL_NEAREST);
+    // Lighting already copied the depth when the sky depth test rejected sky pixels.
+    if (!m_lighting_pass->depth_copied_from_gbuffer()) {
+        // both G-buffer and lighting are internal-sized; copy the internal depth rect
+        // (a screen-sized rect would leave the internal depth garbage at scale<1.0 -> the skybox
+        // depth-mask fails and the sky goes dark). At scale 1.0 internal==screen
+        // (byte-identical).
+        glBlitFramebuffer(0,
+                          0,
+                          static_cast<GLint>(m_internal_width),
+                          static_cast<GLint>(m_internal_height),
+                          0,
+                          0,
+                          static_cast<GLint>(m_internal_width),
+                          static_cast<GLint>(m_internal_height),
+                          GL_DEPTH_BUFFER_BIT,
+                          GL_NEAREST);
+    }
     end_gpu_pass_timer(GpuTimerPass::DepthBlitToLighting);
 }
 
@@ -4162,7 +4169,8 @@ void RenderPipeline::execute_stage_particles(const Camera& camera) {
         // motion advance hoisted to prepare_frame (dispatch only draws).
         RenderContext particle_ctx = make_particle_context(camera);
         begin_gpu_pass_timer(GpuTimerPass::Particle);
-        const std::size_t particles_drawn = m_particle_pass->execute(particle_ctx, camera);
+        const ParticlePass::CallerState caller{.cull_enabled = GL_TRUE};
+        const std::size_t particles_drawn = m_particle_pass->execute(particle_ctx, camera, caller);
         end_gpu_pass_timer(GpuTimerPass::Particle);
         // stat bumps relocated out of the pass; bump only
         // when the pass actually drew (preserves the original guarded behavior).

@@ -1,0 +1,17 @@
+{
+  "id": "contract.dw.policy.06",
+  "source": "docs/distant-world.md#per-system-distant-policy",
+  "statement": "Acceptance obligations: C4 replaces them with the world-anchored pages above. / once C4 stores cadence in the ledger, the all-zero record omission in the table applies without losing that phase.",
+  "status": "planned",
+  "requirements": [
+    "dw.policy.036",
+    "dw.policy.039"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwPolicyContract.Requirements06",
+      "planned": "Named future oracle for world-anchored C4 page replacement and all-zero record omission without losing cadence phase. Planned fixture: test/fixtures/acceptance/dw.policy.06.json; not a landed test; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

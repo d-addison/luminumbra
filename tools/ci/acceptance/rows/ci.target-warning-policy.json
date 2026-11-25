@@ -1,0 +1,33 @@
+{
+  "id": "ci.target-warning-policy",
+  "source": "docs/ci/local-checks.md#fast-hosted-validation",
+  "statement": "The first-party CMake helper emits a private warning-policy definition for every compiler and configuration. Fast compile applies the strict fatal profile only to command variants carrying that definition; other selected variants replay their normal database flags. Unsupported marker values and undefines refuse before compilation. Mixed-policy variants of the same source remain selected and cache identity includes their effective commands.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ChangedTranslationUnitsContract"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ChangedTranslationUnitsContractPart1"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ChangedTranslationUnitsContractPart2"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ChangedTranslationUnitsContractPart3"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ChangedTranslationUnitsContractPart4"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ChangedTranslationUnitsContractPart5"
+    }
+  ],
+  "requirements": []
+}

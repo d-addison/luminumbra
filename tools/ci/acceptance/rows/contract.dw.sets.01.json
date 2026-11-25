@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.sets.01",
+  "source": "docs/distant-world.md#three-explicit-sets",
+  "statement": "Acceptance obligations: This contract separates three sets that may overlap but are never equated. / | Render visibility | What the client draws: the live chunk disc plus volumetric far tiers out to 16 km. / Rendering never mutates or activates world state. | Client `FarLodSystem` and the render passes | / | Simulation activation | Which 512 m regions advance state: persistent active regions ranked and scheduled by the host. | Host `GameSession` through the active-region ledger | / | Storage residency | What is held in memory and on disk: chunk lattices in the live disc, regenerable far-tile caches, durable region records and the far authority overlay. | Persistence and streaming | / Camera position, noclip flight, disabled rendering and coarse rendering never create or wake an active region.",
+  "status": "planned",
+  "requirements": [
+    "dw.sets.007",
+    "dw.sets.008",
+    "dw.sets.009",
+    "dw.sets.010",
+    "dw.sets.011",
+    "dw.sets.012"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwSetsContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.sets.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

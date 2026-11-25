@@ -31,6 +31,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <unordered_map>
@@ -1361,4 +1362,123 @@ TEST(WaterDeterminism, AdmittedAndLegacyInteriorArithmeticKeepGoldenValues) {
     }
 }
 
+} // namespace
+
+#include "../support/WaterSchedulerFixture.h"
+
+TEST(WaterDeterminism, RawSchedulerCursorDistinguishesEqualPresentAndDifferentFuture) {
+    using Luminumbra::TestSupport::SchedulerWorld;
+    for (const bool regions : {false, true}) {
+        for (const auto& [resolution, count] :
+             {std::pair{8, std::size_t{65}}, std::pair{16, std::size_t{17}}}) {
+            SCOPED_TRACE(::testing::Message() << regions << ':' << resolution);
+            SchedulerWorld first(regions, resolution, count), second(regions, resolution, count);
+            first.water.SetSimWindowCursor(0);
+            second.water.SetSimWindowCursor(count - 1);
+            const auto before = first.Capture();
+            const auto other = second.Capture();
+            EXPECT_EQ(first.Capture(false).world, second.Capture(false).world);
+            EXPECT_EQ(first.Capture(false).sub.water, second.Capture(false).sub.water);
+            EXPECT_EQ(before.sub.terrain, other.sub.terrain);
+            EXPECT_EQ(before.sub.mesh, other.sub.mesh);
+            EXPECT_NE(before.sub.water, other.sub.water);
+            EXPECT_NE(before.world, other.world);
+            EXPECT_EQ(before.water_scheduler_cursor, 0u);
+            EXPECT_EQ(other.water_scheduler_cursor, count - 1);
+            first.Step();
+            second.Step();
+            std::size_t changed = 0;
+            for (const auto& [id, chunk] : first.chunks) {
+                if (chunk->water_depth_mm != second.chunks.at(id)->water_depth_mm)
+                    ++changed;
+                EXPECT_EQ(chunk->sdf_data, second.chunks.at(id)->sdf_data);
+            }
+            EXPECT_GT(changed, 0u);
+            EXPECT_EQ(first.Capture().sub.terrain, before.sub.terrain);
+            EXPECT_EQ(second.Capture().sub.terrain, other.sub.terrain);
+        }
+    }
+}
+
+TEST(WaterDeterminism, BelowBudgetAndEmptyWorldRetainRawCursorUntilLaterActivation) {
+    using Luminumbra::TestSupport::SchedulerWorld;
+    for (const bool regions : {false, true}) {
+        for (const auto& [resolution, count] :
+             {std::pair{8, std::size_t{65}}, std::pair{16, std::size_t{17}}}) {
+            SchedulerWorld first(regions, resolution, 0), second(regions, resolution, 0);
+            second.water.SetSimWindowCursor(count - 1);
+            EXPECT_NE(first.Capture().world, second.Capture().world);
+            first.Step();
+            second.Step();
+            first.AddChunks(0, 1, resolution);
+            second.AddChunks(0, 1, resolution);
+            first.Step();
+            second.Step();
+            EXPECT_EQ(first.chunks.begin()->second->water_depth_mm,
+                      second.chunks.begin()->second->water_depth_mm);
+            EXPECT_EQ(second.water.GetSimWindowCursor(), count - 1);
+            EXPECT_NE(first.Capture().sub.water, second.Capture().sub.water);
+            first.AddChunks(1, count, resolution);
+            second.AddChunks(1, count, resolution);
+            first.Step();
+            second.Step();
+            std::size_t changed = 0;
+            for (const auto& [id, chunk] : first.chunks)
+                changed += chunk->water_depth_mm != second.chunks.at(id)->water_depth_mm;
+            EXPECT_GT(changed, 0u);
+        }
+    }
+}
+
+namespace {
+TEST(WaterDeterminism, DurableReadErrorRefusesDirectWaterConsumers) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetJobSystem(&jobs);
+    session.SetRootPath(root.root_string());
+    ASSERT_TRUE(session.CreateWorld("WaterReadError", "777", "default"));
+    auto* world = session.GetWorldSystem();
+    auto* water = session.GetWaterSystem();
+    ASSERT_NE(world, nullptr);
+    ASSERT_NE(water, nullptr);
+    world->set_durable_residency(true);
+    int faults = 0;
+    world->set_durable_chunk_loader(
+        [](const Luminumbra::IVec3&) -> std::shared_ptr<Luminumbra::Chunk> {
+            throw std::runtime_error("injected durable read error");
+        },
+        [&faults](const std::string&) { ++faults; });
+    const Luminumbra::IVec3 expected{4096, 0, 4096};
+    world->remember_durable_chunks({expected});
+    // True suppresses procedural regeneration even when restoration fails.
+    ASSERT_TRUE(world->restore_authoritative_chunk(expected));
+    ASSERT_TRUE(world->durable_read_failed());
+    ASSERT_EQ(faults, 1);
+    const auto before = world->debug_water_state_hash().hash;
+    Luminumbra::world::ActiveRegionLedger ledger;
+    ledger.mark_edited({128, 128}, Luminumbra::world::WorldClock{});
+    ASSERT_TRUE(ledger.set_water_debts({{{128, 128}, 17}}));
+    const auto ledger_before = ledger.encode();
+    std::vector<Luminumbra::world::RegionWork> completed;
+    Luminumbra::world::RegionSchedule schedule;
+    water->SetRegionalScheduling(true);
+    const auto work_before = water->regional_work();
+    EXPECT_THROW(water->UpdateRegional(session.GetRegistry(), {}, ledger, schedule, completed),
+                 std::invalid_argument);
+    EXPECT_EQ(ledger.encode(), ledger_before);
+    EXPECT_EQ(water->regional_work(), work_before);
+    EXPECT_TRUE(completed.empty());
+    EXPECT_FALSE(world->find_streamed_chunk(expected));
+    water->SetRegionalScheduling(false);
+    EXPECT_THROW(water->update(session.GetRegistry(), {}), std::runtime_error);
+    EXPECT_THROW(water->get_water_level_at(0.0f, 0.0f), std::runtime_error);
+    EXPECT_THROW(water->get_water_flow_at(0.0f, 0.0f), std::runtime_error);
+    EXPECT_THROW(water->apply_displacement(Vec3(0.0f), 1.0f), std::runtime_error);
+    EXPECT_THROW(water->EditTerrainBed(Vec3(0.0f), 1, 1.0f), std::runtime_error);
+    EXPECT_THROW(water->MigrateChunksToSimResolution({}), std::runtime_error);
+    EXPECT_EQ(world->debug_water_state_hash().hash, before);
+    EXPECT_EQ(faults, 1);
+}
 } // namespace

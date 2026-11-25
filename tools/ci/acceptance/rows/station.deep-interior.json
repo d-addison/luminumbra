@@ -1,0 +1,17 @@
+{
+  "id": "station.deep-interior",
+  "source": "docs/distant-world.md#station-discovery-req-e4",
+  "statement": "Deep-interior feature discovery and completion of the entire game scene set remain separate follow-up work.",
+  "status": "planned",
+  "evidence": [
+    {
+      "kind": "doc",
+      "ref": "src/luminumbra_common/world/StationDiscovery.cpp",
+      "planned": "Specify and implement deep-interior discovery before claiming the complete game scene set; owner: world generation"
+    }
+  ],
+  "requirements": [
+    "dw.station.099",
+    "dw.station.100"
+  ]
+}

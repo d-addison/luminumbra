@@ -1,0 +1,22 @@
+{
+  "id": "contract.ar.history.01",
+  "source": "docs/active-regions.md#historical-ambient-hash-portability-investigation",
+  "statement": "Acceptance obligations: These persistence tests use expected sessions computed in the same build, retain the exact devel save bytes, and print all seven actual and expected component hashes on mismatch. / The subsequent ambient dispatch repair caps both FBm and Simplex nodes in all three ambient systems at terrain's x86 AVX2 ceiling, preserving lower-ISA fallback and native non-x86 selection. / Its Debug/Release controls and native qualification retain their own source identities; / the historical table above is not relabelled as post-repair evidence. / Integrated and native acceptance remain tracked by [issue #163](https://github.com/d-addison/luminumbra/issues/163). / `RegionRecordingOverwrite` runs the shipping recorder/player with `--test-streaming-radius-cap 1` on every invocation. / This diagnostic option applies the existing streaming cap before boot;",
+  "status": "planned",
+  "requirements": [
+    "ar.history.016",
+    "ar.history.018",
+    "ar.history.019",
+    "ar.history.020",
+    "ar.history.021",
+    "ar.history.024",
+    "ar.history.025"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArHistoryContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.history.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ac"
+    }
+  ]
+}

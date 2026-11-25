@@ -1156,3 +1156,49 @@ TEST_F(HostSchedulerFault, ClientMetadataSaveFailureSuppressesSuccessAndAllowsRe
     ASSERT_NO_FATAL_FAILURE(ExpectRecoveryWorld(directory, expected_contents));
 }
 } // namespace
+
+TEST_F(HostSchedulerFault, FailedEntryReleasesRegistryBeforePhysics) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    struct PhysicsLifetimeProbe {
+        GameSession* session = nullptr;
+        bool* released = nullptr;
+        ~PhysicsLifetimeProbe() {
+            EXPECT_NE(session->GetWorldSystem(), nullptr);
+            auto* physics = session->GetPhysicsSystem();
+            EXPECT_NE(physics, nullptr);
+            if (physics) {
+                EXPECT_FALSE(physics->audio_raycast({0, 2, 0}, {0, 1, 0}).hit);
+            }
+            *released = true;
+        }
+    };
+    for (const bool reset : {false, true}) {
+        SCOPED_TRACE(reset);
+        bool released = false;
+        {
+            GameSession session;
+            session.SetJobSystem(&jobs);
+            session.SetRootPath(root.generic_string() + "/");
+            session.SetActiveRegionsEnabled(true);
+            ASSERT_TRUE(session.CreateTransientWorld("Failed entry cleanup", "1337", "default"));
+            auto probe = std::make_shared<PhysicsLifetimeProbe>();
+            probe->session = &session;
+            probe->released = &released;
+            session.GetRegistry().emplace<std::shared_ptr<PhysicsLifetimeProbe>>(
+                session.GetRegistry().create(), std::move(probe));
+            const auto directory = root / "corrupt-entry";
+            const auto spawn = session.GetMetadata().spawnPoint;
+            const auto key = Luminumbra::world::ActiveRegionLedger::region_at(spawn);
+            WriteHostFile(WorldSaveService::region_file_path(directory, key.x, key.z), "partial");
+            EXPECT_FALSE(session.LoadWorldStateFrom(directory));
+            EXPECT_FALSE(session.GetWorldOpenError().empty());
+            EXPECT_EQ(session.GetSimulationTickCount(), 0u);
+            if (reset) {
+                ASSERT_TRUE(session.CreateTransientWorld("Replacement", "1337", "default"));
+                EXPECT_TRUE(released);
+            }
+        }
+        EXPECT_TRUE(released);
+    }
+}

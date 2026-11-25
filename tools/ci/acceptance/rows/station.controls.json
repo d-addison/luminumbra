@@ -1,0 +1,29 @@
+{
+  "id": "station.controls",
+  "source": "docs/distant-world.md#station-discovery-req-e4",
+  "statement": "Horizon and coverage controls share the origin terrain anchor, use their declared eye offsets and angles, require clearance and Y bounds, and carry distinct control IDs without coverage or settled claims.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "StationDiscovery.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "StationDiscoveryContract"
+    },
+    {
+      "kind": "ctest",
+      "ref": "StationDiscoveryCliSmoke"
+    }
+  ],
+  "requirements": [
+    "dw.station.058",
+    "dw.station.059",
+    "dw.station.060",
+    "dw.station.061",
+    "dw.station.062",
+    "dw.station.063",
+    "dw.station.064"
+  ]
+}

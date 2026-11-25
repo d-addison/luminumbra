@@ -1,0 +1,25 @@
+{
+  "id": "ci.scratch-preparation",
+  "source": "docs/ci/local-checks.md#worker-recipe",
+  "statement": "The documented prepare command checks original checkout and scratch components, fresh stage/init paths and all existing temporary, compiler-cache and build-tree entries before creating temporary/cache directories or exporting their paths. Redirects, non-directory components, special files and containment escapes refuse without writes; ordinary nested trees are allowed and checks repeat on every call.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "OfflineDependenciesContract"
+    },
+    {
+      "kind": "ctest",
+      "ref": "OfflineDependenciesContractPart1"
+    },
+    {
+      "kind": "ctest",
+      "ref": "OfflineDependenciesContractPart2"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/ci/local-checks.md"
+    }
+  ],
+  "requirements": []
+}

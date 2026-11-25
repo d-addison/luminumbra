@@ -1,0 +1,26 @@
+{
+  "id": "render.visual-diagnostic-material-views",
+  "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+  "statement": "Material views report actual sampler mip/density, normalized triplanar weights and raw finite sentinels through opt-in G-buffer variants. Registered GL-free source/catalogue and hidden-GL regressions cover these views; native execution remains pending.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticContributions.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticContributionsGl.*"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development/visual-diagnostics.md"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticCaptureIntegration.*",
+      "planned": "Add and run GPU attribution and scenario capture bundle regressions; owner: maintainers"
+    }
+  ],
+  "requirements": []
+}

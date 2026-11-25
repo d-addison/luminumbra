@@ -2877,11 +2877,8 @@ int main(int argc, char* argv[]) {
                 "Runtime scenario mode: preparing world presentation before entry.");
             bool horizon_ready = true;
             if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
-                horizon_ready = gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
-                    gameSession->GetMetadata().spawnPoint,
-                    gameSession->GetPhysicsSystem(),
-                    scenario_config.horizon_radius,
-                    scenario_config.collision_radius);
+                horizon_ready = gameSession->PrepareInitialSimulation(
+                    scenario_config.horizon_radius, scenario_config.collision_radius);
             }
             if (!horizon_ready) {
                 refuse_world_entry("Surface preparation exceeds the supported work budget.", false);
@@ -4386,11 +4383,10 @@ int main(int argc, char* argv[]) {
         const bool capture_horizon = benchmark_v4 || runtime_boot_recorder.enabled() ||
                                      (scenario_config.active() && scenario_config.auto_enter_world);
         if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
-            entry_horizon_prepared = gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
-                gameSession->GetMetadata().spawnPoint,
-                gameSession->GetPhysicsSystem(),
+            entry_horizon_prepared = gameSession->PrepareInitialSimulation(
                 capture_horizon ? scenario_config.horizon_radius : 12,
-                capture_horizon ? scenario_config.collision_radius : 4);
+                capture_horizon ? scenario_config.collision_radius : 4,
+                entry_stop.get_token());
             return entry_horizon_prepared;
         }
         entry_horizon_prepared = true;
@@ -5472,9 +5468,15 @@ int main(int argc, char* argv[]) {
                 // step below. Render camera/streaming inputs never enter this horizon.
                 if (!scenario_config.temporal_audit && advance_frame_simulation &&
                     !scenario_config.networked_session_smoke()) {
-                    if (auto* physics = gameSession->GetPhysicsSystem()) {
-                        if (!physics->prepare_simulation_collisions(
-                                {}, std::numeric_limits<std::uint64_t>::max())) {
+                    if (gameSession->SimulationHostIntegrationEnabled() && g_playerController) {
+                        gameSession->SetLocalPlayerSimulationPosition(
+                            g_playerController->GetPosition(),
+                            g_playerController->GetMovementMode() ==
+                                Luminumbra::Client::MovementMode::Walking);
+                    }
+                    if (gameSession->GetPhysicsSystem()) {
+                        if (!gameSession->PrepareSimulationCollisions(
+                                std::numeric_limits<std::uint64_t>::max())) {
                             Luminumbra::Client::PollSessionFault(
                                 *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
                             Luminumbra::Client::SaveSessionWhenDue(gameSession.get(),
@@ -5715,8 +5717,11 @@ int main(int argc, char* argv[]) {
                         *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
                 } else {
                     if (advance_frame_simulation) {
-                        if (auto* physics = gameSession->GetPhysicsSystem())
-                            physics->update(deltaTime * g_app.capture.timeScale);
+                        if (!gameSession->SimulationHostIntegrationEnabled()) {
+                            if (auto* physics = gameSession->GetPhysicsSystem()) {
+                                physics->update(deltaTime * g_app.capture.timeScale);
+                            }
+                        }
                     }
                     // fixed 30 Hz simulation tick (SimulationClock +
                     // OrderedEventBus drain) hosted by GameSession. Render,
@@ -5729,7 +5734,8 @@ int main(int argc, char* argv[]) {
                     _rb_sim_t0 = std::chrono::steady_clock::now(); //
                     if (!scenario_config.networked_session_smoke()) {
                         if (advance_frame_simulation) {
-                            if (benchmark_v4 && g_camera)
+                            if (benchmark_v4 && g_camera &&
+                                !gameSession->SimulationHostIntegrationEnabled())
                                 gameSession->SetLocalPlayerSimulationPosition(g_camera->Position,
                                                                               true);
                             else if (g_playerController)

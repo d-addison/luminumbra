@@ -402,9 +402,13 @@ TEST(DiagnosticAttribution, InactivePassGuardsAllSnapshotAndRestoreWork) {
              "const bool diagnostic_capture = GBufferDiagnosticCapture::Current() != nullptr;");
     const auto snapshot = Body(pass, "if (diagnostic_capture)");
     EXPECT_EQ(Count(snapshot, "glGetIntegerv("), 3u);
-    EXPECT_EQ(Count(snapshot, "glIsEnabled("), 1u);
+    EXPECT_EQ(Count(snapshot, "glIsEnabled("), 0u);
     EXPECT_EQ(Count(pass, "glGetIntegerv("), 3u);
-    EXPECT_EQ(Count(pass, "glIsEnabled("), 1u);
+    EXPECT_EQ(Count(pass, "glIsEnabled("), 0u);
+    Contains(pass, "const GLboolean previous_cull = caller.cull_enabled;");
+    const auto query = Body(Read(kPass), "GBufferPass::CallerState::QueryExternal()");
+    EXPECT_EQ(Count(query, "glIsEnabled("), 1u);
+    Contains(query, "glIsEnabled(GL_CULL_FACE)");
     const auto restore = Body(pass, "ReplayRollback restore_gl(");
     Contains(restore, "if (!diagnostic_capture) {\n            return;\n        }");
     EXPECT_LT(restore.find("return;"), restore.find("glBindVertexArray("));
@@ -1689,15 +1693,19 @@ TEST_F(DiagnosticAttributionGl, InactivePassDoesNoSnapshotOrRestoreOnNormalAndEx
     isolation_.layer_mask = 0;
     for (const bool replay : {false, true}) {
         ctx_.frozen_replay = replay;
-        SetEntryState(true);
-        PassStateProbe probe;
-        EXPECT_NO_THROW(pass_.execute(ctx_, entities_, input_));
-        EXPECT_EQ(probe.integer_queries, 0u);
-        EXPECT_EQ(probe.enabled_queries, 0u);
-        EXPECT_EQ(probe.vao_binds, 0u);
-        EXPECT_EQ(probe.combined_fbo_binds, 2u); // Pass target, then normal unbind.
-        EXPECT_EQ(probe.draw_fbo_binds, 0u);
-        EXPECT_EQ(probe.read_fbo_binds, 0u);
+        for (const bool external : {false, true}) {
+            SetEntryState(true);
+            const GBufferPass::CallerState caller{.cull_enabled = GL_TRUE};
+            PassStateProbe probe;
+            EXPECT_NO_THROW(external ? pass_.execute_external(ctx_, entities_, input_)
+                                     : pass_.execute(ctx_, entities_, input_, caller));
+            EXPECT_EQ(probe.integer_queries, 0u);
+            EXPECT_EQ(probe.enabled_queries, external ? 1u : 0u);
+            EXPECT_EQ(probe.vao_binds, 0u);
+            EXPECT_EQ(probe.combined_fbo_binds, 2u); // Pass target, then normal unbind.
+            EXPECT_EQ(probe.draw_fbo_binds, 0u);
+            EXPECT_EQ(probe.read_fbo_binds, 0u);
+        }
     }
     isolation_.layer_mask = Luminumbra::Client::ScenarioHarness::IsolationLayer::Terrain;
     input_.submit_terrain_chunks = [](const glm::vec4(&)[6]) -> TerrainSubmitStats {
@@ -1705,14 +1713,20 @@ TEST_F(DiagnosticAttributionGl, InactivePassDoesNoSnapshotOrRestoreOnNormalAndEx
     };
     for (const bool replay : {false, true}) {
         ctx_.frozen_replay = replay;
-        PassStateProbe probe;
-        EXPECT_THROW(pass_.execute(ctx_, entities_, input_), std::runtime_error);
-        EXPECT_EQ(probe.integer_queries, 0u);
-        EXPECT_EQ(probe.enabled_queries, 0u);
-        EXPECT_EQ(probe.vao_binds, 0u);
-        EXPECT_EQ(probe.combined_fbo_binds, 1u); // Devel also leaves the target on throw.
-        EXPECT_EQ(probe.draw_fbo_binds, 0u);
-        EXPECT_EQ(probe.read_fbo_binds, 0u);
+        for (const bool external : {false, true}) {
+            SetEntryState(true);
+            const GBufferPass::CallerState caller{.cull_enabled = GL_TRUE};
+            PassStateProbe probe;
+            EXPECT_THROW(external ? pass_.execute_external(ctx_, entities_, input_)
+                                  : pass_.execute(ctx_, entities_, input_, caller),
+                         std::runtime_error);
+            EXPECT_EQ(probe.integer_queries, 0u);
+            EXPECT_EQ(probe.enabled_queries, external ? 1u : 0u);
+            EXPECT_EQ(probe.vao_binds, 0u);
+            EXPECT_EQ(probe.combined_fbo_binds, 1u); // Devel also leaves the target on throw.
+            EXPECT_EQ(probe.draw_fbo_binds, 0u);
+            EXPECT_EQ(probe.read_fbo_binds, 0u);
+        }
     }
 }
 
@@ -3526,7 +3540,7 @@ TEST(DiagnosticAttribution, GlassAttributesEachPaneBeforeOitResolveWithoutReplac
     Contains(shader, "float alpha = 0.85;"); // Every depth-passing pane contributes.
     EXPECT_LT(shader.find("outReveal ="), shader.find("gDiagnosticIds ="));
     EXPECT_EQ(SourceHash(WithoutForwardSubmissionDiagnostics(draw, "m_accum_shader")),
-              0xba16573f1a9b983aull);
+              0x0991109675814e0bull);
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(shader)), 0x65ad88713c0671a3ull);
     const auto resolve = Body(source, "void GlassOitPass::execute_resolve(");
     EXPECT_EQ(resolve.find("Diagnostic"), std::string::npos);
@@ -3563,7 +3577,7 @@ TEST(DiagnosticAttribution, WaterfallAttributesOnlySubmittedSheetPoolSlotsAndNon
 
 TEST(DiagnosticAttribution, ParticleBatchAttributesAllEmitterKindsAtTheOriginalDraw) {
     const auto draw = Body(Read("src/luminumbra_client/rendering/passes/ParticlePass.cpp"),
-                           "std::size_t ParticlePass::execute(");
+                           "ParticlePass::execute(");
     const auto shader = Read("res/shaders/magical_particles.frag");
     ForwardSubmissionContract(draw, shader);
     Contains(draw, "m_frame_instance_count == 0 || m_vao == 0");
@@ -3587,7 +3601,7 @@ TEST(DiagnosticAttribution, ParticleBatchAttributesAllEmitterKindsAtTheOriginalD
     EXPECT_LT(shader.rfind("discard;"), shader.find("gDiagnosticIds ="));
     EXPECT_LT(shader.find("FragColor = finalColor;"), shader.find("gDiagnosticIds ="));
     EXPECT_EQ(SourceHash(WithoutForwardSubmissionDiagnostics(draw, "m_shader")),
-              0x898d08b83ad897a7ull);
+              0x0c5d62f44ac3e045ull);
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(shader, 3)), 0xa054f82b3bb88a66ull);
 }
 

@@ -1,0 +1,25 @@
+{
+  "id": "em.edits-far-authority",
+  "source": "docs/distant-world.md#evidence-map",
+  "statement": "Edits bake to all tiers and far authority is preserved across save and load.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "WorldOpenRefusal.CreateEditSaveRestartAndSwitchPreserveAuthority"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldPersistenceRoundtripGate"
+    },
+    {
+      "kind": "ctest",
+      "ref": "EditBakeAllTiers.*",
+      "planned": "all-tier edit bake regression; owner: fw; issue #132"
+    }
+  ],
+  "requirements": [
+    "dw.evidence.003",
+    "dw.mappings.019"
+  ]
+}

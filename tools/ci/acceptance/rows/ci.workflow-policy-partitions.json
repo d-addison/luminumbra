@@ -1,0 +1,60 @@
+{
+  "id": "ci.workflow-policy-partitions",
+  "source": "tools/ci/test_workflow_policy.py",
+  "statement": "Disjoint workflow policy partitions retain every unittest case and subtest, unchanged ci/tools labels and 30-second deadlines. WorkflowPolicyContractPart8 isolates bootstrap classification coverage; WorkflowPolicyContractPart9 isolates the native aggregate route grid with two bounded case workers. WorkflowPolicyContractPart10 isolates required-aggregate behaviour; WorkflowPolicyContractPart11 isolates reusable Windows routing and standalone Python contract placement; WorkflowPolicyContractPart12 isolates the aggregate refusal of uncertain classification. Selection refuses unregistered classes and invalid class or case partition targets. The worker option follows the route-grid partition and is refused for other partitions. Windows reserves four CTest slots for every partition and seeds costs for the launch-heavy entries. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster, CLI and scheduling regressions cover both platform branches. Windows deadline qualification remains pending.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "WorkflowPolicyContract"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorkflowPolicyContractPart1"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorkflowPolicyContractPart2"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorkflowPolicyContractPart3"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorkflowPolicyContractPart4"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorkflowPolicyContractPart5"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorkflowPolicyContractPart6"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorkflowPolicyContractPart7"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorkflowPolicyContractPart8"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorkflowPolicyContractPart9"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorkflowPolicyContractPart10"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorkflowPolicyContractPart11"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorkflowPolicyContractPart12"
+    }
+  ]
+}

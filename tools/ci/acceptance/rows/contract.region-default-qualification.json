@@ -1,0 +1,16 @@
+{
+  "id": "contract.region-default-qualification",
+  "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
+  "statement": "Regional continuation performance and default enablement remain planned for v0.4.0 under issue #320; compiled switch defaults do not qualify those release obligations.",
+  "status": "planned",
+  "requirements": [
+    "ar.scope.008"
+  ],
+  "evidence": [
+    {
+      "kind": "doc",
+      "ref": "docs/regional-water-continuation.md",
+      "planned": "Qualify representative-world regional continuation performance and release defaults for v0.4.0; owner: ds"
+    }
+  ]
+}
