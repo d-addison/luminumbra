@@ -4865,7 +4865,8 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_gbuffer_pass->destroy_gbuffer(m_render_registry);
     m_shadow_pass->destroy_shadow_map(m_render_registry);
     m_ssao_pass->destroy_ssao(m_render_registry);
-    destroy_halfres_cloud(); // render-optimization: reduced-res sky-dome target
+    m_taau_pass->destroy(m_render_registry); // registry-owned output-res history and replay
+    destroy_halfres_cloud();                 // render-optimization: reduced-res sky-dome target
     if (m_screen_quad_vao) {
         glDeleteVertexArrays(1, &m_screen_quad_vao);
         m_screen_quad_vao = 0;
