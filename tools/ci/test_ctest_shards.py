@@ -875,10 +875,10 @@ class CTestShardTests(unittest.TestCase):
                                   if line.strip().startswith("python3 tools/ci/ctest_shards.py plan ")))
         timing_path = ROOT / command[command.index("--timings") + 1]
         timings = shards.read_json(timing_path)
-        render_timings = {"RenderBenchmarkIsolationSubmission": 78,
-                          "RenderBenchmarkOverrideCollection": 174,
-                          "RenderTraversalEmbeddedPresetRefusal": 214,
-                          "RenderTraversalIntegrated": 156}
+        render_timings = {"RenderBenchmarkIsolationSubmission": 197,
+                          "RenderBenchmarkOverrideCollection": 403,
+                          "RenderTraversalEmbeddedPresetRefusal": 270,
+                          "RenderTraversalIntegrated": 660}
         self.assertEqual({name: timings[name] for name in render_timings}, render_timings)
         rows = self.policy_roster("asan")
         existing = {row["name"] for row in rows}
