@@ -6196,6 +6196,8 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
          "!is_halo_chunk(entry.coords.x, entry.coords.z, rx, rz)",
          "continue;",
          "entry.as_reduction_snapshot();",
+         "if (reduction.source_kind == World::FarLodBrickSourceKind::RegenerableCache)",
+         "continue;",
          "overlay_authority(reduction, belongs_to_region(entry, rx, rz),"});
     expect_ordered(
         worker,

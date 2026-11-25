@@ -1586,9 +1586,8 @@ void ExpectFarCaptureMatchesFullScan(SHIELD_WorldSystem& world, int rx, int rz) 
         EXPECT_EQ(entry.payload->coords, chunk->get_coords());
         EXPECT_EQ(entry.payload->revision, chunk->voxel_revision());
         EXPECT_EQ(entry.payload->source_kind,
-                  chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited
-                      ? World::FarLodBrickSourceKind::Authoritative
-                      : World::FarLodBrickSourceKind::RegenerableCache);
+                  chunk->has_terrain_authority() ? World::FarLodBrickSourceKind::Authoritative
+                                                 : World::FarLodBrickSourceKind::RegenerableCache);
         ASSERT_EQ(entry.payload->sdf_data.size(), chunk->sdf_data.size());
         EXPECT_EQ(std::memcmp(entry.payload->sdf_data.data(),
                               chunk->sdf_data.data(),
