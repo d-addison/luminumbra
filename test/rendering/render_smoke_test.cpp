@@ -12371,3 +12371,203 @@ TEST(RenderSmokeTest, WaterCausticsRegenerateIdenticallyAfterSkippedFrames) {
     EXPECT_FALSE(water.caustics_valid());
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
+
+TEST(ScenarioGeometryMask, ReversedDepthAndWaterOverrideEveryDisplayColour) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    constexpr int width = 8;
+    constexpr int height = 8;
+    std::vector<float> depth(width * height, 0.5f);
+    depth[0] = 0.0f;
+    depth[1] = std::numeric_limits<float>::denorm_min();
+    std::vector<unsigned char> water(width * height, 0);
+    water[0] = 255;
+    const auto opaque = BuildSkyPixelMask(depth, width, height);
+    const auto covered = BuildSkyPixelMask(depth, width, height, water);
+    ASSERT_TRUE(opaque.valid_for(width, height));
+    ASSERT_TRUE(covered.valid_for(width, height));
+    EXPECT_EQ(opaque.pixels[0], 1);
+    EXPECT_EQ(opaque.pixels[1], 0);
+    EXPECT_EQ(covered.pixels[0], 0);
+
+    // A hole below the horizon is visible even when the sky is amber or black.
+    // Blue distant terrain at finite depth cannot hide or manufacture a hole.
+    for (const auto colour : {std::array<unsigned char, 3>{25, 70, 120},
+                              std::array<unsigned char, 3>{210, 150, 80},
+                              std::array<unsigned char, 3>{0, 0, 0}}) {
+        std::vector<unsigned char> rgb(width * height * 3);
+        for (std::size_t index = 0; index < rgb.size(); ++index) {
+            rgb[index] = colour[index % 3];
+        }
+        const auto hole = AnalyzePlayerViewPixels(rgb, opaque, width, height, 2);
+        EXPECT_EQ(hole.below_horizon_sky_pixels, 1);
+        EXPECT_GT(hole.below_horizon_sky_ratio, 0.005);
+        EXPECT_EQ(AnalyzePlayerViewPixels(rgb, covered, width, height, 2).below_horizon_sky_pixels,
+                  0);
+        const auto boundary = AnalyzeFarLodBoundaryBand(rgb, opaque, width, height, 4, 7);
+        EXPECT_TRUE(boundary.band_resolved);
+        EXPECT_EQ(boundary.band_sky_pixels, 1);
+        EXPECT_GT(boundary.band_sky_ratio, 0.02);
+        EXPECT_EQ(AnalyzeFarLodBoundaryBand(rgb, covered, width, height, 4, 7).band_sky_pixels, 0);
+    }
+}
+
+TEST(ScenarioGeometryMask, BoundaryMaterialCountsExcludeClearDepth) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    constexpr int width = 8;
+    constexpr int height = 8;
+    for (const auto colour :
+         {std::array<unsigned char, 3>{50, 70, 90}, std::array<unsigned char, 3>{240, 240, 230}}) {
+        std::vector<unsigned char> rgb(width * height * 3);
+        for (std::size_t index = 0; index < rgb.size(); ++index) {
+            rgb[index] = colour[index % 3];
+        }
+        for (const float depth_value : {0.0f, 0.5f}) {
+            const auto mask =
+                BuildSkyPixelMask(std::vector<float>(width * height, depth_value), width, height);
+            std::uint64_t water_pixels = 0;
+            std::uint64_t band_pixels = 0;
+            std::uint64_t sand_pixels = 0;
+            AnalyzeFarLodBoundaryBandWater(
+                rgb, mask, width, height, 4, 7, water_pixels, band_pixels, &sand_pixels);
+            EXPECT_EQ(band_pixels, 32);
+            EXPECT_EQ(water_pixels + sand_pixels, depth_value == 0.0f ? 0 : 32);
+            EXPECT_EQ(water_pixels, depth_value != 0.0f && colour[0] == 50 ? 32 : 0);
+            EXPECT_EQ(sand_pixels, depth_value != 0.0f && colour[0] == 240 ? 32 : 0);
+        }
+    }
+}
+
+TEST(ScenarioGeometryMask, FiniteSliverSurvivesAndPairedLiveGeometryCancels) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    constexpr int width = 128;
+    constexpr int height = 720;
+    constexpr int horizon = 360;
+    std::vector<float> depth(width * height, 0.0f);
+    const auto clear_mask = BuildSkyPixelMask(depth, width, height);
+    EXPECT_EQ(AnalyzeFarLodHorizonSkySliver(clear_mask, width, height, horizon).tallest_sliver_px,
+              0);
+    // A one-column geometry streak spans 300 rows, exceeding the existing 64px budget.
+    for (int row = 0; row < 300; ++row) {
+        depth[static_cast<std::size_t>(height - 1 - row) * width + width / 2] = 0.00001f;
+    }
+    const auto streak = BuildSkyPixelMask(depth, width, height);
+    EXPECT_EQ(AnalyzeFarLodHorizonSkySliver(streak, width, height, horizon).tallest_sliver_px, 300);
+    EXPECT_EQ(AnalyzeFarLodHorizonSkySliver(streak, width, height, horizon, &clear_mask)
+                  .tallest_sliver_px,
+              300);
+    EXPECT_EQ(
+        AnalyzeFarLodHorizonSkySliver(streak, width, height, horizon, &streak).tallest_sliver_px,
+        0);
+    // A neighboring live silhouette cancels with the unchanged 3x3 jitter allowance.
+    std::vector<float> baseline_depth(width * height, 0.0f);
+    for (int row = 0; row < 300; ++row) {
+        baseline_depth[static_cast<std::size_t>(height - 1 - row) * width + width / 2 + 1] = 0.5f;
+    }
+    const auto baseline = BuildSkyPixelMask(baseline_depth, width, height);
+    EXPECT_EQ(
+        AnalyzeFarLodHorizonSkySliver(streak, width, height, horizon, &baseline).tallest_sliver_px,
+        0);
+    EXPECT_EQ(AnalyzeFarLodHorizonSkySliver(streak, width, height, 0).tallest_sliver_px, 0);
+    EXPECT_EQ(AnalyzeFarLodHorizonSkySliver(streak, width, height, -1).tallest_sliver_px, 0);
+    EXPECT_EQ(AnalyzeFarLodHorizonSkySliver(streak, width, height, std::numeric_limits<int>::max())
+                  .tallest_sliver_px,
+              300);
+    std::fill(depth.begin(), depth.end(), 0.5f);
+    const auto ridge = BuildSkyPixelMask(depth, width, height);
+    EXPECT_EQ(AnalyzeFarLodHorizonSkySliver(ridge, width, height, horizon).tallest_sliver_px, 0);
+}
+
+TEST(ScenarioGeometryMask, CreatureCompositionDetectsMissingHorizonAndExcludesSkyFromSubject) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    constexpr int width = 128;
+    constexpr int height = 128;
+    std::vector<unsigned char> rgb(width * height * 3, 100);
+    std::vector<float> depth(width * height, 0.5f);
+    const auto ground = BuildSkyPixelMask(depth, width, height);
+    const auto ground_comp = AnalyzeCreatureSliceComposition(rgb, ground, width, height, 64, 64);
+    EXPECT_LT(ground_comp.sky_ratio, 0.05);
+    for (int row = height * 3 / 4; row < height; ++row) {
+        for (int column = 0; column < width; ++column) {
+            depth[static_cast<std::size_t>(row) * width + static_cast<std::size_t>(column)] = 0.0f;
+        }
+    }
+    const auto horizon_mask = BuildSkyPixelMask(depth, width, height);
+    const auto composition =
+        AnalyzeCreatureSliceComposition(rgb, horizon_mask, width, height, 64, 64);
+    EXPECT_DOUBLE_EQ(composition.sky_ratio, 0.25);
+    EXPECT_GT(composition.creature_roi_pixels, 0);
+    const auto sky_only = BuildSkyPixelMask(std::vector<float>(width * height, 0), width, height);
+    const auto sky_comp = AnalyzeCreatureSliceComposition(rgb, sky_only, width, height, 64, 64);
+    EXPECT_GT(sky_comp.sky_ratio, 0.6);
+    EXPECT_EQ(sky_comp.creature_roi_pixels, 0);
+    EXPECT_EQ(sky_comp.terrain_ref_pixels, 0);
+}
+
+TEST(ScenarioGeometryMask, IncompleteOrInvalidEvidenceCannotReportZeroDefects) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    constexpr int width = 8;
+    constexpr int height = 8;
+    const std::vector<unsigned char> rgb(width * height * 3, 100);
+    std::vector<float> depth(width * height, 0.5f);
+    const auto mask = BuildSkyPixelMask(depth, width, height);
+    EXPECT_FALSE(BuildSkyPixelMask({}, 0, height).valid_for(0, height));
+    EXPECT_FALSE(BuildSkyPixelMask({}, -1, height).valid_for(-1, height));
+    EXPECT_FALSE(
+        BuildSkyPixelMask({}, std::numeric_limits<int>::max(), height).valid_for(width, height));
+    EXPECT_FALSE(BuildSkyPixelMask({}, width, height).valid_for(width, height));
+    EXPECT_FALSE(BuildSkyPixelMask(depth, width, height, {255}).valid_for(width, height));
+    EXPECT_FALSE(mask.valid_for(width + 1, height));
+    for (const float invalid : {-0.1f,
+                                1.1f,
+                                std::numeric_limits<float>::infinity(),
+                                std::numeric_limits<float>::quiet_NaN()}) {
+        depth[0] = invalid;
+        EXPECT_FALSE(BuildSkyPixelMask(depth, width, height).valid_for(width, height));
+    }
+    const SkyPixelMask missing;
+    EXPECT_THROW(AnalyzePlayerViewPixels(rgb, missing, width, height, 2), std::invalid_argument);
+    EXPECT_THROW(AnalyzePlayerViewPixels({}, mask, width, height, 2), std::invalid_argument);
+    EXPECT_THROW(AnalyzeFarLodBoundaryBand(rgb, missing, width, height, 4, 7),
+                 std::invalid_argument);
+    EXPECT_THROW(AnalyzeCreatureSliceComposition(rgb, missing, width, height, 4, 4),
+                 std::invalid_argument);
+    EXPECT_THROW(AnalyzeFarLodHorizonSkySliver(missing, width, height, 4), std::invalid_argument);
+    EXPECT_THROW(AnalyzeFarLodHorizonSkySliver(missing, width, std::numeric_limits<int>::min(), 4),
+                 std::invalid_argument);
+    EXPECT_THROW(AnalyzeFarLodHorizonSkySliver(mask, width, height, 4, &missing),
+                 std::invalid_argument);
+    std::uint64_t water_pixels = 123;
+    std::uint64_t band_pixels = 456;
+    EXPECT_THROW(AnalyzeFarLodBoundaryBandWater(
+                     rgb, missing, width, height, 4, 7, water_pixels, band_pixels, nullptr),
+                 std::invalid_argument);
+    EXPECT_EQ(water_pixels, 123);
+    EXPECT_EQ(band_pixels, 456);
+}
+
+TEST(ScenarioGeometryMask, BoundaryRowsAreClippedBeforeTraversal) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    constexpr int width = 8;
+    constexpr int height = 8;
+    const std::vector<unsigned char> rgb(width * height * 3, 100);
+    const auto mask = BuildSkyPixelMask(std::vector<float>(width * height, 0.0f), width, height);
+    std::uint64_t water_pixels = 1;
+    std::uint64_t band_pixels = 1;
+    AnalyzeFarLodBoundaryBandWater(rgb,
+                                   mask,
+                                   width,
+                                   height,
+                                   std::numeric_limits<int>::min(),
+                                   std::numeric_limits<int>::max(),
+                                   water_pixels,
+                                   band_pixels,
+                                   nullptr);
+    EXPECT_EQ(band_pixels, 64);
+    EXPECT_EQ(water_pixels, 0);
+    AnalyzeFarLodBoundaryBandWater(
+        rgb, mask, width, height, 9, 10, water_pixels, band_pixels, nullptr);
+    EXPECT_EQ(band_pixels, 0);
+    AnalyzeFarLodBoundaryBandWater(
+        rgb, mask, width, height, 7, 4, water_pixels, band_pixels, nullptr);
+    EXPECT_EQ(band_pixels, 0);
+}
