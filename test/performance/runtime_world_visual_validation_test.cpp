@@ -1291,6 +1291,7 @@ TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStart
     options.ticks = 1;
     options.surface_radius = 0;
     options.collision_radius = 0;
+    options.test_streaming_radius_cap = 1;
     options.systems_config_override = systems;
     options.record_path = (root.path() / "cli.lrec1").string();
     ASSERT_EQ(RunRecord(options), 0);
@@ -1309,6 +1310,7 @@ TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStart
     client.ApplySystemConfig(systems);
     ASSERT_TRUE(client.CreateWorld("Client", options.seed, options.preset));
     ASSERT_TRUE(client.LoadWorldState());
+    client.GetWorldSystem()->debug_set_streaming_radius_cap(options.test_streaming_radius_cap);
     ASSERT_TRUE(client.PrepareInitialSimulation(options.surface_radius, options.collision_radius));
     EXPECT_EQ(client.GetSimulationTickCount(), 0u);
     const auto start_hash = TestSupport::SessionWorldHash(client);
@@ -1320,6 +1322,7 @@ TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStart
     config.systems_config_override = systems;
     config.surface_radius = 0;
     config.collision_radius = 0;
+    config.test_streaming_radius_cap = options.test_streaming_radius_cap;
     config.hash_cadence_ticks = 1;
     config.budget_ticks = 1;
     {
@@ -1452,12 +1455,16 @@ TEST(NetworkedSessionDriverTest, PresentationPreloadPreservesBothStartingAuthori
     ASSERT_TRUE(client.CreateWorld("Presentation", "424242", "default"));
     ASSERT_TRUE(client.LoadWorldState());
     auto* world_system = client.GetWorldSystem();
+    Client::ScenarioHarness::NetworkedSessionDriver::Config config;
+    config.test_streaming_radius_cap = 1;
+    world_system->debug_set_streaming_radius_cap(config.test_streaming_radius_cap);
     ASSERT_TRUE(client.PrepareInitialSimulation(0, 0));
+    EXPECT_LE(world_system->get_last_streaming_budget_stats().target_render_radius,
+              config.test_streaming_radius_cap);
     const auto before = TestSupport::SessionWorldHash(client);
     ASSERT_TRUE(
         world_system->PrepareInitialWaterPresentationNear(client.GetMetadata().spawnPoint, 0));
     EXPECT_EQ(TestSupport::SessionWorldHash(client), before);
-    Client::ScenarioHarness::NetworkedSessionDriver::Config config;
     config.root_path = root.root_string();
     config.surface_radius = 0;
     config.collision_radius = 0;
@@ -1494,6 +1501,8 @@ protected:
         config.collision_radius = 0;
         config.budget_ticks = 3;
         config.hash_cadence_ticks = 1;
+        config.test_streaming_radius_cap = 1;
+        client.GetWorldSystem()->debug_set_streaming_radius_cap(config.test_streaming_radius_cap);
         ASSERT_TRUE(client.PrepareInitialSimulation(0, 0));
 
         auto params = Luminumbra::Test::SyntheticTerrainParams();

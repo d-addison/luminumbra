@@ -282,6 +282,7 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
         m_failure_reason = "host_world_systems_missing";
         return false;
     }
+    host_ws->debug_set_streaming_radius_cap(config.test_streaming_radius_cap);
     m_spawn_anchor = m_impl->host_session->GetMetadata().spawnPoint;
     if (!m_impl->host_session->PrepareInitialSimulation(config.surface_radius,
                                                         config.collision_radius)) {
