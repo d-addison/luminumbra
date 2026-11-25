@@ -17,9 +17,11 @@
 #include "ImpostorCoverage.h"
 #include "Mesh.h"
 #include "NearTerrainRefinement.h"
-#include "RenderContext.h"          // pass contract (make_ssao_context returns by value)
-#include "RenderFrameTypes.h"       // light/weather/cloud PODs (extracted)
-#include "RenderInputs.h"           //  GlassPaneItem (the glass draw list member)
+#include "RenderContext.h"    // pass contract (make_ssao_context returns by value)
+#include "RenderFrameTypes.h" // light/weather/cloud PODs (extracted)
+#include "RenderInputs.h"     //  GlassPaneItem (the glass draw list member)
+#include "RenderPassMetadata.h"
+#include "RenderPreparationScratch.h"
 #include "RenderResourceRegistry.h" // render resource registry (value member)
 #include "ShadowMap.h"              // ShadowMap (extracted)
 #include "SkyAtmosphereLut.h"       //  Hillaire 2020 scattering LUTs
@@ -35,6 +37,7 @@
 #include "passes/SsaoData.h" // SSAOData (extracted; still read here for stats)
 #include "passes/WaterfallPass.h"
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <glad/glad.h>
@@ -118,6 +121,7 @@ struct ChunkRenderData {
     u32 vertex_capacity = 0;
     u32 index_capacity = 0;
     u32 frames_since_inactive = 0;
+    u64 last_seen_frame = 0;
     //  pool slice. Packs {block_index, vertex/index slot offsets}.
     static constexpr u32 kInvalidPoolHandle = 0xFFFFFFFFu;
     u32 pool_handle = kInvalidPoolHandle;
@@ -162,6 +166,7 @@ struct WaterRenderData {
     u32 vertex_capacity = 0;
     u32 index_capacity = 0;
     u32 frames_since_inactive = 0;
+    u64 last_seen_frame = 0;
     // Only a validated Ladder upload certifies this exact mesh version.
     std::optional<u32> ladder_upload_version;
 
@@ -360,17 +365,7 @@ public:
         double cpu_post_ms = 0.0;        // ssao + lighting + skybox + water + particles + final
     };
 
-    struct RenderPassMetadata {
-        std::string name;
-        std::vector<std::string> inputs;
-        std::vector<std::string> outputs;
-        u32 width = 0;
-        u32 height = 0;
-        std::string clear;
-        std::string load_store;
-        size_t draw_count = 0;
-        size_t dispatch_count = 0;
-    };
+    using RenderPassMetadata = Rendering::RenderPassMetadata;
 
     struct RenderResourceRegistryStats {
         size_t framebuffers = 0;
@@ -609,7 +604,7 @@ public:
         return m_last_render_pass_stats;
     }
     const std::vector<RenderPassMetadata>& get_last_render_pass_metadata() const {
-        return m_last_render_pass_metadata;
+        return m_render_pass_metadata.passes();
     }
     // the ORDERED stage ids render_frame actually dispatched last frame --
     // the runtime golden the declarative RenderGraph (BuildLuminumbraFrameGraph) is gated against
@@ -671,6 +666,21 @@ public:
         return m_volumetric_quality;
     }
     RenderHealthSnapshot get_render_health_snapshot(bool drain_gl_errors = false) const;
+    // Owner-thread lifetime allocation count for light/snapshot/upload/submission
+    // scratch and exact terrain membership. Upload payloads and captures are separate.
+    std::uint64_t preparation_scratch_allocations() const {
+        return m_preparation_scratch_allocations;
+    }
+    // Read-only CPU submission diagnostics, valid until the next prepare/dispatch.
+    std::span<const std::byte> terrain_command_bytes() const {
+        return std::as_bytes(std::span(m_mdi_command_scratch.data(), m_mdi_command_scratch.size()));
+    }
+    std::span<const glm::vec4> terrain_origins() const {
+        return {m_mdi_origin_scratch.data(), m_mdi_origin_scratch.size()};
+    }
+    std::span<const PointLight> prepared_point_lights() const {
+        return m_point_lights_this_frame;
+    }
     // framescan: read-only access to the G-buffer attachments for the
     // what's-in-frame scan tool. The normal/material attachment (RGBA8) carries
     // the material id in its ALPHA byte (g_buffer.frag writes alpha =
@@ -1160,6 +1170,10 @@ public:
     void cancel_waterfall_adoption();
 
 private:
+    // Declared before its allocator users so the counter outlives their storage.
+    std::uint64_t m_preparation_scratch_allocations = 0;
+    template<typename T>
+    using ScratchVector = std::vector<T, RenderScratchAllocator<T>>;
     friend struct TerrainCullingTestPeer;
     friend struct TextureFileTestPeer;
     friend struct RenderClockTestPeer;
@@ -1220,6 +1234,15 @@ private:
         std::size_t bytes = 0;
         bool refinement_only = false;
     };
+    ScratchVector<ChunkID> m_expired_scratch{
+        RenderScratchAllocator<ChunkID>(m_preparation_scratch_allocations)};
+    ScratchVector<MeshUploadCandidate> m_upload_candidate_scratch{
+        RenderScratchAllocator<MeshUploadCandidate>(m_preparation_scratch_allocations)};
+    ScratchVector<MeshUploadCandidate> m_refinement_candidate_scratch{
+        RenderScratchAllocator<MeshUploadCandidate>(m_preparation_scratch_allocations)};
+    u64 m_terrain_resource_frame = 0;
+    u64 m_water_resource_frame = 0;
+    TerrainResidencyRevision m_terrain_residency{m_preparation_scratch_allocations};
     NearTerrainRefinementCache m_near_terrain_refinement;
     UploadQueue<MeshUploadCandidate> m_terrain_upload_queue;
     UploadQueue<MeshUploadCandidate> m_near_terrain_upload_queue;
@@ -1262,8 +1285,7 @@ private:
     RenderContext make_waterfall_context(const Camera& camera);
     RenderContext make_luminance_meter_context();
 
-    std::vector<ChunkMeshSnapshot>
-    build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const;
+    void build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks);
 
     //   (the  unlock): render_frame is split into prepare_frame (ALL
     // per-frame CPU mutation — clock snapshot, time-of-day advance, light gathering,
@@ -1691,8 +1713,10 @@ private:
     std::array<MdiFrameBuffers, TerrainStreamRing::kSlotCount> m_mdi_frames;
     TerrainStreamRing m_mdi_stream;
     // Reusable CPU scratch so the per-frame submit allocates nothing steady-state.
-    std::vector<DrawElementsIndirectCommand> m_mdi_command_scratch;
-    std::vector<glm::vec4> m_mdi_origin_scratch;
+    ScratchVector<DrawElementsIndirectCommand> m_mdi_command_scratch{
+        RenderScratchAllocator<DrawElementsIndirectCommand>(m_preparation_scratch_allocations)};
+    ScratchVector<glm::vec4> m_mdi_origin_scratch{
+        RenderScratchAllocator<glm::vec4>(m_preparation_scratch_allocations)};
 
     void init_mdi_buffers();
     void destroy_mdi_buffers();
@@ -1702,7 +1726,7 @@ private:
 
     MeshUploadFrameStats m_last_mesh_upload_stats;
     RenderPassFrameStats m_last_render_pass_stats;
-    std::vector<RenderPassMetadata> m_last_render_pass_metadata;
+    RenderPassMetadataCache m_render_pass_metadata;
     std::vector<std::string> m_frame_stage_trace; //  ( ): last frame's dispatch order
 
     // the prepared per-frame state dispatch_stages reads (see prepare_frame).
@@ -2002,6 +2026,12 @@ private:
     // false on any header/size error.
     static bool load_ltex_cpu_image(const std::filesystem::path& path, LtexCpuImage& out);
 
+    struct LightCandidate {
+        PointLight light;
+        float d2 = 0;
+    };
+    ScratchVector<LightCandidate> m_light_candidate_scratch{
+        RenderScratchAllocator<LightCandidate>(m_preparation_scratch_allocations)};
     std::vector<PointLight> m_point_lights_this_frame;
     const int MAX_POINT_LIGHTS = 32;
 
@@ -2082,7 +2112,7 @@ private:
     std::unordered_set<ChunkID> m_terrain_coverage_visible;
 
     struct TerrainCullingCache {
-        u64 chunk_set_signature = 0;
+        u64 residency_revision = 0;
         size_t chunk_count = 0;
         bool valid = false;
     } m_terrainCullingCache;

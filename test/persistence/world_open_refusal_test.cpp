@@ -8130,3 +8130,31 @@ TEST(OwnerContinuationEnvelope, AmbientCaptureTracksAppliedInputsAndRefusesIncoh
     EXPECT_EQ(weather.ComputeWeatherSubHash(), weather_hash);
     EXPECT_EQ(wind.ComputeWindSubHash(), wind_hash);
 }
+
+TEST_F(WorldOpenRefusal, RegionReplacementPreservesIndependentReaderImage) {
+    const IVec3 coords(0, 0, 0);
+    auto original = std::make_shared<Chunk>(coords);
+    original->heightmap_data.assign(std::size_t{17} * 17, 3.0f);
+    original->mark_sdf_loaded_or_edited();
+    WorldStreamingState state;
+    state.insert_chunk(original);
+    ASSERT_TRUE(WorldSaveService{}.save_world(state, save));
+    WorldSaveService::ChunkReader independent_reader;
+    const auto old_image = WorldSaveService::read_chunk(save, coords, false, &independent_reader);
+    ASSERT_NE(old_image.chunk, nullptr);
+    auto replacement = std::make_shared<Chunk>(coords);
+    replacement->heightmap_data.assign(std::size_t{17} * 17, 7.0f);
+    replacement->mark_sdf_loaded_or_edited();
+    WorldStreamingState replaced;
+    replaced.insert_chunk(replacement);
+    ASSERT_TRUE(WorldSaveService{}.save_world(replaced, save));
+    EXPECT_EQ(old_image.chunk->heightmap_data, original->heightmap_data);
+    WorldSaveService::ChunkReader new_reader;
+    const auto new_image = WorldSaveService::read_chunk(save, coords, false, &new_reader);
+    ASSERT_NE(new_image.chunk, nullptr);
+    EXPECT_EQ(new_image.chunk->heightmap_data, replacement->heightmap_data);
+    const auto refreshed = WorldSaveService::read_chunk(save, coords, false, &independent_reader);
+    ASSERT_NE(refreshed.chunk, nullptr);
+    EXPECT_EQ(refreshed.chunk->heightmap_data, replacement->heightmap_data);
+    EXPECT_EQ(old_image.chunk->heightmap_data, original->heightmap_data);
+}

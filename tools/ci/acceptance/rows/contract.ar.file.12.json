@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.file.12",
+  "source": "docs/active-regions.md#file-and-compatibility",
+  "statement": "Acceptance obligations: | 11 | 1 | pending wake, 0 or 1 | / | 12 | 4 | derived cadence phase | / | 16 | 40 | u64 first active, last proximity, last edit, last ticked, frozen at | / | 56 | 8 | u64 last save (observational) | / | 64 | 8 | u64 last decision tick | / | 72 | 8 | u64 per-region pressure |",
+  "status": "planned",
+  "requirements": [
+    "ar.file.075",
+    "ar.file.076",
+    "ar.file.077",
+    "ar.file.078",
+    "ar.file.079",
+    "ar.file.080"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArFileContract.Requirements12",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.file.12.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.fixtures.02",
+  "source": "docs/active-regions.md#verification-fixtures",
+  "statement": "Acceptance obligations: these fixtures are never installed as runtime data. / The unchanged LMR1/manifest validators supply their corruption and future-version refusals. / `test/fixtures/active-regions/devel-off-plant-edit/` is a second exact-byte oracle captured from the same origin/devel commit in this worktree. / A seed-1337 session first saves only a plant roster, then retains idle chunks at (0,0,0) and (32,0,0), dirties only the former, and saves again without advancing a tick. / `DisabledPlantRosterThenMultiRegionEditMatchesDevelHashAndExactSaveBytes` checks every output file against the fixture: plant roster, `r.0.0.lmr`, and manifest, with no `r.1.0.lmr`. / Independent expected sessions contain the plant roster and respectively two live chunks or just the dirty saved chunk, without executing the save/load sequence under test.",
+  "status": "planned",
+  "requirements": [
+    "ar.fixtures.007",
+    "ar.fixtures.008",
+    "ar.fixtures.009",
+    "ar.fixtures.010",
+    "ar.fixtures.011",
+    "ar.fixtures.012"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArFixturesContract.Requirements02",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.fixtures.02.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

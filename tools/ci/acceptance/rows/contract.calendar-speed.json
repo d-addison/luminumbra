@@ -1,0 +1,17 @@
+{
+  "id": "contract.calendar-speed",
+  "source": "docs/distant-world.md#simulation-clock-and-calendar",
+  "statement": "Simulation speed controls retain batching and the pause through 16 times range; at ideal 16 times speed the default day lasts 337.5 seconds. Input dispatch and live pacing need dedicated regression and native evidence.",
+  "status": "planned",
+  "requirements": [
+    "dw.calendar.063",
+    "dw.calendar.064"
+  ],
+  "evidence": [
+    {
+      "kind": "doc",
+      "ref": "docs/distant-world.md",
+      "planned": "Add an input-dispatch regression for pause, doubling, halving and the 16 times cap, and qualify actual tick batching and day duration in the live client.; owner: ac"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "id": "contract.ar.fixtures.03",
+  "source": "docs/active-regions.md#verification-fixtures",
+  "statement": "Acceptance obligations: Their hashes are computed in the same build. / `hashes.json` retains the historical capture values; / it is not a save member or a portable hash oracle. / Missing or changed fixture bytes still fail the tests.",
+  "status": "planned",
+  "requirements": [
+    "ar.fixtures.013",
+    "ar.fixtures.014",
+    "ar.fixtures.015",
+    "ar.fixtures.016"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArFixturesContract.Requirements03",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.fixtures.03.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

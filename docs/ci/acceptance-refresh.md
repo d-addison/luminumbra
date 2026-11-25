@@ -5,6 +5,56 @@ matching complete contract statements. It preserves stable IDs, requirement
 mappings, evidence, statuses and audited exclusions. Ambiguous, new, reworded
 or removed statements require an explicit inventory decision before publication.
 
+## Row layout and branch migration
+
+Each acceptance row is one object in `tools/ci/acceptance/rows/<id>.json`.
+`tools/ci/acceptance/matrix.json` holds the schema and description, without rows.
+All consumers sort by ID; there is no shared order list. IDs are lowercase ASCII
+letters, digits, dots, underscores and hyphens, start with a letter or digit,
+contain at most 200 characters and cannot end in a dot or use a Windows device
+basename. Filenames must equal IDs plus `.json`. Foreign files, directories,
+symlinks, duplicate IDs, invalid JSON and empty row directories are refused.
+Use two-space JSON indentation and a final newline. Prose remains a string:
+sentence lists would change schema-v2 semantics and legacy round-trips.
+
+A diagnostics slice adds or edits its own `render.visual-diagnostic-*` feature
+row. It never appends acceptance prose to another feature's row. Keep each
+feature's evidence and pending qualification explicit.
+
+The Markdown view is generated locally or uploaded as the `acceptance-matrix`
+artifact by the Public tree / inventory honesty job. It is not tracked.
+Generate and optionally check a local view using a fresh caller receipt path:
+
+```bash
+mkdir -p build
+python3 -I -B tools/ci/check_acceptance_matrix.py --write-doc build/acceptance-matrix.md --check-doc build/acceptance-matrix.md --preparation-receipt-file "$callerMetadata/document.json"
+```
+
+To migrate an open branch, save its legacy matrix before merging the layout
+change, then explode into a fresh directory. Both the row directory and sibling
+`matrix.json` must be absent; the parent may already exist. For example:
+
+```bash
+python3 -I -B tools/ci/check_acceptance_matrix.py --explode legacy-matrix.json --rows-dir migrated-acceptance/rows
+python3 -I -B tools/ci/check_acceptance_matrix.py --rows-dir migrated-acceptance/rows --implode round-trip.json
+```
+
+Compare the sorted legacy rows with `round-trip.json`, then copy the changed
+feature rows into `tools/ci/acceptance/rows/`. Every unknown metadata and row field
+is retained. `--implode legacy-view.json` exports the current repository layout
+for older tools or diffs. Migration does not reinterpret evidence or split legacy
+diagnostics prose automatically; reconcile that row with the individual feature
+rows. Existing destinations are never adopted by explode. Inventory refresh
+updates only changed row files and the requirement inventory, with the existing
+five-output transaction bound; larger relocations refuse before publication and
+require an explicit reviewed update. It generates a view only when `--write-doc` is
+explicitly requested. Legacy `--matrix FILE` refresh remains supported.
+
+Execution receipts hash the assembled matrix as UTF-8 JSON with sorted object
+keys, sorted rows and the standard JSON separators, without a trailing newline.
+This covers metadata and every complete row object; legacy `--matrix` receipts
+retain their file-byte hash.
+
 ## Preparation custody
 
 Issue #540 adds persistent bounded preparation records to journaled CLI writes.
@@ -35,7 +85,8 @@ JSON. For example, choose a new receipt pathname in an existing directory:
 ```bash
 custody="$(python3 -I -B tools/ci/check_acceptance_matrix.py --enroll-preparation --preparation-receipt-file "$callerMetadata/enrollment.json")" || exit
 python3 -I -B tools/ci/check_acceptance_matrix.py --preparation-custody "$custody" --refresh-inventory
-python3 -I -B tools/ci/check_acceptance_matrix.py --preparation-custody "$custody" --check-doc docs/acceptance-matrix.md
+mkdir -p build
+python3 -I -B tools/ci/check_acceptance_matrix.py --preparation-custody "$custody" --write-doc build/acceptance-matrix.md
 python3 -I -B tools/ci/check_acceptance_matrix.py --preparation-custody "$custody" --retire-preparation
 ```
 

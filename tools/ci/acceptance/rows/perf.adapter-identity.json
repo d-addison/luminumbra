@@ -1,0 +1,26 @@
+{
+  "id": "perf.adapter-identity",
+  "source": "docs/distant-world.md#performance-measurement-contract",
+  "statement": "Client reports must record GL vendor, renderer and version from glGetString. RenderContractPython accepts synthetic qualified-adapter strings and rejects a renderer mismatch against the qualified RTX 5070 Ti; it does not exercise glGetString or the client report assignments. GL identity recording remains outstanding native qualification.",
+  "status": "needs-native-run",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "RenderContractPython"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/perf/validate_render_capture.py"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/perf/run_qualification.py",
+      "planned": "render qualification runner (v0.3.1); owner: ac",
+      "command": "python tools/perf/run_qualification.py --package <dir> --out <dir> --declare-refresh 3840x1600=143",
+      "receipt_schema": "luminumbra.render_qualification.v1"
+    }
+  ],
+  "requirements": [
+    "dw.mappings.008"
+  ]
+}

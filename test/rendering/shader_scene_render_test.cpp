@@ -42,13 +42,18 @@ protected:
     GLuint vbo = 0;
     std::array<GLuint, 6> attachments{};
     std::array<GLuint, 5> textures{};
-    std::array<GLuint, 3> storage{};
+    std::array<GLuint, 9> storage{};
 
     void NormalDecode();
     void DepthConventions();
     void PostEdge();
     void SharpenChroma();
     void ComputeReadback();
+    void PrefixScan(const std::vector<std::uint32_t>& counts,
+                    GLuint cap,
+                    std::vector<std::uint32_t>& actual,
+                    std::vector<std::uint32_t>& expected);
+    void GrassPrefixParity();
 
     void SetUp() override {
         initialized = glfwInit() == GLFW_TRUE;
@@ -1273,41 +1278,97 @@ void main() { result = sharpenLuma(inputColor, inputMean, inputLower, inputUpper
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 }
 
-void ShaderScene::ComputeReadback() {
-    program = Link(Compile(GL_COMPUTE_SHADER, "grass_compact_prefix.comp"));
-    ASSERT_NE(program, 0u);
+void ShaderScene::PrefixScan(const std::vector<std::uint32_t>& counts,
+                             GLuint cap,
+                             std::vector<std::uint32_t>& actual,
+                             std::vector<std::uint32_t>& expected) {
+    // The public scatter limit bounds all host and shader arithmetic to 65,536 groups.
+    ASSERT_LE(counts.size(), 65536u);
+    expected.resize(counts.size());
+    std::uint32_t total = 0;
+    for (std::size_t index = 0; index < counts.size(); ++index) {
+        ASSERT_LE(counts[index], 64u);
+        expected[index] = total;
+        total += counts[index];
+    }
+    actual.assign(std::max(counts.size(), std::size_t{5}), 0xFFFFFFFFu);
+    const std::array<std::uint32_t, 3> zero{};
     glUseProgram(program);
-    constexpr std::array<std::uint32_t, 8> counts{0, 3, 1, 0, 7, 2, 5, 1};
-    constexpr std::array<std::uint32_t, 13> expected{19, 12, 13, 0, 0, 0, 0, 3, 4, 4, 11, 13, 18};
-    // Three fixed buffers, at most eight uint32 words each. Sentinels detect a
-    // missing dispatch or a wrong output binding even where zero is expected.
-    std::array<std::uint32_t, 8> sentinel{};
-    sentinel.fill(0xFFFFFFFFu);
-    glGenBuffers(static_cast<GLsizei>(storage.size()), storage.data());
-    constexpr std::array<GLuint, 3> bindings{3, 5, 6};
-    for (std::size_t index = 0; index < storage.size(); ++index) {
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[index]);
-        glBufferData(GL_SHADER_STORAGE_BUFFER,
-                     sizeof(counts),
-                     index == 1 ? counts.data() : sentinel.data(),
-                     GL_STATIC_COPY);
+    constexpr std::array<GLuint, 5> bindings{3, 5, 6, 7, 4};
+    for (std::size_t index = 0; index < bindings.size(); ++index) {
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, bindings[index], storage[index]);
     }
+    for (std::size_t index = 0; index < 3; ++index) {
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[index]);
+        glBufferData(GL_SHADER_STORAGE_BUFFER,
+                     static_cast<GLsizeiptr>(actual.size() * sizeof(std::uint32_t)),
+                     actual.data(),
+                     GL_STATIC_COPY);
+    }
+    if (!counts.empty()) {
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[1]);
+        glBufferSubData(GL_SHADER_STORAGE_BUFFER,
+                        0,
+                        static_cast<GLsizeiptr>(counts.size() * sizeof(std::uint32_t)),
+                        counts.data());
+    }
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[4]);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(zero), zero.data(), GL_STATIC_COPY);
     glUniform1ui(Uniform("u_group_count"), static_cast<GLuint>(counts.size()));
-    glUniform1ui(Uniform("u_max_instances"), 13u);
-    glDispatchCompute(1u, 1u, 1u);
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+    glUniform1ui(Uniform("u_max_instances"), cap);
+    const GLuint blocks = static_cast<GLuint>((counts.size() + 255) / 256);
+    for (GLuint pass = 0; pass < 3; ++pass) {
+        glUniform1ui(Uniform("u_pass"), pass);
+        glDispatchCompute(pass == 1 ? 1u : blocks, 1u, 1u);
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+    }
+    std::array<std::uint32_t, 5> command{};
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[0]);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(command), command.data());
+    const std::array<std::uint32_t, 5> expectedCommand{total, 12u, std::min(total, cap), 0u, 0u};
+    EXPECT_EQ(command, expectedCommand);
+    actual.resize(counts.size());
+    if (!actual.empty()) {
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[2]);
+        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,
+                           0,
+                           static_cast<GLsizeiptr>(actual.size() * sizeof(std::uint32_t)),
+                           actual.data());
+    }
+    EXPECT_EQ(actual, expected);
+    std::array<std::uint32_t, 3> work{};
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[4]);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(work), work.data());
+    const std::array<std::uint32_t, 3> expectedWork{
+        counts.empty() ? 0u : 8u, 8u, counts.empty() ? 0u : 1u};
+    EXPECT_EQ(work, expectedWork);
+    // Instrumented shader additions on the longest lane, summed over ordered
+    // dispatches: 17 versus 65,536 dependent additions in the serial reference.
+    if (counts.size() == 65536) {
+        EXPECT_LT(work[0] + work[1] + work[2], counts.size() / 100);
+    }
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+void ShaderScene::ComputeReadback() {
+    std::string prefix = Source("res/shaders/grass_compact_prefix.comp");
+    prefix.insert(prefix.find('\n') + 1, "#define PREFIX_MEASURE_WORK\n");
+    program = Link(CompileSource(GL_COMPUTE_SHADER, prefix, "grass prefix"));
+    ASSERT_NE(program, 0u);
+    glGenBuffers(static_cast<GLsizei>(storage.size()), storage.data());
+    // Fixed scratch: 256 sums plus 256 bases; stale tail values must be ignored.
+    std::array<std::uint32_t, 512> scratch{};
+    scratch.fill(0xFFFFFFFFu);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[3]);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(scratch), scratch.data(), GL_STATIC_COPY);
+    std::vector<std::uint32_t> offsets;
+    std::vector<std::uint32_t> serial;
+    PrefixScan({0, 3, 1, 0, 7, 2, 5, 1}, 13u, offsets, serial);
+    ASSERT_FALSE(HasFailure());
     std::array<std::uint32_t, 13> actual{};
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[0]);
     glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, 5 * sizeof(std::uint32_t), actual.data());
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[2]);
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(counts), actual.data() + 5);
-    // Integer-exact, independent of float rounding and workgroup scheduling.
-    for (std::size_t index = 0; index < actual.size(); ++index) {
-        EXPECT_EQ(actual[index], expected[index]) << "word " << index;
-    }
-    ASSERT_EQ(glGetError(), GL_NO_ERROR);
-    ASSERT_FALSE(HasFailure());
+    std::copy(offsets.begin(), offsets.end(), actual.begin() + 5);
     const char* output = std::getenv("LUMINUMBRA_SHADER_SCENE_OUTPUT");
     ASSERT_NE(output, nullptr);
     std::ofstream readback(std::filesystem::path(output) / "compute-ssbo.bin", std::ios::binary);
@@ -1320,6 +1381,147 @@ void ShaderScene::ComputeReadback() {
     }
     readback.close();
     ASSERT_TRUE(readback);
+    for (const std::size_t count : {0u, 1u, 255u, 256u, 257u, 65535u, 65536u, 257u, 1u}) {
+        std::vector<std::uint32_t> counts(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            counts[index] = static_cast<std::uint32_t>(index % 65);
+        }
+        for (const GLuint cap : {0u, 13u, 262144u}) {
+            PrefixScan(counts, cap, offsets, serial);
+            ASSERT_FALSE(HasFailure());
+        }
+    }
+    GrassPrefixParity();
+}
+
+void ShaderScene::GrassPrefixParity() {
+    const GLuint scatter = Link(Compile(GL_COMPUTE_SHADER, "grass_scatter.comp"));
+    ASSERT_NE(scatter, 0u);
+    // All 512 columns share one immutable 8192-sample surface slot. Fixed bounds:
+    // 65,536 groups, 128 KiB surfaces, 18 KiB metadata, and a 9 MiB blade pool.
+    constexpr std::size_t GroupCount = 65536;
+    constexpr GLuint Cap = 262144;
+    constexpr std::size_t BladeWords = static_cast<std::size_t>(Cap) * 9;
+    std::array<std::uint32_t, 512 * 9> metadata{};
+    for (std::size_t chunk = 0; chunk < 512; ++chunk) {
+        metadata[chunk * 8 + 3] = std::bit_cast<std::uint32_t>(1.f);
+        metadata[chunk * 8 + 4] = std::bit_cast<std::uint32_t>(static_cast<float>(chunk));
+        metadata[chunk * 8 + 7] = std::bit_cast<std::uint32_t>(1.f);
+    }
+    constexpr std::array<float, 8> palette{.2f, .6f, .15f, 1.f, .1f, 1.f, 1.f, 0.f};
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[6]);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(metadata), metadata.data(), GL_STATIC_COPY);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[8]);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(palette), palette.data(), GL_STATIC_COPY);
+    glUseProgram(scatter);
+    glUniform1i(glGetUniformLocation(scatter, "u_chunk_count"), 512);
+    glUniform1i(glGetUniformLocation(scatter, "u_archetype_count"), 1);
+    glUniform1f(glGetUniformLocation(scatter, "u_total_weight"), 1.f);
+    glUniform1i(glGetUniformLocation(scatter, "u_max_candidates"), 8192);
+    glUniform1f(glGetUniformLocation(scatter, "u_density_scale"), 1.f);
+    glUniform2f(glGetUniformLocation(scatter, "u_camera_xz"), 0.f, 0.f);
+    glUniform1f(glGetUniformLocation(scatter, "u_fade_end_m"), 100.f);
+    glUniform2f(glGetUniformLocation(scatter, "u_wind_xz"), .25f, -.5f);
+    const auto bindScatter = [&]() {
+        constexpr std::array<std::size_t, 8> slots{6, 7, 5, 0, 8, 1, 2, 6};
+        glUseProgram(scatter);
+        for (std::size_t binding = 0; binding < slots.size(); ++binding) {
+            glBindBufferBase(
+                GL_SHADER_STORAGE_BUFFER, static_cast<GLuint>(binding), storage[slots[binding]]);
+        }
+    };
+    const auto bladeHash = [](const std::vector<std::uint32_t>& words) {
+        std::uint64_t hash = 14695981039346656037ull;
+        for (const auto word : words) {
+            for (unsigned shift = 0; shift < 32; shift += 8) {
+                hash = (hash ^ ((word >> shift) & 255u)) * 1099511628211ull;
+            }
+        }
+        return hash;
+    };
+    std::vector<std::uint32_t> counts(GroupCount);
+    std::vector<std::uint32_t> offsets;
+    std::vector<std::uint32_t> serial;
+    std::vector<std::uint32_t> reference(BladeWords);
+    std::vector<std::uint32_t> blades(BladeWords);
+    for (unsigned pattern = 0; pattern < 3; ++pattern) {
+        SCOPED_TRACE(pattern);
+        std::array<float, 8192 * 4> surface{};
+        for (std::size_t candidate = 0; candidate < 8192; ++candidate) {
+            surface[candidate * 4] = 1.f;
+            surface[candidate * 4 + 1] = 1.f;
+            surface[candidate * 4 + 3] = pattern == 0                             ? 0.f
+                                         : pattern == 1                           ? 1.f
+                                         : candidate % 64 < (candidate / 64) % 65 ? 1.f
+                                                                                  : 0.f;
+        }
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[7]);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(surface), surface.data(), GL_STATIC_COPY);
+        // Allocate/reset the count storage before the production count dispatch.
+        PrefixScan(counts, Cap, offsets, serial);
+        ASSERT_FALSE(HasFailure());
+        bindScatter();
+        glUniform1i(glGetUniformLocation(scatter, "u_emit"), GL_FALSE);
+        glDispatchCompute(128u, 512u, 1u);
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[1]);
+        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,
+                           0,
+                           static_cast<GLsizeiptr>(counts.size() * sizeof(std::uint32_t)),
+                           counts.data());
+        for (std::size_t group = 0; group < GroupCount; ++group) {
+            const auto expectedCount = pattern == 0 ? 0u
+                                       : pattern == 1
+                                           ? 64u
+                                           : static_cast<std::uint32_t>((group % 128) % 65);
+            ASSERT_EQ(counts[group], expectedCount) << group;
+        }
+        for (const GLuint cap : {0u, 13u, Cap}) {
+            SCOPED_TRACE(cap);
+            PrefixScan(counts, cap, offsets, serial);
+            ASSERT_FALSE(HasFailure());
+            for (unsigned variant = 0; variant < 2; ++variant) {
+                // Identical production emit inputs; only the offsets differ.
+                glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[2]);
+                const auto& input = variant == 0 ? serial : offsets;
+                glBufferSubData(GL_SHADER_STORAGE_BUFFER,
+                                0,
+                                static_cast<GLsizeiptr>(input.size() * sizeof(std::uint32_t)),
+                                input.data());
+                std::fill(blades.begin(), blades.end(), 0xFFFFFFFFu);
+                glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[5]);
+                glBufferData(GL_SHADER_STORAGE_BUFFER,
+                             static_cast<GLsizeiptr>(blades.size() * sizeof(std::uint32_t)),
+                             blades.data(),
+                             GL_STATIC_COPY);
+                bindScatter();
+                glUniform1ui(glGetUniformLocation(scatter, "u_max_instances"), cap);
+                glUniform1i(glGetUniformLocation(scatter, "u_emit"), GL_TRUE);
+                glDispatchCompute(128u, 512u, 1u);
+                glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+                glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[5]);
+                glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,
+                                   0,
+                                   static_cast<GLsizeiptr>(blades.size() * sizeof(std::uint32_t)),
+                                   blades.data());
+                const auto written = std::min(offsets.back() + counts.back(), cap);
+                for (std::size_t blade = 0; blade < written; ++blade) {
+                    ASSERT_EQ(blades[blade * 9 + 1], std::bit_cast<std::uint32_t>(1.f));
+                }
+                ASSERT_TRUE(std::all_of(blades.begin() + static_cast<std::ptrdiff_t>(written * 9),
+                                        blades.end(),
+                                        [](std::uint32_t word) { return word == 0xFFFFFFFFu; }));
+                if (variant == 0) {
+                    reference = blades;
+                } else {
+                    EXPECT_EQ(bladeHash(blades), bladeHash(reference));
+                    EXPECT_EQ(blades, reference);
+                }
+            }
+            ASSERT_EQ(glGetError(), GL_NO_ERROR);
+        }
+    }
+    glDeleteProgram(scatter);
 }
 
 TEST_F(ShaderScene, GrassHasSeparatedBladesAndClutterHasCutoutCorners) {

@@ -329,6 +329,7 @@ TEST(FarLodWorker, AuthoritativeCaptureBuildsPersistsAndStales) {
         }
     }
     chunk->mark_voxel_data_dirty();
+    chunk->set_water_authority(); // Water ownership must not hide edited terrain.
     ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
     const auto snapshot = world.capture_far_lod_sdf_snapshot(0, 0);
     ASSERT_TRUE(snapshot);
@@ -1755,7 +1756,7 @@ TEST(FarLodWorker, DefaultCaveStreamsEveryNeighbouringMesh) {
     jobs.shutdown();
 }
 
-TEST(FarLodWorker, MissingImmutableAuthorityPayloadIsRejected) {
+TEST(FarLodWorker, MissingOrInvalidImmutableAuthorityPayloadIsRejected) {
     const SHIELD_WorldSystem world(nullptr, nullptr, FlatParams(), 1337);
     Systems::FarLodSdfSnapshot snapshot;
     snapshot.params_hash = ComputeTerrainParamsHash(world.get_params(), world.get_seed());
@@ -1766,8 +1767,26 @@ TEST(FarLodWorker, MissingImmutableAuthorityPayloadIsRejected) {
         .authority_durable = true,
         .payload = {},
     });
-    const auto outcome = BuildFarLodWorkerTile(world, snapshot, FarLodTier::F1, 0, 0, {});
-    EXPECT_FALSE(outcome.ok);
-    EXPECT_FALSE(outcome.error.empty());
-    EXPECT_TRUE(outcome.mesh.vertices.empty());
+    for (const auto tier : {FarLodTier::F1, FarLodTier::F2}) {
+        // Missing payload, empty/partial authoritative lattices and unknown
+        // source kinds must still refuse instead of taking the pristine path.
+        for (int invalid = 0; invalid < 4; ++invalid) {
+            SCOPED_TRACE(::testing::Message()
+                         << "tier=" << static_cast<int>(tier) << " invalid=" << invalid);
+            auto payload = std::make_shared<World::FarLodSdfSnapshot>();
+            payload->coords = IVec3(0, 0, 0);
+            payload->revision = 1u;
+            constexpr std::size_t kSamples = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
+                                             (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+            if (invalid >= 2)
+                payload->sdf_data.assign(invalid == 2 ? kSamples - 1u : kSamples, -1.0f);
+            if (invalid == 3)
+                payload->source_kind = static_cast<FarLodBrickSourceKind>(255);
+            snapshot.entries.front().payload = invalid == 0 ? nullptr : payload;
+            const auto outcome = BuildFarLodWorkerTile(world, snapshot, tier, 0, 0, {});
+            EXPECT_FALSE(outcome.ok);
+            EXPECT_FALSE(outcome.error.empty());
+            EXPECT_TRUE(outcome.mesh.vertices.empty());
+        }
+    }
 }

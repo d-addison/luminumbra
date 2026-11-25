@@ -1340,6 +1340,9 @@ void WaterSystem::inject_water_sources(entt::registry& registry, bool determinis
 void WaterSystem::update(entt::registry& registry,
                          const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks,
                          bool deterministic_authority) {
+    if (m_shield_system && m_shield_system->durable_read_failed()) {
+        throw std::runtime_error("water update refused after durable chunk read error");
+    }
     if (m_regional_scheduling) {
         m_active_chunks = &active_chunks;
         return;
@@ -1777,6 +1780,9 @@ void WaterSystem::update(entt::registry& registry,
 }
 
 f32 WaterSystem::get_water_level_at(float world_x, float world_z) const {
+    if (m_shield_system && m_shield_system->durable_read_failed()) {
+        throw std::runtime_error("water query refused after durable chunk read error");
+    }
     if (!m_active_chunks)
         return SEA_LEVEL;
 
@@ -1820,6 +1826,9 @@ f32 WaterSystem::get_water_level_at(float world_x, float world_z) const {
 }
 
 Vec2 WaterSystem::get_water_flow_at(float world_x, float world_z) const {
+    if (m_shield_system && m_shield_system->durable_read_failed()) {
+        throw std::runtime_error("water query refused after durable chunk read error");
+    }
     if (!m_active_chunks) {
         return Vec2(0.0f);
     }
@@ -1867,6 +1876,9 @@ Vec2 WaterSystem::get_water_flow_at(float world_x, float world_z) const {
 }
 
 void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
+    if (m_shield_system && m_shield_system->durable_read_failed()) {
+        throw std::runtime_error("water edit refused after durable chunk read error");
+    }
     if (!m_active_chunks)
         return;
 
@@ -1976,6 +1988,9 @@ int WaterSystem::EditTerrainBed(const Vec3& world_pos,
                                 std::int32_t delta_mm,
                                 float radius_m,
                                 const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>* chunks) {
+    if (m_shield_system && m_shield_system->durable_read_failed()) {
+        throw std::runtime_error("water bed edit refused after durable chunk read error");
+    }
     const auto* owners = chunks ? chunks : m_active_chunks;
     if (!owners || delta_mm == 0)
         return 0;
@@ -2056,6 +2071,9 @@ void WaterSystem::SetSimResolution(int cells_per_side) {
 
 std::size_t WaterSystem::MigrateChunksToSimResolution(
     const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& chunks) {
+    if (m_shield_system && m_shield_system->durable_read_failed()) {
+        throw std::runtime_error("water migration refused after durable chunk read error");
+    }
     // Regional preparation owns resizing, including sleeping saved columns. Eager
     // boot or streaming migration would make eligibility depend on residency.
     if (m_regional_scheduling) {

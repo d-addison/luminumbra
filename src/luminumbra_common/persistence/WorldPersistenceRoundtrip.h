@@ -13,6 +13,39 @@
 
 namespace Luminumbra::Persistence {
 
+// Capture selection only; never serialized or folded into authority identity.
+// Unrequested sub-hash slots remain empty. Unknown bits are refused.
+enum class AuthoritySubHashMask : std::uint16_t {
+    None = 0,
+    Terrain = 1u << 0,
+    Mesh = 1u << 1,
+    Water = 1u << 2,
+    Entities = 1u << 3,
+    Wind = 1u << 4,
+    Weather = 1u << 5,
+    Aether = 1u << 6,
+    AetherState = 1u << 7,
+    All = 0xffu
+};
+constexpr AuthoritySubHashMask operator|(AuthoritySubHashMask lhs, AuthoritySubHashMask rhs) {
+    return static_cast<AuthoritySubHashMask>(static_cast<std::uint16_t>(lhs) |
+                                             static_cast<std::uint16_t>(rhs));
+}
+constexpr bool RequestsSubHash(AuthoritySubHashMask requested, AuthoritySubHashMask slot) {
+    return (static_cast<std::uint16_t>(requested) & static_cast<std::uint16_t>(slot)) != 0;
+}
+constexpr bool IsValidSubHashMask(AuthoritySubHashMask requested) {
+    return (static_cast<std::uint16_t>(requested) &
+            ~static_cast<std::uint16_t>(AuthoritySubHashMask::All)) == 0;
+}
+// Optional caller-owned additive work diagnostic. Counts elements when mesh arrays are
+// actually materialized as JSON, across streamed and sub-hash projections in a capture.
+struct AuthorityHashWork {
+    std::size_t serialized_mesh_elements = 0;
+    // Wind/weather/aether/state hash evaluations performed by GameSession.
+    std::size_t runtime_hashes = 0;
+};
+
 struct WorldPersistenceRoundtripCheck {
     std::string name;
     bool passed = false;
@@ -111,6 +144,22 @@ std::string SerializeChunkRecordPayloadJson(const Chunk& chunk, bool* strict_wat
 // Allocation-free validation using the saved water grid, mirror and scalar rules.
 // Dormant and Off states retain bounded arrays independently of their resolution.
 bool HasValidWaterPersistenceState(const Chunk& chunk);
+// Decodes the same snapshot contract without boxing terrain samples as JSON values.
+// The const diagnostic counts samples decoded directly in the last successful load;
+// it is zero after failure or when a noncanonical input needs the general decoder.
+class WorldStreamingSnapshotDecoder {
+public:
+    bool load(const std::string& json_text,
+              WorldStreamingState& out_state,
+              std::vector<std::string>& errors,
+              const ChunkAuthorityLoadPolicy& authority = {});
+    [[nodiscard]] std::size_t direct_terrain_samples() const {
+        return m_directTerrainSamples;
+    }
+
+private:
+    std::size_t m_directTerrainSamples = 0;
+};
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
                                          std::vector<std::string>& errors,
@@ -122,7 +171,8 @@ bool ValidateWorldStreamingChunkFormatJson(const std::string& chunk_json,
 // Nonzero cursors append |waterSimCursor:v1: and a uint64 little-endian value
 // to the canonical bytes. Zero/absent appends nothing, preserving legacy hashes.
 std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state,
-                                           std::uint64_t water_sim_cursor = 0);
+                                           std::uint64_t water_sim_cursor = 0,
+                                           AuthorityHashWork* work = nullptr);
 
 // Active-region freeze identity: voxel/material and water solver contents only.
 // Caller filters incomplete live/parked inputs; durable edited records allow every lifecycle.
@@ -217,7 +267,9 @@ struct WorldStreamingStateSubHashes {
 // entities field is left empty.
 WorldStreamingStateSubHashes
 ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state,
-                                    std::uint64_t water_sim_cursor = 0);
+                                    std::uint64_t water_sim_cursor = 0,
+                                    AuthoritySubHashMask requested = AuthoritySubHashMask::All,
+                                    AuthorityHashWork* work = nullptr);
 
 // Overload that also fills the entities sub-hash from a serialized ECS entity
 // snapshot (the canonical SerializeEntityRegistrySnapshotJson output), checksummed
@@ -226,7 +278,9 @@ ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state,
 WorldStreamingStateSubHashes
 ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state,
                                     const std::string& entity_snapshot_json,
-                                    std::uint64_t water_sim_cursor = 0);
+                                    std::uint64_t water_sim_cursor = 0,
+                                    AuthoritySubHashMask requested = AuthoritySubHashMask::All,
+                                    AuthorityHashWork* work = nullptr);
 
 // Append-only runtime hash order; shared with the production server runner.
 std::string ComposeWorldHash(const std::string& chunk_hash,

@@ -1,0 +1,20 @@
+{
+  "id": "contract.dw.overlay.02",
+  "source": "docs/distant-world.md#edits-and-the-far-authority-overlay",
+  "statement": "Acceptance obligations: Each bake writes the far authority generation it was produced from; / a client that finds an overlay older than the durable chunk generation treats it as stale and rebuilds from the chunk records. / An interrupted bake leaves the previous complete generation in place. / The far authority overlay stores only edit-baked bricks; / pristine bricks are a regenerable in-memory cache.",
+  "status": "planned",
+  "requirements": [
+    "dw.overlay.007",
+    "dw.overlay.008",
+    "dw.overlay.009",
+    "dw.overlay.010",
+    "dw.overlay.011"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwOverlayContract.Requirements02",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.overlay.02.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: fw"
+    }
+  ]
+}

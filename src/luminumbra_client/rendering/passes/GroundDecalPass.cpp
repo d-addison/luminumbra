@@ -25,8 +25,10 @@ void GroundDecalPass::init_shader(const std::filesystem::path& root_path) {
     m_shader = std::make_unique<Shader>(vert.c_str(), frag.c_str());
     // validate gPosition + u_scentField against the registry.
     if (m_shader && m_shader->IsValid()) {
-        if (const ExpectedLayout* layout = FindPassExpectedLayout("scent_decal"))
-            m_shader->ValidateLayout(*layout);
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("scent_decal");
+            layout && !m_shader->ValidateLayout(*layout)) {
+            m_shader.reset();
+        }
     }
 }
 

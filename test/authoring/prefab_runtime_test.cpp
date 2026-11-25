@@ -2,6 +2,7 @@
 #include "authoring/PrefabRuntime.h"
 #include "components/CoreComponents.h"
 
+#include "../support/InlineTextureFixture.h"
 #include "../support/UniqueTempPath.h"
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -190,6 +191,44 @@ TEST_F(PrefabRuntimeTest, LoadsOwnedSharedGeometryAndExactMaterialBindings) {
     std::filesystem::remove_all(generation);
     EXPECT_EQ(child.draws[0].mesh->bytes.size(),
               136u); // Pinned owned bytes outlive the generation directory.
+}
+
+TEST_F(PrefabRuntimeTest, InlineCutoffV1BytesAndMaterialBindingsRemainOwned) {
+    namespace Fixture = Luminumbra::TestSupport::InlineTexture;
+    std::shared_ptr<const PrefabAsset> retained;
+    for (const auto& sample : Fixture::kCutoffs) {
+        SCOPED_TRACE(sample.argument);
+        const auto bytes = Fixture::LtexBytes(sample.mip_alpha);
+        files[kTexture] = {bytes.begin(), bytes.end()};
+        auto& metrics = manifest["outputs"][kTexture];
+        metrics["width"] = 2;
+        metrics["height"] = 2;
+        metrics["mip_levels"] = 2;
+        auto& material = descriptor["materials"]["mat.copper"];
+        material["base_color"][3] = .8;
+        material["alpha_cutoff"] = sample.cutoff * .8;
+        Publish();
+        const auto asset = Load();
+        ASSERT_EQ(asset->nodes().size(), 3u);
+        const auto& child = asset->nodes()[1];
+        const auto& mirror = asset->nodes()[2];
+        ASSERT_EQ(child.draws.size(), 1u);
+        ASSERT_EQ(mirror.draws.size(), 1u);
+        ASSERT_TRUE(child.draws[0].material);
+        EXPECT_EQ(child.draws[0].material, mirror.draws[0].material);
+        EXPECT_EQ(child.draws[0].material->properties, material);
+        const auto texture = child.draws[0].material->textures.at("baseColorTexture");
+        ASSERT_TRUE(texture);
+        EXPECT_EQ(texture->width, 2u);
+        EXPECT_EQ(texture->height, 2u);
+        EXPECT_EQ(texture->mip_levels, 2u);
+        EXPECT_EQ(texture->bytes, (std::vector<std::uint8_t>{bytes.begin(), bytes.end()}));
+        retained = asset;
+    }
+    ASSERT_TRUE(retained);
+    std::filesystem::remove_all(generation);
+    EXPECT_EQ(retained->nodes()[1].draws[0].material->textures.at("baseColorTexture")->bytes,
+              files.at(kTexture));
 }
 
 TEST_F(PrefabRuntimeTest, InstantiatesRealHierarchyShearNormalsMirroringAndWorldBounds) {

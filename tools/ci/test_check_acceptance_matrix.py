@@ -161,6 +161,11 @@ def document_read_count(read: Any, document: Path) -> int:
     return sum(Path(call.args[0]).resolve() == identity for call in read.call_args_list)
 
 
+def repository_matrix(root: Path = MODULE.DEFAULT_ROOT) -> dict[str, Any]:
+    return MODULE.load_layout(root / "tools/ci/acceptance/matrix.json",
+                              root / "tools/ci/acceptance/rows")
+
+
 @lru_cache(maxsize=1)
 def repository_paths() -> tuple[str, ...]:
     # All partitions use the same immutable discovery, including untracked files.
@@ -388,7 +393,11 @@ class AcceptanceFixture(_PhaseCase):
     def run_main(self, *args: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = MODULE.main(list(args))
+            selected = list(args)
+            legacy = self.__dict__.get("root", Path("/")) / "tools/ci/legacy-matrix.json"
+            if "--matrix" not in selected and legacy.is_file():
+                selected.extend(("--matrix", str(legacy)))
+            code = MODULE.main(selected)
         self.remember_custody(err.getvalue())
         return code, out.getvalue(), err.getvalue()
 
@@ -543,6 +552,347 @@ raise SystemExit(module["main"](sys.argv[3:]))
 
 
 class AcceptanceMatrixTests(AcceptanceFixture):
+    def test_default_row_layout_snapshots_and_output_overlap(self) -> None:
+        self.write_matrix(baseline_matrix())
+        rows = self.root / "tools/ci/acceptance/rows"
+        MODULE.explode_matrix(self.matrix_path, rows)
+        document = self.root / "build/acceptance-matrix.md"
+        document.parent.mkdir()
+        options = ["--root", str(self.root)]
+        self.assertEqual(self.run_main(*options)[0], 0)
+        export = self.tmp / "legacy-view.json"
+        code, _, error = self.run_main(*options, "--implode", str(export))
+        self.assertEqual(code, 0, error)
+        self.assertEqual(json.loads(export.read_bytes()), MODULE.load_layout(rows.parent / "matrix.json", rows))
+        protected = rows / "alpha.covered.json"
+        original = protected.read_bytes()
+        code, _, error = self.run_main(*options, "--implode", str(protected))
+        self.assertEqual(code, 2, error)
+        self.assertIn("overlaps an input", error)
+        self.assertEqual(protected.read_bytes(), original)
+        code, _, error = self.run_main(*options, "--write-doc", str(document),
+                                       "--preparation-receipt-file", self.base_args()[-1])
+        self.assertEqual(code, 0, error)
+        before = document.read_bytes()
+        first = rows / "alpha.covered.json"
+        publish = MODULE._replace_outputs
+        original_row = first.read_bytes()
+        def change_export_input(outputs, **kwargs):
+            first.write_bytes(original_row + b"\n")
+            return publish(outputs, **kwargs)
+        try:
+            with mock.patch.object(MODULE, "_replace_outputs", change_export_input):
+                code, _, error = self.run_main(*options, "--implode", str(export))
+            self.assertEqual(code, 2, error)
+            self.assertIn("snapshot changed", error)
+            self.assertEqual(json.loads(export.read_bytes()), baseline_matrix())
+        finally:
+            first.write_bytes(original_row)
+        resolve = Path.resolve
+        def document_alias(path, *args, **kwargs):
+            resolved = resolve(path, *args, **kwargs)
+            return first if resolved == document else resolved
+        with mock.patch.object(Path, "resolve", document_alias):
+            code, _, error = self.run_main(*options, "--refresh-inventory", "--write-doc", str(document))
+        self.assertEqual(code, 2, error)
+        self.assertIn("overlaps an input", error)
+        code, _, error = self.run_main(*options, "--write-doc", str(first))
+        self.assertEqual(code, 2, error)
+        self.assertIn("overlaps an input", error)
+        validate = MODULE.validate
+        for mutation in ("edit", "add"):
+            with self.subTest(mutation=mutation):
+                original = first.read_bytes()
+                extra = rows / "extra.json"
+                def change_input(*args, **kwargs):
+                    errors = validate(*args, **kwargs)
+                    if mutation == "edit":
+                        first.write_bytes(original + b"\n")
+                    else:
+                        extra.write_text('{"id":"extra"}', encoding="utf-8")
+                    return errors
+                try:
+                    with mock.patch.object(MODULE, "validate", change_input):
+                        code, _, error = self.run_main(*options, "--write-doc", str(document),
+                                                      "--preparation-receipt-file", self.base_args()[-1])
+                    self.assertEqual(code, 2, error)
+                    self.assertIn("snapshot changed", error)
+                    self.assertEqual(document.read_bytes(), before)
+                finally:
+                    first.write_bytes(original)
+                    if extra.exists():
+                        extra.unlink()
+        lock = MODULE._refresh_lock_path(self.root)
+        compare = MODULE._PathComparisons.same
+        def same_input(comparisons, left, right):
+            return left == first and right == lock or compare(comparisons, left, right)
+        with mock.patch.object(MODULE._PathComparisons, "same", same_input), \
+                mock.patch.object(MODULE, "load_layout") as load:
+            for mode in ([], ["--implode", str(export)]):
+                code, _, error = self.run_main(*options, *mode)
+                self.assertEqual(code, 2, error)
+                self.assertIn("refresh lock cannot be used as an input", error)
+        load.assert_not_called()
+        code, _, error = self.run_main(*options, "--implode", str(lock))
+        self.assertEqual(code, 2, error)
+        self.assertIn("overlaps recovery metadata", error)
+
+    def test_row_refresh_updates_only_affected_rows_and_preserves_transaction_bound(self) -> None:
+        matrix = self.prepare_refresh(generated_evidence=False)
+        for row in matrix["rows"]:
+            row.get("requirements", []).sort()
+        template = row_of(matrix, "iss.126")
+        matrix["rows"].extend({**template, "id": "extra." + str(index)} for index in range(5))
+        self.write_matrix(matrix)
+        rows = self.root / "tools/ci/acceptance/rows"
+        MODULE.explode_matrix(self.matrix_path, rows)
+        metadata = rows.parent / "matrix.json"
+        inventory = self.root / "tools/ci/acceptance_requirements.json"
+        before = {path: path.read_bytes() for path in (*rows.iterdir(), metadata, inventory)}
+        (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+            "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+        options = ["--root", str(self.root), "--refresh-inventory"]
+        code, _, error = self.run_main(*options, "--preparation-receipt-file", self.base_args()[-1])
+        self.assertEqual(code, 2, error)
+        self.assertIn("too many transaction outputs", error)
+        self.assertEqual({path: path.read_bytes() for path in before}, before)
+        for path in rows.glob("extra.*.json"):
+            path.unlink()
+            before.pop(path)
+        replace = Path.replace
+        def deny_inventory(path, target):
+            if target == inventory:
+                raise PermissionError("inventory denied")
+            return replace(path, target)
+        with mock.patch.object(Path, "replace", deny_inventory):
+            code, _, error = self.run_main(*options, "--preparation-receipt-file", self.base_args()[-1])
+        self.assertEqual(code, 2, error)
+        self.assertIn("inventory denied", error)
+        self.assertEqual({path: path.read_bytes() for path in before}, before)
+        working_directory = Path.cwd()
+        try:
+            os.chdir(self.root)
+            code, _, error = self.run_main(*options, "--rows-dir", "tools/ci/acceptance/rows",
+                                          "--preparation-receipt-file", self.base_args()[-1])
+        finally:
+            os.chdir(working_directory)
+        self.assertEqual(code, 0, error)
+        changed = {path for path, original in before.items() if path.read_bytes() != original}
+        self.assertEqual(changed, {rows / "iss.126.json", inventory})
+        self.assertEqual(json.loads((rows / "iss.126.json").read_bytes())["source"],
+                         MODULE.CONTRACT_DOCUMENTS[1] + "#moved")
+        self.assertFalse((self.root / "build/acceptance-matrix.md").exists())
+
+        discovery, report = self.execution_inputs()
+        receipt = self.tmp / "row-execution.json"
+        code, _, error = self.run_main("--root", str(self.root), "--discovery", str(discovery),
+                                      "--junit", str(report), "--execution-receipt", str(receipt),
+                                      "--preparation-receipt-file", self.base_args()[-1])
+        self.assertEqual(code, 0, error)
+        assembled = MODULE.load_layout(metadata, rows)
+        digest = hashlib.sha256(json.dumps(assembled, sort_keys=True).encode("utf-8")).hexdigest()
+        self.assertEqual(json.loads(receipt.read_bytes())["matrix_sha256"], digest)
+        original = json.loads((rows / "iss.126.json").read_bytes())
+        original["statement"] += " Additional evidence note."
+        (rows / "iss.126.json").write_text(json.dumps(original), encoding="utf-8")
+        code, _, error = self.run_main("--root", str(self.root), "--discovery", str(discovery),
+                                      "--junit", str(report), "--execution-receipt", str(receipt),
+                                      "--preparation-receipt-file", self.base_args()[-1])
+        self.assertEqual(code, 0, error)
+        self.assertNotEqual(json.loads(receipt.read_bytes())["matrix_sha256"], digest)
+
+
+    def test_row_directory_refuses_foreign_and_invalid_inputs(self) -> None:
+        for value, expected in (("rendering.near-terrain-refinement", True), ("a" * 200, True),
+                                ("a" * 201, False), ("alpha.", False), ("CON", False),
+                                ("aux.txt", False), ("com1.anything", False), ("..", False),
+                                ("a/b", False), ("a\\b", False), ("snow-\u96ea", False), (None, False)):
+            self.assertEqual(MODULE._safe_row_id(value), expected, value)
+        cases = (
+            ("empty", "empty rows directory"),
+            ("mismatch", "filename/id mismatch"),
+            ("duplicate", "duplicate id"),
+            ("stray", "stray non-row file"),
+            ("directory", "regular non-symlink"),
+            ("non-row", "filename-unsafe row id"),
+            ("id-only", "stray non-row object"),
+            ("invalid-json", "cannot read row"),
+            ("partial-json", "cannot read row"),
+            ("unsafe", "filename-unsafe row id"),
+            ("device", "filename-unsafe row id"),
+            ("trailing-dot", "filename-unsafe row id"),
+        )
+        for case, error in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                rows = Path(directory)
+                first = rows / "alpha.covered.json"
+                row = baseline_matrix()["rows"][0]
+                if case != "empty":
+                    first.write_text(json.dumps(row), encoding="utf-8")
+                if case == "mismatch":
+                    first.rename(rows / "beta.json")
+                elif case == "duplicate":
+                    (rows / "beta.json").write_bytes(first.read_bytes())
+                elif case == "stray":
+                    (rows / "readme.txt").write_text("foreign", encoding="utf-8")
+                elif case == "directory":
+                    first.unlink()
+                    first.mkdir()
+                elif case == "non-row":
+                    first.write_text("[]", encoding="utf-8")
+                elif case == "id-only":
+                    first.write_text('{"id":"alpha.covered"}', encoding="utf-8")
+                elif case in ("invalid-json", "partial-json"):
+                    first.write_bytes(b"\xff" if case == "invalid-json" else b'{"id":')
+                elif case in ("unsafe", "device", "trailing-dot"):
+                    row["id"] = {"unsafe": "../escape", "device": "con.example",
+                                 "trailing-dot": "alpha."}[case]
+                    first.write_text(json.dumps(row), encoding="utf-8")
+                before = {path.name: path.read_bytes() for path in rows.iterdir() if path.is_file()}
+                with self.assertRaisesRegex(MODULE.MatrixError, error):
+                    MODULE.load_rows({"schema": MODULE.SCHEMA}, rows)
+                self.assertEqual({path.name: path.read_bytes() for path in rows.iterdir() if path.is_file()}, before)
+        with tempfile.TemporaryDirectory() as directory:
+            rows = Path(directory) / "rows"
+            with self.assertRaisesRegex(MODULE.MatrixError, "cannot read rows directory"):
+                MODULE.load_rows({}, rows)
+            rows.mkdir()
+            (rows / "alpha.json").write_text('{"id":"alpha"}', encoding="utf-8")
+            with mock.patch.object(MODULE, "_read_transaction_file", side_effect=PermissionError("denied")), \
+                    self.assertRaisesRegex(MODULE.MatrixError, "denied"):
+                MODULE.load_rows({}, rows)
+            with self.assertRaisesRegex(MODULE.MatrixError, "must not contain rows"):
+                MODULE.load_rows({"rows": []}, rows)
+            with self.assertRaisesRegex(MODULE.MatrixError, "must be an object"):
+                MODULE.load_rows([], rows)
+            valid = baseline_matrix()["rows"][0]
+            (rows / "alpha.json").unlink()
+            (rows / "alpha.covered.json").write_text(json.dumps(valid), encoding="utf-8")
+            foreign = rows / ".acceptance-foreign"
+            foreign.write_bytes(b"payload")
+            with self.assertRaisesRegex(MODULE.MatrixError, "stray non-row file"):
+                MODULE.row_paths(rows)
+            artifacts = {foreign: foreign.lstat()}
+            self.assertEqual(MODULE.row_paths(rows, artifacts), [rows / "alpha.covered.json"])
+            displaced = rows / ".displaced"
+            foreign.rename(displaced)
+            foreign.write_bytes(b"payload")
+            with self.assertRaisesRegex(MODULE.MatrixError, "artifact identity changed"):
+                MODULE.row_paths(rows, artifacts)
+            displaced.unlink()
+            foreign.unlink()
+            metadata = (rows / "alpha.covered.json").lstat()
+            with mock.patch.object(Path, "lstat", return_value=type("LinkMetadata", (),
+                                   {"st_mode": stat.S_IFLNK | stat.S_IMODE(metadata.st_mode)})()), \
+                    self.assertRaisesRegex(MODULE.MatrixError, "regular non-symlink"):
+                MODULE.row_paths(rows)
+            metadata_file = rows.parent / "matrix.json"
+            for payload in (b"[]", b"{", b"\xff"):
+                metadata_file.write_bytes(payload)
+                with self.assertRaises(MODULE.MatrixError):
+                    MODULE.load_layout(metadata_file, rows)
+            output = rows.parent / "bounded.json"
+            with mock.patch.object(MODULE, "_TRANSACTION_BYTES", 8), \
+                    self.assertRaisesRegex(MODULE.MatrixError, "payload exceeds size bound"):
+                MODULE._write_migration_file(output, {"large": "too much text"})
+            self.assertFalse(output.exists())
+
+    def test_explode_implode_round_trip_is_lossless_and_sorted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            legacy = base / "legacy.json"
+            matrix = baseline_matrix()
+            matrix["unknown"] = {"unicode": "snow: \u96ea", "list": [True, None, 1.5]}
+            matrix["rows"].reverse()
+            matrix["rows"][0]["unknown"] = ["one", {"two": 2}]
+            legacy.write_text(json.dumps(matrix), encoding="utf-8")
+            rows = base / "converted" / "feature-rows"
+            code, _, error = self.run_main("--explode", str(legacy), "--rows-dir", str(rows))
+            self.assertEqual(code, 0, error)
+            output = base / "round-trip.json"
+            code, _, error = self.run_main("--rows-dir", str(rows), "--implode", str(output))
+            self.assertEqual(code, 0, error)
+            expected = {**matrix, "rows": sorted(matrix["rows"], key=lambda row: row["id"])}
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8")), expected)
+            self.assertEqual(MODULE.load_layout(rows.parent / "matrix.json", rows), expected)
+            self.assertNotIn("rows", json.loads((rows.parent / "matrix.json").read_bytes()))
+            for path in (output, rows.parent / "matrix.json", *rows.iterdir()):
+                text = path.read_text(encoding="utf-8")
+                self.assertEqual(text, json.dumps(json.loads(text), indent=2) + "\n")
+                self.assertEqual(path.read_bytes(), text.encode("utf-8"))
+            before = {path: path.read_bytes() for path in base.rglob("*") if path.is_file()}
+            with self.assertRaisesRegex(MODULE.MatrixError, "already exists"):
+                MODULE.explode_matrix(legacy, rows)
+            self.assertEqual({path: path.read_bytes() for path in before}, before)
+
+    def test_explode_refusals_and_publication_failure_preserve_destinations(self) -> None:
+        for failure in ("duplicate", "unsafe", "empty", "partial", "schema", "non-object", "non-row",
+                        "occupied-metadata", "directory-name", "short-write", "write-error", "publication",
+                        "racing-metadata", "racing-directory", "publication-short-write", "publication-flush"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                # explode_matrix resolves its destination; macOS /var and Windows
+                # short names differ from the resolved paths the hooks compare.
+                base = Path(directory).resolve()
+                legacy = base / "legacy.json"
+                matrix = baseline_matrix()
+                if failure == "duplicate":
+                    matrix["rows"].append(matrix["rows"][0])
+                elif failure == "unsafe":
+                    matrix["rows"][0]["id"] = "../escape"
+                elif failure == "empty":
+                    matrix["rows"] = []
+                elif failure == "schema":
+                    matrix["schema"] = "unknown"
+                elif failure == "non-object":
+                    matrix = []
+                elif failure == "non-row":
+                    matrix["rows"] = [{"id": "id-only"}]
+                legacy.write_text("{" if failure == "partial" else json.dumps(matrix), encoding="utf-8")
+                rows = base / ("matrix.json" if failure == "directory-name" else "rows")
+                foreign = base / "matrix.json"
+                if failure == "occupied-metadata":
+                    foreign.write_bytes(b"foreign metadata")
+                before = {path: path.read_bytes() for path in base.iterdir()}
+                path_open = Path.open
+                def fail_metadata(path, mode="r", *args, **kwargs):
+                    if path == foreign and mode == "xb" and failure == "publication":
+                        raise PermissionError("metadata denied")
+                    if path == foreign and mode == "xb" and failure == "racing-metadata":
+                        foreign.write_bytes(b"racing metadata")
+                    stream = path_open(path, mode, *args, **kwargs)
+                    if path == foreign and mode == "xb":
+                        if failure == "publication-short-write":
+                            write = stream.write
+                            stream.write = lambda data: write(data[:len(data) // 2])
+                        elif failure == "publication-flush":
+                            stream.flush = mock.Mock(side_effect=OSError("flush failed"))
+                    return stream
+                mkdir = Path.mkdir
+                def create_directory(path, *args, **kwargs):
+                    if path == rows and failure == "racing-directory":
+                        mkdir(path)
+                    return mkdir(path, *args, **kwargs)
+                write = Path.write_text
+                def write_payload(path, *args, **kwargs):
+                    if path.name == "alpha.covered.json":
+                        if failure == "short-write":
+                            return 0
+                        if failure == "write-error":
+                            raise PermissionError("payload denied")
+                    return write(path, *args, **kwargs)
+                with mock.patch.object(Path, "open", fail_metadata), \
+                        mock.patch.object(Path, "mkdir", create_directory), \
+                        mock.patch.object(Path, "write_text", write_payload), \
+                        self.assertRaises((MODULE.MatrixError, OSError)):
+                    MODULE.explode_matrix(legacy, rows)
+                if failure == "racing-metadata":
+                    before[foreign] = b"racing metadata"
+                if failure == "racing-directory":
+                    self.assertTrue(rows.is_dir())
+                    self.assertEqual(list(rows.iterdir()), [])
+                self.assertEqual({path: path.read_bytes() for path in base.iterdir() if path.is_file()}, before)
+
+
     def test_native_publication_then_interrupt_restores_every_staged_destination(self) -> None:
         for journaled in (False, True):
             for existing in (False, True):
@@ -2777,7 +3127,7 @@ script.write_text('changed input', encoding='utf-8')
         self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
 
     def test_default_output_destinations_use_resolved_paths_for_publish_and_rollback(self) -> None:
-        self.matrix_path = self.root / "tools/ci/acceptance_matrix.json"
+        self.matrix_path = self.root / "tools/ci/legacy-matrix.json"
         resolve, replace = Path.resolve, Path.replace
         for name in ("document", "matrix", "inventory"):
             for fail in (False, True):
@@ -2825,7 +3175,7 @@ script.write_text('changed input', encoding='utf-8')
                         self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
 
     def test_default_input_destinations_are_resolved_for_readers(self) -> None:
-        self.matrix_path = self.root / "tools/ci/acceptance_matrix.json"
+        self.matrix_path = self.root / "tools/ci/legacy-matrix.json"
         self.prepare_refresh()
         inventory = self.root / "tools/ci/acceptance_requirements.json"
         resolve = Path.resolve
@@ -2865,7 +3215,7 @@ script.write_text('changed input', encoding='utf-8')
                     alias.write_bytes(original)
 
     def test_default_destinations_cannot_read_the_mandatory_lock_range(self) -> None:
-        self.matrix_path = self.root / "tools/ci/acceptance_matrix.json"
+        self.matrix_path = self.root / "tools/ci/legacy-matrix.json"
         self.prepare_refresh()
         lock, resolve = MODULE._refresh_lock_path(self.root), Path.resolve
         for alias in (self.matrix_path, self.root / "tools/ci/acceptance_requirements.json",
@@ -4314,7 +4664,7 @@ script.write_text('changed input', encoding='utf-8')
     def test_scope_requirement_cannot_be_hidden_by_exclusion(self) -> None:
         root = MODULE.DEFAULT_ROOT
         inventory = MODULE.load_matrix(root / "tools/ci/acceptance_requirements.json")
-        matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
+        matrix = repository_matrix(root)
         entry = next(e for e in inventory["requirements"] if e["id"] == "dw.scope.001")
         inventory["requirements"].remove(entry)
         inventory["exclusions"].append(dict(entry, reason="Not in scope"))
@@ -4329,7 +4679,7 @@ script.write_text('changed input', encoding='utf-8')
     def test_behaviour_and_reserved_zero_cannot_be_excluded_under_any_category(self) -> None:
         root = MODULE.DEFAULT_ROOT
         inventory = MODULE.load_matrix(root / "tools/ci/acceptance_requirements.json")
-        matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
+        matrix = repository_matrix(root)
         index = repository_index()
         for identity in ("dw.scope.001", "dw.scope.009", "ar.file.055"):
             for category in ("rationale", "example", "cross-reference", "current-behaviour", "historical"):
@@ -4461,7 +4811,7 @@ script.write_text('changed input', encoding='utf-8')
     def test_reaudited_obligations_are_requirements_with_planned_rows(self) -> None:
         root = MODULE.DEFAULT_ROOT
         inventory = MODULE.load_matrix(root / "tools/ci/acceptance_requirements.json")
-        matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
+        matrix = repository_matrix(root)
         requirements = {e["id"] for e in inventory["requirements"]}
         exclusions = {e["id"] for e in inventory["exclusions"]}
         for identity in ("dw.policy.036", "dw.policy.039", "ar.history.020"):
@@ -4489,14 +4839,18 @@ script.write_text('changed input', encoding='utf-8')
         inventory = MODULE.load_matrix(root / "tools/ci/acceptance_requirements.json")
         requirements, errors = MODULE.validate_inventory(inventory, root)
         self.assertEqual(errors, [])
-        matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
+        matrix = repository_matrix(root)
         self.assertEqual(MODULE.validate(matrix, repository_index(), root, False), [])
         mapped = {ref for row in matrix["rows"] for ref in row.get("requirements", [])}
         self.assertEqual(set(requirements), mapped)
-        self.assertTrue(MODULE._doc_matches(root / "docs/acceptance-matrix.md", MODULE.render_doc(matrix)))
+        rendered = MODULE.render_doc(matrix)
+        with tempfile.TemporaryDirectory() as directory:
+            document = Path(directory) / "acceptance-matrix.md"
+            document.write_text(rendered, encoding="utf-8")
+            self.assertTrue(MODULE._doc_matches(document, rendered))
 
     def test_station_numeric_evidence_includes_floating_point_refusal_controls(self) -> None:
-        matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        matrix = repository_matrix()
         row = row_of(matrix, "station.numeric-inputs")
         self.assertEqual(row["status"], "covered")
         self.assertIn("independent MXCSR rounding, FTZ and DAZ states", row["statement"])
@@ -4541,7 +4895,7 @@ script.write_text('changed input', encoding='utf-8')
         self.assertErrorContains(matrix, "native command entry point must match ref")
         # A missing entry point remains missing even when its evidence ref exists.
         root = MODULE.DEFAULT_ROOT
-        matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
+        matrix = repository_matrix(root)
         row = row_of(matrix, "iss.68")
         row["status"] = "needs-native-run"
         row["evidence"] = [{"kind": "native", "ref": "tools/ci/check_acceptance_matrix.py",
@@ -4632,7 +4986,7 @@ script.write_text('changed input', encoding='utf-8')
     @immutable_repository_reads()
     def test_native_closed_grammar_rejects_options_shell_syntax_and_multiple_scripts(self) -> None:
         root = MODULE.DEFAULT_ROOT
-        matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
+        matrix = repository_matrix(root)
         row = row_of(matrix, "iss.68")
         row["status"] = "needs-native-run"
         item = {"kind": "native", "ref": "tools/ci/check_acceptance_matrix.py", "receipt_schema": RECEIPT}
@@ -4693,7 +5047,7 @@ script.write_text('changed input', encoding='utf-8')
                 self.assertErrorContains(matrix, fragment)
 
     def test_repository_timer_and_disc_claims_require_outstanding_evidence(self) -> None:
-        matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        matrix = repository_matrix()
         timer = row_of(matrix, "perf.timer-coverage")
         self.assertEqual(timer["status"], "needs-native-run")
         for metric in ("frame wall", "CPU submit", "present", "GPU"):
@@ -4714,7 +5068,7 @@ script.write_text('changed input', encoding='utf-8')
                             for item in rows[0]["evidence"]))
 
     def test_repository_boundary_contract_and_watchdog_rearming_evidence(self) -> None:
-        matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        matrix = repository_matrix()
         rows = [row for row in matrix["rows"] if "ar.activation.050" in row.get("requirements", [])]
         self.assertEqual(len(rows), 1)
         row = rows[0]
@@ -4752,7 +5106,7 @@ script.write_text('changed input', encoding='utf-8')
         self.assertIn("HangWatchdog.RearmsAfterHeartbeatResumes", {e["ref"] for e in watchdog["evidence"]})
 
     def test_repository_boundary_discrepancy_and_watchdog_rearming_evidence(self) -> None:
-        matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        matrix = repository_matrix()
         rows = [row for row in matrix["rows"] if "ar.activation.050" in row.get("requirements", [])]
         self.assertEqual(len(rows), 1)
         row = rows[0]
@@ -6446,47 +6800,37 @@ raise SystemExit(module["main"](sys.argv[3:]))
 class ProductionAcceptanceMatrixTests(_PhaseCase):
     def test_production_inputs_allow_refresh_and_standard_document_write(self) -> None:
         root = MODULE.DEFAULT_ROOT
-        doc = root / "docs/acceptance-matrix.md"
-        paths = (root / "tools/ci/acceptance_matrix.json", root / "tools/ci/acceptance_requirements.json", doc)
+        paths = (root / "tools/ci/acceptance/matrix.json",
+                 root / "tools/ci/acceptance_requirements.json",
+                 *MODULE.row_paths(root / "tools/ci/acceptance/rows"))
         before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in paths}
-        matrix = MODULE.load_matrix(paths[0])
+        matrix = repository_matrix(root)
         for row_id in ("perf.requirement-matrix", "iss.126"):
-            self.assertIn({"kind": "doc", "ref": "docs/acceptance-matrix.md"}, row_of(matrix, row_id)["evidence"])
-        expected = before[doc][0].decode("utf-8").replace("\r\n", "\n")
-        publish = MODULE._replace_outputs
-        # Read all production inputs in place. Redirect coordination metadata
-        # and publication to scratch so Git metadata may be read-only and an
-        # explicit write may normalize CRLF without changing the checkout.
+            self.assertIn({"kind": "doc", "ref": "docs/ci/acceptance-refresh.md"},
+                          row_of(matrix, row_id)["evidence"])
+        expected = MODULE.render_doc(matrix)
         with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryDirectory() as caller:
             scratch = Path(temporary).resolve()
-            destination = scratch / doc.name
-            destination.write_bytes(expected.replace("\n", "\r\n").encode("utf-8"))
-            def publish_document(outputs: list[tuple[Path, str]], **kwargs: Any) -> None:
-                self.assertTrue(all(path == doc and text == expected for path, text in outputs))
-                publish([(destination, text) for _, text in outputs], **kwargs)
-            for options in (["--refresh-inventory"], ["--write-doc", str(doc)]):
+            document = scratch / "acceptance-matrix.md"
+            for options in (["--refresh-inventory"], ["--write-doc", str(document), "--check-doc", str(document)]):
                 with self.subTest(options=options):
                     out, err = io.StringIO(), io.StringIO()
                     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
                             mock.patch.object(MODULE, "_refresh_lock_path",
-                                              return_value=scratch / "acceptance-refresh.lock"), \
-                            mock.patch.object(MODULE, "_replace_outputs", side_effect=publish_document) as publisher:
-                        code = MODULE.main(["--root", str(root), *options, "--check-doc", str(doc),
+                                              return_value=scratch / "acceptance-refresh.lock"):
+                        code = MODULE.main(["--root", str(root), *options,
                                             "--preparation-receipt-file", str(Path(caller) / "receipt.json")])
                     self.assertEqual(code, 0, err.getvalue())
                     self.assertIn(f"static references ok: {len(matrix['rows'])} rows", out.getvalue())
-                    publisher.assert_called_once()
-                    self.assertEqual(publisher.call_args.args[0], [] if "--refresh-inventory" in options
-                                     else [(doc, expected)])
                     self.assertEqual({path: (path.read_bytes(), path.stat().st_mtime_ns) for path in paths}, before)
                     if "--write-doc" in options:
-                        self.assertEqual(destination.read_bytes(), expected.encode("utf-8"))
+                        self.assertEqual(document.read_bytes(), expected.encode("utf-8"))
             self.assertEqual(list(scratch.glob(".acceptance-*")), [])
             self.assertFalse((scratch / "acceptance-refresh.transaction").exists())
 
     def test_runtime_and_save_rows_keep_native_qualification_pending(self) -> None:
         root = MODULE.DEFAULT_ROOT
-        matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
+        matrix = repository_matrix(root)
         recipe = (root / "docs/v0.3-acceptance.md").read_text(encoding="utf-8")
         command = ("python3 tools/ci/check_acceptance_matrix.py --discovery <discovery.json> "
                    "--junit <native.junit.xml> --execution-receipt <acceptance-execution.json> "
@@ -6514,7 +6858,7 @@ class ProductionAcceptanceMatrixTests(_PhaseCase):
             self.assertIn(text, recipe)
 
     def test_runtime_and_save_ctest_receipts_cannot_qualify_native_evidence(self) -> None:
-        source = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        source = repository_matrix()
         matrix = dict(source, rows=[row_of(source, row_id) for row_id in ("iss.385", "iss.429")])
         before = copy.deepcopy(matrix)
         names = sorted({item["ref"] for row in matrix["rows"] for item in row["evidence"]
@@ -6559,7 +6903,7 @@ class ProductionAcceptanceMatrixTests(_PhaseCase):
     @immutable_repository_reads()
     def test_deleting_any_required_production_mapping_fails_validation(self) -> None:
         root = MODULE.DEFAULT_ROOT
-        matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
+        matrix = repository_matrix(root)
         required_ids = MODULE.load_required_ids(root / MODULE.REQUIREMENT_SOURCE)
         index = repository_index()
         self.assertIn("perf.floor-p99", required_ids)
@@ -6578,7 +6922,7 @@ class ProductionAcceptanceMatrixTests(_PhaseCase):
                 self.assertEqual(MODULE.validate(incomplete, index, root, False), sorted(expected))
 
     def test_production_planned_notes_render_as_descriptive_text(self) -> None:
-        matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        matrix = repository_matrix()
         planned = [item["planned"] for row in matrix["rows"] for item in row["evidence"]
                    if "planned" in item]
         self.assertTrue(planned)
@@ -6592,16 +6936,18 @@ class ProductionAcceptanceMatrixTests(_PhaseCase):
 
 class AcceptanceMatrixPublishabilityTests(_PhaseCase):
     def test_inventory_and_generated_matrix_are_publishable(self) -> None:
-        public_documents = ("tools/ci/acceptance_requirements.json", "tools/ci/acceptance_matrix.json",
-                            "docs/acceptance-matrix.md", *MODULE.CONTRACT_DOCUMENTS)
+        public_documents = ("tools/ci/acceptance_requirements.json", "tools/ci/acceptance/matrix.json",
+                            *MODULE.CONTRACT_DOCUMENTS,
+                            *(path.relative_to(MODULE.DEFAULT_ROOT).as_posix()
+                              for path in MODULE.row_paths(MODULE.DEFAULT_ROOT / "tools/ci/acceptance/rows")))
         for relative in public_documents:
             with self.subTest(path=relative):
                 self.assertNotRegex(
                     (MODULE.DEFAULT_ROOT / relative).read_text(encoding="utf-8"),
                     re.compile(r"/pull/|\bPR\s*#\s*[0-9]+\b", re.IGNORECASE),
                 )
-        for relative in ("tools/ci/acceptance_requirements.json", "tools/ci/acceptance_matrix.json",
-                         "docs/acceptance-matrix.md", "tools/ci/check_acceptance_matrix.py",
+        for relative in ("tools/ci/acceptance_requirements.json", "tools/ci/acceptance/matrix.json",
+                         "tools/ci/check_acceptance_matrix.py",
                          "tools/ci/test_check_acceptance_matrix.py"):
             with self.subTest(path=relative):
                 self.assertEqual(PUBLIC_TREE.inspect_path(relative), [])
@@ -8273,7 +8619,7 @@ class AcceptanceSelectionTests(_PhaseCase):
         output = io.StringIO()
         with mock.patch.dict(globals(), _phase_records=0), contextlib.redirect_stderr(output):
             suite = contract_suite(7)
-        self.assertEqual(suite.countTestCases(), 3)
+        self.assertEqual(suite.countTestCases(), 4)
         self.assertEqual(output.getvalue(), "acceptance-phase=selection-start selector=7\n"
                          "acceptance-phase=selection-finish selector=7\n")
 
@@ -9115,9 +9461,9 @@ watchdog.join()
                           for case in (*_MATRIX_CLASSES, AcceptanceRecoveryTests, AcceptanceMatrixPublicTreeTests)
                           for name in loader.getTestCaseNames(case)
                           if name != "test_crash_fixture_matches_terminated_publication"})
-        self.assertEqual(len(original), 256)
+        self.assertEqual(len(original), 261)
         self.assertEqual(hashlib.sha256("\n".join(original).encode("utf-8")).hexdigest(),
-                         "5e1914e4b76f800b1b1a69592af1ac5b4e3edb167250c867a9d844204cc057cd")
+                         "985a8a6c042213d178d83f08053a65f17bf04773934931f9d721f2aa9f470c0a")
         selected = [test.id() for number in range(_CONTRACT_PARTITIONS) for test in contract_suite(number)]
         known = {type(test).__name__ + "." + test._testMethodName for number in range(_CONTRACT_PARTITIONS)
                  for test in contract_suite(number)}
@@ -9144,7 +9490,7 @@ watchdog.join()
                              r'AcceptanceMatrixPublicTreeContract4\s+PROPERTIES LABELS "hygiene;tools" TIMEOUT 30\)')
         selected.extend(test.id() for case in (AcceptanceMatrixPublicTreeTests,)
                         for test in loader.loadTestsFromTestCase(case))
-        matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        matrix = repository_matrix()
         names = {"AcceptanceMatrixContract" + (str(number + 1) if number else "")
                  for number in range(_CONTRACT_PARTITIONS)}
         for row_id in ("perf.requirement-matrix", "iss.126", "ci.acceptance-preparation-custody"):
@@ -9256,6 +9602,9 @@ _CHILD_ALLOWANCES = {}
 # checks actual work including nested fault grids and setup/cleanup helpers.
 # Every other case reserves one unit for ordinary fixture and import work.
 _STORAGE_ALLOWANCES = {
+    'AcceptanceMatrixTests.test_default_row_layout_snapshots_and_output_overlap': 12,
+    'AcceptanceMatrixTests.test_row_refresh_updates_only_affected_rows_and_preserves_transaction_bound': 5,
+    'AcceptanceMatrixTests.test_explode_implode_round_trip_is_lossless_and_sorted': 2,
     'AcceptanceCustodyTests.test_explicit_enrollment_refuses_legacy_recovery_without_consuming_receipt': 2,
     'AcceptanceCustodyTests.test_legacy_recovery_validation_failure_retires_custody': 2,
     'AcceptanceCustodyTests.test_legacy_recovery_validation_failure_retires_custody_case_1': 2,

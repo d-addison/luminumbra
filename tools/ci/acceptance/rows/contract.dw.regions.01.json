@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.regions.01",
+  "source": "docs/distant-world.md#persistent-active-regions",
+  "statement": "Acceptance obligations: Regions are the existing 512 m persistence regions. / A region becomes persistent-active when a replicated simulation anchor (a server avatar, or the single-player host's player position) is inside its 512 m near disc, when any voxel or ground-object edit touches it, or when the game pins it explicitly. / Each region carries flags (visited, edited, pinned, populated), tick stamps (first active, last proximity, last edit, last ticked, frozen at, last save), a state (active, reduced, frozen), a cadence shift, a water cursor, and the content digest of its durable records at the time it froze. / Regions inside any anchor's near disc are always active at full cadence. / Scheduling is a deterministic function of host tick state only. / Pressure is measured in integer work units counted per tick (region ticks, entity updates, water cells, page updates), never in wall-clock time;",
+  "status": "planned",
+  "requirements": [
+    "dw.regions.001",
+    "dw.regions.002",
+    "dw.regions.003",
+    "dw.regions.004",
+    "dw.regions.005",
+    "dw.regions.006"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwRegionsContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.regions.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

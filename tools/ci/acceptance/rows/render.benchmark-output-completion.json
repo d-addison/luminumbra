@@ -1,0 +1,16 @@
+{
+  "id": "render.benchmark-output-completion",
+  "source": "docs/render-benchmark.md#compatibility-and-commands",
+  "statement": "All three benchmark schemas reject incomplete artifact output. Registered regressions cover directory creation and file-open errors plus partial stream writes and flush failure; the writer also checks file-close completion.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "RenderBenchmarkOutput.BothSchemasRejectPartialWritesAndFlushFailures"
+    },
+    {
+      "kind": "ctest",
+      "ref": "RenderBenchmarkOutput.BothSchemasCheckFileOpenAndDirectoryCreation"
+    }
+  ]
+}

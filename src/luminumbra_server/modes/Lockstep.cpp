@@ -2,6 +2,8 @@
 #include "Modes.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 
+#include <array>
+
 namespace fs = std::filesystem;
 
 namespace {
@@ -215,8 +217,22 @@ int RunLockstepLoopback(const ServerCliOptions& options) try {
             if (session->GetSimulationTickCount() >= budget) {
                 continue;
             }
-            if (!session->GetPhysicsSystem()->prepare_simulation_collisions(
-                    {}, session->GetSimulationTickCount() + 1)) {
+            if (session->SimulationHostIntegrationEnabled() && !runner->Avatars().empty()) {
+                // Boot bounds the roster to the collision owner budget. Match the
+                // runner's next-tick publication before caching either peer's horizon.
+                std::array<Luminumbra::Vec3,
+                           Luminumbra::Systems::PhysicsSystem::kSimulationOwnerBudget>
+                    anchors{};
+                std::size_t count = 0;
+                for (const auto& avatar : runner->Avatars()) {
+                    anchors[count++] = avatar.position;
+                }
+                if (!session->SetHostSimulationAnchors({anchors.data(), count})) {
+                    terminal = true;
+                    break;
+                }
+            }
+            if (!session->PrepareSimulationCollisions(session->GetSimulationTickCount() + 1)) {
                 terminal = session->GetRegionSchedulerFault().has_value();
                 if (!terminal) {
                     retry = true;

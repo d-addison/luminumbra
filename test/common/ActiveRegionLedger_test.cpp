@@ -29,9 +29,30 @@ std::size_t*& AllocationCounter() {
     static thread_local std::size_t* counter = nullptr;
     return counter;
 }
+std::size_t*& AllocationFailureCountdown() {
+    static thread_local std::size_t* remaining = nullptr;
+    return remaining;
+}
+class ScopedAllocationFailure {
+public:
+    explicit ScopedAllocationFailure(std::size_t& remaining) {
+        AllocationFailureCountdown() = &remaining;
+    }
+    ~ScopedAllocationFailure() {
+        AllocationFailureCountdown() = nullptr;
+    }
+    ScopedAllocationFailure(const ScopedAllocationFailure&) = delete;
+    ScopedAllocationFailure& operator=(const ScopedAllocationFailure&) = delete;
+};
 } // namespace
 
 void* operator new(std::size_t bytes) {
+    if (auto* remaining = AllocationFailureCountdown()) {
+        if (*remaining == 0) {
+            throw std::bad_alloc();
+        }
+        --*remaining;
+    }
     if (auto* storage = std::malloc(bytes == 0 ? 1 : bytes)) {
         if (auto* counter = AllocationCounter())
             ++*counter;
@@ -46,6 +67,12 @@ void operator delete(void* storage, std::size_t) noexcept {
     std::free(storage);
 }
 void* operator new(std::size_t bytes, const std::nothrow_t&) noexcept {
+    if (auto* remaining = AllocationFailureCountdown()) {
+        if (*remaining == 0) {
+            return nullptr;
+        }
+        --*remaining;
+    }
     auto* storage = std::malloc(bytes == 0 ? 1 : bytes);
     if (storage != nullptr) {
         if (auto* counter = AllocationCounter())
@@ -936,6 +963,43 @@ TEST(ActiveRegionLedgerTest, WarmScheduleCountsAnchorAdmittedRegionWorkFromTheNe
             EXPECT_EQ(ledger.encode(), fresh.encode());
         }
     }
+}
+
+TEST(ActiveRegionLedgerTest, PriorityAdmissionAllocationFailuresLeaveWarmLedgerRetryable) {
+    const std::array anchors{Vec3{100, 0, 100}};
+    const std::array retry_anchors{Vec3{-10240, 0, -10240}};
+    bool completed = false;
+    // At most 12 admitted records and two index nodes per record, plus bounded
+    // vector/string growth: 128 failure positions cover this warm preparation.
+    for (std::size_t failure = 0; failure < 128; ++failure) {
+        ActiveRegionLedger ledger;
+        ledger.activate_owned(kFar, WorldClock{});
+        ledger.schedule(WorldClock(1));
+        ledger.activate_owned({11, 11}, WorldClock(1));
+        auto fresh = ledger;
+        auto remaining = failure;
+        bool refused = false;
+        try {
+            const ScopedAllocationFailure allocations(remaining);
+            ledger.schedule(WorldClock(2), anchors);
+        } catch (const std::bad_alloc&) {
+            refused = true;
+        }
+        if (!refused) {
+            completed = true;
+            break;
+        }
+        SCOPED_TRACE(failure);
+        EXPECT_EQ(ledger.records(), fresh.records());
+        EXPECT_EQ(ledger.encode(), fresh.encode());
+        EXPECT_EQ(ledger.canonical_bytes(), fresh.canonical_bytes());
+        EXPECT_EQ(ledger.schedule(WorldClock(2), retry_anchors),
+                  fresh.schedule(WorldClock(2), retry_anchors));
+        EXPECT_EQ(ledger.records(), fresh.records());
+        EXPECT_EQ(ledger.encode(), fresh.encode());
+        EXPECT_EQ(ledger.canonical_bytes(), fresh.canonical_bytes());
+    }
+    EXPECT_TRUE(completed);
 }
 
 TEST(ActiveRegionLedgerTest, WorkWithoutValidAnchorsRequiresAnExistingRecord) {
@@ -2431,4 +2495,161 @@ TEST(ActiveRegionLedgerTest,
     }
 }
 
+} // namespace
+
+namespace {
+TEST(ActiveRegionLedgerTest, PinBoundariesOnBothAxes) {
+    ActiveRegionLedger ledger;
+    const WorldClock clock;
+    for (const auto key :
+         std::array<RegionKey, 4>{{{-32768, 0}, {32767, 0}, {0, -32768}, {0, 32767}}}) {
+        ledger.pin(key, true, clock);
+        ASSERT_TRUE(ledger.records().contains(key));
+        EXPECT_TRUE(ledger.records().at(key).pinned);
+    }
+    const auto before = ledger.encode();
+    for (const auto key :
+         std::array<RegionKey, 4>{{{-32769, 0}, {32768, 0}, {0, -32769}, {0, 32768}}}) {
+        EXPECT_THROW(ledger.pin(key, true, clock), std::invalid_argument);
+        EXPECT_EQ(ledger.encode(), before);
+    }
+}
+
+TEST(ActiveRegionLedgerTest, EvictedActiveDueKeysAreFilteredBeforePublishingSurvivingWork) {
+    auto ledger = HomeVisit();
+    const auto keys = Keys(ledger);
+    ASSERT_GE(keys.size(), 4u);
+    // Rank puts the pinned final key first, so survivor order differs from map order.
+    ledger.pin(keys.back(), true, WorldClock(2));
+    const std::vector<RegionKey> survivors{keys.back(), keys.front(), keys[2]};
+    const RegionKey expired = keys[1];
+    const auto& record = ledger.records().at(expired);
+    ASSERT_EQ(record.state, RegionState::Active);
+    ASSERT_EQ(record.last_proximity, 1u);
+    ASSERT_FALSE(record.pinned);
+    ASSERT_FALSE(record.edited);
+    ASSERT_FALSE(record.populated);
+    ASSERT_EQ(record.water_cursor, 0u);
+    ASSERT_TRUE(ledger.completed_work().empty());
+    ASSERT_TRUE(ledger.energy_ages().empty());
+
+    const std::uint64_t due_tick = record.last_proximity + kIdle;
+    // With no probe, every Active record is due; this is also the pre-eviction trace oracle.
+    auto trace_reference = ledger;
+    const auto unfiltered = Idle(trace_reference, due_tick);
+    ASSERT_NE(std::find(unfiltered.due.begin(), unfiltered.due.end(), expired),
+              unfiltered.due.end());
+    ASSERT_EQ(trace_reference.records().at(expired).last_ticked, due_tick);
+
+    const auto schedule = Idle(ledger, due_tick, [&survivors](RegionKey key) {
+        return std::find(survivors.begin(), survivors.end(), key) != survivors.end();
+    });
+    EXPECT_FALSE(ledger.records().contains(expired));
+    EXPECT_EQ(std::find(schedule.due.begin(), schedule.due.end(), expired), schedule.due.end());
+    EXPECT_EQ(schedule.due, survivors);
+    EXPECT_EQ(schedule.ledger_records, survivors.size());
+    EXPECT_EQ(schedule.digest, unfiltered.digest);
+    EXPECT_EQ(schedule.transitions, unfiltered.transitions);
+
+    std::vector<RegionWork> completed;
+    for (const auto key : schedule.due) {
+        ASSERT_TRUE(ledger.records().contains(key));
+        EXPECT_EQ(ledger.records().at(key).last_ticked, due_tick);
+        completed.push_back({key, 1, 0, 0, 0});
+    }
+    ASSERT_NO_THROW(ledger.publish_completed_work(completed));
+    ASSERT_EQ(ledger.completed_work().size(), survivors.size());
+    for (const auto key : survivors)
+        EXPECT_EQ(ledger.completed_work().at(key), 1u);
+}
+
+TEST(ActiveRegionLedgerTest, FrozenRetentionKeepsOwnedRecordsAndEvictsThemWhenReleased) {
+    ActiveRegionLedger ledger({0, 4, 1});
+    ledger.set_local_anchor(Vec3(0));
+    ledger.schedule(WorldClock(1));
+    const auto keys = Keys(ledger);
+    const std::array pressure{RegionWork{keys.front(), 1, 0, 0, 0}};
+    for (std::uint64_t tick = 2; tick <= 1 + 2 * keys.size() * ledger.config().hold_ticks; ++tick) {
+        ledger.schedule(WorldClock(tick), std::span<const Vec3>{}, pressure, [](RegionKey) {
+            return std::uint64_t{0};
+        });
+    }
+    ASSERT_GT(keys.size(), 1u);
+    const auto owner = keys.front();
+    const auto before = Idle(ledger, kIdle, kNobodyOwns);
+    EXPECT_EQ(Keys(ledger), keys);
+    EXPECT_TRUE(before.due.empty());
+    const auto retained = Idle(ledger, 1 + kIdle, [owner](RegionKey key) { return key == owner; });
+    ASSERT_EQ(Keys(ledger), (std::vector<RegionKey>{owner}));
+    EXPECT_EQ(retained.ledger_records, 1u);
+    EXPECT_TRUE(retained.due.empty());
+    EXPECT_EQ(ledger.records().at(owner).state, RegionState::Frozen);
+    EXPECT_EQ(Reload(ledger).records(), ledger.records());
+    const auto released = Idle(ledger, 2 + kIdle, kNobodyOwns);
+    EXPECT_TRUE(ledger.records().empty());
+    EXPECT_EQ(released.ledger_records, 0u);
+    EXPECT_TRUE(released.due.empty());
+}
+
+TEST(ActiveRegionLedgerTest, EnergyAgeCoexistsInAscendingAllocatorProjectionWorkEnvelope) {
+    auto ledger = FrozenLedger();
+    std::uint64_t id = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(id));
+    ASSERT_TRUE(ledger.set_energy_age(kFar, 6));
+    const std::array completed{RegionWork{kFar, 1, 2, 3, 4}};
+    ledger.publish_completed_work(completed);
+    const auto bytes = ledger.encode();
+    const auto extensions = Tlv(1, LittleEndian(2, 8)) + Tlv(2, std::string(1, '\x02')) +
+                            Tlv(4, EnergyAgePayload(1, kFar, 6)) +
+                            Tlv(6, EnergyAgePayload(1, kFar, 10));
+    const auto offset = ActiveRegionLedger::kHeaderBytes + ActiveRegionLedger::kRecordBytes;
+    EXPECT_EQ(bytes.substr(offset, bytes.size() - offset - 8),
+              LittleEndian(extensions.size(), 4) + extensions);
+    auto restored = Reload(ledger);
+    EXPECT_EQ(restored.encode(), bytes);
+    EXPECT_EQ(restored.energy_ages().at(kFar), 6u);
+    EXPECT_EQ(restored.completed_work().at(kFar), 10u);
+    EXPECT_EQ(ActiveRegionLedger::kMaxFileBytes,
+              ActiveRegionLedger::kHeaderBytes +
+                  ActiveRegionLedger::kMaxRegions * ActiveRegionLedger::kRecordBytes + 4u + 7u +
+                  8u);
+}
+
+TEST(ActiveRegionLedger, ReusedInternalScheduleStoragePreservesPriorityTraceAndRollback) {
+    ActiveRegionLedger reused({10, 1, 2}), fresh({10, 1, 2});
+    for (auto* ledger : {&reused, &fresh}) {
+        ledger->mark_edited({10, 0}, WorldClock{});
+        ledger->mark_edited({-10, 0}, WorldClock{});
+        ledger->pin({10, 0}, true, WorldClock{});
+    }
+    const std::array work{RegionWork{{-10, 0}, 20, 0, 0, 0}};
+    const auto digest = [](RegionKey) {
+        return std::uint64_t{123};
+    };
+    // Initial wakes keep both active; overload then freezes the edited region at tick 3
+    // and the pinned region at tick 5. The pinned region's Reduced phase is 3 modulo 4.
+    const std::array<std::vector<RegionKey>, 8> due_by_tick{{
+        {{10, 0}, {-10, 0}},
+        {{10, 0}},
+        {{10, 0}},
+        {},
+        {},
+        {},
+        {},
+        {},
+    }};
+    for (std::uint64_t tick = 1; tick <= 8; ++tick) {
+        SCOPED_TRACE(tick);
+        const auto actual = reused.schedule(WorldClock(tick), {}, work, digest, {});
+        const auto expected = fresh.schedule(WorldClock(tick), {}, work, digest);
+        EXPECT_EQ(actual, expected);
+        EXPECT_EQ(reused.encode(), fresh.encode());
+        EXPECT_EQ(actual.due, due_by_tick.at(tick - 1));
+    }
+    const auto before = reused.encode();
+    EXPECT_THROW(reused.schedule(WorldClock(8), {}, work, digest, {}), std::invalid_argument);
+    EXPECT_EQ(reused.encode(), before);
+    EXPECT_EQ(reused.schedule(WorldClock(9), {}, work, digest, {}),
+              fresh.schedule(WorldClock(9), {}, work, digest));
+}
 } // namespace

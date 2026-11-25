@@ -29,8 +29,10 @@
 #include "luminumbra_client/rendering/passes/GBufferPass.h"
 #include "luminumbra_client/rendering/passes/GlassOitPass.h"
 #include "luminumbra_client/rendering/passes/GodRaysPass.h"
+#include "luminumbra_client/rendering/passes/GroundDecalPass.h"
 #include "luminumbra_client/rendering/passes/LightingPass.h"
 #include "luminumbra_client/rendering/passes/ParticlePass.h"
+#include "luminumbra_client/rendering/passes/PassGlHelpers.h"
 #include "luminumbra_client/rendering/passes/SkyboxPass.h"
 #include "luminumbra_client/rendering/passes/SsaoPass.h"
 #include "luminumbra_client/rendering/passes/TaauPass.h"
@@ -6194,6 +6196,8 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
          "!is_halo_chunk(entry.coords.x, entry.coords.z, rx, rz)",
          "continue;",
          "entry.as_reduction_snapshot();",
+         "if (reduction.source_kind == World::FarLodBrickSourceKind::RegenerableCache)",
+         "continue;",
          "overlay_authority(reduction, belongs_to_region(entry, rx, rz),"});
     expect_ordered(
         worker,
@@ -8120,6 +8124,114 @@ struct ProgramDeletionCapture {
     ProgramDeletionCapture& operator=(const ProgramDeletionCapture&) = delete;
 };
 
+struct LayoutDrawCapture {
+    struct State {
+        PFNGLDRAWARRAYSPROC original = nullptr;
+        PFNGLCOPYTEXSUBIMAGE2DPROC copy = nullptr;
+        PFNGLGENTEXTURESPROC generate = nullptr;
+        std::size_t count = 0;
+        std::size_t copies = 0;
+        std::size_t textures = 0;
+    };
+    static State& Current() {
+        static State state;
+        return state;
+    }
+    static void APIENTRY Draw(GLenum mode, GLint first, GLsizei count) {
+        auto& state = Current();
+        if (!state.original) {
+            ADD_FAILURE() << "Missing draw entry point";
+            return;
+        }
+        ++state.count;
+        state.original(mode, first, count);
+    }
+    static void APIENTRY Copy(GLenum target,
+                              GLint level,
+                              GLint xoffset,
+                              GLint yoffset,
+                              GLint x,
+                              GLint y,
+                              GLsizei width,
+                              GLsizei height) {
+        auto& state = Current();
+        if (!state.copy) {
+            ADD_FAILURE() << "Missing scene copy entry point";
+            return;
+        }
+        ++state.copies;
+        state.copy(target, level, xoffset, yoffset, x, y, width, height);
+    }
+    static void APIENTRY Generate(GLsizei count, GLuint* textures) {
+        auto& state = Current();
+        if (!state.generate) {
+            ADD_FAILURE() << "Missing texture generation entry point";
+            return;
+        }
+        ++state.textures;
+        state.generate(count, textures);
+    }
+    LayoutDrawCapture() {
+        Current() = {.original = glad_glDrawArrays,
+                     .copy = glad_glCopyTexSubImage2D,
+                     .generate = glad_glGenTextures,
+                     .count = 0,
+                     .copies = 0,
+                     .textures = 0};
+        glad_glDrawArrays = Draw;
+        glad_glCopyTexSubImage2D = Copy;
+        glad_glGenTextures = Generate;
+    }
+    ~LayoutDrawCapture() {
+        glad_glDrawArrays = Current().original;
+        glad_glCopyTexSubImage2D = Current().copy;
+        glad_glGenTextures = Current().generate;
+    }
+    LayoutDrawCapture(const LayoutDrawCapture&) = delete;
+    LayoutDrawCapture& operator=(const LayoutDrawCapture&) = delete;
+};
+
+// Two-by-two targets bound every allocation and keep the public execute paths
+// reachable. The synthetic programs sample only their first expected sampler.
+struct LayoutPassTargets {
+    RenderResourceRegistry registry;
+    LightingPass lighting;
+    Camera camera;
+    ShadowMap shadow_map;
+    const DebugViewPass::Controls saved_controls = DebugViewPass::controls();
+    RenderContext ctx;
+    GLuint vao = 0;
+    LayoutPassTargets() {
+        DebugViewPass::controls() = {};
+        lighting.init_lighting_fbo(registry, 2, 2);
+        glGenVertexArrays(1, &vao);
+        ctx.screen_width = 2;
+        ctx.screen_height = 2;
+        ctx.screen_quad_vao = vao;
+        ctx.camera = &camera;
+        PassGl::set_default_shadow_cascade_splits(shadow_map);
+        shadow_map.light_space_matrices.assign(ShadowMap::CASCADE_COUNT, glm::mat4(1));
+        ctx.cascade_splits = glm::vec4(shadow_map.cascade_splits[1],
+                                       shadow_map.cascade_splits[2],
+                                       shadow_map.cascade_splits[3],
+                                       shadow_map.cascade_splits[4]);
+        ctx.light_space_matrices = &shadow_map.light_space_matrices;
+        ctx.lit_scene = FboHandle{lighting.lighting_fbo().fbo_id, true};
+        ctx.lit_scene_color = TextureHandle{lighting.lighting_fbo().color_texture};
+        ctx.lit_scene_depth = RenderbufferHandle{lighting.lighting_fbo().depth_texture};
+        ctx.opaque_scene = TextureHandle{lighting.lighting_fbo().opaque_color_texture};
+        ctx.gbuffer_position = ctx.opaque_scene;
+        ctx.gbuffer_depth = ctx.opaque_scene;
+        glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
+        glViewport(0, 0, 2, 2);
+    }
+    ~LayoutPassTargets() {
+        lighting.destroy_lighting_fbo(registry);
+        glDeleteVertexArrays(1, &vao);
+        DebugViewPass::controls() = saved_controls;
+    }
+};
+
 bool WriteLayoutShader(const fs::path& path, std::string_view source) {
     std::ofstream output(path, std::ios::binary);
     output << source;
@@ -8136,6 +8248,31 @@ std::string LayoutFragment(std::string_view sampler, bool wrong_type) {
            std::string(wrong_type ? "sampler2DArray " : "sampler2D ") + std::string(sampler) +
            ";\nlayout(location=0) out vec4 color;\nvoid main() { color = texture(" +
            std::string(sampler) + (wrong_type ? ", vec3(0.5)); }\n" : ", vec2(0.5)); }\n");
+}
+
+template<typename Check>
+void CheckLayoutInputs(const fs::path& root,
+                       const fs::path& vertex,
+                       const fs::path& fragment,
+                       const ExpectedLayout& expected,
+                       const Check& check) {
+    ASSERT_FALSE(expected.samplers.empty());
+    // Fixed three-input matrix: matching, wrong type, and optimized-out sampler.
+    for (int input = 0; input < 3; ++input) {
+        SCOPED_TRACE(input);
+        const bool rejects = input == 1;
+        const auto source = input == 2 ? "#version 450 core\nout vec4 color;\n"
+                                         "void main() { color = vec4(1.0); }\n"
+                                       : LayoutFragment(expected.samplers.front().name, rejects);
+        ASSERT_TRUE(WriteLayoutShader(root / vertex, kLayoutVertex));
+        ASSERT_TRUE(WriteLayoutShader(root / fragment, source));
+        {
+            Shader probe((root / vertex).string().c_str(), (root / fragment).string().c_str());
+            ASSERT_TRUE(probe.IsValid()) << probe.Diagnostic();
+            EXPECT_EQ(ValidateReflectedLayout(probe.Reflected(), expected).ok, !rejects);
+        }
+        check(rejects);
+    }
 }
 
 bool WritePassLayoutSources(const fs::path& root) {
@@ -8749,6 +8886,253 @@ TEST(RenderSmokeTest, PassesDiscardLayoutMismatchesAndKeepCompatiblePrograms) {
     CheckPassLayoutAdoption(root, "aerial_perspective", &AerialPass::init_shader, 1);
     CheckPassLayoutAdoption(root, "god_rays", &GodRaysPass::init_shader, 1);
     CheckPassLayoutAdoption(root, "magical_particles", &ParticlePass::init_shader, 1);
+    CheckPassLayoutAdoption(root, "debug_view", &DebugViewPass::init_shader, 1);
+    CheckPassLayoutAdoption(root, "scent_decal", &GroundDecalPass::init_shader, 1);
+    CheckPassLayoutAdoption(root, "taau_resolve", &TaauPass::init_shader, 1);
+    CheckPassLayoutAdoption(root, "lighting", &LightingPass::init_shader, 1);
+}
+
+TEST(RenderSmokeTest, RemainingPassLayoutsControlDrawSubmission) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("shader-layout-", ".root");
+    const auto root = temporary.Path().parent_path();
+    ASSERT_TRUE(WritePassLayoutSources(root));
+    for (const auto* name : {"debug_view", "scent_decal", "taau_resolve", "lighting"}) {
+        SCOPED_TRACE(name);
+        const auto* entry = FindPassShaderLayout(name);
+        ASSERT_NE(entry, nullptr);
+        CheckLayoutInputs(root, entry->vert, entry->frag, entry->expected, [&](bool rejects) {
+            LayoutPassTargets targets;
+            ProgramDeletionCapture deletions;
+            const auto check_execute = [&](auto& pass) {
+                EXPECT_EQ(ProgramDeletionCapture::Current().count, rejects ? 1u : 0u);
+                LayoutDrawCapture draws;
+                glEnable(GL_DEPTH_TEST);
+                glEnable(GL_BLEND);
+                pass.execute(targets.ctx);
+                EXPECT_EQ(LayoutDrawCapture::Current().count, rejects ? 0u : 1u);
+                if (rejects) {
+                    EXPECT_EQ(glIsEnabled(GL_DEPTH_TEST), GL_TRUE);
+                    EXPECT_EQ(glIsEnabled(GL_BLEND), GL_TRUE);
+                    GLint framebuffer = 0;
+                    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer);
+                    EXPECT_EQ(static_cast<GLuint>(framebuffer), targets.ctx.lit_scene.id);
+                }
+            };
+            if (entry->layout_name == "debug_view") {
+                DebugViewPass pass;
+                pass.init_shader(root);
+                pass.init_buffers();
+                pass.set_mode(DebugViewPass::Albedo);
+                check_execute(pass);
+                pass.destroy_buffers();
+            } else if (entry->layout_name == "scent_decal") {
+                GroundDecalPass pass;
+                pass.init_shader(root);
+                pass.init_buffers();
+                ScentFieldRenderMirror mirror;
+                mirror.resize(1);
+                mirror.valid = true;
+                mirror.any_scent = true;
+                mirror.rg = {1.0f, 1.0f};
+                pass.update_scent(mirror);
+                ASSERT_TRUE(pass.active());
+                check_execute(pass);
+                pass.destroy_buffers();
+            } else if (entry->layout_name == "taau_resolve") {
+                TaauPass pass;
+                pass.init_shader(root);
+                pass.init(targets.registry, 2, 2);
+                check_execute(pass);
+                EXPECT_EQ(pass.history_valid(), !rejects);
+                const auto history = pass.history_state();
+                ASSERT_TRUE(pass.prepare_replay(targets.registry));
+                LayoutDrawCapture draws;
+                pass.execute(targets.ctx, &history);
+                EXPECT_EQ(LayoutDrawCapture::Current().count, rejects ? 0u : 1u);
+                EXPECT_EQ(pass.history_state().write_index, history.write_index);
+                EXPECT_EQ(pass.history_valid(), !rejects);
+                pass.destroy(targets.registry);
+            } else {
+                targets.lighting.init_shader(root);
+                check_execute(targets.lighting);
+            }
+            EXPECT_EQ(glGetError(), GL_NO_ERROR);
+        });
+    }
+}
+
+TEST(RenderSmokeTest, LightningLayoutFailureSkipsCopyAndDraw) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("shader-layout-", ".root");
+    const auto root = temporary.Path().parent_path();
+    ASSERT_TRUE(WritePassLayoutSources(root));
+    const auto* entry = FindPassShaderLayout("lightning_overlay");
+    ASSERT_NE(entry, nullptr);
+    CheckLayoutInputs(root, entry->vert, entry->frag, entry->expected, [&](bool rejects) {
+        LayoutPassTargets targets;
+        targets.lighting.init_shader(root);
+        LightningRenderState lightning;
+        lightning.active = true;
+        lightning.pulse_intensity = 1.0f;
+        targets.ctx.lightning_state = &lightning;
+        ProgramDeletionCapture deletions;
+        LayoutDrawCapture draws;
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        targets.lighting.execute_lightning_overlay(targets.ctx);
+        EXPECT_EQ(ProgramDeletionCapture::Current().count, rejects ? 1u : 0u);
+        EXPECT_EQ(LayoutDrawCapture::Current().count, rejects ? 0u : 1u);
+        EXPECT_EQ(LayoutDrawCapture::Current().copies, rejects ? 0u : 1u);
+        EXPECT_EQ(LayoutDrawCapture::Current().textures, rejects ? 0u : 1u);
+        if (rejects) {
+            EXPECT_EQ(glIsEnabled(GL_DEPTH_TEST), GL_TRUE);
+            EXPECT_EQ(glIsEnabled(GL_BLEND), GL_TRUE);
+            GLint framebuffer = 0;
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer);
+            EXPECT_EQ(static_cast<GLuint>(framebuffer), targets.ctx.lit_scene.id);
+        }
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    });
+}
+
+TEST(RenderSmokeTest, GlassLayoutsRequireBothProgramsBeforeAccumulationAndResolve) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("shader-layout-", ".root");
+    const auto root = temporary.Path().parent_path();
+    ASSERT_TRUE(WritePassLayoutSources(root));
+    const fs::path accum_vertex = "res/shaders/glass_oit.vert";
+    const fs::path resolve_vertex = "res/shaders/volumetric_lighting.vert";
+    const fs::path accum_fragment = "res/shaders/glass_oit.frag";
+    const fs::path resolve_fragment = "res/shaders/glass_oit_resolve.frag";
+    for (const auto* sampler : {"u_opaqueScene", "u_accum", "u_reveal"}) {
+        SCOPED_TRACE(sampler);
+        const bool fail_accum = std::string_view(sampler) == "u_opaqueScene";
+        SCOPED_TRACE(fail_accum);
+        ASSERT_TRUE(WriteLayoutShader(root / accum_vertex, kLayoutVertex));
+        ASSERT_TRUE(WriteLayoutShader(root / resolve_vertex, kLayoutVertex));
+        ASSERT_TRUE(
+            WriteLayoutShader(root / accum_fragment, LayoutFragment("u_opaqueScene", false)));
+        ASSERT_TRUE(WriteLayoutShader(root / resolve_fragment, LayoutFragment("u_accum", false)));
+        ExpectedLayout expected;
+        expected.pass_name = fail_accum ? "glass_oit" : "glass_oit_resolve";
+        expected.samplers = {{sampler, GL_SAMPLER_2D, -1}};
+        CheckLayoutInputs(
+            root,
+            fail_accum ? accum_vertex : resolve_vertex,
+            fail_accum ? accum_fragment : resolve_fragment,
+            expected,
+            [&](bool rejects) {
+                LayoutPassTargets targets;
+                GlassOitPass pass;
+                struct Cleanup {
+                    GlassOitPass& pass;
+                    ~Cleanup() {
+                        pass.destroy();
+                    }
+                } cleanup{pass};
+                const std::vector<GlassPaneItem> panes(1);
+                const GlassOitPassInput input{
+                    .glass_items = &panes, .glass_vao = targets.vao, .root_path = root};
+                ProgramDeletionCapture deletions;
+                LayoutDrawCapture draws;
+                glEnable(GL_DEPTH_TEST);
+                glEnable(GL_BLEND);
+                pass.execute_accum(targets.ctx, input);
+                EXPECT_EQ(ProgramDeletionCapture::Current().count, rejects ? 1u : 0u);
+                EXPECT_EQ(pass.accum_shader() && pass.accum_shader()->IsValid(),
+                          !(rejects && fail_accum));
+                EXPECT_EQ(pass.resolve_shader() && pass.resolve_shader()->IsValid(),
+                          !(rejects && !fail_accum));
+                pass.execute_resolve(targets.ctx, input);
+                EXPECT_EQ(LayoutDrawCapture::Current().count, rejects ? 0u : 2u);
+                EXPECT_EQ(LayoutDrawCapture::Current().textures, rejects ? 0u : 2u);
+                if (rejects) {
+                    // Repeat the public call: a rejected accumulation owner must
+                    // neither be dereferenced nor trigger a sibling rebuild.
+                    pass.execute_accum(targets.ctx, input);
+                    EXPECT_EQ(ProgramDeletionCapture::Current().count, 1u);
+                    EXPECT_EQ(LayoutDrawCapture::Current().count, 0u);
+                    EXPECT_EQ(glIsEnabled(GL_DEPTH_TEST), GL_TRUE);
+                    EXPECT_EQ(glIsEnabled(GL_BLEND), GL_TRUE);
+                    GLint framebuffer = 0;
+                    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer);
+                    EXPECT_EQ(static_cast<GLuint>(framebuffer), targets.ctx.lit_scene.id);
+                }
+                EXPECT_EQ(glGetError(), GL_NO_ERROR);
+            });
+    }
+}
+
+TEST(RenderSmokeTest, UnavailableGlassProgramsSkipBeforeAllocatingTargets) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("shader-layout-", ".root");
+    const auto root = temporary.Path().parent_path();
+    ASSERT_TRUE(WritePassLayoutSources(root));
+    const auto accum_fragment = root / "res/shaders/glass_oit.frag";
+    const auto resolve_fragment = root / "res/shaders/glass_oit_resolve.frag";
+    ASSERT_TRUE(WriteLayoutShader(root / "res/shaders/glass_oit.vert", kLayoutVertex));
+    ASSERT_TRUE(WriteLayoutShader(root / "res/shaders/volumetric_lighting.vert", kLayoutVertex));
+    // Both mismatched; either source absent or incomplete; both sources absent.
+    for (int input = 0; input < 6; ++input) {
+        SCOPED_TRACE(input);
+        ASSERT_TRUE(WriteLayoutShader(accum_fragment, LayoutFragment("u_opaqueScene", input == 0)));
+        ASSERT_TRUE(WriteLayoutShader(resolve_fragment, LayoutFragment("u_accum", input == 0)));
+        if (input == 1 || input == 5) {
+            ASSERT_TRUE(fs::remove(accum_fragment));
+        }
+        if (input == 2 || input == 5) {
+            ASSERT_TRUE(fs::remove(resolve_fragment));
+        }
+        if (input == 3 || input == 4) {
+            ASSERT_TRUE(WriteLayoutShader(input == 3 ? accum_fragment : resolve_fragment,
+                                          "#version 450 core\nvoid main() {"));
+        }
+        LayoutPassTargets targets;
+        GlassOitPass pass;
+        struct Cleanup {
+            GlassOitPass& pass;
+            ~Cleanup() {
+                pass.destroy();
+            }
+        } cleanup{pass};
+        const std::vector<GlassPaneItem> panes(1);
+        const GlassOitPassInput glass_input{
+            .glass_items = &panes, .glass_vao = targets.vao, .root_path = root};
+        ProgramDeletionCapture deletions;
+        LayoutDrawCapture draws;
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        if (input == 3 || input == 4) {
+            glDisable(GL_DEBUG_OUTPUT);
+        }
+        pass.execute_accum(targets.ctx, glass_input);
+        if (input == 3 || input == 4) {
+            glEnable(GL_DEBUG_OUTPUT);
+        }
+        pass.execute_resolve(targets.ctx, glass_input);
+        EXPECT_EQ(glIsEnabled(GL_DEBUG_OUTPUT), GL_TRUE);
+        EXPECT_EQ(pass.accum_shader() && pass.accum_shader()->IsValid(), input == 2 || input == 4);
+        EXPECT_EQ(pass.resolve_shader() && pass.resolve_shader()->IsValid(),
+                  input == 1 || input == 3);
+        if (input == 0) {
+            EXPECT_EQ(ProgramDeletionCapture::Current().count, 2u);
+            EXPECT_EQ(pass.accum_shader(), nullptr);
+            EXPECT_EQ(pass.resolve_shader(), nullptr);
+        }
+        EXPECT_EQ(LayoutDrawCapture::Current().count, 0u);
+        EXPECT_EQ(LayoutDrawCapture::Current().textures, 0u);
+        EXPECT_EQ(glIsEnabled(GL_DEPTH_TEST), GL_TRUE);
+        EXPECT_EQ(glIsEnabled(GL_BLEND), GL_TRUE);
+        GLint framebuffer = 0;
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer);
+        EXPECT_EQ(static_cast<GLuint>(framebuffer), targets.ctx.lit_scene.id);
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    }
 }
 
 TEST(RenderSmokeTest, GBufferLayoutFailureRefusesSelectionForEveryVariant) {
@@ -8825,6 +9209,7 @@ TEST(RenderSmokeTest, UnavailablePassProgramsSkipWithoutChangingGlState) {
     SsaoPass ssao;
     SkyboxPass skybox;
     WaterPass water;
+    LightingPass lighting;
     Camera camera({0, 0, 0});
     RenderContext ctx;
     // Deliberately omit camera and render targets: unavailable programs must
@@ -8838,6 +9223,7 @@ TEST(RenderSmokeTest, UnavailablePassProgramsSkipWithoutChangingGlState) {
             ssao.execute_blur(ctx);
         }
         skybox.execute(ctx, camera, false);
+        lighting.execute(ctx);
         const WaterPassInput water_input;
         const auto water_stats = water.execute(ctx, water_input, camera);
         EXPECT_EQ(water_stats.water_draws, 0u);
@@ -8856,12 +9242,15 @@ TEST(RenderSmokeTest, UnavailablePassProgramsSkipWithoutChangingGlState) {
     ssao.init_shaders(root);
     skybox.init_shader(root);
     water.init_shader(root);
+    lighting.init_shader(root);
     ASSERT_NE(ssao.ssao().ssaoShader, nullptr);
     EXPECT_FALSE(ssao.ssao().ssaoShader->IsValid());
     ASSERT_NE(skybox.shader(), nullptr);
     EXPECT_FALSE(skybox.shader()->IsValid());
     ASSERT_NE(water.shader(), nullptr);
     EXPECT_FALSE(water.shader()->IsValid());
+    ASSERT_NE(lighting.shader(), nullptr);
+    EXPECT_FALSE(lighting.shader()->IsValid());
     check_skip();
 }
 
@@ -9559,6 +9948,127 @@ TEST(RenderSmokeTest, AllocationLedgerPipelineReconcilesTexturesAtEachRenderScal
     EXPECT_TRUE(pipeline.allocation_ledger().empty());
 }
 
+TEST(RenderSmokeTest, SettledPreparationHasNoScratchAllocationsAndPreservesSubmissionBytes) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(32, 32, SourceRoot()));
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(false);
+    Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    for (int index = 0; index < 4; ++index) {
+        auto chunk =
+            std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(index % 2, 0, index / 2));
+        chunk->set_state(Luminumbra::ChunkState::Ready);
+        chunk->mesh_vertices = {{{0, 6, 0}, {0, 1, 0}, 3u},
+                                {{0, 6, 16}, {0, 1, 0}, 3u},
+                                {{16, 6, 0}, {0, 1, 0}, 3u},
+                                {{16, 6, 16}, {0, 1, 0}, 3u}};
+        chunk->mesh_indices = {0u, 1u, 2u, 2u, 1u, 3u};
+        chunk->water_mesh_vertices = chunk->mesh_vertices;
+        chunk->water_mesh_indices = chunk->mesh_indices;
+        chunk->mesh_version.store(1u);
+        chunk->water_mesh_version.store(1u);
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    }
+    entt::registry registry;
+    for (int index = 0; index < 40; ++index) {
+        const auto entity = registry.create();
+        Luminumbra::Components::TransformComponent transform;
+        transform.position = {static_cast<float>(index), 8.0f, 12.0f};
+        registry.emplace<Luminumbra::Components::TransformComponent>(entity, transform);
+        registry.emplace<Luminumbra::Components::PointLightComponent>(entity);
+    }
+    Camera camera({16, 18, 16}, {0, 1, 0}, -90, -89);
+    const auto render = [&] {
+        pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+    };
+    // Warm every submission slot and both upload lanes before measuring scratch.
+    for (int frame = 0; frame < 8; ++frame) {
+        render();
+    }
+    ASSERT_TRUE(pipeline.render_uploads_settled());
+    ASSERT_EQ(pipeline.get_last_render_pass_stats().terrain_draws, 4u);
+    ASSERT_EQ(pipeline.get_last_render_pass_stats().water_draws, 4u);
+    const auto command_span = pipeline.terrain_command_bytes();
+    const std::vector<std::byte> commands(command_span.begin(), command_span.end());
+    const auto origin_span = std::as_bytes(pipeline.terrain_origins());
+    const std::vector<std::byte> origins(origin_span.begin(), origin_span.end());
+    ASSERT_FALSE(commands.empty());
+    ASSERT_EQ(origins.size(), 4u * sizeof(glm::vec4));
+    const auto& renderable = world.renderable_chunks_view();
+    ASSERT_EQ(renderable.size(), pipeline.terrain_origins().size());
+    for (std::size_t index = 0; index < renderable.size(); ++index) {
+        const auto coords = renderable[index]->get_coords();
+        EXPECT_EQ(pipeline.terrain_origins()[index],
+                  glm::vec4(static_cast<float>(coords.x * Luminumbra::CHUNK_SIZE_X),
+                            static_cast<float>(coords.y * Luminumbra::CHUNK_SIZE_Y),
+                            static_cast<float>(coords.z * Luminumbra::CHUNK_SIZE_Z),
+                            0.0f));
+    }
+
+    // Independent original light-selection oracle, including equal distances.
+    struct Candidate {
+        PointLight light;
+        float d2 = 0;
+    };
+    std::vector<Candidate> reference;
+    const auto view = registry.view<const Luminumbra::Components::TransformComponent,
+                                    const Luminumbra::Components::PointLightComponent>();
+    for (const auto entity : view) {
+        const auto& transform = view.get<const Luminumbra::Components::TransformComponent>(entity);
+        const auto& light = view.get<const Luminumbra::Components::PointLightComponent>(entity);
+        const glm::vec3 delta = transform.position - camera.Position;
+        reference.push_back({{transform.position, light.radius, light.color, light.intensity},
+                             glm::dot(delta, delta)});
+    }
+    std::nth_element(reference.begin(),
+                     reference.begin() + 32,
+                     reference.end(),
+                     [](const Candidate& a, const Candidate& b) { return a.d2 < b.d2; });
+    reference.resize(32);
+    const auto read_albedo = [&] {
+        std::array<unsigned char, 32 * 32 * 4> pixels{};
+        glGetTextureImage(pipeline.gbuffer().albedo_texture,
+                          0,
+                          GL_RGBA,
+                          GL_UNSIGNED_BYTE,
+                          static_cast<GLsizei>(pixels.size()),
+                          pixels.data());
+        return pixels;
+    };
+    const auto expected_albedo = read_albedo();
+    EXPECT_TRUE(std::any_of(expected_albedo.begin(),
+                            expected_albedo.end(),
+                            [](unsigned char value) { return value != 0; }));
+    const auto warmed_allocations = pipeline.preparation_scratch_allocations();
+    EXPECT_GT(warmed_allocations, 0u);
+    for (int frame = 0; frame < 6; ++frame) {
+        render();
+        EXPECT_EQ(pipeline.preparation_scratch_allocations(), warmed_allocations);
+        EXPECT_EQ(pipeline.get_last_render_pass_stats().culling_hierarchy_rebuilds, 0u);
+        EXPECT_EQ(pipeline.get_last_mesh_upload_stats().terrain_budget.attempts, 0u);
+        EXPECT_EQ(pipeline.get_last_mesh_upload_stats().water_budget.attempts, 0u);
+        const auto actual_commands = pipeline.terrain_command_bytes();
+        EXPECT_EQ(std::vector<std::byte>(actual_commands.begin(), actual_commands.end()), commands);
+        const auto actual_origins = std::as_bytes(pipeline.terrain_origins());
+        EXPECT_EQ(std::vector<std::byte>(actual_origins.begin(), actual_origins.end()), origins);
+        const auto lights = pipeline.prepared_point_lights();
+        ASSERT_EQ(lights.size(), reference.size());
+        for (std::size_t index = 0; index < lights.size(); ++index) {
+            EXPECT_EQ(lights[index].position, reference[index].light.position);
+            EXPECT_EQ(lights[index].color, reference[index].light.color);
+            EXPECT_EQ(lights[index].radius, reference[index].light.radius);
+            EXPECT_EQ(lights[index].intensity, reference[index].light.intensity);
+        }
+        EXPECT_EQ(read_albedo(), expected_albedo);
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    }
+}
+
 TEST(RenderSmokeTest, WaterOnlyOwnerSubmitsWaterAndTracksTerrainPresence) {
     HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();
@@ -9712,6 +10222,11 @@ TEST(RenderSmokeTest, WaterOnlyOwnerSubmitsWaterAndTracksTerrainPresence) {
     EXPECT_TRUE(world.renderable_chunks_view().empty());
     EXPECT_EQ(pipeline.get_last_render_pass_stats().snapshot_count, 0u);
     EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 0u);
+    for (int frame = 1; frame <= 30; ++frame) {
+        EXPECT_EQ(pipeline.get_runtime_render_stats().water_gpu_chunks, 1u);
+        render();
+    }
+    EXPECT_EQ(pipeline.get_runtime_render_stats().water_gpu_chunks, 0u);
     pipeline.clear_all_chunk_data();
     for (const auto& entry : pipeline.allocation_ledger()) {
         EXPECT_FALSE(entry.name.starts_with("buffer."));

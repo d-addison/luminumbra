@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.history.04",
+  "source": "docs/active-regions.md#historical-ambient-hash-portability-investigation",
+  "statement": "Acceptance obligations: Initial player construction and all feature-off calls retain the existing spawn convention. / Replay divergence uses the existing artifact's `divergence_section` value `region_schedule` when a companion digest differs; / this adds no field or off-path bytes. / The heavy oracle compares canonical ledger bytes as part of its enabled authoritative equality. / If shared Git metadata is read-only, the receipt retains the actual assigned branch's `head_commit`, separately identifies `prepared_commit`, and records that the branch was not advanced. / In that case `slice-C2.bundle` and `slice-C2.patch` beside the receipt carry the prepared commit (one parent at the recorded base, with a plain imperative message).",
+  "status": "planned",
+  "requirements": [
+    "ar.history.038",
+    "ar.history.039",
+    "ar.history.040",
+    "ar.history.041",
+    "ar.history.042",
+    "ar.history.043"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArHistoryContract.Requirements04",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.history.04.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ac"
+    }
+  ]
+}

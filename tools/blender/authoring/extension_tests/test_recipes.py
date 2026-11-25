@@ -168,6 +168,171 @@ class ReviewedRecipes(unittest.TestCase):
                 with self.assertRaises(recipes.RecipeError):
                     self.plan()
 
+    def test_plan_publication_precedes_cache_and_cannot_mutate_review(self):
+        published = []
+        before = copy.deepcopy(self.rows)
+
+        def publish(value):
+            self.assertNotIn(value["plan_sha256"], self.session.plans)
+            published.append(copy.deepcopy(value))
+            value["changes"][0]["after"] = "changed.by.publisher"
+
+        plan = self.session.plan(self.rows, "collection:1", publish=publish)
+        self.assertEqual(published, [plan])
+        self.assertEqual(self.rows, before)
+        self.assertEqual(self.apply(plan)["changes"], plan["changes"])
+
+    def test_plan_publication_failure_preserves_existing_review_and_session(self):
+        # An empty review has the same digest on repeated planning.
+        self.rows = [row("collection", 1, "asset.prop")]
+        existing = self.plan()
+        pending = copy.deepcopy(self.session.plans)
+
+        def failure(_):
+            raise OSError("publication refused")
+
+        for rows in (self.rows, self.rows + [row("mesh", 2, None)]):
+            with self.subTest(rows=rows):
+                with self.assertRaisesRegex(OSError, "publication refused"):
+                    self.session.plan(rows, "collection:1", publish=failure)
+                self.assertEqual(self.session.plans, pending)
+                self.assertEqual(self.session.revision, 0)
+                self.assertEqual(self.session.receipts, {})
+        self.assertEqual(self.apply(existing)["changes"], [])
+
+    def test_every_snapshot_field_and_missing_record_refuse_before_callbacks(self):
+        changes = {"uid": 99, "handle": "mesh:99", "kind": "material", "prefix": "other",
+                   "label": "renamed", "key": "other.key", "identity": "mesh.new",
+                   "target": False, "editable": False, "shared_users": ["Object:new"],
+                   "parent": 19, "data": 20, "collections": [1, 2], "objects": [2, 3]}
+        for field, value in list(changes.items()) + [("removed", None), ("document", None),
+                                                     ("revision", None)]:
+            with self.subTest(field=field):
+                self.setUp()
+                plan = self.plan()
+                if field == "removed":
+                    self.rows.pop()
+                elif field == "document":
+                    self.session.document = "other-document"
+                elif field == "revision":
+                    self.session.revision += 1
+                else:
+                    self.rows[3][field] = value
+                events = []
+                with self.assertRaises(recipes.RecipeError):
+                    self.session.apply(plan["plan_sha256"], "refused", self.rows,
+                                       lambda *_: events.append("write"),
+                                       lambda _: events.append("publish"),
+                                       before_apply=lambda: events.append("invalidate"))
+                self.assertEqual(events, [])
+                self.assertEqual(self.session.receipts, {})
+
+    def test_failure_at_each_apply_stage_restores_preimage_in_reverse_order(self):
+        for stage in ("invalidate", "write-first", "write-second", "publish"):
+            for partial in (False, True):
+                with self.subTest(stage=stage, partial=partial):
+                    self.setUp()
+                    plan = self.plan()
+                    before, events, writes = dict(self.values), [], []
+                    failed_index = {"write-first": 1, "write-second": 2}.get(stage)
+
+                    def invalidate():
+                        events.append("invalidate")
+                        if stage == "invalidate":
+                            raise OSError("build invalidation failed")
+
+                    def write(handle, identity):
+                        writes.append((handle, identity))
+                        if len(writes) == failed_index:
+                            if partial:
+                                self.values[handle] = identity
+                            raise RuntimeError("property write failed")
+                        self.values[handle] = identity
+
+                    def publish(value):
+                        events.append(value["status"])
+                        if stage == "publish" and value["status"] == "applied":
+                            raise OSError("receipt publication failed")
+                        self.published.append(value)
+
+                    with self.assertRaises(recipes.RecipeError) as error:
+                        self.session.apply(plan["plan_sha256"], "request_1", self.rows,
+                                           write, publish, before_apply=invalidate)
+                    self.assertEqual(error.exception.rule, "recipe.failed")
+                    self.assertEqual(self.values, before)
+                    attempted = 0 if stage == "invalidate" else failed_index or len(plan["changes"])
+                    self.assertEqual(writes[attempted:], [(change["handle"], change["before"])
+                                                         for change in reversed(plan["changes"][:attempted])])
+                    self.assertEqual(events[0], "invalidate")
+                    self.assertEqual(events[-1], "failed")
+                    self.assertEqual(self.session.revision, 1)
+                    self.assertEqual(self.session.plans, {})
+                    self.assertEqual(self.apply(plan), self.published[-1])
+
+    def test_rollback_continues_after_each_restore_failure_and_reports_all_errors(self):
+        for failing in ({"mesh:4"}, {"object:3"}, {"mesh:4", "object:3"}):
+            with self.subTest(failing=failing):
+                self.setUp()
+                plan = self.plan()
+                attempts = []
+
+                def write(handle, value):
+                    attempts.append((handle, value))
+                    if len(attempts) > len(plan["changes"]) and handle in failing:
+                        raise RuntimeError("cannot restore " + handle)
+                    self.values[handle] = value
+
+                def publish(value):
+                    if value["status"] == "applied":
+                        raise OSError("receipt unavailable")
+                    self.published.append(value)
+
+                with self.assertRaises(recipes.RecipeError) as error:
+                    self.apply(plan, write=write, publish=publish)
+                self.assertEqual(error.exception.rule, "recipe.rollback")
+                receipt = self.published[-1]
+                self.assertEqual(receipt["status"], "rollback_failed")
+                self.assertEqual(receipt["rollback_errors"], ["cannot restore " + change["handle"]
+                                 for change in reversed(plan["changes"]) if change["handle"] in failing])
+                self.assertEqual(len(attempts), 2 * len(plan["changes"]))
+                for change in plan["changes"]:
+                    expected = change["after"] if change["handle"] in failing else change["before"]
+                    self.assertEqual(self.values[change["handle"]], expected)
+                self.assertEqual(self.apply(plan), receipt)
+                self.assertEqual(self.session.plans, {})
+
+    def test_receipt_copies_and_record_order_do_not_change_stored_result(self):
+        plan = self.plan()
+        self.rows.reverse()
+        result = self.apply(plan)
+        expected = copy.deepcopy(result)
+        result["changes"].clear()
+        self.published[0]["status"] = "changed"
+        replay = self.apply(plan)
+        self.assertEqual(replay, expected)
+        replay["changes"].clear()
+        self.assertEqual(self.apply(plan), expected)
+
+    def test_pending_and_terminal_limits_refuse_without_losing_replay(self):
+        for _ in range(32):
+            self.plan()
+        with self.assertRaises(recipes.RecipeError) as error:
+            self.plan()
+        self.assertEqual(error.exception.rule, "recipe.limit")
+        self.assertEqual(len(self.session.plans), 32)
+        self.session.changed()
+        for index in range(256):
+            plan = self.plan()
+            receipt = self.apply(plan, request=str(index))
+        self.assertEqual(self.apply(plan, request="255"), receipt)
+        plan = self.plan()
+        before, published = dict(self.values), copy.deepcopy(self.published)
+        with self.assertRaises(recipes.RecipeError) as error:
+            self.apply(plan, request="overflow")
+        self.assertEqual(error.exception.rule, "recipe.limit")
+        self.assertEqual(self.values, before)
+        self.assertEqual(self.published, published)
+
 
 if __name__ == "__main__":
     unittest.main()

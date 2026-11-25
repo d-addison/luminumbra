@@ -131,11 +131,13 @@ bool NetSessionApplyStep(std::uint64_t /*tick*/,
     // then quiesce so the next scheduler decision observes the identical settled
     // state on both peers. The streaming anchor is the spawn point -- NOT the
     // client camera -- so render-side look can never alter the hashed world.
-    if (!physics_system->prepare_simulation_collisions(
-            {}, ctx->session->GetSimulationTickCount() + 1)) {
+    if (!ctx->session->SetHostSimulationAnchors({&ctx->spawn_anchor, 1}) ||
+        !ctx->session->PrepareSimulationCollisions(ctx->session->GetSimulationTickCount() + 1)) {
         return false; // No physics or session tick is consumed on refusal.
     }
-    physics_system->update(static_cast<float>(ctx->fixed_dt));
+    if (!ctx->session->SimulationHostIntegrationEnabled()) {
+        physics_system->update(static_cast<float>(ctx->fixed_dt));
+    }
     const std::uint32_t ran =
         ctx->session->TickSimulation(ctx->fixed_dt, /*defer_water_authority=*/true);
     world_system->update(ctx->session->GetRegistry(), ctx->spawn_anchor, physics_system);
@@ -154,7 +156,11 @@ void NetSessionCaptureHashes(std::uint64_t tick, Luminumbra::Net::HashMsg& out, 
     const std::string empty_entities = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
         Luminumbra::Ecs::EntityRegistrySnapshot{});
     const auto result = ctx->session->CaptureAuthorityHashes(
-        empty_entities, Luminumbra::Persistence::AuthorityCaptureParts::StreamedAndSubHashes);
+        empty_entities,
+        Luminumbra::Persistence::AuthorityCaptureParts::StreamedAndSubHashes,
+        Luminumbra::Persistence::AuthoritySubHashMask::Terrain |
+            Luminumbra::Persistence::AuthoritySubHashMask::Water |
+            Luminumbra::Persistence::AuthoritySubHashMask::Entities);
     if (!result.capture) {
         throw Luminumbra::Persistence::AuthorityCaptureRefused();
     }
@@ -177,7 +183,11 @@ void NetSessionCaptureAuthorityHashes(std::uint64_t tick,
     const std::string empty_entities = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
         Luminumbra::Ecs::EntityRegistrySnapshot{});
     const auto result = ctx->session->CaptureAuthorityHashes(
-        empty_entities, Luminumbra::Persistence::AuthorityCaptureParts::All);
+        empty_entities,
+        Luminumbra::Persistence::AuthorityCaptureParts::All,
+        Luminumbra::Persistence::AuthoritySubHashMask::Terrain |
+            Luminumbra::Persistence::AuthoritySubHashMask::Water |
+            Luminumbra::Persistence::AuthoritySubHashMask::Entities);
     if (!result.capture) {
         throw Luminumbra::Persistence::AuthorityCaptureRefused();
     }
@@ -280,10 +290,11 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
         m_failure_reason = "host_world_systems_missing";
         return false;
     }
+    host_ws->debug_set_streaming_radius_cap(config.test_streaming_radius_cap);
     m_spawn_anchor = m_impl->host_session->GetMetadata().spawnPoint;
-    if (!host_ws->EnsureSurfaceReadyNear(
-            m_spawn_anchor, host_phys, config.surface_radius, config.collision_radius)) {
-        m_failure_reason = "host_surface_not_ready";
+    if (!m_impl->host_session->PrepareInitialSimulation(config.surface_radius,
+                                                        config.collision_radius)) {
+        m_failure_reason = "host_initial_simulation_not_ready";
         return false;
     }
 
@@ -385,9 +396,10 @@ bool NetworkedSessionDriver::StepAgreedTick() {
     // The hook reuses this tick's publication and cannot spend the budget twice.
     bool retry = false;
     for (auto* ctx : {&m_impl->host_ctx, &m_impl->client_ctx}) {
-        const bool prepared = !ctx->session->GetRegionSchedulerFault() &&
-                              ctx->session->GetPhysicsSystem()->prepare_simulation_collisions(
-                                  {}, ctx->session->GetSimulationTickCount() + 1);
+        const bool prepared =
+            !ctx->session->GetRegionSchedulerFault() &&
+            ctx->session->SetHostSimulationAnchors({&ctx->spawn_anchor, 1}) &&
+            ctx->session->PrepareSimulationCollisions(ctx->session->GetSimulationTickCount() + 1);
         if (ctx->session->GetRegionSchedulerFault()) {
             m_failure_reason = "region_preparation_fault";
             m_finished = true;

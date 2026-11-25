@@ -1,0 +1,18 @@
+{
+  "id": "iss.130",
+  "source": "issue #130",
+  "statement": "Reversed-Z float depth is adopted with no GL error-severity output on a fixed view.",
+  "status": "needs-native-run",
+  "evidence": [
+    {
+      "kind": "native",
+      "ref": "tools/perf/check_gl_debug_log.py",
+      "planned": "GL debug output qualification checker (v0.3.1); owner: ac",
+      "command": "python tools/perf/check_gl_debug_log.py <client-stdout.log>",
+      "receipt_schema": "luminumbra.gl_debug_verdict.v1"
+    }
+  ],
+  "requirements": [
+    "dw.mappings.035"
+  ]
+}

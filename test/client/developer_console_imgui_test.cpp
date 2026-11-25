@@ -8,6 +8,8 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 
+#include <limits>
+
 using namespace Luminumbra::Client::App;
 using namespace Luminumbra::Client::Debug;
 
@@ -54,7 +56,13 @@ struct UiFixture : testing::Test {
     DeveloperFrameAdapter frame;
     int effects = 0, saves = 0;
     std::map<std::string, int> draws, queries;
+    luminumbra::core::InspectorRegistry inspectors;
+    std::optional<luminumbra::core::InspectorPanelHandle> perf_inspector;
     void SetUp() override {
+        perf_inspector = RegisterPerfHudInspector(inspectors);
+        ASSERT_TRUE(perf_inspector);
+        if (!perf_inspector)
+            return;
         DeveloperHost host;
         host.save = [&] {
             ++saves;
@@ -76,9 +84,14 @@ struct UiFixture : testing::Test {
                             },
                             [&, id](DeveloperFrameAdapter&) {
                                 ++draws[id];
-                                if (id == "perf.hud")
-                                    DrawPerfHudContents({0.2, 0.75, 12});
-                                else if (id == "runtime.time_indicator")
+                                if (id == "perf.hud") {
+                                    ASSERT_TRUE(perf_inspector);
+                                    if (!perf_inspector)
+                                        return;
+                                    ASSERT_TRUE(PublishPerfHudInspector(
+                                        inspectors, *perf_inspector, {0.2, 0.75, 12, 1}));
+                                    DrawPerfHudContents(inspectors.Read(*perf_inspector, 1));
+                                } else if (id == "runtime.time_indicator")
                                     DrawTimeIndicatorContents(
                                         0.5f, FormatKeyChord(console.Bindings().Get("time.reset")));
                                 else if (id == "runtime.time")
@@ -97,6 +110,148 @@ struct UiFixture : testing::Test {
         };
     }
 };
+
+TEST(PerfHudInspector, CopiesCompletedObservationsAndPreservesUnknownProducerAge) {
+    using namespace luminumbra::core;
+    InspectorRegistry registry;
+    const auto handle = RegisterPerfHudInspector(registry);
+    ASSERT_TRUE(handle);
+    if (!handle)
+        return;
+    ASSERT_TRUE(PublishPerfHudInspector(registry, *handle, {0.2, 0.75, 0, 42}));
+    const auto snapshot = registry.Read(*handle, 42);
+    ASSERT_TRUE(snapshot);
+    if (!snapshot)
+        return;
+    EXPECT_EQ(snapshot->metrics[0].value, 200.0);
+    EXPECT_EQ(snapshot->metrics[0].age_frames, 0u);
+    EXPECT_EQ(snapshot->metrics[1].value, 0.75);
+    EXPECT_FALSE(snapshot->metrics[1].age_frames);
+    EXPECT_EQ(snapshot->metrics[2].value, 0.0);
+    EXPECT_EQ(snapshot->metrics[2].availability, MetricAvailability::Available);
+    EXPECT_FALSE(snapshot->metrics[2].age_frames);
+    EXPECT_TRUE(registry.Find("perf.hud"));
+    EXPECT_FALSE(RegisterPerfHudInspector(registry));
+    const auto stale = registry.Read(*handle, 43);
+    ASSERT_TRUE(stale);
+    if (!stale)
+        return;
+    EXPECT_EQ(stale->metrics[0].availability, MetricAvailability::Stale);
+    EXPECT_FALSE(stale->metrics[0].value);
+    ASSERT_TRUE(registry.Unregister(*handle));
+    EXPECT_FALSE(PublishPerfHudInspector(registry, *handle, {0.2, 0.75, 0, 42}));
+}
+
+TEST(PerfHudInspector, MissingAndInvalidInputsHaveNoNumericValue) {
+    using namespace luminumbra::core;
+    InspectorRegistry registry;
+    const auto handle = RegisterPerfHudInspector(registry);
+    ASSERT_TRUE(handle);
+    if (!handle)
+        return;
+    ASSERT_TRUE(PublishPerfHudInspector(registry, *handle, {0.0, {}, {}, {}}));
+    const auto missing = registry.Read(*handle, 0);
+    ASSERT_TRUE(missing);
+    if (!missing)
+        return;
+    EXPECT_EQ(missing->metrics[0].availability, MetricAvailability::Pending);
+    EXPECT_EQ(missing->metrics[1].availability, MetricAvailability::Unavailable);
+    EXPECT_EQ(missing->metrics[2].availability, MetricAvailability::Unavailable);
+    EXPECT_FALSE(missing->metrics[0].value);
+    EXPECT_FALSE(missing->metrics[1].value);
+    EXPECT_FALSE(missing->metrics[2].value);
+    for (const double invalid : {-1.0,
+                                 std::numeric_limits<double>::infinity(),
+                                 std::numeric_limits<double>::quiet_NaN(),
+                                 std::numeric_limits<double>::max()}) {
+        ASSERT_TRUE(PublishPerfHudInspector(registry, *handle, {invalid, -1.0, {}, 1}));
+        const auto snapshot = registry.Read(*handle, 1);
+        ASSERT_TRUE(snapshot);
+        if (!snapshot)
+            return;
+        EXPECT_EQ(snapshot->metrics[0].availability, MetricAvailability::Unavailable);
+        EXPECT_FALSE(snapshot->metrics[0].value);
+    }
+    for (const double invalid : {0.0,
+                                 -1.0,
+                                 std::numeric_limits<double>::infinity(),
+                                 std::numeric_limits<double>::quiet_NaN()}) {
+        ASSERT_TRUE(PublishPerfHudInspector(registry, *handle, {0.2, invalid, {}, {}}));
+        const auto snapshot = registry.Read(*handle, 1);
+        ASSERT_TRUE(snapshot);
+        if (!snapshot)
+            return;
+        EXPECT_EQ(snapshot->metrics[1].availability, MetricAvailability::Unavailable);
+        EXPECT_FALSE(snapshot->metrics[1].value);
+        EXPECT_FALSE(snapshot->metrics[0].age_frames);
+    }
+    if (std::numeric_limits<std::size_t>::max() > (std::uint64_t{1} << 53)) {
+        const auto exact_limit = static_cast<std::size_t>(std::uint64_t{1} << 53);
+        ASSERT_TRUE(PublishPerfHudInspector(registry, *handle, {0.2, {}, exact_limit, {}}));
+        const auto exact = registry.Read(*handle, 1);
+        ASSERT_TRUE(exact);
+        if (!exact)
+            return;
+        EXPECT_EQ(exact->metrics[2].value, static_cast<double>(exact_limit));
+        ASSERT_TRUE(PublishPerfHudInspector(
+            registry, *handle, {0.2, {}, std::numeric_limits<std::size_t>::max(), {}}));
+        const auto snapshot = registry.Read(*handle, 1);
+        ASSERT_TRUE(snapshot);
+        if (!snapshot)
+            return;
+        EXPECT_EQ(snapshot->metrics[2].availability, MetricAvailability::Unavailable);
+        EXPECT_FALSE(snapshot->metrics[2].value);
+    }
+}
+
+std::string LoggedPerfHud(const std::optional<luminumbra::core::InspectorPanelSnapshot>& snapshot) {
+    ImGui::Begin("Inspector presentation");
+    ImGui::LogToBuffer();
+    DrawPerfHudContents(snapshot);
+    const std::string text(ImGui::GetCurrentContext()->LogBuffer.c_str());
+    ImGui::LogFinish();
+    ImGui::End();
+    return text;
+}
+
+TEST(PerfHudInspector, PresentationReportsSourceAgeAndEveryAvailabilityWithoutFalseZeros) {
+    using namespace luminumbra::core;
+    ScopedImGuiContext context;
+    InspectorRegistry registry;
+    const auto handle = RegisterPerfHudInspector(registry);
+    ASSERT_TRUE(handle);
+    if (!handle)
+        return;
+    for (const auto status : {MetricAvailability::Pending,
+                              MetricAvailability::Unsupported,
+                              MetricAvailability::Unavailable}) {
+        const std::array samples{InspectorMetricSample{status, {}, {}},
+                                 InspectorMetricSample{status, {}, {}},
+                                 InspectorMetricSample{status, {}, {}}};
+        ASSERT_TRUE(registry.Publish(*handle, samples));
+        const auto text = LoggedPerfHud(registry.Read(*handle, 1));
+        EXPECT_NE(text.find(std::string("unavailable (") + MetricAvailabilityName(status) + ")"),
+                  std::string::npos);
+        EXPECT_NE(text.find("source: CPU observed frame interval; age: unknown"),
+                  std::string::npos);
+        EXPECT_EQ(text.find("0.000"), std::string::npos);
+    }
+    ASSERT_TRUE(PublishPerfHudInspector(registry, *handle, {0.2, 0.75, 0, 42}));
+    const auto available = LoggedPerfHud(registry.Read(*handle, 42));
+    EXPECT_NE(available.find("5.0 FPS"), std::string::npos);
+    EXPECT_NE(available.find("Terrain draws: 0.000 draws (available)"), std::string::npos);
+    EXPECT_NE(available.find("source: CPU observed frame interval; age: 0 frames"),
+              std::string::npos);
+    const auto stale = LoggedPerfHud(registry.Read(*handle, 43));
+    EXPECT_NE(stale.find("Frame interval: unavailable (stale)"), std::string::npos);
+    EXPECT_NE(stale.find("age: 1 frames"), std::string::npos);
+    EXPECT_EQ(stale.find("200.000"), std::string::npos);
+    EXPECT_EQ(stale.find("FPS"), std::string::npos);
+    ASSERT_TRUE(PublishPerfHudInspector(
+        registry, *handle, {std::numeric_limits<double>::denorm_min(), {}, {}, 43}));
+    EXPECT_EQ(LoggedPerfHud(registry.Read(*handle, 43)).find("FPS"), std::string::npos);
+    EXPECT_NE(LoggedPerfHud(std::nullopt).find("Frame performance unavailable"), std::string::npos);
+}
 
 TEST_F(UiFixture, DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled) {
     ScopedImGuiContext context;

@@ -1,0 +1,32 @@
+{
+  "id": "station.document",
+  "source": "docs/distant-world.md#station-discovery-req-e4",
+  "statement": "Discovery emits the closed canonical UTF-8 v1 document on stdout and diagnostics on stderr; schema, identity pins and certification refusals are checked without claiming native terrain qualification.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "StationDiscoveryContract"
+    },
+    {
+      "kind": "ctest",
+      "ref": "StationDiscoveryCliSmoke"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/gates/station_discovery_contract.py"
+    }
+  ],
+  "requirements": [
+    "dw.station.013",
+    "dw.station.014",
+    "dw.station.015",
+    "dw.station.016",
+    "dw.station.017",
+    "dw.station.018",
+    "dw.station.019",
+    "dw.station.020",
+    "dw.station.021",
+    "dw.station.091"
+  ]
+}

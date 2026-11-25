@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.history.03",
+  "source": "docs/active-regions.md#historical-ambient-hash-portability-investigation",
+  "statement": "Acceptance obligations: The campaign receipt is a local build artifact at `build/campaign-archives-20260907/slice-C2/receipt.json`, containing branch, head commit, changed files, added tests, both ctest totals, before/after fixture hashes, and deviations. / Its absence means the slice has not supplied completion evidence; / malformed or unknown receipt fields do not authorize acceptance. / It is not read by the engine and does not change save or performance artifact schemas. / For an enabled saved session that has scheduled ticks, client player construction also restores the ledger's walking feet before accepting another walking update. / This prevents a saved noclip camera/spawn position from replacing the restored simulation anchor on the first frame.",
+  "status": "planned",
+  "requirements": [
+    "ar.history.032",
+    "ar.history.033",
+    "ar.history.034",
+    "ar.history.035",
+    "ar.history.036",
+    "ar.history.037"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArHistoryContract.Requirements03",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.history.03.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ac"
+    }
+  ]
+}

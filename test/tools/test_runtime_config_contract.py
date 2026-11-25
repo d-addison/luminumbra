@@ -32,6 +32,26 @@ def cpp_block(source, anchor):
 
 
 class RuntimeConfigSourceContract(unittest.TestCase):
+    def test_clock_authority_uses_registered_legacy_adapter(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
+                              .read_text(encoding="utf-8"))
+        self.assertNotIn("world::WorldClock::from_metadata(", service)
+        self.assertNotIn("clock.write_metadata(metadata)", service)
+        self.assertIn("Game::WorldClockAuthorityAdapter::ReadMetadata(metadata,clock,error)", service)
+        self.assertIn("Game::WorldClockAuthorityAdapter::WriteMetadata(clock,metadata)", service)
+        fold = cpp_block(session, "GameSession::FoldClockIntoEcologyHash(")
+        self.assertIn("Game::WorldClockAuthorityAdapter::CanonicalBytes(m_worldClock)", fold)
+        self.assertIn("Game::WorldClockAuthorityAdapter::WriteMetadata(m_worldClock,metadata_json)", session)
+        adapter = compact_cpp((ROOT / "src/luminumbra_common/game/WorldClockAuthorityAdapter.h")
+                              .read_text(encoding="utf-8"))
+        self.assertIn("contributors.RegisterMetadata(adapter,kModuleId)", adapter)
+        self.assertIn("modules.register_module(", adapter)
+        self.assertIn("contributors.RestoreMetadata(modules,kRequiredModules,metadata,error)", adapter)
+        self.assertIn("contributors.WriteMetadata(modules,kRequiredModules,metadata)", adapter)
+        self.assertIn("contributors.LegacyCanonicalState(modules,kRequiredModules,kContributorId)", adapter)
+
     def test_strict_numeric_input_sites_share_the_checked_parser(self):
         sites = {
             "core/RuntimeScenarioConfig.cpp": (
@@ -170,9 +190,9 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                          "parts==AuthorityCaptureParts::Composite||"
                          "parts==AuthorityCaptureParts::Chunk;}")
         for expression in (
-                "want_streamed?ComputeWorldStreamingStateHash(state,cursor):std::string()",
+                "want_streamed?ComputeWorldStreamingStateHash(state,cursor,work):std::string()",
                 "want_chunk?(regional_projection?StableChecksum(*regional_projection):streamed):std::string()",
-                "sub=ComputeWorldStreamingStateSubHashes(state,cursor);",
+                "sub=ComputeWorldStreamingStateSubHashes(state,cursor,requested,work);",
                 "sub.entities=StableChecksum(entity_snapshot_json);",
                 "ComposeWorldHash(chunk,runtime.wind,runtime.weather,runtime.aether,"
                 "runtime.scent,runtime.ecology,runtime.plant)"):
@@ -211,7 +231,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         _, _, regional = self.authority_capture_blocks()
         skip = cpp_block(regional, "if(!NeedsRegionalAuthority(parts))")
         self.assertEqual(skip, "{returnCaptureAuthorityHashes(state,water_sim_cursor,std::nullopt,"
-                         "entity_snapshot_json,runtime,parts);}")
+                         "entity_snapshot_json,runtime,parts,requested,work);}")
         self.assertLess(regional.index(skip), regional.index("regional.regions"))
         self.assertLess(regional.index(skip), regional.index("RegionDigestOperationoperation("))
 
@@ -279,7 +299,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertNotIn("m_regionFault", capture)
         self.assertIn("if(!m_worldUsable||!IsSimulationTickBoundary())", capture)
         self.assertIn("returnPersistence::CaptureAuthorityHashes("
-                      "state,cursor,projection,entity_snapshot_json,runtime,parts);", capture)
+                      "state,cursor,projection,entity_snapshot_json,runtime,parts,requested,work);", capture)
         self.assertIn("LatchRegionFault(m_worldClock.tick(),error.what());"
                       "return{AuthorityCaptureStatus::PreparationRefused,std::nullopt};", capture)
 
@@ -287,8 +307,11 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         driver = compact_cpp((ROOT / "src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp")
                              .read_text(encoding="utf-8"))
         capture = cpp_block(driver, "voidNetSessionCaptureHashes(")
-        request = "ctx->session->CaptureAuthorityHashes(empty_entities," \
-                  "Luminumbra::Persistence::AuthorityCaptureParts::StreamedAndSubHashes)"
+        request = ("ctx->session->CaptureAuthorityHashes(empty_entities,"
+                  "Luminumbra::Persistence::AuthorityCaptureParts::StreamedAndSubHashes,"
+                  "Luminumbra::Persistence::AuthoritySubHashMask::Terrain|"
+                  "Luminumbra::Persistence::AuthoritySubHashMask::Water|"
+                  "Luminumbra::Persistence::AuthoritySubHashMask::Entities)")
         self.assertIn(request, capture)
         refusal = cpp_block(capture, "if(!result.capture)")
         self.assertIn("throwLuminumbra::Persistence::AuthorityCaptureRefused();", refusal)
@@ -1092,7 +1115,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         metadata = service[start:service.index("boolWorldSaveService::save_metadata_and_active_regions(", start)]
         reclaim = metadata.index("ReclaimAbandonedStaging(destination);")
         for validation in ("validate_save(save_dir,errors)",
-                           "world::WorldClock::from_metadata(metadata,clock,clock_error)",
+                           "Game::WorldClockAuthorityAdapter::ReadMetadata(metadata,clock,clock_error)",
                            "ReadAmbientAnchor(metadata,ambient_anchor,clock_error)",
                            "read_clock_metadata(save_dir,previous_clock,requires_active_regions,errors)",
                            "if(requires_active_regions&&!has_clock)"):

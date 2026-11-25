@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.persistence.07",
+  "source": "docs/distant-world.md#persistence-and-format-contract",
+  "statement": "Acceptance obligations: A save with zero dirty chunks still publishes the clock, ledger, pages and entity records that changed. / Interruption is tested after every rename and during the bake. / Everything in this section is gated by `sim.active_regions`: with the key off, clock restoration, the calendar unification, identity-dependent random streams, the chunk projection, the water host-tick change and every new hash section are inactive, so the existing determinism fixtures (canonical debug and release hashes, populated goldens, replay and lockstep gates) stay byte-identical; / a save written with the key on and opened with it off refuses as incompatible configuration rather than silently degrading. / With the key on, world hash composition keeps its append-only order and folds new state into existing slots as tagged canonical sections, each present only when its state is non-empty: clock, calendar, scheduler configuration and ledger state, region random-stream state, persistent-identity allocator, creature and ground-object records fold into the `ecology` slot; / page bytes fold into the `wind`, `weather` and `aether` slots.",
+  "status": "planned",
+  "requirements": [
+    "dw.persistence.037",
+    "dw.persistence.038",
+    "dw.persistence.039",
+    "dw.persistence.040",
+    "dw.persistence.041",
+    "dw.persistence.042"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwPersistenceContract.Requirements07",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.persistence.07.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

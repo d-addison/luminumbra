@@ -1,3 +1,4 @@
+#include "../support/PollinationOracle.h"
 #include "../support/UniqueTempPath.h"
 
 #include <gtest/gtest.h>
@@ -6,6 +7,8 @@
 
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/PlantComponents.h"
+#include "luminumbra_common/core/PhaseScheduler.h"
+#include "luminumbra_common/persistence/PlantPersistence.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/simulation/SimBudgetTelemetry.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -249,6 +252,13 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
         }
         const auto report = runner.RunFixedTicks(ticks);
         ASSERT_EQ(report.ticks_executed, ticks);
+        // Oracle is the previous hard-coded order, repeated once per executed tick.
+        Luminumbra::ExecutionTrace expected_schedule;
+        for (std::uint64_t tick = 0; tick < ticks; ++tick) {
+            expected_schedule.record("phase", "Ecology", "ecology.pollination");
+            expected_schedule.record("phase", "Ecology", "ecology.disease");
+        }
+        EXPECT_EQ(runner.Session()->GetEcologyScheduleTraceHash(), expected_schedule.hash());
         const std::string hash = runner.ComputeWorldHash();
         ASSERT_FALSE(hash.empty());
         std::cout << "SimBudgetParity active_regions=" << GetParam()
@@ -285,6 +295,108 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
         ASSERT_TRUE(runner.Session()->SaveWorldState());
         ASSERT_TRUE(runner.Session()->SaveWorld());
         EXPECT_EQ(SavedContentFingerprints(runner.Session()->GetWorldSaveDir()), before);
+        runner.Shutdown();
+    }
+}
+TEST_P(SimBudgetWorldParity, EcologyScheduleVisitsOnlyExecutedTicksWithEmptyRoster) {
+    Luminumbra::Server::ServerWorldRunnerConfig config;
+    config.root_path = Root().generic_string() + "/";
+    config.seed = "1337";
+    config.surface_radius = 1;
+    config.collision_radius = 1;
+    config.autosave_interval_ticks = 0;
+    config.finite_hydrology = false;
+    Luminumbra::Server::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot());
+    auto* session = runner.Session();
+    ASSERT_NE(session, nullptr);
+    ASSERT_EQ(session->ActiveRegionsEnabled(), GetParam());
+    ASSERT_TRUE(session->GetRegistry().view<Luminumbra::Components::PlantTag>().empty());
+    Luminumbra::ExecutionTrace expected;
+    EXPECT_EQ(session->GetEcologyScheduleTraceHash(), expected.hash());
+    EXPECT_EQ(session->TickSimulation(0.0), 0u);
+    EXPECT_EQ(session->GetEcologyScheduleTraceHash(), expected.hash());
+    const double fixed_dt = session->GetSimulationClock().fixed_dt();
+    EXPECT_EQ(session->TickSimulation(fixed_dt * 0.5), 0u);
+    EXPECT_EQ(session->GetEcologyScheduleTraceHash(), expected.hash());
+    ASSERT_EQ(session->TickSimulation(fixed_dt * 0.5), 1u);
+    expected.record("phase", "Ecology", "ecology.pollination");
+    expected.record("phase", "Ecology", "ecology.disease");
+    EXPECT_EQ(session->GetEcologyScheduleTraceHash(), expected.hash());
+    // The session clamps catch-up below the shared clock default. Request one
+    // tick past that cap, so only the executed batch may reach the trace.
+    const std::uint32_t cap = session->GetSimulationClock().max_catch_up_ticks();
+    ASSERT_GE(cap, 2u);
+    ASSERT_EQ(session->TickSimulation(fixed_dt * static_cast<double>(cap + 1)), cap);
+    for (std::uint32_t tick = 0; tick < cap; ++tick) {
+        expected.record("phase", "Ecology", "ecology.pollination");
+        expected.record("phase", "Ecology", "ecology.disease");
+    }
+    EXPECT_EQ(session->GetEcologyScheduleTraceHash(), expected.hash());
+    EXPECT_FALSE(session->CreateTransientWorld("Refused schedule", "1337", "missing-preset"));
+    EXPECT_EQ(session->GetEcologyScheduleTraceHash(), expected.hash());
+    ASSERT_TRUE(session->CreateTransientWorld("Reset schedule", "1337", "default"));
+    EXPECT_EQ(session->GetEcologyScheduleTraceHash(), expected.hash());
+    ASSERT_EQ(session->TickSimulation(fixed_dt), 1u);
+    expected.record("phase", "Ecology", "ecology.pollination");
+    expected.record("phase", "Ecology", "ecology.disease");
+    EXPECT_EQ(session->GetEcologyScheduleTraceHash(), expected.hash());
+    runner.Shutdown();
+    runner.Shutdown();
+    // A new session starts with its own registry and trace after teardown.
+    const Luminumbra::world::GameSession next;
+    EXPECT_EQ(next.GetEcologyScheduleTraceHash(), Luminumbra::ExecutionTrace{}.hash());
+}
+
+TEST_P(SimBudgetWorldParity, PollinationIndexMatchesBruteForceWorldHash) {
+    namespace C = Luminumbra::Components;
+    namespace F = luminumbra::foliage;
+    using Gate = Luminumbra::world::RegionConsumerGate;
+    std::string reference_hash;
+    std::string reference_bytes;
+    for (const bool indexed : {false, true}) {
+        Luminumbra::Server::ServerWorldRunnerConfig config;
+        config.root_path = Root().generic_string() + "/";
+        config.seed = "1337";
+        config.surface_radius = 1;
+        config.collision_radius = 1;
+        config.ecology_roster = true;
+        config.planted_roster = true;
+        config.autosave_interval_ticks = 0;
+        config.finite_hydrology = false;
+        Luminumbra::Server::ServerWorldRunner runner(config);
+        ASSERT_TRUE(runner.Boot());
+        auto& registry = runner.Session()->GetRegistry();
+        std::uint32_t count = 0;
+        for (const auto plant : registry.view<C::PlantTag, C::PlantGrowthComponent>()) {
+            registry.get<C::PlantGrowthComponent>(plant).stage =
+                static_cast<std::uint8_t>(C::PlantStage::Flowering);
+            registry.emplace_or_replace<C::PollinationTag>(plant);
+            registry.emplace_or_replace<C::PollinationComponent>(plant);
+            // Coincident donors exercise identity ties.
+            registry.get<C::TransformComponent>(plant).position = {0.0f, 0.0f, 0.0f};
+            ++count;
+        }
+        ASSERT_GE(count, 2u);
+        const Gate gate;
+        for (const auto tick : {1u, 2u, 99u}) {
+            const auto stats =
+                indexed ? F::RunPollinationOnTick(registry, tick, {1.0f, -1.0f}, 99, 0.05f, gate)
+                        : Luminumbra::TestSupport::PollinationOracle::BrutePollination(
+                              registry, tick, {1.0f, -1.0f}, gate);
+            EXPECT_EQ(stats.crossed, count);
+        }
+        const auto bytes = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
+            F::BuildPlantEntitySnapshot(registry, true));
+        const auto hash = runner.ComputeWorldHash();
+        ASSERT_FALSE(hash.empty());
+        if (indexed) {
+            EXPECT_EQ(bytes, reference_bytes);
+            EXPECT_EQ(hash, reference_hash);
+        } else {
+            reference_bytes = bytes;
+            reference_hash = hash;
+        }
         runner.Shutdown();
     }
 }

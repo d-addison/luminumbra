@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <memory>
 #include <span>
@@ -55,6 +56,10 @@ class Shader;
 // ===========================================================================
 class ParticlePass {
 public:
+    struct CallerState {
+        GLboolean cull_enabled = GL_FALSE;
+        static CallerState QueryExternal();
+    };
     // --- Pinned capacities (documented design). ---
     static constexpr std::size_t kMaxInstances = 65536; // global ring pool
     static constexpr std::size_t kMaxEmitters = 256;    // concurrent emitters
@@ -171,6 +176,11 @@ public:
     }
     std::size_t live_particle_count() const {
         return m_live_count;
+    }
+    // Slots examined by the most recent update, including particles that die.
+    // Constant-time, render-only work diagnostic; no particle storage is exposed.
+    std::size_t update_slot_visits() const {
+        return m_update_slot_visits;
     }
     // Render-only diagnostic copy in pool order, bounded by kMaxInstances.
     // Reports ownership and motion without exposing mutable particle storage.
@@ -289,7 +299,13 @@ public:
     // G-buffer depth/lit-scene draw target) from the RenderContext seam instead
     // of RenderPipeline&. RETURNS the instances drawn (0 on a no-op) so the
     // pipeline owns the stat bump at the call site.
-    std::size_t execute(const RenderContext& ctx, const Camera& camera);
+    // Shipping dispatch supplies known enable state; direct hosts preserve arbitrary state.
+    std::size_t execute(const RenderContext& ctx, const Camera& camera, const CallerState& caller);
+    std::size_t execute_external(const RenderContext& ctx, const Camera& camera);
+    // Preserve the existing direct-call boundary for previews and pass consumers.
+    std::size_t execute(const RenderContext& ctx, const Camera& camera) {
+        return execute_external(ctx, camera);
+    }
 
 private:
     struct ActiveEmitter {
@@ -330,7 +346,10 @@ private:
     std::vector<EmitterDescriptor> m_descriptors;
 
     // Ring buffer of live particles (oldest evicted on overflow).
+    struct ActiveSlots;
+    std::unique_ptr<ActiveSlots> m_active_slots;
     std::vector<Particle> m_particles;
+    std::size_t m_update_slot_visits = 0;
     std::size_t m_ring_head = 0; // next write slot
     std::size_t m_live_count = 0;
 

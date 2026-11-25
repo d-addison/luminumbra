@@ -143,7 +143,8 @@
     "res/shaders/foliage.vert": "aba0d84c40685a71d6b332d8e3e72ff68144d2aa6b01a3a89abcd70bd6c2c20f",
     "res/shaders/g_buffer.frag": "6e07692ad1d04e3fdaa79184c03d31d4d61965ea0e4c77e8de48fa98b57a227d",
     "res/shaders/g_buffer.vert": "bb20ba2c791ac0d4c087d8c7b792ee45eb6dbfcffa12cfa1838c27002e2b25b4",
-    "res/shaders/grass_compact_prefix.comp": "43bcf2b6c883f958cab97d9b88c911701edd1ff1416e0290ef427228b406e677",
+    "res/shaders/grass_compact_prefix.comp": "efcb77ed4b0f514887b79883345b16e7485dbbb9317ce607db3344413b5a1203",
+    "res/shaders/grass_scatter.comp": "f5d98e2bca9004977b2c44202dd6cdb996bee7fd017304b7c07459bb5d7f42db",
     "res/shaders/instanced_mesh.vert": "83198486e34bcb2d2ad4dcd5271efc9b4fd5deab5842768a8a85eac76d245d9c",
     "res/shaders/lighting_pass.frag": "85af518c331ee1eb07b361f7b3b5177fb2d0f6b9d2ab0a1b462ec4f0439fa54d",
     "res/shaders/magical_particles.frag": "4b04d290eba44750b4c908a8195a9d5f94d14b9a00b4ff19e9eb5d862e6b4e2d",
@@ -155,7 +156,7 @@
     "res/shaders/tree_impostor.vert": "6e69ff1391d2d6dd6ef93d7c72c3c387cc4009b3bccf317e5c050018f2e1d796",
     "src/luminumbra_client/rendering/Camera.h": "eccf0f45502d6a41b96833328a5c45258cf19599eb6a23aafd76dccf1009546c",
     "src/luminumbra_client/rendering/SkyAtmosphereLut.ipp": "364b936972a6902aecfb97128d7160d3a0c6380c1ba2e6e1cdf9d783f97596af",
-    "test/rendering/shader_scene_render_test.cpp": "24a929b4f6fd71ad7965af69b1e7562747421b6177d151375787c11b4f9a99db"
+    "test/rendering/shader_scene_render_test.cpp": "e17c09a86db50d1bd4b3caade8f64762284542cb0d6567a1f4d8a8e769760d37"
   },
   "reference_capture": {
     "material": {

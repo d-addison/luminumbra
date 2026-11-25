@@ -5,12 +5,15 @@
 #include "../components/ForagingComponents.h"
 #include "../components/ScavengerComponent.h"
 #include "../components/ThirstComponents.h"
+#include "../core/ModuleRegistry.h"
+#include "../core/PhaseScheduler.h"
 #include "../core/SystemConfig.h"
 #include "../persistence/WorkerBoundary.h"
 #include "../simulation/SimBudgetTelemetry.h"
 #include "ActiveRegionLedger.h"
 #include "Chunk.h"
 #include "FarWorldAuthorityProducer.h"
+#include "SurfaceWorkBudget.h"
 #include "entt/entity/fwd.hpp"
 #include "entt/entt.hpp"
 #include "luminumbra/core/Types.h"
@@ -64,6 +67,7 @@
 #include "../core/JobSystem.h"
 #include "../core/Log.h"
 #include "../fields/EnergyFieldState.h"
+#include "../game/WorldClockAuthorityAdapter.h"
 #include "../persistence/CreatedWorldArtifacts.h"
 #include "../persistence/PlantPersistence.h"
 #include "../persistence/SaveTransaction.h"
@@ -84,7 +88,8 @@
 #include "../systems/PhysicsSystem.h"
 #include "../systems/PlantDiseaseSystem.h" // Plant disease propagation.
 #include "../systems/PlantGrowthSystem.h"  // Plant growth tick.
-#include "../systems/PollinationSystem.h"  // Cross-pollination.
+#include "../systems/PlantTerrainCache.h"
+#include "../systems/PollinationSystem.h" // Cross-pollination.
 #include "../systems/RegionalFoliage.h"
 #include "../systems/SHIELD_WorldSystem.h" // This includes TerrainGenParams
 #include "../systems/SoilNutrientSystem.h" // Soil-nutrient cycling.
@@ -319,6 +324,146 @@ void StepCreatureAvatars(entt::registry& registry,
 } // namespace
 
 namespace Luminumbra::world {
+
+bool GameSession::PrepareInitialSimulation(int surface_radius,
+                                           int collision_radius,
+                                           const std::stop_token& stop) {
+    if (stop.stop_requested() || !m_worldSystem || !m_physicsSystem ||
+        !World::SurfaceRadiiSupported(surface_radius, collision_radius)) {
+        return false;
+    }
+    const bool loaded = RestoredOwnerContinuation() || GetLastLoadedChunkCount() > 0;
+    struct WaterPauseGuard {
+        Systems::SHIELD_WorldSystem& world;
+        bool loaded;
+        ~WaterPauseGuard() {
+            if (loaded)
+                world.SetWaterBootPaused(false);
+        }
+    } pause_guard{*m_worldSystem, loaded};
+    if (loaded)
+        m_worldSystem->SetWaterBootPaused(true);
+    if (!RestoredOwnerContinuation() &&
+        !m_worldSystem->EnsureSurfaceReadyNear(
+            m_metadata.spawnPoint, m_physicsSystem.get(), surface_radius, collision_radius)) {
+        return false;
+    }
+    BootSettleStats stats;
+    if (!SettleInitialSimulation({}, stats, stop))
+        return false;
+    if (loaded)
+        m_worldSystem->SetWaterBootPaused(false);
+    m_worldSystem->sync_water_authority();
+    return true;
+}
+
+bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
+                                          BootSettleStats& stats,
+                                          const std::stop_token& stop) {
+    if (stop.stop_requested() || !m_worldSystem || !m_physicsSystem)
+        return false;
+    auto* ws = m_worldSystem.get();
+    auto* phys = m_physicsSystem.get();
+    const auto* continuation = RestoredOwnerContinuation();
+    const bool water_loaded_from_save = continuation || GetLastLoadedChunkCount() > 0;
+    const auto stream_once = [&] {
+        if (anchors.empty()) {
+            ws->update(
+                m_registry, continuation ? continuation->anchor : m_metadata.spawnPoint, phys);
+        } else {
+            ws->update(m_registry, anchors, phys);
+        }
+        ws->wait_for_streaming_jobs();
+    };
+    // Residency: at most 400 streaming barriers, ending after eight stable counts.
+    // Each update retains the streamer's existing radius/chunk budgets; snapshots
+    // visit only that bounded resident set. No counted simulation ticks run here.
+    std::size_t last_count = static_cast<std::size_t>(-1);
+    int stable = 0;
+    for (int i = 0; !continuation && i < 400 && stable < 8; ++i) {
+        if (stop.stop_requested())
+            return false;
+        stream_once();
+        const std::size_t count = ws->snapshot_streamed_chunks().size();
+        stable = (count == last_count) ? stable + 1 : 0;
+        last_count = count;
+    }
+    // Fresh water has no global all-asleep fixed point: wet/dry seams can
+    // perpetually wake neighbours. Initialize the backlog, then consume the
+    // original fixed transient budget. Loaded/continued water must not advance.
+    int settle_iters = 0;
+    if (!continuation && !water_loaded_from_save) {
+        ws->SetWaterBootSettleMode(true);
+        struct SettleModeGuard {
+            Systems::SHIELD_WorldSystem& world;
+            ~SettleModeGuard() {
+                world.SetWaterBootSettleMode(false);
+            }
+        } settle_guard{*ws};
+        // 2a: init the full backlog (boot mode seeds ALL pending per update; the
+        // loop tolerates late streamers). Bounded.
+        constexpr int kInitSettleCap = 50;
+        std::size_t uninited_now = 0;
+        for (int i = 0; i < kInitSettleCap; ++i) {
+            ++settle_iters;
+            if (stop.stop_requested())
+                return false;
+            stream_once();
+            uninited_now = 0;
+            for (const auto& c : ws->snapshot_streamed_chunks()) {
+                if (c && !c->has_water_sim.load(std::memory_order_acquire))
+                    ++uninited_now;
+            }
+            if (uninited_now == 0)
+                break;
+        }
+        // 2b: exactly kPostInitSettleTicks full-set sim iterations — the flood
+        // transient (lakes/rivers redistributing from their seeded rest levels)
+        // drains and the calm-able majority of chunks reaches sleep. A fixed count
+        // is deterministic (run==replay, host==peer) and bounded by construction.
+        constexpr int kPostInitSettleTicks = 240;
+        for (int i = 0; i < kPostInitSettleTicks; ++i) {
+            ++settle_iters;
+            if (stop.stop_requested())
+                return false;
+            stream_once();
+        }
+    }
+    if (stop.stop_requested())
+        return false;
+    // Settle-exit summary: the heavy oracle asserts the settle CONTRACT —
+    // fresh boots leave zero uninitialized chunks; loaded boots skip the settle
+    // (water paused, state preserved). awake > 0 is EXPECTED (the network flows
+    // perpetually); reproducibility comes from the pause + persisted cursor.
+    {
+        std::size_t water_chunks = 0, awake = 0, uninited = 0;
+        for (const auto& c : ws->snapshot_streamed_chunks()) {
+            if (!c)
+                continue;
+            if (c->has_water_sim.load(std::memory_order_acquire)) {
+                ++water_chunks;
+                if (!c->is_water_sleeping.load(std::memory_order_relaxed))
+                    ++awake;
+            } else {
+                ++uninited;
+            }
+        }
+        LUMINUMBRA_CORE_INFO(
+            "Boot water settle exit: {} water-inited ({} awake), {} NOT water-inited, {} "
+            "chunks total{}",
+            water_chunks,
+            awake,
+            uninited,
+            ws->snapshot_streamed_chunks().size(),
+            water_loaded_from_save ? " [loaded: water settle skipped, state preserved]" : "");
+        stats.water_chunks = water_chunks;
+        stats.awake = awake;
+        stats.uninited = uninited;
+        stats.iterations = settle_iters;
+        stats.water_settle_skipped = water_loaded_from_save;
+    }
+    return true;
+}
 
 struct GameSession::LoadedWorldState {
     WorldStreamingState chunks;
@@ -1515,6 +1660,9 @@ std::uint64_t GameSession::GetFoliageReplayCellVisits() const {
 std::uint64_t GameSession::GetFoliageReplayPreparationPages() const {
     return m_foliageStep ? m_foliageStep->preparation_pages : 0;
 }
+std::uint64_t GameSession::GetPlantTerrainQueryMisses() const {
+    return m_plantTerrainCache ? m_plantTerrainCache->misses() : 0;
+}
 const luminumbra::foliage::SoilGrid* GameSession::GetFoliageSoilGrid() const {
     return m_soilGrid.get();
 }
@@ -1649,6 +1797,37 @@ bool GameSession::AdoptPreparedWorld(const std::shared_ptr<WorldPreparation>& pr
     return prepared->create ? AdoptCreatedWorld(*prepared, artifacts) : AdoptLoadedWorld(*prepared);
 }
 
+// Session composition only: systems remain owned by the session. No stored hooks or
+// borrowed callbacks survive execution of a tick.
+struct GameSession::EcologySchedule {
+    ModuleRegistry modules;
+    PhaseScheduler scheduler;
+
+    EcologySchedule() {
+        // Two fixed tasks. Dependency order deliberately differs from ASCII order.
+        const std::vector<PhaseTask> tasks{{"ecology.disease", "Ecology", {"ecology.pollination"}},
+                                           {"ecology.pollination", "Ecology", {}}};
+        for (const auto& task : tasks) {
+            if (modules.register_module({.id = task.id,
+                                         .provides = {task.id},
+                                         .requires_services = task.after,
+                                         .startup = nullptr,
+                                         .shutdown = nullptr,
+                                         .context = nullptr}) != ModuleResult::Ok) {
+                throw std::logic_error("Invalid ecology module registration");
+            }
+        }
+        if (scheduler.compile({"Ecology"}, tasks) != ScheduleResult::Ok ||
+            modules.startup() != ModuleResult::Ok) {
+            throw std::logic_error("Invalid ecology schedule");
+        }
+    }
+};
+
+std::uint64_t GameSession::GetEcologyScheduleTraceHash() const {
+    return m_ecologySchedule->scheduler.execution_trace_hash();
+}
+
 GameSession::GameSession()
     : GameSession(AuthorityProfileOptions{}, AuthorityProfileTag{}) {}
 
@@ -1656,7 +1835,8 @@ GameSession::GameSession()
 // (see GameSession.h); its only definition is the test seam source.
 GameSession::GameSession(const AuthorityProfileOptions& authority_profile,
                          AuthorityProfileTag /*tag*/)
-    : m_authorityProfile(authority_profile) {
+    : m_authorityProfile(authority_profile)
+    , m_ecologySchedule(std::make_unique<EcologySchedule>()) {
     m_scriptState = std::make_unique<Luminumbra::scripting::LuaState>();
     m_registry.on_destroy<Luminumbra::Components::CreaturePhysicsComponent>()
         .connect<&RemoveCreatureAvatar>(*this);
@@ -1670,11 +1850,15 @@ GameSession::GameSession(const OwnerContinuationOptions& options)
 GameSession::~GameSession() {
     m_registry.ctx().erase<luminumbra::foliage::FarmingReplayGate>();
     DisableFarWorldAuthorityProducer();
-    m_registry.on_destroy<Luminumbra::Components::CreaturePhysicsComponent>()
-        .disconnect<&RemoveCreatureAvatar>(*this);
+    m_regionalEnergyStep.reset();
+    m_foliageStep.reset();
     // Jobs can read world, water, weather and physics. Drain before member destruction.
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
+    // Component destructors and destruction signals borrow world and physics services.
+    m_registry.clear();
+    m_registry.on_destroy<Luminumbra::Components::CreaturePhysicsComponent>()
+        .disconnect<&RemoveCreatureAvatar>(*this);
     if (m_physicsSystem)
         m_physicsSystem->set_world_system(nullptr);
     m_worldSystem.reset();
@@ -1685,9 +1869,11 @@ void GameSession::ResetWorldSystems() {
     m_regionalEnergyStep.reset();
     m_registry.ctx().erase<luminumbra::foliage::FarmingReplayGate>();
     m_foliageStep.reset();
+    m_plantTerrainCache.reset();
     m_worldUsable = false;
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
+    m_registry.clear();
     // Keep all dependencies alive while the world destructor fences admitted work.
     if (m_physicsSystem)
         m_physicsSystem->set_world_system(nullptr);
@@ -1695,7 +1881,6 @@ void GameSession::ResetWorldSystems() {
     m_worldSystem.reset();
     m_physicsSystem.reset();
     m_waterSystem.reset();
-    m_registry.clear();
     m_restoredOwnerContinuation.reset();
     m_ownerStreamTick = 0;
     m_ownerAnchorSet = false;
@@ -2048,12 +2233,12 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
         const std::uint64_t current_tick = first_tick + i;
         // Standalone session hosts also step creature controllers. Reuse a host's
         // successful barrier for this tick; otherwise prepare before any tick writes.
-        if (m_activeRegionsEnabled && m_physicsSystem &&
-            !m_physicsSystem->prepare_simulation_collisions({}, current_tick)) {
+        if (!PrepareSimulationCollisions(current_tick)) {
             m_simulationClock.return_unconsumed_ticks(ticks_executed - i);
             SettleWaterAuthority(defer_water_authority);
             return i; // Retry this unconsumed tick with the same simulation inputs.
         }
+        StepHostPhysics();
         if (i != 0 && m_foliageStep) {
             // Each fixed simulation update has its own replay allowance, even
             // when several updates share one host frame.
@@ -2458,6 +2643,11 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             // growth runs AFTER weather. Integer/fixed-point + id-ordered = run==replay.
             // Temperature, light, soil, weather, and irrigation are sampled below.
             if (!foliage_registry.view<const Luminumbra::Components::PlantTag>().empty()) {
+                if (!m_plantTerrainCache) {
+                    m_plantTerrainCache =
+                        std::make_unique<luminumbra::foliage::PlantTerrainCache>();
+                }
+                m_plantTerrainCache->BeginTick(m_worldSystem.get());
                 const auto plant_env = [this, current_tick](
                                            const Luminumbra::Components::TransformComponent& tf) {
                     luminumbra::foliage::PlantEnvSample s;
@@ -2474,36 +2664,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         s.moisture = luminumbra::foliage::clamp01(
                             s.moisture + static_cast<float>(moist) / 1000.0f * 0.5f);
                     }
-                    // Soil + temperature from the TERRAIN: surface-material favourability
-                    // (grass/soil rich, sand/stone poor) and an altitude lapse (higher
-                    // ground is colder -> alpine vs lowland growth). The real atmospheric/
-                    // terrain coupling. (Only runs for opt-in sim plants, so the per-plant
-                    // world queries are bounded.)
-                    float soil = 0.5f, temp = 0.55f;
-                    if (m_worldSystem) {
-                        const float th = m_worldSystem->GetTerrainHeightAt(p.x, p.z);
-                        switch (m_worldSystem->SurfaceVertexMaterial(p.x, p.z, th)) {
-                            case Luminumbra::MaterialType::Grass:
-                                soil = 0.95f;
-                                break;
-                            case Luminumbra::MaterialType::Soil:
-                                soil = 0.85f;
-                                break;
-                            case Luminumbra::MaterialType::Sand:
-                                soil = 0.45f;
-                                break;
-                            case Luminumbra::MaterialType::Stone:
-                                soil = 0.30f;
-                                break;
-                            default:
-                                soil = 0.25f;
-                                break;
-                        }
-                        const float altitude = th - static_cast<float>(Luminumbra::SEA_LEVEL);
-                        temp = luminumbra::foliage::clamp01(
-                            0.60f - (altitude > 0.0f ? altitude : 0.0f) * 0.00045f);
-                    }
-                    s.soil_quality = soil;
+                    const auto terrain = m_plantTerrainCache->At(m_worldSystem.get(), p.x, p.z);
+                    s.soil_quality = terrain.soil;
                     // fold the freshly-updated SOIL-NUTRIENT grid (milli 0..1000) into soil
                     // quality. Foragers/feeders DEPLETE the cell, so a monoculture on one cell
                     // starves itself (monoculture-starves). No grid -> unchanged terrain
@@ -2521,7 +2683,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         s.soil_quality =
                             luminumbra::foliage::clamp01(s.soil_quality * 0.5f + nutFrac * 0.5f);
                     }
-                    s.temperature = temp;
+                    s.temperature = terrain.temperature;
                     // Real day/night light from the sim clock. Triangular day
                     // curve peaking at noon, with a twilight floor so growth slows (not halts)
                     // at night. kTicksPerDay = 20-min day @30Hz (mirrors the circadian slot).
@@ -2557,6 +2719,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 };
                 luminumbra::foliage::RunPlantGrowthSystemOnTick(
                     foliage_registry, current_tick, plant_env, foliage_gate);
+                m_plantTerrainCache->EndTick();
             }
 
             // 7. LIVING-WORLD SYSTEMS: pollination / disease / fire / wildlife-grazing /
@@ -2576,28 +2739,36 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     m_windFieldSystem ? m_windFieldSystem->SampleWind(m_metadata.spawnPoint)
                                       : ::Luminumbra::Vec2(0.0f);
 
-                budget.Next(Stage::Pollination, [&] {
-                    return SimParticipantCount<TelemetryComp::PollinationTag,
-                                               TelemetryComp::PlantGenomeComponent,
-                                               TelemetryComp::PlantGrowthComponent,
-                                               TelemetryComp::TransformComponent,
-                                               TelemetryComp::PollinationComponent>(
-                        foliage_registry);
+                // Compile once at session startup; dispatch only these two tasks per tick.
+                m_ecologySchedule->scheduler.execute(0, [&](std::string_view id) {
+                    if (id == "ecology.pollination") {
+                        budget.Next(Stage::Pollination, [&] {
+                            return SimParticipantCount<TelemetryComp::PollinationTag,
+                                                       TelemetryComp::PlantGenomeComponent,
+                                                       TelemetryComp::PlantGrowthComponent,
+                                                       TelemetryComp::TransformComponent,
+                                                       TelemetryComp::PollinationComponent>(
+                                foliage_registry);
+                        });
+                        if (!foliage_registry.view<Comp::PlantGenomeComponent>().empty())
+                            fol::RunPollinationOnTick(foliage_registry,
+                                                      current_tick,
+                                                      windXZ,
+                                                      0,
+                                                      m_plantMutationRate,
+                                                      foliage_gate);
+                    } else {
+                        budget.Next(Stage::Disease, [&] {
+                            return SimParticipantCount<TelemetryComp::PlantTag,
+                                                       TelemetryComp::PlantHealthComponent,
+                                                       TelemetryComp::TransformComponent>(
+                                foliage_registry);
+                        });
+                        if (!foliage_registry.view<Comp::PlantHealthComponent>().empty())
+                            fol::RunPlantDiseaseOnTick(
+                                foliage_registry, current_tick, 0, foliage_gate);
+                    }
                 });
-                if (!foliage_registry.view<Comp::PlantGenomeComponent>().empty())
-                    fol::RunPollinationOnTick(foliage_registry,
-                                              current_tick,
-                                              windXZ,
-                                              0,
-                                              m_plantMutationRate,
-                                              foliage_gate);
-                budget.Next(Stage::Disease, [&] {
-                    return SimParticipantCount<TelemetryComp::PlantTag,
-                                               TelemetryComp::PlantHealthComponent,
-                                               TelemetryComp::TransformComponent>(foliage_registry);
-                });
-                if (!foliage_registry.view<Comp::PlantHealthComponent>().empty())
-                    fol::RunPlantDiseaseOnTick(foliage_registry, current_tick, 0, foliage_gate);
                 //  germination: ripe plants senesce -> annual dies + reseeds, perennial
                 // resets + reseeds (child genome = the pollination cross, computed just above, or
                 // self). Runs AFTER pollination so next_genome is fresh. Opt-in via
@@ -2737,9 +2908,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             const auto deliver_events = [&] {
                 budget.Next(Stage::Events, [&] { return m_simulationEventBus.pending_count(); });
                 if (m_activeRegionsEnabled) {
-                    m_simulationEventBus.drain(current_tick, [this] { return !m_regionFault; });
+                    m_simulationEventBus.drain_without_capture(current_tick,
+                                                               [this] { return !m_regionFault; });
                 } else {
-                    m_simulationEventBus.drain(current_tick);
+                    m_simulationEventBus.drain_without_capture(current_tick);
                 }
                 budget.Finish();
             };
@@ -4373,6 +4545,125 @@ void GameSession::SetReplicatedSimulationAnchors(std::vector<Vec3> anchors) {
     if (m_activeRegionsEnabled)
         m_replicatedSimulationAnchors = std::move(anchors);
 }
+std::span<const Vec3> GameSession::SimulationAnchors() const {
+    return RegionalWaterAnchors(m_replicatedSimulationAnchors, m_activeRegionLedger.local_anchor());
+}
+bool GameSession::SetHostSimulationAnchors(std::span<const Vec3> anchors) {
+    if (!SimulationHostIntegrationEnabled()) {
+        return true;
+    }
+    // R2 admits at most 64 total owners. Retain capacity across host ticks;
+    // explicit empty input stays distinct from the local-player fallback.
+    if (anchors.size() > Systems::PhysicsSystem::kSimulationOwnerBudget ||
+        !std::all_of(anchors.begin(), anchors.end(), ActiveRegionLedger::valid_anchor)) {
+        return false;
+    }
+    if (!m_replicatedSimulationAnchors) {
+        std::vector<Vec3> prepared;
+        prepared.reserve(Systems::PhysicsSystem::kSimulationOwnerBudget);
+        m_replicatedSimulationAnchors.emplace(std::move(prepared));
+    } else {
+        m_replicatedSimulationAnchors->reserve(Systems::PhysicsSystem::kSimulationOwnerBudget);
+    }
+    m_replicatedSimulationAnchors->assign(anchors.begin(), anchors.end());
+    // The persisted representative must match walking input on every host.
+    // Empty replicated input keeps the last representative but suppresses it.
+    if (!anchors.empty()) {
+        m_activeRegionLedger.set_local_anchor(anchors.front());
+    }
+    return true;
+}
+void GameSession::StepHostPhysics() {
+    if (SimulationHostIntegrationEnabled() && m_physicsSystem) {
+        // Host rigid bodies use the same fixed boundary as regional consumers.
+        // Creature avatars are stepped by their admitted consumer below.
+        const auto fixed_dt = static_cast<float>(m_simulationClock.fixed_dt());
+        m_physicsSystem->update(fixed_dt);
+        const auto physics_creatures = m_registry.view<Components::CreaturePhysicsComponent,
+                                                       Components::CreatureComponent,
+                                                       Components::TransformComponent>();
+        if (physics_creatures.begin() == physics_creatures.end()) {
+            m_physicsSystem->update_avatars(fixed_dt);
+        }
+    }
+}
+bool GameSession::PrepareSimulationCollisions(std::uint64_t tick) {
+    if (!m_activeRegionsEnabled) {
+        return true;
+    }
+    return (!SimulationHostIntegrationEnabled() || !m_regionFault) &&
+           (!m_physicsSystem ||
+            m_physicsSystem->prepare_simulation_collisions(
+                SimulationHostIntegrationEnabled() ? SimulationAnchors() : std::span<const Vec3>{},
+                tick));
+}
+std::optional<Vec3> GameSession::DefaultSimulationSmokeAnchor() const {
+    if (!m_worldSystem) {
+        return std::nullopt;
+    }
+    // 81 fixed seams, <=34 paired terrain/water samples each, selected once at host boot.
+    // The returned 3x3 column footprint spans the selected 512 m region boundary.
+    const int resolution = m_waterHighResEnabled ? 16 : 8;
+    const float cell = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(resolution);
+    for (int z = -4; z <= 4; ++z) {
+        for (int x = -4; x <= 4; ++x) {
+            const float boundary = static_cast<float>(x * 512);
+            const float centre_z = static_cast<float>(z * 512 + 8);
+            const float left = m_worldSystem->GetTerrainHeightAt(boundary - 8.0f, centre_z);
+            const float right = m_worldSystem->GetTerrainHeightAt(boundary + 8.0f, centre_z);
+            if (m_worldSystem->WaterLevelAt(boundary - 8.0f, centre_z) > left + 0.25f &&
+                m_worldSystem->WaterLevelAt(boundary + 8.0f, centre_z) > right + 0.25f) {
+                for (int row = 0; row < resolution; ++row) {
+                    const float edge_z =
+                        static_cast<float>(z * 512) + (static_cast<float>(row) + 0.5f) * cell;
+                    const float edge_left =
+                        m_worldSystem->GetTerrainHeightAt(boundary - 0.5f * cell, edge_z);
+                    const float edge_right =
+                        m_worldSystem->GetTerrainHeightAt(boundary + 0.5f * cell, edge_z);
+                    if (m_worldSystem->WaterLevelAt(boundary - 0.5f * cell, edge_z) >
+                            edge_left + 0.25f &&
+                        m_worldSystem->WaterLevelAt(boundary + 0.5f * cell, edge_z) >
+                            edge_right + 0.25f) {
+                        return Vec3(boundary - 8.0f, std::max(left, right) + 2.0f, centre_z);
+                    }
+                }
+            }
+        }
+    }
+    return std::nullopt;
+}
+int GameSession::SimulationSmokeWetRegionSeamPairs(const Vec3& anchor) const {
+    if (!m_worldSystem || !ActiveRegionLedger::valid_anchor(anchor)) {
+        return 0;
+    }
+    const auto coords = Systems::SHIELD_WorldSystem::world_to_chunk_coords({anchor.x, 0, anchor.z});
+    if (coords.x >= Chunk::kPackedMaxXz || (coords.x + 1) % (512 / CHUNK_SIZE_X) != 0) {
+        return 0;
+    }
+    // Called once after a smoke batch, never per tick: two canonical lookups may
+    // read at most two committed columns. Loading storage belongs to a worker and
+    // must not be inspected. Fresh smoke grids have at most 16 rows.
+    const auto left = m_worldSystem->find_authoritative_chunk(coords);
+    const auto right = m_worldSystem->find_authoritative_chunk({coords.x + 1, 0, coords.z});
+    if (!left || !right || left->get_state() == ChunkState::Loading ||
+        right->get_state() == ChunkState::Loading || !left->has_water_authority() ||
+        !right->has_water_authority()) {
+        return 0;
+    }
+    const int resolution = left->current_water_resolution.load();
+    if ((resolution != 8 && resolution != 16) ||
+        right->current_water_resolution.load() != resolution || !left->has_complete_water_state() ||
+        !right->has_complete_water_state()) {
+        return 0;
+    }
+    const auto side = static_cast<std::size_t>(resolution);
+    int wet_pairs = 0;
+    for (std::size_t row = 0; row < side; ++row) {
+        wet_pairs += left->water_depth_mm[row * side + side - 1] > 0 &&
+                     right->water_depth_mm[row * side] > 0;
+    }
+    return wet_pairs;
+}
 void GameSession::NotifyGroundObjectEdit(const Vec3& position) {
     if (!m_activeRegionsEnabled)
         return;
@@ -4709,9 +5000,15 @@ std::string GameSession::ComputeChunkStateHash() {
 
 Persistence::AuthorityCaptureResult
 GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
-                                    Persistence::AuthorityCaptureParts parts) {
+                                    Persistence::AuthorityCaptureParts parts,
+                                    Persistence::AuthoritySubHashMask requested,
+                                    Persistence::AuthorityHashWork* work) {
     using Persistence::AuthorityCaptureParts;
     using Persistence::AuthorityCaptureStatus;
+    using Persistence::AuthoritySubHashMask;
+    if (!Persistence::IsValidSubHashMask(requested)) {
+        return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+    }
     // The regional projection only feeds the chunk slot; scent, ecology and plant only
     // feed the composite. Consumers that discard them skip the work.
     const bool want_chunk = parts == AuthorityCaptureParts::All ||
@@ -4719,7 +5016,12 @@ GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
                             parts == AuthorityCaptureParts::Chunk;
     const bool want_composite =
         parts == AuthorityCaptureParts::All || parts == AuthorityCaptureParts::Composite;
-    const bool want_runtime = parts != AuthorityCaptureParts::Chunk;
+    const bool want_sub = parts == AuthorityCaptureParts::All ||
+                          parts == AuthorityCaptureParts::SubHashes ||
+                          parts == AuthorityCaptureParts::StreamedAndSubHashes;
+    const auto want_runtime = [&](AuthoritySubHashMask slot) {
+        return want_composite || (want_sub && Persistence::RequestsSubHash(requested, slot));
+    };
     if (!want_chunk && parts != AuthorityCaptureParts::SubHashes &&
         parts != AuthorityCaptureParts::StreamedAndSubHashes) {
         return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
@@ -4802,30 +5104,55 @@ GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
             projection = std::move(regional);
         }
         Persistence::AuthorityRuntimeHashes runtime;
-        if (want_runtime) {
-            const std::string aether_state = ComputeAetherStateSubHash();
-            const std::string aether =
-                m_aetherFieldSystem ? m_aetherFieldSystem->ComputeAetherSubHash() : std::string();
-            runtime = {
-                .wind = m_windFieldSystem ? m_windFieldSystem->ComputeWindSubHash() : std::string(),
-                .weather =
-                    m_weatherSystem ? m_weatherSystem->ComputeWeatherSubHash() : std::string(),
-                .aether = aether_state.empty()
-                              ? aether
-                              : Persistence::StableChecksum(aether + "|state:" + aether_state),
-                .scent = want_composite ? ComputeScentSubHash() : std::string(),
-                .ecology = want_composite ? FoldClockIntoEcologyHash(
-                                                luminumbra::ai::ComputeEcologySubHash(m_registry))
-                                          : std::string(),
-                .plant = want_composite ? ComputePlantSubHash() : std::string(),
-                .aether_state = aether_state};
+        const auto record_runtime = [&] {
+            if (work) {
+                ++work->runtime_hashes;
+            }
+        };
+        if (want_runtime(AuthoritySubHashMask::Wind) && m_windFieldSystem) {
+            runtime.wind = m_windFieldSystem->ComputeWindSubHash();
+            record_runtime();
+        }
+        if (want_runtime(AuthoritySubHashMask::Weather) && m_weatherSystem) {
+            runtime.weather = m_weatherSystem->ComputeWeatherSubHash();
+            record_runtime();
+        }
+        if (want_runtime(AuthoritySubHashMask::Aether) ||
+            (want_sub &&
+             Persistence::RequestsSubHash(requested, AuthoritySubHashMask::AetherState))) {
+            runtime.aether_state = ComputeAetherStateSubHash();
+            record_runtime();
+        }
+        if (want_runtime(AuthoritySubHashMask::Aether)) {
+            std::string aether;
+            if (m_aetherFieldSystem) {
+                aether = m_aetherFieldSystem->ComputeAetherSubHash();
+                record_runtime();
+            }
+            runtime.aether =
+                runtime.aether_state.empty()
+                    ? aether
+                    : Persistence::StableChecksum(aether + "|state:" + runtime.aether_state);
+        }
+        if (want_composite) {
+            runtime.scent = ComputeScentSubHash();
+            runtime.ecology =
+                FoldClockIntoEcologyHash(luminumbra::ai::ComputeEcologySubHash(m_registry));
+            runtime.plant = ComputePlantSubHash();
         }
         return Persistence::CaptureAuthorityHashes(
-            state, cursor, projection, entity_snapshot_json, runtime, parts);
+            state, cursor, projection, entity_snapshot_json, runtime, parts, requested, work);
     } catch (const std::exception& error) {
         LatchRegionFault(m_worldClock.tick(), error.what());
         return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
     }
+}
+
+Persistence::AuthorityCaptureResult
+GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
+                                    Persistence::AuthorityCaptureParts parts) {
+    return CaptureAuthorityHashes(
+        entity_snapshot_json, parts, Persistence::AuthoritySubHashMask::All);
 }
 
 Persistence::AuthorityCaptureResult
@@ -4835,11 +5162,11 @@ GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json) {
 
 std::string GameSession::FoldClockIntoEcologyHash(const std::string& ecology_hash) const {
     return m_activeRegionsEnabled
-               ? Persistence::StableChecksum(ecology_hash + m_worldClock.canonical_bytes() +
-                                             m_activeRegionLedger.canonical_bytes() +
-                                             m_groundObjects.canonical_bytes() +
-                                             CaptureGroundNotifications().canonical_bytes() +
-                                             m_fieldPages.canonical_bytes())
+               ? Persistence::StableChecksum(
+                     ecology_hash + Game::WorldClockAuthorityAdapter::CanonicalBytes(m_worldClock) +
+                     m_activeRegionLedger.canonical_bytes() + m_groundObjects.canonical_bytes() +
+                     CaptureGroundNotifications().canonical_bytes() +
+                     m_fieldPages.canonical_bytes())
                : ecology_hash;
 }
 
@@ -5392,7 +5719,7 @@ bool GameSession::PrepareWorldMetadataTo(const fs::path& save_dir,
     if (!m_activeRegionsEnabled && m_renderCalendar)
         metadata_json["renderCalendar"] = WorldClock(0, *m_renderCalendar).calendar_metadata();
     if (m_activeRegionsEnabled) {
-        m_worldClock.write_metadata(metadata_json);
+        Game::WorldClockAuthorityAdapter::WriteMetadata(m_worldClock, metadata_json);
         metadata_json["ambientFieldAnchor"] = {{"x", m_ambientFieldAnchor.x},
                                                {"y", m_ambientFieldAnchor.y},
                                                {"z", m_ambientFieldAnchor.z}};
@@ -6389,6 +6716,7 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     // All refusing readers have passed; publish the staged state together.
     m_registry.ctx().erase<luminumbra::foliage::FarmingReplayGate>();
     m_foliageStep.reset();
+    m_plantTerrainCache.reset();
     m_lastLoadedChunkCount = 0;
     if (m_activeRegionsEnabled && m_authorityProfile.regional_water) {
         m_worldSystem->clear_world(m_physicsSystem.get());

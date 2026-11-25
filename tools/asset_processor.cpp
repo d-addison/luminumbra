@@ -187,6 +187,15 @@ bool CollectStaticInstances(const cgltf_data* data, std::vector<StaticInstance>&
         if (node->has_matrix && (node->has_translation || node->has_rotation || node->has_scale))
             return ImportError("scene.transform",
                                "Use matrix or TRS, not both, on node " + std::to_string(index));
+        if (!node->has_matrix) {
+            double length = 0;
+            for (const float value : node->rotation)
+                length += double(value) * value;
+            if (!std::isfinite(length) || std::abs(length - 1) > 1e-4)
+                return ImportError("scene.rotation",
+                                   "Normalize the rotation quaternion on node " +
+                                       std::to_string(index));
+        }
         ImportMatrix local;
         cgltf_node_transform_local(node, local.data());
         if (!FiniteAffine(local))
@@ -640,10 +649,11 @@ bool ImportSkeleton(const cgltf_data* data,
         return ImportError("skin.limit", "Export between 1 and 256 joints per skin.");
     const auto* inverse = skin->inverse_bind_matrices;
     if (inverse && (inverse->type != cgltf_type_mat4 ||
-                    inverse->component_type != cgltf_component_type_r_32f ||
+                    inverse->component_type != cgltf_component_type_r_32f || inverse->normalized ||
                     inverse->count < skin->joints_count || inverse->is_sparse))
-        return ImportError("skin.inverse_bind",
-                           "Supply a dense float MAT4 inverse bind for every joint.");
+        return ImportError(
+            "skin.inverse_bind",
+            "Supply a dense, non-normalized float MAT4 inverse bind for every joint.");
     std::unordered_map<const cgltf_node*, size_t> original;
     for (size_t j = 0; j < skin->joints_count; ++j)
         if (!original.emplace(skin->joints[j], j).second)

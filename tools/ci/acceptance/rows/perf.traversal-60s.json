@@ -1,0 +1,26 @@
+{
+  "id": "perf.traversal-60s",
+  "source": "docs/distant-world.md#performance-measurement-contract",
+  "statement": "Scripted 60 s traversals with pinned seeds, camera paths and cold-cache state meet the floor; streaming transients are included.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "RenderTraversalDeterministic"
+    },
+    {
+      "kind": "ctest",
+      "ref": "RenderTraversalRefusal"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/perf/run_qualification.py",
+      "planned": "render qualification runner (v0.3.1); owner: ac",
+      "command": "python tools/perf/run_qualification.py --package <dir> --out <dir> --only surface-flight.quality.3840x1600",
+      "receipt_schema": "luminumbra.render_qualification.v1"
+    }
+  ],
+  "requirements": [
+    "dw.mappings.012"
+  ]
+}

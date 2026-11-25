@@ -19,6 +19,7 @@
 #include "core/FilesystemPath.h"
 #include "core/Log.h"
 #include "core/NativeFileOwner.h"
+#include "game/WorldClockAuthorityAdapter.h"
 #include "luminumbra/core/Types.h"
 #include "world/ActiveRegionLedger.h"
 #include "world/Chunk.h"
@@ -1748,9 +1749,11 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
     if (written_version)
         *written_version = {};
     LUMIN_PROFILE_ZONE_N("File save write");
+    // At most one probe per path component, plus 128 occupied temporary names.
+    auto staging = destination;
     HANDLE file = INVALID_HANDLE_VALUE;
-    for (int attempt = 0; attempt < 128; ++attempt) {
-        out_temp = NextRegionTempPath(destination);
+    for (int attempt = 0; attempt < 128;) {
+        out_temp = NextRegionTempPath(staging);
         if (artifacts)
             artifacts->reserve_file(out_temp);
         file = ::CreateFileW(out_temp.c_str(),
@@ -1774,13 +1777,22 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
         const DWORD error = ::GetLastError();
         if (artifacts)
             artifacts->abandon_file_reservation();
-        if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) {
-            AddError(errors,
-                     "failed to create temporary region file: " +
-                         Filesystem::GenericUtf8PathString(out_temp) + ": " +
-                         WindowsErrorMessage(error));
-            return false;
+        if (!artifacts && (error == ERROR_PATH_NOT_FOUND || error == ERROR_FILE_NOT_FOUND)) {
+            const auto parent = staging.parent_path();
+            if (!parent.empty() && parent != parent.parent_path()) {
+                staging = parent.parent_path() / staging.filename();
+                continue;
+            }
         }
+        if (error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS) {
+            ++attempt;
+            continue;
+        }
+        AddError(errors,
+                 "failed to create temporary region file: " +
+                     Filesystem::GenericUtf8PathString(out_temp) + ": " +
+                     WindowsErrorMessage(error));
+        return false;
     }
     if (file == INVALID_HANDLE_VALUE) {
         AddError(errors,
@@ -1957,9 +1969,11 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
     if (written_version)
         *written_version = {};
     LUMIN_PROFILE_ZONE_N("File save write");
+    // At most one probe per path component, plus 128 occupied temporary names.
+    auto staging = destination;
     int file = -1;
-    for (int attempt = 0; attempt < 128; ++attempt) {
-        out_temp = NextRegionTempPath(destination);
+    for (int attempt = 0; attempt < 128;) {
+        out_temp = NextRegionTempPath(staging);
         if (artifacts)
             artifacts->reserve_file(out_temp);
         file = ::open(out_temp.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0666);
@@ -1977,13 +1991,21 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
         const int error = errno;
         if (artifacts)
             artifacts->abandon_file_reservation();
-        if (error != EEXIST) {
-            AddError(errors,
-                     "failed to create temporary region file: " +
-                         Filesystem::GenericUtf8PathString(out_temp) + ": " +
-                         PosixErrorMessage(error));
-            return false;
+        if (!artifacts && error == ENOENT) {
+            const auto parent = staging.parent_path();
+            if (!parent.empty() && parent != parent.parent_path()) {
+                staging = parent.parent_path() / staging.filename();
+                continue;
+            }
         }
+        if (error == EEXIST) {
+            ++attempt;
+            continue;
+        }
+        AddError(errors,
+                 "failed to create temporary region file: " +
+                     Filesystem::GenericUtf8PathString(out_temp) + ": " + PosixErrorMessage(error));
+        return false;
     }
     if (file < 0) {
         AddError(errors,
@@ -2933,6 +2955,17 @@ bool DigestRegionRecords(const std::filesystem::path& path,
                          MemberDigest& out,
                          std::string& error);
 
+bool CreatePayloadDirectory(const std::filesystem::path& destination,
+                            std::vector<std::string>* errors) {
+    std::error_code error;
+    if (destination.has_parent_path())
+        std::filesystem::create_directories(destination.parent_path(), error);
+    if (!error)
+        return true;
+    AddError(errors, "cannot create publication directory: " + error.message());
+    return false;
+}
+
 bool WriteRegionFile(const std::filesystem::path& path,
                      std::vector<RegionRecord>& records,
                      std::vector<std::string>* errors) {
@@ -3007,6 +3040,10 @@ bool WriteRegionFile(const std::filesystem::path& path,
         return false;
     }
 
+    if (!CreatePayloadDirectory(path, errors)) {
+        RemoveTemporaryFile(temp_path);
+        return false;
+    }
     if (!ReplaceMember(temp_path, path, errors, nullptr, nullptr, admitted ? &written : nullptr)) {
         RemoveTemporaryFile(temp_path);
         return false;
@@ -3787,6 +3824,16 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
     const bool unchanged = FileBytesEqual(manifest_path, bytes);
     if (!unchanged && !WriteDurableRegionTemp(staging, bytes, temp, errors))
         return false;
+    if (!unchanged &&
+        InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
+        RemoveTemporaryFile(temp);
+        AddError(errors, "interrupted before world manifest replacement");
+        return false;
+    }
+    if (!unchanged && !CreatePayloadDirectory(manifest_path, errors)) {
+        RemoveTemporaryFile(temp);
+        return false;
+    }
     if (!unchanged && !ReplaceMember(temp, manifest_path, errors)) {
         RemoveTemporaryFile(temp);
         return false;
@@ -3877,7 +3924,7 @@ std::string CheckMetadataValue(const nlohmann::json& metadata,
         std::string error;
         std::optional<Vec3> anchor;
         std::optional<world::WorldCalendar> render_calendar;
-        if (!world::WorldClock::from_metadata(metadata, clock, error) ||
+        if (!Game::WorldClockAuthorityAdapter::ReadMetadata(metadata, clock, error) ||
             !ReadAmbientAnchor(metadata, anchor, error) ||
             !world::WorldClock::read_render_calendar(metadata, render_calendar, error))
             return error;
@@ -4525,6 +4572,12 @@ bool WorldSaveService::admit_metadata_bytes(const std::string& bytes,
         AddError(errors, seed_error);
         return false;
     }
+    std::size_t cursor = 0;
+    std::string cursor_error;
+    if (!ReadWaterCursor(metadata, cursor, cursor_error)) {
+        AddError(errors, cursor_error);
+        return false;
+    }
     const bool has_clock = metadata.contains("simulationTick") || metadata.contains("calendar");
     const bool has_render_calendar = metadata.contains("renderCalendar");
     if (has_clock || has_render_calendar) {
@@ -4534,14 +4587,14 @@ bool WorldSaveService::admit_metadata_bytes(const std::string& bytes,
         std::string error;
         std::optional<Vec3> anchor;
         std::optional<world::WorldCalendar> calendar;
-        if (!world::WorldClock::from_metadata(metadata, clock, error) ||
+        if (!Game::WorldClockAuthorityAdapter::ReadMetadata(metadata, clock, error) ||
             !ReadAmbientAnchor(metadata, anchor, error) ||
             !world::WorldClock::read_render_calendar(metadata, calendar, error)) {
             AddError(errors, error);
             return false;
         }
         if (has_clock)
-            clock.write_metadata(metadata);
+            Game::WorldClockAuthorityAdapter::WriteMetadata(clock, metadata);
         if (calendar)
             metadata["renderCalendar"] = world::WorldClock(0, *calendar).calendar_metadata();
         std::string normalized;
@@ -4710,7 +4763,7 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
     std::optional<Vec3> ambient_anchor;
     const bool has_render_calendar = metadata.contains("renderCalendar");
     if ((has_clock || has_render_calendar) &&
-        (!world::WorldClock::from_metadata(metadata, clock, clock_error) ||
+        (!Game::WorldClockAuthorityAdapter::ReadMetadata(metadata, clock, clock_error) ||
          !ReadAmbientAnchor(metadata, ambient_anchor, clock_error))) {
         AddError(errors, clock_error);
         return false;
@@ -4736,7 +4789,7 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
     }
     // Explicit writes normalize supported calendar encodings; reads never rewrite.
     if (has_clock)
-        clock.write_metadata(metadata);
+        Game::WorldClockAuthorityAdapter::WriteMetadata(clock, metadata);
     if (has_render_calendar) {
         std::optional<world::WorldCalendar> calendar;
         if (!world::WorldClock::read_render_calendar(metadata, calendar, clock_error)) {
@@ -4819,9 +4872,13 @@ bool WorldSaveService::save_metadata_active_regions_and_ground_objects(
     {
         world::WorldClock clock;
         std::string clock_error;
-        if (!world::WorldClock::from_metadata(
+        if (!Game::WorldClockAuthorityAdapter::ReadMetadata(
                 nlohmann::json::parse(bytes, nullptr, false), clock, clock_error)) {
             AddError(errors, clock_error);
+            return false;
+        }
+        if (ledger.header_tick() != clock.tick()) {
+            AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
             return false;
         }
         if (!GroundObjectsMatchLedger(store, ledger, clock.tick(), errors))
@@ -4853,13 +4910,18 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
     world::WorldClock clock;
     std::optional<Vec3> ambient_anchor;
     std::string error;
-    if (!world::WorldClock::from_metadata(metadata, clock, error) ||
+    if (!Game::WorldClockAuthorityAdapter::ReadMetadata(metadata, clock, error) ||
         !ReadAmbientAnchor(metadata, ambient_anchor, error)) {
         AddError(errors, error);
         return false;
     }
     if (!metadata.contains("simulationTick") && !metadata.contains("calendar")) {
         AddError(errors, "Corrupt world metadata: active regions require clock metadata.");
+        return false;
+    }
+    // Empty ledgers have no record stamps for decode to compare with the clock.
+    if (ledger.header_tick() != clock.tick()) {
+        AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
         return false;
     }
     auto saved = ledger;
@@ -5015,7 +5077,7 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
         }
         std::string error;
         std::optional<Vec3> anchor;
-        if (!world::WorldClock::from_metadata(metadata, clock, error) ||
+        if (!Game::WorldClockAuthorityAdapter::ReadMetadata(metadata, clock, error) ||
             !ReadAmbientAnchor(metadata, anchor, error)) {
             AddError(errors, error);
             return false;
@@ -5362,11 +5424,6 @@ bool WorldSaveService::PreparedPlantWrite::publish(const std::filesystem::path& 
             return false;
         }
         return FlushRemovalDirectory(path, errors) && scope.commit(errors);
-    }
-    std::filesystem::create_directories(path.parent_path(), ec);
-    if (ec) {
-        AddError(errors, "failed to create plant directory: " + ec.message());
-        return false;
     }
     return WriteFileDurably(path, m_bytes, staging, errors) && scope.commit(errors);
 }
@@ -5920,6 +5977,10 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
                                            std::vector<std::string>* errors,
                                            CreatedWorldArtifacts* artifacts) {
     const SaveGuard guard;
+    if (ledger.header_tick() != clock.tick()) {
+        AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
+        return false;
+    }
     bool has_ledger =
         !ledger.records().empty() || ledger.local_anchor() || ledger.next_persistent_id() != 1;
     {
@@ -6055,7 +6116,12 @@ AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
                                               const std::optional<std::string>& regional_projection,
                                               const std::string& entity_snapshot_json,
                                               const AuthorityRuntimeHashes& runtime,
-                                              AuthorityCaptureParts parts) try {
+                                              AuthorityCaptureParts parts,
+                                              AuthoritySubHashMask requested,
+                                              AuthorityHashWork* work) try {
+    if (!IsValidSubHashMask(requested)) {
+        return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+    }
     if (!water_sim_cursor.has_value()) {
         return {AuthorityCaptureStatus::MissingCursor, std::nullopt};
     }
@@ -6074,20 +6140,29 @@ AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
     }
     const auto cursor = water_sim_cursor.value();
     const std::string streamed =
-        want_streamed ? ComputeWorldStreamingStateHash(state, cursor) : std::string();
+        want_streamed ? ComputeWorldStreamingStateHash(state, cursor, work) : std::string();
     const std::string chunk =
         want_chunk ? (regional_projection ? StableChecksum(*regional_projection) : streamed)
                    : std::string();
     WorldStreamingStateSubHashes sub;
     if (want_sub) {
-        sub = ComputeWorldStreamingStateSubHashes(state, cursor);
-        if (!entity_snapshot_json.empty()) {
+        sub = ComputeWorldStreamingStateSubHashes(state, cursor, requested, work);
+        if (RequestsSubHash(requested, AuthoritySubHashMask::Entities) &&
+            !entity_snapshot_json.empty()) {
             sub.entities = StableChecksum(entity_snapshot_json);
         }
-        sub.wind = runtime.wind;
-        sub.weather = runtime.weather;
-        sub.aether = runtime.aether;
-        sub.aether_state = runtime.aether_state;
+        if (RequestsSubHash(requested, AuthoritySubHashMask::Wind)) {
+            sub.wind = runtime.wind;
+        }
+        if (RequestsSubHash(requested, AuthoritySubHashMask::Weather)) {
+            sub.weather = runtime.weather;
+        }
+        if (RequestsSubHash(requested, AuthoritySubHashMask::Aether)) {
+            sub.aether = runtime.aether;
+        }
+        if (RequestsSubHash(requested, AuthoritySubHashMask::AetherState)) {
+            sub.aether_state = runtime.aether_state;
+        }
     }
     return {AuthorityCaptureStatus::Ready,
             AuthorityHashCapture{streamed,
@@ -6110,13 +6185,24 @@ AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
                                               const AuthorityRegionalInputs& regional,
                                               const std::string& entity_snapshot_json,
                                               const AuthorityRuntimeHashes& runtime,
-                                              AuthorityCaptureParts parts) try {
+                                              AuthorityCaptureParts parts,
+                                              AuthoritySubHashMask requested,
+                                              AuthorityHashWork* work) try {
+    if (!IsValidSubHashMask(requested)) {
+        return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+    }
     if (!water_sim_cursor.has_value()) {
         return {AuthorityCaptureStatus::MissingCursor, std::nullopt};
     }
     if (!NeedsRegionalAuthority(parts)) {
-        return CaptureAuthorityHashes(
-            state, water_sim_cursor, std::nullopt, entity_snapshot_json, runtime, parts);
+        return CaptureAuthorityHashes(state,
+                                      water_sim_cursor,
+                                      std::nullopt,
+                                      entity_snapshot_json,
+                                      runtime,
+                                      parts,
+                                      requested,
+                                      work);
     }
     if (HasIncompleteAuthority(state.snapshot_chunks())) {
         return {AuthorityCaptureStatus::IncompleteOwner, std::nullopt};
@@ -6170,7 +6256,9 @@ AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
                                   std::optional{std::move(projection)},
                                   entity_snapshot_json,
                                   runtime,
-                                  parts);
+                                  parts,
+                                  requested,
+                                  work);
 } catch (const std::exception&) {
     return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
 }
@@ -6862,8 +6950,6 @@ bool WorldSaveService::upsert_container_records(const SaveOwnership&,
             ReclaimAbandonedStaging(region_staging_path(region_file));
             return !scope || scope->commit(errors);
         }
-        if (!parent.empty())
-            std::filesystem::create_directories(parent);
         return WriteRegionFile(region_file, raw_records, errors) &&
                (!scope || scope->commit(errors));
     } catch (const std::exception& e) {
@@ -7006,6 +7092,10 @@ bool WorldSaveService::durable_write_file(const std::filesystem::path& destinati
                                 nullptr,
                                 published_identity))
         return false;
+    if (!CreatePayloadDirectory(destination, errors)) {
+        RemoveTemporaryFile(temp);
+        return false;
+    }
     if (!ReplaceMember(temp, destination, errors)) {
         RemoveTemporaryFile(temp);
         return false;
@@ -7462,7 +7552,7 @@ bool WorldSaveService::member_digest_cancellable(const std::filesystem::path& sa
                 world::ActiveRegionLedger ledger;
                 world::WorldClock clock;
                 if (load_active_regions(ledger, save_dir, &diagnostics) &&
-                    world::WorldClock::from_metadata(document, clock, error) &&
+                    Game::WorldClockAuthorityAdapter::ReadMetadata(document, clock, error) &&
                     ledger.header_tick() > clock.tick()) {
                     error = world::ActiveRegionLedger::kCorruptMessage;
                     return false;
@@ -7608,8 +7698,6 @@ bool WorldSaveService::write_member_bytes(const std::filesystem::path& save_dir,
     if (auto* transaction = SaveTransaction::active_for(save_dir);
         transaction && !transaction->protect({relative}, errors))
         return false;
-    std::error_code ec;
-    std::filesystem::create_directories(destination.parent_path(), ec);
     // Before registration, staging must be outside every strict save inventory.
     const auto staging = scope.engaged() ? save_dir / destination.filename() : destination;
     return durable_write_file(destination, bytes, errors, staging) && scope.commit(errors);
@@ -7645,17 +7733,6 @@ bool WriteFileDurably(const std::filesystem::path& destination,
                       FileIdentity* published_identity,
                       CreatedWorldArtifacts* artifacts) {
     // Callers hold SaveGuard and reclaim staging before reaching this helper.
-    std::error_code directory_error;
-    if (!artifacts && destination.has_parent_path()) {
-        std::filesystem::create_directories(destination.parent_path(), directory_error);
-    }
-    if (directory_error) {
-        AddError(errors,
-                 "cannot create directory " +
-                     Filesystem::GenericUtf8PathString(destination.parent_path()) + ": " +
-                     directory_error.message());
-        return false;
-    }
     if (artifacts)
         artifacts->reserve_file(destination);
     std::filesystem::path temp_path;
@@ -7674,6 +7751,10 @@ bool WriteFileDurably(const std::filesystem::path& destination,
         AddError(errors,
                  "file replacement interrupted by test seam before replacing: " +
                      Filesystem::GenericUtf8PathString(destination));
+        return false;
+    }
+    if (!artifacts && !CreatePayloadDirectory(destination, errors)) {
+        RemoveTemporaryFile(temp_path, artifacts);
         return false;
     }
     if (!ReplaceMember(temp_path, destination, errors, artifacts)) {
@@ -8206,13 +8287,6 @@ bool WorldSaveService::create_file_durably(const std::filesystem::path& destinat
                                            std::vector<std::string>* errors) {
     const SaveGuard guard;
     ReclaimAbandonedStaging(destination);
-    std::error_code error;
-    if (destination.has_parent_path())
-        std::filesystem::create_directories(destination.parent_path(), error);
-    if (error) {
-        AddError(errors, "cannot create publication directory: " + error.message());
-        return false;
-    }
     std::filesystem::path temp;
     if (!WriteDurableRegionTemp(destination, bytes, temp, errors))
         return false;
@@ -8221,6 +8295,8 @@ bool WorldSaveService::create_file_durably(const std::filesystem::path& destinat
         AddError(errors, "interrupted before exclusive file publication");
         return false;
     }
+    if (!CreatePayloadDirectory(destination, errors))
+        return false;
     if (!publication.Publish(errors))
         return false;
     publication.Commit();
@@ -8333,14 +8409,6 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
         return FlushRemovalDirectory(source, errors);
     }
     std::filesystem::path temp;
-    // Create the destination hierarchy using the same lexical spelling as the
-    // existing writer; parent aliases and UNC roots must retain their meaning.
-    if (destination.has_parent_path())
-        std::filesystem::create_directories(destination.parent_path(), error);
-    if (error) {
-        AddError(errors, "cannot create rename publication directory: " + error.message());
-        return false;
-    }
     if (!WriteDurableRegionTemp(destination, bytes, temp, errors))
         return false;
     NewFilePublication publication(temp, destination);
@@ -8348,6 +8416,8 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
         AddError(errors, "interrupted before rename publication");
         return false;
     }
+    if (!CreatePayloadDirectory(destination, errors))
+        return false;
     if (!publication.Publish(errors))
         return false;
     if (!std::filesystem::remove(source, error) || error) {
@@ -9827,7 +9897,6 @@ bool WorldSaveService::PreparedWorldWrite::publish(std::vector<std::string>* err
         TransactionScope scope(prepared->save_dir, members, errors);
         if (!scope.ok())
             return false;
-        std::filesystem::create_directories(region_directory(prepared->save_dir));
         const AncestorFlushBatch directory_flushes(prepared->save_dir);
         for (const auto& path : prepared->unchanged_regions)
             ReclaimAbandonedStaging(region_staging_path(path));

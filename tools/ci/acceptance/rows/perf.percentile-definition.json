@@ -1,0 +1,27 @@
+{
+  "id": "perf.percentile-definition",
+  "source": "docs/distant-world.md#performance-measurement-contract",
+  "statement": "Client reports must emit p50, p95, p99, maximum and median absolute deviation through Measurement::add_distributions. RenderMeasurementStatistics exercises summarize and RenderContractPython constructs synthetic distributions; neither calls Measurement::add_distributions or generates a client report. Distribution emission remains outstanding native qualification.",
+  "status": "needs-native-run",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "RenderMeasurementStatistics"
+    },
+    {
+      "kind": "ctest",
+      "ref": "RenderContractPython"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/perf/run_qualification.py",
+      "planned": "render qualification runner (v0.3.1); owner: ac",
+      "command": "python tools/perf/run_qualification.py --package <dir> --out <dir> --declare-refresh 3840x1600=143",
+      "receipt_schema": "luminumbra.render_qualification.v1"
+    }
+  ],
+  "requirements": [
+    "dw.perf.011",
+    "dw.mappings.010"
+  ]
+}

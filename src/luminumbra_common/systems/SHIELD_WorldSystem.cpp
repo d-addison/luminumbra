@@ -3958,6 +3958,11 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         m_deferred_meshing.begin() + static_cast<std::ptrdiff_t>(m_deferred_meshing_cursor),
         m_deferred_meshing.end(),
         [](const MeshingWorkItem& item) { return !item.current_candidate; }));
+    const auto retained_candidates =
+        m_deferred_meshing.size() - m_deferred_meshing_cursor - retained_non_candidates;
+    m_unadmitted_meshing_candidates = m_last_streaming_budget_stats.meshing_candidates -
+                                      m_last_streaming_budget_stats.submitted_meshing -
+                                      retained_candidates;
     m_last_streaming_budget_stats.deferred_meshing =
         m_last_streaming_budget_stats.meshing_candidates -
         m_last_streaming_budget_stats.submitted_meshing + retained_non_candidates;
@@ -5120,17 +5125,25 @@ std::int64_t SHIELD_WorldSystem::debug_land_water_volume_mm() const {
     return sum;
 }
 
-// Lowest LAND cell (bed above sea) in a carvable chunk — the natural valley floor where rainfall
-// collects. Returns its world pos (surface = bed) + bed height; false if no land chunk is streamed.
+// Lowest LAND cell (bed above sea) with carvable bed terrain — the natural valley floor where
+// rainfall collects. Returns its world pos (surface = bed) + bed height; false if no land chunk is
+// streamed.
+namespace {
+bool HasCarvableTerrainAt(const SHIELD_WorldSystem& world, const Vec3& position) {
+    const auto coords = SHIELD_WorldSystem::world_to_chunk_coords(position);
+    if (coords.y < Chunk::kPackedMinY || coords.y > Chunk::kPackedMaxY)
+        return false;
+    const auto terrain = world.find_streamed_chunk(coords);
+    return terrain && terrain->sdf_data.size() == (static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
+                                                   (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1));
+}
+} // namespace
+
 bool SHIELD_WorldSystem::debug_lowest_land_pos(Vec3& pos_out, float& bed_m_out) const {
-    constexpr std::size_t kFullSdf =
-        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
     std::int32_t lowest = 0x7fffffff;
     bool found = false;
     for (const auto& [id, c] : m_streaming_state.chunks) {
         if (!c || !c->has_water_sim.load(std::memory_order_acquire))
-            continue;
-        if (c->sdf_data.size() != kFullSdf)
             continue;
         const int res = static_cast<int>(c->current_water_resolution.load());
         if (!IsBoundedWaterResolution(res) || static_cast<int>(c->water_bed_mm.size()) != res * res)
@@ -5143,12 +5156,15 @@ bool SHIELD_WorldSystem::debug_lowest_land_pos(Vec3& pos_out, float& bed_m_out) 
                 const std::int32_t b = c->water_bed_mm[static_cast<std::size_t>(z * res + x)];
                 if (b > 2000 &&
                     b < lowest) { // above sea (valley floor, not coast) and the lowest so far
-                    lowest = b;
                     const float wx = static_cast<float>(cc.x * CHUNK_SIZE_X) +
                                      (static_cast<float>(x) + 0.5f) * cw_x;
                     const float wz = static_cast<float>(cc.z * CHUNK_SIZE_Z) +
                                      (static_cast<float>(z) + 0.5f) * cw_z;
-                    pos_out = Vec3(wx, static_cast<float>(b) / 1000.0f, wz);
+                    const Vec3 bed_position(wx, static_cast<float>(b) / 1000.0f, wz);
+                    if (!HasCarvableTerrainAt(*this, bed_position))
+                        continue;
+                    lowest = b;
+                    pos_out = bed_position;
                     bed_m_out = static_cast<float>(b) / 1000.0f;
                     found = true;
                 }
@@ -5157,7 +5173,7 @@ bool SHIELD_WorldSystem::debug_lowest_land_pos(Vec3& pos_out, float& bed_m_out) 
     return found;
 }
 
-// Find a SHORELINE worth filming: a deep-water cell (in a carvable full-sdf chunk) that sits right
+// Find a SHORELINE worth filming: a deep-water cell above carvable terrain that sits right
 // next to genuinely DRY land (terrain well above the water surface). Returns the water cell as the
 // carve start, the unit direction from the water toward the dry bank, the water surface height, and
 // the bank height. Picks the tallest dry bank found (most dramatic dry->flooded contrast). False if
@@ -5168,14 +5184,10 @@ bool SHIELD_WorldSystem::debug_find_shoreline(Vec3& water_pos_out,
                                               float& to_land_z,
                                               float& water_surf_out,
                                               float& bank_height_out) const {
-    constexpr std::size_t kFullSdf =
-        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
     float best_bank = -1e9f;
     bool found = false;
     for (const auto& [id, c] : m_streaming_state.chunks) {
         if (!c || !c->has_water_sim.load(std::memory_order_acquire))
-            continue;
-        if (c->sdf_data.size() != kFullSdf)
             continue;
         const int res = static_cast<int>(c->current_water_resolution.load());
         if (!IsBoundedWaterResolution(res) ||
@@ -5193,6 +5205,11 @@ bool SHIELD_WorldSystem::debug_find_shoreline(Vec3& water_pos_out,
                     static_cast<float>(cc.x * CHUNK_SIZE_X) + (static_cast<float>(x) + 0.5f) * cw_x;
                 const float wz =
                     static_cast<float>(cc.z * CHUNK_SIZE_Z) + (static_cast<float>(z) + 0.5f) * cw_z;
+                const float bed_height =
+                    static_cast<float>(c->water_bed_mm[static_cast<std::size_t>(z * res + x)]) /
+                    1000.0f;
+                if (!HasCarvableTerrainAt(*this, Vec3(wx, bed_height, wz)))
+                    continue;
                 const float surf =
                     static_cast<float>(static_cast<std::int64_t>(
                                            c->water_bed_mm[static_cast<std::size_t>(z * res + x)]) +
@@ -5238,14 +5255,9 @@ void SHIELD_WorldSystem::debug_force_water_remesh() {
 Vec3 SHIELD_WorldSystem::debug_deepest_water_pos(std::int64_t* depth_mm_out) const {
     std::int64_t best = 0;
     Vec3 best_pos(0.0f, 0.0f, 0.0f);
-    // Only full-res (lod-0) chunks are CARVABLE (EditTerrainVoxel's exact test), so anchoring on
-    // one guarantees the breach lands — coarse far chunks carry water but no editable sdf.
-    constexpr std::size_t kFullSdf =
-        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    // The bed's terrain chunk must be carvable; the Y=0 water owner can carry only air.
     for (const auto& [id, c] : m_streaming_state.chunks) {
         if (!c || !c->has_water_sim.load(std::memory_order_acquire))
-            continue;
-        if (c->sdf_data.size() != kFullSdf)
             continue;
         const int res = static_cast<int>(c->current_water_resolution.load());
         if (!IsBoundedWaterResolution(res) ||
@@ -5260,11 +5272,16 @@ Vec3 SHIELD_WorldSystem::debug_deepest_water_pos(std::int64_t* depth_mm_out) con
                 const std::int32_t d = c->water_depth_mm[static_cast<std::size_t>(z * res + x)];
                 if (d <= best)
                     continue;
-                best = d;
                 const float wx =
                     static_cast<float>(cc.x * CHUNK_SIZE_X) + (static_cast<float>(x) + 0.5f) * cw_x;
                 const float wz =
                     static_cast<float>(cc.z * CHUNK_SIZE_Z) + (static_cast<float>(z) + 0.5f) * cw_z;
+                const float bed_height =
+                    static_cast<float>(c->water_bed_mm[static_cast<std::size_t>(z * res + x)]) /
+                    1000.0f;
+                if (!HasCarvableTerrainAt(*this, Vec3(wx, bed_height, wz)))
+                    continue;
+                best = d;
                 const float surf_y =
                     static_cast<float>(static_cast<std::int64_t>(
                                            c->water_bed_mm[static_cast<std::size_t>(z * res + x)]) +
@@ -7064,6 +7081,7 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
     m_parking_deferred = 0;
     m_persistence_save_requested = false;
     m_deferred_generation_candidates = 0;
+    m_unadmitted_meshing_candidates = 0;
     m_activation_index.clear();
     m_activation_plan_valid = false;
     m_activation_has_run = false;
@@ -7125,6 +7143,17 @@ void SHIELD_WorldSystem::wait_for_streaming_jobs() {
         dispatch_deferred_meshing();
         wait_for_admitted_streaming_jobs();
     }
+    // Observe publication after the fence, without another streaming/water
+    // update or a resident-world scan. Repeated barriers preserve the backlog.
+    m_streaming_telemetry_stats.last_queue_depth =
+        m_deferred_generation_candidates + m_unadmitted_meshing_candidates;
+    m_streaming_telemetry_stats.settled_queue_depth =
+        std::min(m_streaming_telemetry_stats.settled_queue_depth,
+                 m_streaming_telemetry_stats.last_queue_depth);
+    m_streaming_telemetry_stats.generation_batches = m_streaming_state.generation_batches.size();
+    m_streaming_telemetry_stats.meshing_batches = m_streaming_state.meshing_batches.size();
+    m_streaming_telemetry_stats.promotion_pending = promotion_pipeline_pending();
+    m_streaming_telemetry_stats.pending_lod_chunks = 0;
 }
 
 namespace {
@@ -7170,7 +7199,8 @@ bool SHIELD_WorldSystem::capture_resident_chunk_ids(std::vector<ChunkID>& ids,
     return true;
 }
 
-void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coords) {
+void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coords,
+                                                         bool terrain_changed) {
     const auto floor_div = [](int value, int divisor) {
         const int quotient = value / divisor;
         const int remainder = value % divisor;
@@ -7202,6 +7232,10 @@ void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coor
     // Recursive ownership permits notification inside an existing session save;
     // no jobs are dispatched or awaited while these locks are held.
     const Persistence::WorldSaveService::SaveOwnership ownership;
+    const auto terrain_revision = m_terrain_edit_revision.load(std::memory_order_relaxed);
+    if (terrain_changed && terrain_revision != std::numeric_limits<u64>::max()) {
+        m_terrain_edit_revision.store(terrain_revision + 1u, std::memory_order_release);
+    }
     const u64 revision = m_far_lod_authority_revision.fetch_add(1u, std::memory_order_acq_rel) + 1u;
     LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>,
                        lock,
@@ -7272,7 +7306,13 @@ SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
         entry.coords = chunk->get_coords();
         entry.provenance = chunk->sdf_provenance();
         entry.voxel_revision = chunk->voxel_revision();
+        // Far tiles consume terrain, not the live water grid. Water-only
+        // ownership shares saved provenance, but its generated SDF is already
+        // reproducible. Only edited terrain must wait for a durable voxel save.
         entry.authority_durable = !chunk->is_voxel_data_dirty();
+        if (!chunk->has_terrain_authority()) {
+            entry.authority_durable = true;
+        }
         entry.payload = chunk->capture_far_lod_sdf(snapshot->bytes_copied);
         snapshot->entries.push_back(std::move(entry));
     };
@@ -8324,7 +8364,7 @@ void SHIELD_WorldSystem::sync_water_authority() {
             return;
         }
         if (chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited) {
-            bump_far_lod_authority_revision(chunk->get_coords());
+            bump_far_lod_authority_revision(chunk->get_coords(), false);
         }
         chunk->set_water_authority();
         chunk->mark_water_data_dirty();

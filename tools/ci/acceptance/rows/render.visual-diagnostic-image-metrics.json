@@ -1,0 +1,26 @@
+{
+  "id": "render.visual-diagnostic-image-metrics",
+  "source": "docs/development/visual-diagnostics.md#d-capture-checks",
+  "statement": "The standard-library diagnostic reader measures normalized named ROIs: exact ID-class coverage fractions, per-AOV validity fractions, scalar weather contribution mean and ranges when declared, and maximum adjacent-column or adjacent-row channel discontinuities. Schema-1 bundles remain unchanged; reader-only schema 2 declares bounded precipitation, fog and cloud contribution planes for future producers. Missing or undefined measurements report unavailable with null values. Enforcement is opt-in per ROI and defaults to advisory; all shipped regions are advisory. Qualified threshold misses and unavailable measurements fail. A stdlib SVG montage path validates a bundle and labels clipped raw-albedo worst-pixel crops with metric values and qualification. Registered synthetic regressions cover measurement, configuration and bundle refusals, enforcement, unavailable data and montage output. Runtime contribution producers, scenario qualification and native fixture evidence remain pending; no required CI check is added.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "script",
+      "ref": "tools/gates/test_diagnostic_rois.py",
+      "command": "python3 -I -B tools/gates/test_diagnostic_rois.py"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticRoisPython"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/gates/baselines/diagnostic-rois.json"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development/visual-diagnostics.md"
+    }
+  ],
+  "requirements": []
+}

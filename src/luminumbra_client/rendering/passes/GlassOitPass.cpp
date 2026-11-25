@@ -27,7 +27,7 @@ void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInp
     if (!input.glass_items || input.glass_items->empty() || input.glass_vao == 0) {
         return;
     }
-    if (!m_accum_shader) {
+    if (!m_accum_shader && !m_resolve_shader) {
         if (ctx.frozen_replay)
             return;
         // Lazy init: shaders + the accum/reveal MRT FBO sharing the lighting depth.
@@ -45,14 +45,21 @@ void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInp
             ExpectedLayout layout;
             layout.pass_name = "glass_oit";
             layout.samplers = {{"u_opaqueScene", GL_SAMPLER_2D, -1}};
-            m_accum_shader->ValidateLayout(layout);
+            if (!m_accum_shader->ValidateLayout(layout)) {
+                m_accum_shader.reset();
+            }
         }
         if (m_resolve_shader && m_resolve_shader->IsValid()) {
             ExpectedLayout layout;
             layout.pass_name = "glass_oit_resolve";
             layout.samplers = {{"u_accum", GL_SAMPLER_2D, -1}, {"u_reveal", GL_SAMPLER_2D, -1}};
-            m_resolve_shader->ValidateLayout(layout);
+            if (!m_resolve_shader->ValidateLayout(layout)) {
+                m_resolve_shader.reset();
+            }
         }
+        if (!m_accum_shader || !m_accum_shader->IsValid() || !m_resolve_shader ||
+            !m_resolve_shader->IsValid())
+            return;
 
         auto make_target = [&](GLenum ifmt, const char* name) {
             GLuint t = 0;
@@ -87,7 +94,8 @@ void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInp
         }
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
-    if (m_fbo == 0 || !m_accum_shader->IsValid()) {
+    if (m_fbo == 0 || !m_accum_shader || !m_accum_shader->IsValid() || !m_resolve_shader ||
+        !m_resolve_shader->IsValid()) {
         return;
     }
 

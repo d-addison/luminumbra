@@ -343,10 +343,10 @@ class PathGateTests(unittest.TestCase):
             (["docs/development.md"], (False, True)),
             (["tools/audio/bank_validate.py"], (True, True)),
             (["tools/ci/check_docs.py"], (True, True)),
-            (["src/main.cpp"], (True, False)),
+            (["src/main.cpp"], (True, True)),
             (["docs/index.md", "src/main.cpp", "tools/ci/check_docs.py"], (True, True)),
             (["tools/perf/test_render_runner.py"], (True, True)),
-            (["src/deleted.cpp", "docs/renamed.txt"], (True, False)),
+            (["src/deleted.cpp", "docs/renamed.txt"], (True, True)),
             ([".github/workflows/cache-cleanup.yml"], (True, True)),
             (["scripts/README.md"], (True, True)),
         ):

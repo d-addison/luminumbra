@@ -1,0 +1,46 @@
+{
+  "id": "contract.calendar-disabled",
+  "source": "docs/distant-world.md#simulation-clock-and-calendar",
+  "statement": "Disabled world opens restart simulation at zero with legacy biological periods. Explicit snapshots retain the running tick while replacing the presentation calendar, including absent metadata; markers persist without requiring active regions or entering the disabled clock hash, and competing authorities refuse.",
+  "status": "covered",
+  "requirements": [
+    "dw.calendar.017",
+    "dw.calendar.047",
+    "dw.calendar.048",
+    "dw.calendar.049",
+    "dw.calendar.051",
+    "dw.calendar.052",
+    "dw.calendar.053",
+    "ar.scope.003"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.ExplicitlyDisabledKeepsLegacyMetadataBytesAndTickZeroLoad"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.ExplicitlyDisabledCallbacksKeepLegacySavesLoadsAndNestedTicks"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.DisabledRegionsMatchDevelWorldHashAndExactSaveBytes"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.RenderCalendarMarkerLifecycleAndSnapshotReplacement"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.UnmarkedSnapshotOverwriteRemovesRenderCalendarOnEverySavePath"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldClockTest.StrictV2AndMarkerRefusalMatrixLeavesOutputUnchanged"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.EnergyWriteFailurePreservesCalendarMetadataOnEverySavePath"
+    }
+  ]
+}

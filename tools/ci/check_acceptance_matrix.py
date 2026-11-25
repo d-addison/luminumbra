@@ -28,6 +28,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 import xml.etree.ElementTree as ET
@@ -128,7 +129,7 @@ AUDITED_EXCLUSIONS = frozenset({
     ('ar.history.001', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
      'historical', 'f3eb0146b2325ddd65ec2aeacf580069ea0281d8687006b5efdb20445bea41f1'),
     ('ar.history.002', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
-     'historical', '886e7306a06cae4dedb2fb4092d755e24699eebab3661bfbbac34d3418390237'),
+     'historical', '44c3d8117c244803c62ecb3147819a2a2fc6e04adfc8b27da45d556ac18a8c0a'),
     ('ar.history.003', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
      'historical', 'fe2a41203526d9432c8d2f8d856e7034cc80359810a94b09099c2a500967b539'),
     ('ar.history.004', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
@@ -154,7 +155,7 @@ AUDITED_EXCLUSIONS = frozenset({
     ('ar.history.014', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
      'historical', 'a015bb5aaeac0e8392289108259f39b67d28ac809259b7682afc908cfdbef6c4'),
     ('ar.history.015', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
-     'historical', '271e6c42c937bae094e7e6215de6af43fdaa82039f4a217fe5b498224c89d5ba'),
+     'historical', 'f9b7922d4fd62234f1eed32d5ab5f248c9d137abf9109475ed813c65a546f82d'),
     ('ar.history.017', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
      'historical', 'a3ccd5678e29ef7b79f76d23e2b8782c5c4e72a4cd3dd1a67399ae6d14ababf6'),
     ('ar.history.022', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
@@ -164,6 +165,11 @@ AUDITED_EXCLUSIONS = frozenset({
 })
 
 ROW_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+# Portable single-component names, including on case-insensitive Windows trees.
+# Reserve device basenames even when followed by an extension.
+ROW_FILE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,199}\Z")
+WINDOWS_DEVICES = frozenset({"con", "prn", "aux", "nul", *(f"com{i}" for i in range(10)),
+                             *(f"lpt{i}" for i in range(10))})
 RECEIPT_RE = re.compile(r"^luminumbra\.[a-z0-9_]+\.v[0-9]+$")
 ADD_TEST_RE = re.compile(
     r'add_test\(\s*NAME\s+(?:"(?P<quoted>[^"]*)"|(?P<bare>[^\s"()]+))', re.IGNORECASE
@@ -207,6 +213,178 @@ def load_matrix(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise MatrixError(f"{path}: top-level value must be a JSON object")
     return data
+
+
+def _safe_row_id(value: Any) -> bool:
+    return (isinstance(value, str) and ROW_FILE_ID_RE.fullmatch(value) is not None
+            and not value.endswith(".") and value.split(".")[0] not in WINDOWS_DEVICES)
+
+
+def row_paths(directory: Path, artifacts: dict[Path, os.stat_result] | None = None) -> list[Path]:
+    """Enumerate the complete flat input set; refuse foreign occupants."""
+    try:
+        paths = []
+        for path in sorted(directory.iterdir()):
+            if artifacts is not None and path in artifacts:
+                if not _same_transaction_identity(path, artifacts[path]):
+                    raise MatrixError(f"transaction artifact identity changed: {path}")
+                continue
+            paths.append(path)
+        if not paths:
+            raise MatrixError(f"empty rows directory: {directory}")
+        for path in paths:
+            if path.suffix != ".json" or not _safe_row_id(path.stem):
+                raise MatrixError(f"stray non-row file: {path}")
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise MatrixError(f"row must be a regular non-symlink file: {path}")
+        return paths
+    except OSError as exc:
+        raise MatrixError(f"cannot read rows directory {directory}: {exc}") from exc
+
+
+def load_rows(metadata: dict[str, Any], directory: Path) -> dict[str, Any]:
+    if not isinstance(metadata, dict):
+        raise MatrixError("matrix metadata must be an object")
+    if "rows" in metadata:
+        raise MatrixError("matrix metadata must not contain rows")
+    rows, seen = [], set()
+    for path in row_paths(directory):
+        try:
+            # The existing handle reader refuses special files without blocking,
+            # bounds each input to 16 MiB and detects partial or changing reads.
+            row = json.loads(_read_transaction_file(path, _TRANSACTION_BYTES, sole_link=False)[0])
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise MatrixError(f"cannot read row {path}: {exc}") from exc
+        if not isinstance(row, dict) or not _safe_row_id(row.get("id")):
+            raise MatrixError(f"invalid or filename-unsafe row id: {path}")
+        if not {"source", "statement", "status", "evidence"} <= row.keys():
+            raise MatrixError(f"stray non-row object: {path}")
+        if row["id"] in seen:
+            raise MatrixError(f"duplicate id: {row['id']}")
+        seen.add(row["id"])
+        if row["id"] != path.stem:
+            raise MatrixError(f"filename/id mismatch: {path.name}: {row['id']}")
+        rows.append(row)
+    return {**metadata, "rows": sorted(rows, key=lambda row: row["id"])}
+
+
+def load_layout(path: Path, directory: Path) -> dict[str, Any]:
+    return load_rows(_migration_input(path), directory)
+
+
+def _migration_input(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(_read_transaction_file(path, _TRANSACTION_BYTES, sole_link=False)[0])
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise MatrixError(f"cannot read matrix metadata {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise MatrixError("matrix metadata must be an object")
+    return value
+
+
+def _json_text(value: Any) -> str:
+    return json.dumps(value, indent=2, ensure_ascii=True) + "\n"
+
+
+def _write_migration_file(path: Path, value: Any) -> None:
+    text = _json_text(value)
+    # ensure_ascii makes the character count the exact UTF-8 byte count.
+    if len(text) > _TRANSACTION_BYTES:
+        raise MatrixError("migration payload exceeds size bound")
+    if path.write_text(text, encoding="utf-8", newline="\n") != len(text):
+        raise MatrixError(f"incomplete migration write: {path}")
+
+
+def explode_matrix(legacy: Path, directory: Path) -> None:
+    """Stage a new layout before publishing rows and their metadata.
+
+    No existing metadata or row directory is overwritten. Payloads are staged
+    first and metadata is published last; failed publication removes only this
+    invocation's closed files and directories whose identities still match.
+    """
+    if os.path.lexists(directory):
+        raise MatrixError(f"migration destination already exists: {directory}")
+    directory = directory.resolve()
+    if directory.name == "matrix.json":
+        raise MatrixError("row directory cannot be named matrix.json")
+    matrix = _migration_input(legacy)
+    rows = matrix.get("rows")
+    if matrix.get("schema") != SCHEMA or not isinstance(rows, list) or not rows:
+        raise MatrixError("legacy matrix must have the current schema and non-empty rows")
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict) or not _safe_row_id(row.get("id")):
+            raise MatrixError("invalid or filename-unsafe row id")
+        if not {"source", "statement", "status", "evidence"} <= row.keys():
+            raise MatrixError("stray non-row object in legacy matrix")
+        if row["id"] in seen:
+            raise MatrixError(f"duplicate id: {row['id']}")
+        seen.add(row["id"])
+    destination = directory.absolute().parent
+    existing_parent = destination.is_dir()
+    if os.path.lexists(directory) or os.path.lexists(destination / "matrix.json"):
+        raise MatrixError(f"migration destination already exists: {destination}")
+    with tempfile.TemporaryDirectory(prefix=".acceptance-explode-",
+                                     dir=destination if existing_parent else destination.parent) as temporary:
+        staged = Path(temporary) / "matrix"
+        (staged / directory.name).mkdir(parents=True)
+        for row in sorted(rows, key=lambda row: row["id"]):
+            _write_migration_file(staged / directory.name / (row["id"] + ".json"), row)
+        _write_migration_file(staged / "matrix.json", {key: value for key, value in matrix.items() if key != "rows"})
+        created: list[tuple[Path, os.stat_result]] = []
+        try:
+            if not existing_parent:
+                destination.mkdir()
+                created.append((destination, destination.lstat()))
+            directory.mkdir()
+            created.append((directory, directory.lstat()))
+            payloads = [(staged / directory.name / (row["id"] + ".json"),
+                         directory / (row["id"] + ".json"))
+                        for row in sorted(rows, key=lambda row: row["id"])]
+            payloads.append((staged / "matrix.json", destination / "matrix.json"))
+            for source, target in payloads:
+                data = _read_transaction_file(source, _TRANSACTION_BYTES)[0]
+                # Exclusive creation refuses racing occupants on Windows and
+                # POSIX alike. All streams close before rollback removes files.
+                with target.open("xb") as stream:
+                    created.append((target, _transaction_metadata(stream)))
+                    if stream.write(data) != len(data):
+                        raise MatrixError(f"incomplete migration write: {target}")
+                    stream.flush()
+        except BaseException:
+            for target, identity in reversed(created):
+                same = (os.path.samestat(identity, target.lstat()) if stat.S_ISDIR(identity.st_mode)
+                        else _same_transaction_identity(target, identity))
+                if same:
+                    if stat.S_ISDIR(identity.st_mode):
+                        target.rmdir()
+                    else:
+                        target.unlink()
+            raise
+
+
+def implode_matrix(path: Path, directory: Path | None, output: Path, root: Path) -> None:
+    """Bind an export to the complete input set while cooperating writers wait."""
+    with _refresh_lock(root, shared=True):
+        paths = row_paths(directory) if directory is not None else []
+        comparisons = _PathComparisons()
+        lock = _refresh_lock_path(root, required=False)
+        if lock is not None:
+            if any(comparisons.same(source, lock) for source in (path, *paths)):
+                raise MatrixError("refresh lock cannot be used as an input")
+            reserved = (lock, lock.with_suffix(".transaction"), lock.with_suffix(".pending"),
+                        lock.with_suffix(".preparation"))
+            if any(comparisons.same(output, metadata) for metadata in reserved):
+                raise MatrixError("migration output overlaps recovery metadata")
+        snapshot = _RefreshSnapshot(root, [path, *paths])
+        if directory is not None:
+            snapshot.row_directories[directory] = paths
+        matrix = load_layout(path, directory) if directory is not None else _migration_input(path)
+        matrix["rows"] = sorted(matrix["rows"], key=lambda row: row["id"])
+        if (any(comparisons.same(output, source) for source in (path, *paths))
+                or directory is not None and output.resolve().is_relative_to(directory.resolve())):
+            raise MatrixError("migration output overlaps an input")
+        _replace_outputs([(output, _json_text(matrix))], verify=snapshot.verify)
 
 
 def load_required_ids(path: Path) -> frozenset[str]:
@@ -1036,6 +1214,8 @@ class _RefreshSnapshot:
     """Bind validation to input bytes and the complete discovery file sets."""
     def __init__(self, root: Path, paths: list[Path], *, aliases: dict[Path, Path] | None = None) -> None:
         self.root = root
+        self.row_directories: dict[Path, list[Path]] = {}
+        self.row_artifacts: dict[Path, os.stat_result] = {}
         self.discovery = self._discover()
         self.fingerprints: dict[Path, tuple[Path, bytes | None]] = {}
         self.identities: dict[Path, tuple[int, int, int] | None] = {}
@@ -1083,7 +1263,8 @@ class _RefreshSnapshot:
                 self.fingerprints[path] = (target, self._fingerprint(target))
 
     def verify(self, published: dict[Path, bytes]) -> None:
-        if (self._discover() != self.discovery or any(
+        if (any(row_paths(directory, self.row_artifacts) != paths for directory, paths in self.row_directories.items())
+                or self._discover() != self.discovery or any(
                 path.resolve() != target or self._fingerprint(target) != published.get(target, fingerprint)
                 # Publishing replaces regular files, but must preserve links
                 # used to reach them. Unpublished names retain their identities
@@ -1093,6 +1274,12 @@ class _RefreshSnapshot:
                     and self._identity(path) != self.identities[path])
                 for path, (target, fingerprint) in self.fingerprints.items())):
             raise MatrixError("refresh input snapshot changed; retry after source edits finish")
+
+    def artifact_created(self, path: Path, metadata: os.stat_result) -> None:
+        # Only exact names created by this transaction may coexist with rows.
+        # At most fifteen payload artifacts are retained by the existing bound.
+        if path.parent in self.row_directories:
+            self.row_artifacts[path] = metadata
 
 
 # Recovery has at most five destinations (three defaults, document, receipt),
@@ -2026,6 +2213,7 @@ def _replace_outputs(
     verify: Callable[[dict[Path, bytes]], None] | None = None,
     journal: Path | None = None,
     custody: str | None = None,
+    artifact_created: Callable[[Path, os.stat_result], None] | None = None,
 ) -> None:
     """Stage closed files and rollback copies before publishing on either OS."""
     journal = journal.parent.resolve() / journal.name if journal is not None else None
@@ -2089,6 +2277,8 @@ def _replace_outputs(
         if mode is not None:
             _verify_transaction_file(temporary_records[temporary]).chmod(mode)
         preparation.bind(temporary_records[temporary])
+        if artifact_created is not None:
+            artifact_created(temporary, metadata)
         return temporary
 
     def verify_temporary(path: Path) -> None:
@@ -2768,7 +2958,7 @@ def _render_item(item: dict[str, Any]) -> str:
 
 
 def render_doc(matrix: dict[str, Any]) -> str:
-    rows = matrix["rows"]
+    rows = sorted(matrix["rows"], key=lambda row: row["id"])
     counts = {status: 0 for status in STATUS_ORDER}
     for row in rows:
         counts[row["status"]] += 1
@@ -2776,14 +2966,14 @@ def render_doc(matrix: dict[str, Any]) -> str:
     lines = [
         "# Acceptance matrix",
         "",
-        "This file is generated from `tools/ci/acceptance_matrix.json` by "
+        "This file is generated from `tools/ci/acceptance/rows/` by "
         "`tools/ci/check_acceptance_matrix.py --write-doc`. Do not edit it by hand; "
         "change the matrix and regenerate. The requirement inventory is "
         "`tools/ci/acceptance_requirements.json`; every statement in both reviewed "
         "documents is accounted for as a requirement or a justified exclusion.",
         "",
         "Statuses declare the available evidence. Static validation requires a mapping for every ID "
-        "in the Acceptance requirement IDs section of [the contract](distant-world.md) "
+        "in the Acceptance requirement IDs section of `docs/distant-world.md` "
         "and checks references; it does not "
         "prove execution. JUnit mode checks every referenced CTest identity in the supplied discovery "
         "roster, including parameter instances. Scripts, documents and native commands need separate "
@@ -2901,8 +3091,10 @@ def _same_path(left: Path, right: Path) -> bool:
 
 def _check_output_paths(args: argparse.Namespace, root: Path, matrix_path: Path, inputs: list[Path]) -> None:
     inventory, doc = args.inventory, args.generated_doc
-    targets = [inventory, matrix_path, doc] if args.refresh_inventory else []
-    if args.write_doc is not None and (not args.refresh_inventory or args.write_doc != doc):
+    row_layout = getattr(args, "row_layout", False)
+    changed_rows = getattr(args, "changed_rows", [])
+    targets = ([*changed_rows, inventory] if row_layout else [inventory, matrix_path, doc]) if args.refresh_inventory else []
+    if args.write_doc is not None and (row_layout or not args.refresh_inventory or args.write_doc != doc):
         targets.append(args.write_doc)
     if args.execution_receipt is not None:
         targets.append(args.execution_receipt)
@@ -2916,6 +3108,8 @@ def _check_output_paths(args: argparse.Namespace, root: Path, matrix_path: Path,
     protected = [*(root / path for path in CONTRACT_DOCUMENTS),
                  *cmake_files, *gtest_files, *inputs, *args.junit,
                  *([args.discovery] if args.discovery is not None else [])]
+    if row_layout:
+        protected.extend([matrix_path, *(path for path in row_paths(args.rows_dir) if path not in changed_rows)])
     lock = _refresh_lock_path(root)
     protected.extend([lock, lock.with_suffix(".transaction"), lock.with_suffix(".pending"),
                       lock.with_suffix(".preparation")])
@@ -2942,6 +3136,13 @@ def _argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Check the acceptance matrix.")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--matrix", type=Path, default=None)
+    parser.add_argument("--rows-dir", type=Path,
+                        help="row directory (metadata is its sibling matrix.json)")
+    migration = parser.add_mutually_exclusive_group()
+    migration.add_argument("--explode", type=Path, metavar="LEGACY_JSON",
+                           help="migrate into a new parent directory containing metadata and rows")
+    migration.add_argument("--implode", type=Path, metavar="OUT_JSON",
+                           help="write the sorted legacy single-file representation")
     parser.add_argument("--check-doc", type=Path, default=None)
     parser.add_argument("--write-doc", type=Path, default=None)
     parser.add_argument("--refresh-inventory", action="store_true",
@@ -3000,6 +3201,26 @@ def main(argv: list[str] | None = None) -> int:
         return int(exc.code or 0)
 
     root = args.root.resolve()
+    if args.explode is not None or args.implode is not None:
+        try:
+            if (args.check_doc or args.write_doc or args.refresh_inventory or args.junit or args.discovery
+                    or args.execution_receipt or args.ci_context or args.enroll_preparation
+                    or args.retire_preparation or args.preparation_custody or args.preparation_receipt_file
+                    or args.require_landed):
+                raise MatrixError("migration requires a separate invocation")
+            if args.explode is not None:
+                if args.rows_dir is None or args.matrix is not None:
+                    raise MatrixError("--explode requires --rows-dir and cannot use --matrix")
+                explode_matrix(args.explode, args.rows_dir)
+            else:
+                path = args.matrix or ((args.rows_dir.parent / "matrix.json") if args.rows_dir
+                                       else root / "tools/ci/acceptance/matrix.json")
+                directory = args.rows_dir or (path.parent / "rows" if args.matrix is None else None)
+                implode_matrix(path, directory, args.implode, root)
+            return 0
+        except (MatrixError, OSError, UnicodeError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     if ((args.enroll_preparation and (args.preparation_custody is not None or args.retire_preparation))
             or args.retire_preparation and args.preparation_custody is None
             or (args.enroll_preparation or args.retire_preparation) and (
@@ -3065,13 +3286,20 @@ def _run_locked(args: argparse.Namespace, root: Path) -> int:
     # A speculative reader may retry. Never discard its original names by
     # mutating the parsed arguments, including an aliased checkout root.
     args = copy.copy(args)
-    args.matrix = args.matrix if args.matrix is not None else args.root / "tools/ci/acceptance_matrix.json"
+    args.rows_dir = getattr(args, "rows_dir", None)
+    args.row_layout = args.matrix is None or args.rows_dir is not None
+    args.matrix = args.matrix if args.matrix is not None else (
+        args.rows_dir.parent / "matrix.json" if args.rows_dir is not None
+        else args.root / "tools/ci/acceptance/matrix.json")
+    args.rows_dir = args.rows_dir or (args.matrix.parent / "rows" if args.row_layout else None)
     args.inventory = args.root / "tools/ci/acceptance_requirements.json"
-    args.generated_doc = args.root / "docs/acceptance-matrix.md"
+    args.generated_doc = args.root / ("build/acceptance-matrix.md" if args.row_layout else "docs/acceptance-matrix.md")
     # Use one identity for aliases, including Windows short names and paths
     # containing parent components, throughout snapshots and publication.
     # Defaults follow the same rule: replace the resolved destination and
     # preserve the symlink used to reach it.
+    if args.rows_dir is not None:
+        args.rows_dir = args.rows_dir.resolve()
     aliases: dict[Path, Path] = {}
     for name in ("matrix", "inventory", "generated_doc", "check_doc", "write_doc", "discovery",
                  "execution_receipt"):
@@ -3087,6 +3315,9 @@ def _run_locked(args: argparse.Namespace, root: Path) -> int:
     lock_path = _refresh_lock_path(root, required=False)
     lock = lock_path.resolve() if lock_path is not None else None
     comparisons = _PathComparisons()
+    if args.rows_dir is not None and lock is not None:
+        if any(comparisons.same(path, lock) for path in row_paths(args.rows_dir)):
+            raise MatrixError("refresh lock cannot be used as an input")
     if lock is not None and any(path is not None and comparisons.same(path, lock)
                                 for path in (args.write_doc, args.execution_receipt)):
         raise MatrixError("output path overlaps an input: refresh lock")
@@ -3100,13 +3331,20 @@ def _run_locked(args: argparse.Namespace, root: Path) -> int:
         paths.extend(path for path in (args.discovery, args.check_doc, args.write_doc,
                                        args.execution_receipt) if path is not None)
         snapshot = _RefreshSnapshot(root, paths, aliases=aliases)
+        if args.rows_dir is not None:
+            paths = row_paths(args.rows_dir)
+            snapshot.row_directories[args.rows_dir] = paths
+            snapshot.add(paths)
     return _run(args, root, snapshot)
 
 
 def _run(args: argparse.Namespace, root: Path, snapshot: _RefreshSnapshot | None) -> int:
     matrix_path = args.matrix
     try:
-        matrix = load_matrix(matrix_path)
+        if args.rows_dir is not None:
+            matrix = load_layout(matrix_path, args.rows_dir)
+        else:
+            matrix = load_matrix(matrix_path)
     except MatrixError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -3128,10 +3366,18 @@ def _run(args: argparse.Namespace, root: Path, snapshot: _RefreshSnapshot | None
             refreshed, refreshed_matrix, decisions = refresh_inventory(inventory, matrix, root)
             # Matrix precedes inventory even when only canonical formatting changes.
             if refreshed_matrix != matrix or refreshed != inventory:
-                outputs.append((matrix_path, json.dumps(refreshed_matrix, indent=2, sort_keys=True) + "\n"))
+                if args.rows_dir is None:
+                    outputs.append((matrix_path, json.dumps(refreshed_matrix, indent=2, sort_keys=True) + "\n"))
+                else:
+                    old_rows = {row["id"]: row for row in matrix["rows"]}
+                    outputs.extend((args.rows_dir / (row["id"] + ".json"), _json_text(row))
+                                   for row in refreshed_matrix["rows"] if row != old_rows[row["id"]])
             if refreshed != inventory:
                 outputs.append((inventory_path, json.dumps(refreshed, indent=2, sort_keys=True) + "\n"))
             matrix = refreshed_matrix
+            if args.row_layout:
+                args.changed_rows = [path for path, _ in outputs if path.parent == args.rows_dir]
+                _check_output_paths(args, root, matrix_path, protected_inputs)
         except (MatrixError, OSError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
@@ -3147,7 +3393,7 @@ def _run(args: argparse.Namespace, root: Path, snapshot: _RefreshSnapshot | None
         return 1
 
     rendered = render_doc(matrix)
-    if args.refresh_inventory and not _doc_matches(doc, rendered):
+    if args.refresh_inventory and not args.row_layout and not _doc_matches(doc, rendered):
         outputs.insert(0, (doc, rendered))
     if args.write_doc is not None:
         outputs.insert(0, (args.write_doc, rendered))
@@ -3165,7 +3411,9 @@ def _run(args: argparse.Namespace, root: Path, snapshot: _RefreshSnapshot | None
         try:
             receipt = validate_execution(matrix, index, args.junit, args.discovery)
             matrix_text = next((text for path, text in outputs if path == matrix_path), None)
-            receipt["matrix_sha256"] = (hashlib.sha256(matrix_text.encode("utf-8")).hexdigest()
+            receipt["matrix_sha256"] = (hashlib.sha256(json.dumps(matrix, sort_keys=True).encode("utf-8")).hexdigest()
+                                        if args.row_layout else
+                                        hashlib.sha256(matrix_text.encode("utf-8")).hexdigest()
                                         if matrix_text is not None else _sha256(matrix_path))
             receipt["identity"] = _ci_identity(root) if args.ci_context else None
             if args.execution_receipt:
@@ -3184,6 +3432,7 @@ def _run(args: argparse.Namespace, root: Path, snapshot: _RefreshSnapshot | None
             print("preparation custody receipt: " + automatic_custody, file=sys.stderr, flush=True)
         _replace_outputs(outputs, private_output=args.execution_receipt,
                          verify=snapshot.verify if snapshot is not None else None,
+                         artifact_created=snapshot.artifact_created if args.row_layout and snapshot is not None else None,
                          journal=output_journal,
                          custody=(args.preparation_custody or automatic_custody) if outputs else None)
     except (MatrixError, OSError) as exc:

@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.overlay.01",
+  "source": "docs/distant-world.md#edits-and-the-far-authority-overlay",
+  "statement": "Acceptance obligations: Edits are baked into every tier on the world host inside the save path, after dirty chunks are written and before far authority is notified. / Bake obligations are derived, never remembered: on every save and load, any column whose committed chunk generation exceeds its overlay generation is due for a bake, so an interrupted or failed bake is retried by the next save without blocking the chunk write that preceded it, and a snapshot commits successfully with bakes still due. / A baked authoritative brick record carries one of three states: present (sampled signed-distance values), homogeneous air, or homogeneous solid; / the two homogeneous states are tombstones, so a brick that an edit emptied or filled is never confused with an absent pristine brick. / Absence of an overlay record means \"no authoritative override\"; / if an overlay record is absent for a column whose lod-0 chunk records are marked edited, the tier is rebuilt from those durable chunk records, never from the pristine field.",
+  "status": "planned",
+  "requirements": [
+    "dw.overlay.001",
+    "dw.overlay.002",
+    "dw.overlay.003",
+    "dw.overlay.004",
+    "dw.overlay.005",
+    "dw.overlay.006"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwOverlayContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.overlay.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: fw"
+    }
+  ]
+}

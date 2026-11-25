@@ -187,7 +187,7 @@ public:
                 if (Present(exchange))
                     DiffuseSealed(field, diffusion_iters, diffusion_rate, exchange);
                 else
-                    (void)field.diffuse(diffusion_iters, diffusion_rate);
+                    field.advance(diffusion_iters, diffusion_rate);
                 // Smoothing and evaporation skip nonparticipants, so diffusion through
                 // an open edge can leave roundoff below zero there. Settle it at zero
                 // so a later advection or clamp never reads a negative cell.
@@ -385,7 +385,7 @@ private:
                               double diffusion_rate,
                               const Exchange& exchange) {
         const std::size_t grid_width = field.width();
-        (void)field.diffuse(iterations, diffusion_rate, [&](std::size_t lhs, std::size_t rhs) {
+        field.advance(iterations, diffusion_rate, [&](std::size_t lhs, std::size_t rhs) {
             return Allows(exchange,
                           static_cast<int>(lhs % grid_width),
                           static_cast<int>(lhs / grid_width),

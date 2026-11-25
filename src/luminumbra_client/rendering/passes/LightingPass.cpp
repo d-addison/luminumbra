@@ -48,6 +48,46 @@ LightingPass::~LightingPass() {
 }
 
 namespace {
+// The caller supplies the depth-test enable state. Every frame changes the depth
+// mask and clear value; only the sky depth test also changes the function and range.
+class LightingDepthState {
+public:
+    LightingDepthState(GLboolean enabled, bool sky_depth_test)
+        : enabled_(enabled)
+        , saved_(sky_depth_test) {
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &mask_);
+        glGetDoublev(GL_DEPTH_CLEAR_VALUE, &clear_);
+        if (saved_) {
+            glGetIntegerv(GL_DEPTH_FUNC, &function_);
+            glGetDoublev(GL_DEPTH_RANGE, range_.data());
+        }
+    }
+    LightingDepthState(const LightingDepthState&) = delete;
+    LightingDepthState& operator=(const LightingDepthState&) = delete;
+    ~LightingDepthState() {
+        if (enabled_) {
+            glEnable(GL_DEPTH_TEST);
+        } else {
+            glDisable(GL_DEPTH_TEST);
+        }
+        glDepthMask(mask_);
+        glClearDepth(clear_);
+        if (!saved_) {
+            return;
+        }
+        glDepthFunc(static_cast<GLenum>(function_));
+        glDepthRange(range_[0], range_[1]);
+    }
+
+private:
+    GLboolean enabled_ = GL_FALSE;
+    bool saved_ = false;
+    GLboolean mask_ = GL_TRUE;
+    GLint function_ = GL_LESS;
+    std::array<GLdouble, 2> range_{};
+    GLdouble clear_ = 1.0;
+};
+
 // Only the opt-in draw touches attachment one. Save at most 32 draw-buffer slots.
 class ContributionAttachment {
 public:
@@ -210,14 +250,15 @@ void LightingPass::init_shader(const std::filesystem::path& root_path) {
     // validate the sampler bindings THIS pass
     // adopts in execute (the glActiveTexture+glBindTexture set above) against the
     // shader's reflected layout. A TYPE mismatch (e.g. binding a sampler2DArray
-    // where the shader declares sampler2D) would render garbage -- this logs it
-    // loudly at load instead. The ExpectedLayout is declared once in the enumerable
+    // where the shader declares sampler2D) would render garbage -- refuse it
+    // at load instead. The ExpectedLayout is declared once in the enumerable
     // PassShaderLayouts registry (the single source the  fixture test +
     // the  coverage gate also read); registering it here also arms the
     // hot-reload rollback for this shader.
     if (m_lighting_shader && m_lighting_shader->IsValid()) {
-        if (const ExpectedLayout* layout = FindPassExpectedLayout("lighting")) {
-            m_lighting_shader->ValidateLayout(*layout);
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("lighting");
+            layout && !m_lighting_shader->ValidateLayout(*layout)) {
+            m_lighting_shader.reset();
         }
     }
 }
@@ -354,13 +395,18 @@ LightingPass::CallerState LightingPass::CallerState::QueryExternal() {
     return {.depth_test_enabled = glIsEnabled(GL_DEPTH_TEST)};
 }
 
-void LightingPass::execute_external(const RenderContext& ctx) {
+void LightingPass::execute_external(const RenderContext& ctx, bool skybox_follows) {
     LUMIN_PROFILE_ZONE_N("GL LightingPass.execute_external");
-    return execute(ctx, CallerState::QueryExternal());
+    return execute(ctx, CallerState::QueryExternal(), skybox_follows);
 }
 
-void LightingPass::execute(const RenderContext& ctx, const CallerState& caller) {
+void LightingPass::execute(const RenderContext& ctx,
+                           const CallerState& caller,
+                           bool skybox_follows) {
     LUMIN_PROFILE_ZONE_N("GL LightingPass.execute");
+    m_depth_copied_from_gbuffer = false;
+    if (!m_lighting_shader || !m_lighting_shader->IsValid())
+        return;
     if (!ctx.render_view && !ctx.camera)
         throw std::invalid_argument("Lighting requires a validated view or production camera");
     if (ctx.static_studio && (!ctx.render_view || ctx.authored_surface.id == 0))
@@ -385,9 +431,9 @@ void LightingPass::execute(const RenderContext& ctx, const CallerState& caller) 
                            !ctx.frozen_replay;
     const bool prepared = requested && prepare_contributions(ctx);
     Shader* lighting_shader = m_lighting_shader.get();
-    const GLboolean depth_was_enabled = caller.depth_test_enabled;
-    // The fullscreen quad lies at clip depth zero. Scene visibility comes from
-    // the G-buffer, and its depth is blitted here after deferred lighting.
+    const bool skip_sky = skybox_follows && !ctx.far_world_ladder && !ctx.static_studio &&
+                          !requested && ctx.gbuffer_fbo.id != 0 && m_lighting_fbo.fbo_id != 0;
+    const LightingDepthState depth_state(caller.depth_test_enabled, skip_sky);
     glDisable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_fbo.fbo_id);
     glViewport(0,
@@ -396,7 +442,32 @@ void LightingPass::execute(const RenderContext& ctx, const CallerState& caller) 
                static_cast<GLsizei>(ctx.internal_h())); // deferred lighting into the internal FBO
     glDepthMask(GL_TRUE);
     glClearDepth(0.0);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    if (skip_sky) {
+        constexpr std::array<GLfloat, 4> zero = {};
+        glClearBufferfv(GL_COLOR, 0, zero.data());
+        // Use a distinct depth image so the shader can still sample the G-buffer.
+        glBlitNamedFramebuffer(ctx.gbuffer_fbo.id,
+                               m_lighting_fbo.fbo_id,
+                               0,
+                               0,
+                               static_cast<GLint>(ctx.internal_w()),
+                               static_cast<GLint>(ctx.internal_h()),
+                               0,
+                               0,
+                               static_cast<GLint>(ctx.internal_w()),
+                               static_cast<GLint>(ctx.internal_h()),
+                               GL_DEPTH_BUFFER_BIT,
+                               GL_NEAREST);
+        m_depth_copied_from_gbuffer = true;
+        // Reversed-Z sky is zero; every visible sample has positive depth.
+        // A constant window depth works with either clip-depth convention.
+        glDepthRange(0.0, 0.0);
+        glDepthFunc(GL_LESS);
+        glDepthMask(GL_FALSE);
+        glEnable(GL_DEPTH_TEST);
+    } else {
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    }
     ContributionAttachment contribution(m_lighting_fbo.fbo_id,
                                         prepared ? m_contribution_texture : 0);
     if (contribution.ready()) {
@@ -661,8 +732,6 @@ void LightingPass::execute(const RenderContext& ctx, const CallerState& caller) 
     contribution.detach();
     glBindVertexArray(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    if (depth_was_enabled)
-        glEnable(GL_DEPTH_TEST);
 }
 
 void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
@@ -691,8 +760,9 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
                                 "shader.lightning_overlay");
         // Validate the overlay color and reversed-Z depth samplers.
         if (m_lightning_overlay_shader && m_lightning_overlay_shader->IsValid()) {
-            if (const ExpectedLayout* layout = FindPassExpectedLayout("lightning_overlay")) {
-                m_lightning_overlay_shader->ValidateLayout(*layout);
+            if (const ExpectedLayout* layout = FindPassExpectedLayout("lightning_overlay");
+                layout && !m_lightning_overlay_shader->ValidateLayout(*layout)) {
+                m_lightning_overlay_shader.reset();
             }
         }
     }

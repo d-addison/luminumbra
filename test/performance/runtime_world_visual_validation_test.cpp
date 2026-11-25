@@ -21,6 +21,7 @@
 #include <memory>
 #include <set>
 #include <sstream>
+#include <stop_token>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -33,6 +34,7 @@
 #include "core/JobSystem.h"
 #include "luminumbra_client/core/RuntimeScenarioConfig.h"
 #include "luminumbra_client/core/RuntimeScenarioHarness.h"
+#include "luminumbra_client/rendering/FarLodSystem.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 #include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
@@ -1101,6 +1103,255 @@ namespace {
 class ClientReplayProducerTest : public testing::TestWithParam<bool> {};
 } // namespace
 
+TEST(ClientBootPreparation, MissingSystemsInvalidRadiiAndCancellationRefuseBeforeMutation) {
+    world::GameSession missing;
+    world::GameSession::BootSettleStats stats;
+    EXPECT_FALSE(missing.PrepareInitialSimulation(0, 0));
+    EXPECT_FALSE(missing.SettleInitialSimulation({}, stats));
+
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    world::GameSession client;
+    client.SetJobSystem(&jobs);
+    client.SetRootPath(root.root_string());
+    ASSERT_TRUE(client.CreateWorld("Client", "424242", "default"));
+    ASSERT_TRUE(client.LoadWorldState());
+    const auto before = TestSupport::SessionWorldHash(client);
+    for (const int radius : {-1, 13, (std::numeric_limits<int>::max)()}) {
+        EXPECT_FALSE(client.PrepareInitialSimulation(radius, 0));
+        EXPECT_FALSE(client.PrepareInitialSimulation(0, radius));
+    }
+    std::stop_source cancellation;
+    cancellation.request_stop();
+    EXPECT_FALSE(client.PrepareInitialSimulation(0, 0, cancellation.get_token()));
+    EXPECT_FALSE(client.SettleInitialSimulation({}, stats, cancellation.get_token()));
+    EXPECT_EQ(TestSupport::SessionWorldHash(client), before);
+    EXPECT_EQ(client.GetSimulationTickCount(), 0u);
+    EXPECT_FALSE(fs::exists(client.GetWorldSaveDir() / "desync.lrec1"));
+}
+
+TEST(ClientBootPreparation, LoadedEntryPreservesWaterAtTickZero) {
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    world::GameSession original;
+    original.SetJobSystem(&jobs);
+    original.SetRootPath(root.root_string());
+    ASSERT_TRUE(original.CreateWorld("Client", "424242", "default"));
+    ASSERT_TRUE(original.LoadWorldState());
+    original.GetWorldSystem()->debug_set_streaming_radius_cap(1);
+    ASSERT_TRUE(original.PrepareInitialSimulation(0, 0));
+    // A full snapshot keeps every settled chunk in the save. With active regions the
+    // loaded entry may regenerate clean chunks instead of adopting them; either way the
+    // shared boot preparation must reproduce the same water state at tick zero.
+    ASSERT_TRUE(original.SaveWorldStateTo(original.GetWorldSaveDir(), nullptr, true));
+    const auto before = original.GetWorldSystem()->debug_water_state_hash();
+
+    world::GameSession loaded;
+    loaded.SetJobSystem(&jobs);
+    loaded.SetRootPath(root.root_string());
+    ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId));
+    loaded.GetWorldSystem()->debug_set_streaming_radius_cap(1);
+    ASSERT_TRUE(loaded.PrepareInitialSimulation(0, 0));
+    EXPECT_EQ(loaded.GetWorldSystem()->debug_water_state_hash().hash, before.hash);
+    EXPECT_EQ(loaded.GetWorldSystem()->debug_water_state_hash().water_chunks, before.water_chunks);
+    EXPECT_EQ(loaded.GetSimulationTickCount(), 0u);
+    EXPECT_EQ(loaded.TickSimulation(loaded.GetSimulationClock().fixed_dt()), 1u);
+}
+
+TEST(ClientBootPreparation, RadiusZeroSettlesStreamingAndWaterAtTickZero) {
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    world::GameSession client;
+    client.SetJobSystem(&jobs);
+    client.SetRootPath(root.root_string());
+    ASSERT_TRUE(client.CreateWorld("Client", "424242", "default"));
+    ASSERT_TRUE(client.LoadWorldState());
+    client.GetWorldSystem()->debug_set_streaming_radius_cap(1);
+    ASSERT_TRUE(client.PrepareInitialSimulation(0, 0));
+    auto* world_system = client.GetWorldSystem();
+    EXPECT_GE(world_system->get_streaming_telemetry_stats().frames_observed, 240u);
+    EXPECT_TRUE(world_system->get_streaming_telemetry_stats().quiescent());
+    const auto spawn = SHIELD_WorldSystem::world_to_chunk_coords(client.GetMetadata().spawnPoint);
+    const auto chunks = world_system->snapshot_streamed_chunks();
+    ASSERT_FALSE(chunks.empty());
+    for (const auto& chunk : chunks) {
+        ASSERT_TRUE(chunk);
+        EXPECT_TRUE(chunk->has_water_sim.load(std::memory_order_acquire));
+    }
+    EXPECT_TRUE(std::any_of(chunks.begin(), chunks.end(), [&](const auto& chunk) {
+        return chunk->get_coords().x != spawn.x || chunk->get_coords().z != spawn.z;
+    }));
+    EXPECT_EQ(client.GetSimulationTickCount(), 0u);
+}
+
+TEST(ClientBootPreparation, SpawnFarTerrainBuildsAfterWaterSettle) {
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    world::GameSession client;
+    client.SetJobSystem(&jobs);
+    client.SetRootPath(root.root_string());
+    ASSERT_TRUE(client.CreateWorld("Client", "424242", "default"));
+    ASSERT_TRUE(client.LoadWorldState());
+    auto* world_system = client.GetWorldSystem();
+    world_system->debug_set_streaming_radius_cap(4);
+    ASSERT_TRUE(client.PrepareInitialSimulation(4, 4));
+    const auto check_tiles = [](world::GameSession& session, const fs::path& save_dir) {
+        auto* system = session.GetWorldSystem();
+        const auto spawn = session.GetMetadata().spawnPoint;
+        const int home_rx = static_cast<int>(std::floor(spawn.x / World::kFarLodRegionSizeMeters));
+        const int home_rz = static_cast<int>(std::floor(spawn.z / World::kFarLodRegionSizeMeters));
+        const auto before = TestSupport::SessionWorldHash(session);
+        // This spawn's radius-four footprint crosses both region axes. The
+        // water-owned columns need not lie in the spawn's own region.
+        std::size_t water_owned_entries = 0;
+        for (int rz = home_rz - 1; rz <= home_rz; ++rz) {
+            for (int rx = home_rx - 1; rx <= home_rx; ++rx) {
+                const auto snapshot = system->capture_far_lod_sdf_snapshot(rx, rz);
+                ASSERT_TRUE(snapshot);
+                water_owned_entries += static_cast<std::size_t>(std::count_if(
+                    snapshot->entries.begin(), snapshot->entries.end(), [](const auto& entry) {
+                        return entry.provenance == ChunkSdfProvenance::LoadedOrEdited;
+                    }));
+                for (const auto tier : {World::FarLodTier::F1, World::FarLodTier::F2}) {
+                    const auto outcome = Rendering::BuildFarLodWorkerTile(
+                        *system, *snapshot, tier, rx, rz, save_dir);
+                    EXPECT_TRUE(outcome.ok) << "region=" << rx << ',' << rz << ' ' << outcome.error;
+                    EXPECT_FALSE(outcome.mesh.vertices.empty());
+                    EXPECT_FALSE(outcome.mesh.indices.empty());
+                    EXPECT_TRUE(outcome.tile.sdf_bricks.empty());
+                    EXPECT_TRUE(system->is_far_lod_sdf_snapshot_current(*snapshot, true));
+                    if (!save_dir.empty()) {
+                        // Also recover with no live SDFs: water-only lod-0 save
+                        // records intentionally omit their regenerable terrain.
+                        Systems::FarLodSdfSnapshot durable_only;
+                        durable_only.params_hash = snapshot->params_hash;
+                        const auto recovered = Rendering::BuildFarLodWorkerTile(
+                            *system, durable_only, tier, rx, rz, save_dir);
+                        EXPECT_TRUE(recovered.ok) << recovered.error;
+                        EXPECT_FALSE(recovered.mesh.vertices.empty());
+                        EXPECT_FALSE(recovered.mesh.indices.empty());
+                        EXPECT_TRUE(recovered.tile.sdf_bricks.empty());
+                    }
+                }
+            }
+        }
+        EXPECT_GT(water_owned_entries, 0u);
+        EXPECT_EQ(TestSupport::SessionWorldHash(session), before);
+        EXPECT_EQ(session.GetSimulationTickCount(), 0u);
+    };
+    ASSERT_NO_FATAL_FAILURE(check_tiles(client, {}));
+    ASSERT_TRUE(client.SaveWorldStateTo(client.GetWorldSaveDir(), nullptr, true));
+    world::GameSession loaded;
+    loaded.SetJobSystem(&jobs);
+    loaded.SetRootPath(root.root_string());
+    ASSERT_TRUE(loaded.LoadWorld(client.GetMetadata().worldId));
+    loaded.GetWorldSystem()->debug_set_streaming_radius_cap(4);
+    ASSERT_TRUE(loaded.PrepareInitialSimulation(4, 4));
+    ASSERT_NO_FATAL_FAILURE(check_tiles(loaded, loaded.GetWorldSaveDir()));
+}
+
+TEST(ClientBootPreparation, DrainedStreamingAndWaterOnlyTerrainArePresentationReady) {
+    JobSystem jobs;
+    jobs.startup(1);
+    const auto params = Luminumbra::Test::SyntheticTerrainParams();
+    SHIELD_WorldSystem world_system(&jobs, nullptr, params, 4242);
+    entt::registry registry;
+    world_system.wait_for_streaming_jobs();
+    EXPECT_TRUE(world_system.get_streaming_telemetry_stats().quiescent());
+    auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    constexpr std::size_t kSamples =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    chunk->sdf_data.assign(kSamples, -1.0f);
+    // Generated data enters the scheduler as Idle, awaiting its first mesh.
+    chunk->set_state(ChunkState::Idle);
+    ASSERT_TRUE(world_system.adopt_streamed_chunk(chunk));
+    world_system.update(registry, Vec3(8.0f), nullptr, false);
+    ASSERT_EQ(world_system.get_last_streaming_budget_stats().meshing_candidates, 1u);
+    ASSERT_EQ(world_system.get_last_streaming_budget_stats().submitted_meshing, 1u);
+    ASSERT_FALSE(world_system.get_streaming_telemetry_stats().quiescent());
+    world_system.wait_for_streaming_jobs();
+    EXPECT_TRUE(world_system.get_streaming_telemetry_stats().quiescent());
+    world_system.wait_for_streaming_jobs();
+    EXPECT_TRUE(world_system.get_streaming_telemetry_stats().quiescent());
+
+    // A water-only save dependency must not hold the terrain cache stale.
+    chunk->set_water_authority();
+    chunk->mark_water_data_dirty();
+    ASSERT_TRUE(chunk->is_voxel_data_dirty());
+    ASSERT_FALSE(chunk->has_terrain_authority());
+    const auto water_only = world_system.capture_far_lod_sdf_snapshot(0, 0);
+    ASSERT_TRUE(water_only);
+    ASSERT_EQ(water_only->entries.size(), 1u);
+    EXPECT_EQ(water_only->entries.front().provenance, ChunkSdfProvenance::LoadedOrEdited);
+    ASSERT_TRUE(water_only->entries.front().payload);
+    EXPECT_EQ(water_only->entries.front().payload->source_kind,
+              World::FarLodBrickSourceKind::RegenerableCache);
+    EXPECT_TRUE(water_only->entries.front().authority_durable);
+    EXPECT_TRUE(world_system.is_far_lod_sdf_snapshot_current(*water_only, true));
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+
+    // Edited terrain retains its save dependency, including after water ownership.
+    chunk->mark_voxel_data_dirty();
+    const auto edited = world_system.capture_far_lod_sdf_snapshot(0, 0);
+    ASSERT_TRUE(edited);
+    ASSERT_EQ(edited->entries.size(), 1u);
+    ASSERT_TRUE(edited->entries.front().payload);
+    EXPECT_EQ(edited->entries.front().payload->source_kind,
+              World::FarLodBrickSourceKind::Authoritative);
+    EXPECT_FALSE(edited->entries.front().authority_durable);
+    EXPECT_FALSE(world_system.is_far_lod_sdf_snapshot_current(*water_only, true));
+    chunk->clear_voxel_data_dirty();
+    const auto durable = world_system.capture_far_lod_sdf_snapshot(0, 0);
+    ASSERT_TRUE(durable);
+    ASSERT_EQ(durable->entries.size(), 1u);
+    EXPECT_TRUE(durable->entries.front().authority_durable);
+}
+
+TEST(ClientBootPreparation, StreamingDrainRetainsUnadmittedCandidates) {
+    JobSystem jobs;
+    jobs.startup(1);
+    const auto params = Luminumbra::Test::SyntheticTerrainParams();
+    SHIELD_WorldSystem world_system(&jobs, nullptr, params, 4242);
+    entt::registry registry;
+    // This backlog selects a 320-item prefix. Uniform SDFs keep the fixed
+    // workload bounded while exercising snapshot backpressure too.
+    constexpr int kChunks = 321;
+    constexpr std::size_t kSamples =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    for (int x = 0; x < kChunks; ++x) {
+        auto chunk = std::make_shared<Chunk>(IVec3(x, 0, 0));
+        chunk->sdf_data.assign(kSamples, -1.0f);
+        chunk->set_state(ChunkState::Idle);
+        ASSERT_TRUE(world_system.adopt_streamed_chunk(chunk));
+    }
+    world_system.update(registry, Vec3(8.0f), nullptr, false);
+    const auto frame = world_system.get_last_streaming_budget_stats();
+    ASSERT_EQ(frame.meshing_candidates, static_cast<std::size_t>(kChunks));
+    ASSERT_GT(frame.meshing_budget, 0);
+    ASSERT_LT(static_cast<std::size_t>(frame.meshing_budget), frame.meshing_candidates);
+    const auto unadmitted =
+        frame.meshing_candidates - static_cast<std::size_t>(frame.meshing_budget);
+    for (int barrier = 0; barrier < 2; ++barrier) {
+        // Other public drains can consume retained work before this observation.
+        world_system.wait_for_promotion_jobs();
+        world_system.wait_for_admitted_streaming_jobs();
+        world_system.wait_for_streaming_jobs();
+        const auto& streaming = world_system.get_streaming_telemetry_stats();
+        EXPECT_FALSE(streaming.quiescent());
+        EXPECT_EQ(streaming.last_queue_depth, unadmitted);
+        EXPECT_EQ(streaming.generation_batches, 0u);
+        EXPECT_EQ(streaming.meshing_batches, 0u);
+        EXPECT_EQ(streaming.pending_lod_chunks, 0u);
+        EXPECT_FALSE(streaming.promotion_pending);
+        EXPECT_EQ(world_system.get_last_streaming_budget_stats().submitted_meshing,
+                  frame.submitted_meshing);
+    }
+}
+
 TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStartWorld) {
     namespace replay = Luminumbra::Replay;
     const TestSupport::HeadlessRoot root;
@@ -1123,25 +1374,37 @@ TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStart
     if (!cli)
         return;
 
-    // Supply the rendering peer with an equivalent authority boot. Its actual
-    // scenario driver and automatic recorder produce the dump below.
-    Server::ServerWorldRunner client(RunnerConfigFrom(options), {.owner_continuation = true});
-    ASSERT_TRUE(client.Boot());
-    const auto dump = client.Session()->GetWorldSaveDir() / "desync.lrec1";
+    // Ordinary client entry: create/adopt state, then use the same entry
+    // preparation as main_client before presentation, ticks or recording.
+    JobSystem client_jobs;
+    client_jobs.startup(1);
+    world::GameSession client;
+    client.SetJobSystem(&client_jobs);
+    client.SetRootPath(root.root_string());
+    client.ApplySystemConfig(systems);
+    ASSERT_TRUE(client.CreateWorld("Client", options.seed, options.preset));
+    ASSERT_TRUE(client.LoadWorldState());
+    client.GetWorldSystem()->debug_set_streaming_radius_cap(options.test_streaming_radius_cap);
+    ASSERT_TRUE(client.PrepareInitialSimulation(options.surface_radius, options.collision_radius));
+    EXPECT_EQ(client.GetSimulationTickCount(), 0u);
+    const auto start_hash = TestSupport::SessionWorldHash(client);
+    EXPECT_EQ(start_hash, cli->header.start_world_hash);
+    const auto dump = client.GetWorldSaveDir() / "desync.lrec1";
     Client::ScenarioHarness::NetworkedSessionDriver::Config config;
     config.seed = GetParam() ? 4294967297ull : 424242ull;
     config.root_path = root.root_string();
     config.systems_config_override = systems;
     config.surface_radius = 0;
     config.collision_radius = 0;
+    config.test_streaming_radius_cap = options.test_streaming_radius_cap;
     config.hash_cadence_ticks = 1;
     config.budget_ticks = 1;
     {
         Client::ScenarioHarness::NetworkedSessionDriver driver;
-        ASSERT_TRUE(driver.Begin(client.Session(), config)) << driver.failure_reason();
+        ASSERT_TRUE(driver.Begin(&client, config)) << driver.failure_reason();
         // A deterministic authority edit AFTER the recorder captured tick zero
         // forces the real desync path to publish the client's recording.
-        const auto chunks = client.Session()->GetWorldSystem()->snapshot_streamed_chunks();
+        const auto chunks = client.GetWorldSystem()->snapshot_streamed_chunks();
         ASSERT_FALSE(chunks.empty());
         const auto edited = std::find_if(chunks.begin(), chunks.end(), [](const auto& chunk) {
             return chunk && !chunk->sdf_data.empty();
@@ -1169,6 +1432,7 @@ TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStart
     EXPECT_EQ(automatic->header.system_config_identity, cli->header.system_config_identity);
     EXPECT_EQ(automatic->header.preset_content_hash, cli->header.preset_content_hash);
     EXPECT_EQ(automatic->header.weather_schedule, cli->header.weather_schedule);
+    EXPECT_EQ(automatic->header.start_world_hash, start_hash);
     EXPECT_EQ(automatic->header.start_world_hash, cli->header.start_world_hash);
     const auto playback_config = ReplayRunnerConfigFrom(options, automatic->header);
     ASSERT_TRUE(playback_config.has_value());
@@ -1196,7 +1460,7 @@ TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStart
         std::string trace_error;
         ASSERT_TRUE(replay::ReadRegionScheduleTrace(dump, 1, trace, trace_error)) << trace_error;
         ASSERT_EQ(trace.size(), 1u);
-        EXPECT_EQ(trace.front().second, client.Session()->GetRegionSchedule().digest);
+        EXPECT_EQ(trace.front().second, client.GetRegionSchedule().digest);
         EXPECT_EQ(trace.front().second, playback.Session()->GetRegionSchedule().digest);
         replay::RegionScheduleTrace cli_trace;
         ASSERT_TRUE(replay::ReadRegionScheduleTrace(options.record_path, 1, cli_trace, trace_error))
@@ -1265,13 +1529,16 @@ TEST(NetworkedSessionDriverTest, PresentationPreloadPreservesBothStartingAuthori
     ASSERT_TRUE(client.CreateWorld("Presentation", "424242", "default"));
     ASSERT_TRUE(client.LoadWorldState());
     auto* world_system = client.GetWorldSystem();
-    ASSERT_TRUE(world_system->EnsureSurfaceReadyNear(
-        client.GetMetadata().spawnPoint, client.GetPhysicsSystem(), 0, 0));
+    Client::ScenarioHarness::NetworkedSessionDriver::Config config;
+    config.test_streaming_radius_cap = 1;
+    world_system->debug_set_streaming_radius_cap(config.test_streaming_radius_cap);
+    ASSERT_TRUE(client.PrepareInitialSimulation(0, 0));
+    EXPECT_LE(world_system->get_last_streaming_budget_stats().target_render_radius,
+              config.test_streaming_radius_cap);
     const auto before = TestSupport::SessionWorldHash(client);
     ASSERT_TRUE(
         world_system->PrepareInitialWaterPresentationNear(client.GetMetadata().spawnPoint, 0));
     EXPECT_EQ(TestSupport::SessionWorldHash(client), before);
-    Client::ScenarioHarness::NetworkedSessionDriver::Config config;
     config.root_path = root.root_string();
     config.surface_radius = 0;
     config.collision_radius = 0;
@@ -1308,8 +1575,9 @@ protected:
         config.collision_radius = 0;
         config.budget_ticks = 3;
         config.hash_cadence_ticks = 1;
-        ASSERT_TRUE(client.GetWorldSystem()->EnsureSurfaceReadyNear(
-            client.GetMetadata().spawnPoint, client.GetPhysicsSystem(), 0, 0));
+        config.test_streaming_radius_cap = 1;
+        client.GetWorldSystem()->debug_set_streaming_radius_cap(config.test_streaming_radius_cap);
+        ASSERT_TRUE(client.PrepareInitialSimulation(0, 0));
 
         auto params = Luminumbra::Test::SyntheticTerrainParams();
         params.base_amplitude = 0;

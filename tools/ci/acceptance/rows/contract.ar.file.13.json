@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.file.13",
+  "source": "docs/active-regions.md#file-and-compatibility",
+  "statement": "Acceptance obligations: | 80 | 8 | u32 over-hold, u32 under-hold | / | 88 | 8 | u64 water cursor | / | 96 | 8 | u64 frozen simulation content digest | / The footer is one LE u64 FNV-1a-64 checksum over every preceding byte, including the extension length and TLVs (offset basis 14695981039346656037, multiplier 1099511628211). / Total length must be exactly 56 + count * 104 + 8 for version 1, or 56 + count * 104 + 4 + ext_len + 8 for version 2. / No trailing bytes, padding, native structs, section omission or alternate encodings are accepted.",
+  "status": "planned",
+  "requirements": [
+    "ar.file.081",
+    "ar.file.082",
+    "ar.file.083",
+    "ar.file.084",
+    "ar.file.085",
+    "ar.file.086"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArFileContract.Requirements13",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.file.13.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

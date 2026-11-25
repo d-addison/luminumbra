@@ -6,6 +6,7 @@
 #include <deque>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <optional>
 #include <string>
@@ -53,79 +54,30 @@ public:
                  std::is_invocable_r_v<bool, const ContinueDelivery&>)
     std::vector<SimulationEvent> drain(std::uint64_t inclusive_tick,
                                        const ContinueDelivery& continue_delivery) {
-        std::vector<SimulationEvent> delivered;
-        for (;;) {
-            const bool resuming = pending_batch_size_ != 0;
-            if (!resuming) {
-                std::stable_sort(pending_events_.begin(),
-                                 pending_events_.end(),
-                                 [](const auto& a, const auto& b) {
-                                     if (a.event.tick != b.event.tick) {
-                                         return a.event.tick < b.event.tick;
-                                     }
-                                     if (a.event.lane != b.event.lane) {
-                                         return a.event.lane < b.event.lane;
-                                     }
-                                     return a.event.sequence < b.event.sequence;
-                                 });
-            }
+        return drain_impl<true>(inclusive_tick, continue_delivery);
+    }
 
-            std::vector<PendingEvent> due;
-            auto first_future = pending_events_.begin();
-            const auto batch_end = resuming ? pending_events_.begin() +
-                                                  static_cast<std::ptrdiff_t>(pending_batch_size_)
-                                            : pending_events_.end();
-            while (first_future != batch_end && first_future->event.tick <= inclusive_tick) {
-                const auto& event = first_future->event;
-                const auto bytes = pending_bytes_.find(event.topic);
-                bytes->second -= event.canonical_size() + 1;
-                if (bytes->second == 0)
-                    pending_bytes_.erase(bytes);
-                due.push_back(std::move(*first_future));
-                ++first_future;
-            }
-            pending_events_.erase(pending_events_.begin(), first_future);
-            if (resuming)
-                pending_batch_size_ -= due.size();
+    // Delivers with the same ordering and retry semantics, without copying completed events.
+    void drain_without_capture(std::uint64_t inclusive_tick,
+                               const std::function<bool()>& continue_delivery = {});
+    template<typename ContinueDelivery>
+        requires(std::is_class_v<ContinueDelivery> &&
+                 !std::is_base_of_v<std::function<bool()>, ContinueDelivery> &&
+                 std::is_invocable_r_v<bool, const ContinueDelivery&>)
+    void drain_without_capture(std::uint64_t inclusive_tick,
+                               const ContinueDelivery& continue_delivery) {
+        drain_impl<false>(inclusive_tick, continue_delivery);
+    }
 
-            std::size_t current = 0;
-            const auto requeue = [&] {
-                for (std::size_t i = current; i < due.size(); ++i) {
-                    const auto& event = due[i].event;
-                    pending_bytes_[event.topic] += event.canonical_size() + 1;
-                }
-                // Preserve this batch's order and handler cutoffs before forming the next batch.
-                pending_events_.insert(
-                    pending_events_.begin(),
-                    std::make_move_iterator(due.begin() + static_cast<std::ptrdiff_t>(current)),
-                    std::make_move_iterator(due.end()));
-                pending_batch_size_ += due.size() - current;
-            };
-            try {
-                for (; current < due.size(); ++current) {
-                    auto& pending = due[current];
-                    if (!pending.handler_count)
-                        pending.handler_count = handlers_.size();
-                    while (pending.next_handler < pending.handler_count.value_or(0)) {
-                        if (!continue_delivery()) {
-                            requeue();
-                            return delivered;
-                        }
-                        // std::deque appends keep references to existing handler elements valid.
-                        const Handler& handler = handlers_[pending.next_handler];
-                        ++pending.next_handler;
-                        handler(pending.event);
-                    }
-                    delivered.push_back(pending.event);
-                }
-            } catch (...) {
-                requeue();
-                throw;
-            }
-
-            if (!resuming || pending_batch_size_ != 0)
-                return delivered;
-        }
+    struct DrainWork {
+        std::size_t sort_comparisons = 0;
+        // Event object bytes plus topic/payload bytes copied into delivery results.
+        std::size_t delivered_copy_bytes = 0;
+        std::size_t scratch_growths = 0;
+    };
+    // Cumulative saturating work counters; clear/restore do not reset them.
+    [[nodiscard]] const DrainWork& drain_work() const noexcept {
+        return drain_work_;
     }
 
     // A subscription added during delivery starts with the next event, in subscription order.
@@ -148,6 +100,115 @@ private:
         std::size_t next_handler = 0;
         std::optional<std::size_t> handler_count;
     };
+    struct DueBuffer {
+        explicit DueBuffer(std::vector<PendingEvent>& scratch)
+            : retained(scratch) {
+            events.swap(retained);
+        }
+        ~DueBuffer() {
+            events.clear();
+            if (events.capacity() > retained.capacity()) {
+                events.swap(retained);
+            }
+        }
+        // Nested drains borrow independent storage while an outer batch is in flight.
+        std::vector<PendingEvent> events;
+        std::vector<PendingEvent>& retained;
+    };
+
+    static void count_work(std::size_t& counter, std::size_t amount) noexcept {
+        counter += std::min(amount, std::numeric_limits<std::size_t>::max() - counter);
+    }
+    void sort_pending_if_needed();
+
+    template<bool Capture, typename ContinueDelivery>
+    std::vector<SimulationEvent> drain_impl(std::uint64_t inclusive_tick,
+                                            const ContinueDelivery& continue_delivery) {
+        DueBuffer buffer(due_scratch_);
+        std::vector<SimulationEvent> delivered;
+        for (;;) {
+            const bool resuming = pending_batch_size_ != 0;
+            if (!resuming) {
+                sort_pending_if_needed();
+            }
+
+            auto& due = buffer.events;
+            due.clear();
+            auto first_future = pending_events_.begin();
+            const auto batch_end = resuming ? pending_events_.begin() +
+                                                  static_cast<std::ptrdiff_t>(pending_batch_size_)
+                                            : pending_events_.end();
+            while (first_future != batch_end && first_future->event.tick <= inclusive_tick) {
+                ++first_future;
+            }
+            // Scratch is bounded by the eligible prefix of the queued batch.
+            const auto due_count = static_cast<std::size_t>(first_future - pending_events_.begin());
+            if (due.capacity() < due_count) {
+                due.reserve(due_count);
+                count_work(drain_work_.scratch_growths, 1);
+            }
+            for (auto it = pending_events_.begin(); it != first_future; ++it) {
+                const auto& event = it->event;
+                const auto bytes = pending_bytes_.find(event.topic);
+                bytes->second -= event.canonical_size() + 1;
+                if (bytes->second == 0) {
+                    pending_bytes_.erase(bytes);
+                }
+                due.push_back(std::move(*it));
+            }
+            pending_events_.erase(pending_events_.begin(), first_future);
+            if (resuming)
+                pending_batch_size_ -= due.size();
+
+            std::size_t current = 0;
+            const auto requeue = [&] {
+                for (std::size_t i = current; i < due.size(); ++i) {
+                    const auto& event = due[i].event;
+                    pending_bytes_[event.topic] += event.canonical_size() + 1;
+                }
+                // Preserve this batch's order and handler cutoffs before forming the next batch.
+                pending_events_.insert(
+                    pending_events_.begin(),
+                    std::make_move_iterator(due.begin() + static_cast<std::ptrdiff_t>(current)),
+                    std::make_move_iterator(due.end()));
+                pending_batch_size_ += due.size() - current;
+                order_dirty_ = true;
+            };
+            try {
+                for (; current < due.size(); ++current) {
+                    auto& pending = due[current];
+                    if (!pending.handler_count)
+                        pending.handler_count = handlers_.size();
+                    while (pending.next_handler < pending.handler_count.value_or(0)) {
+                        if (!continue_delivery()) {
+                            requeue();
+                            return delivered;
+                        }
+                        // std::deque appends keep references to existing handler elements valid.
+                        const Handler& handler = handlers_[pending.next_handler];
+                        ++pending.next_handler;
+                        handler(pending.event);
+                    }
+                    if constexpr (Capture) {
+                        delivered.push_back(pending.event);
+                        count_work(drain_work_.delivered_copy_bytes, sizeof(SimulationEvent));
+                        count_work(drain_work_.delivered_copy_bytes, pending.event.topic.size());
+                        count_work(drain_work_.delivered_copy_bytes, pending.event.payload.size());
+                    }
+                }
+            } catch (...) {
+                requeue();
+                throw;
+            }
+
+            if (!resuming || pending_batch_size_ != 0)
+                return delivered;
+        }
+    }
+
+    bool order_dirty_ = false;
+    std::vector<PendingEvent> due_scratch_;
+    DrainWork drain_work_;
     std::uint64_t next_sequence_ = 0;
     std::vector<PendingEvent> pending_events_;
     // An interrupted batch stays at the front, ahead of callback publications.

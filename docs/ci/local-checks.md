@@ -620,14 +620,17 @@ invocation, including tool fallback and failure propagation.
 ## Acceptance inventory checks
 
 Acceptance refresh and restart custody are specified in
-[acceptance-refresh.md](acceptance-refresh.md). Its 24 contract partitions include
+[acceptance-refresh.md](acceptance-refresh.md). Its registered contract partitions include
 recovery and custody tests, with four separate public-tree partitions; all keep
 the existing labels and 30-second deadlines. Run the complete Python suite and
-static inventories without a project build:
+static inventories without a project build. For document generation, choose a
+fresh receipt path in an existing caller metadata directory outside the checkout
+and Git metadata (the `callerMetadata` variable below):
 
 ```bash
 python3 -I -B tools/ci/test_check_acceptance_matrix.py
-python3 -I -B tools/ci/check_acceptance_matrix.py --check-doc docs/acceptance-matrix.md
+mkdir -p build
+python3 -I -B tools/ci/check_acceptance_matrix.py --write-doc build/acceptance-matrix.md --check-doc build/acceptance-matrix.md --preparation-receipt-file "$callerMetadata/document.json"
 python3 -I -B tools/ci/validate_public_tree.py --root .
 python3 -I -B tools/ci/test_validate_public_tree.py
 python3 -I -B tools/ci/validate_assets.py --check config/public-asset-inventory.json

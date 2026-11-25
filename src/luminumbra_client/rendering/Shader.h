@@ -1,9 +1,12 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <string>
+#include <string_view>
 #include <unordered_map> // Added for the cache
 #include <vector>
 
@@ -60,7 +63,7 @@ public:
     // sampler) is logged at WARN and returns true. The expected layout is
     // remembered so a later hot-reload re-validates against it and
     // rolls back on mismatch.
-    bool ValidateLayout(const ExpectedLayout& expected);
+    [[nodiscard]] bool ValidateLayout(const ExpectedLayout& expected);
 
     //  hot-reload safety: recompile+relink from the stored source paths
     // into a SEPARATE program, reflect it, and (if an expected layout was
@@ -70,25 +73,25 @@ public:
     // is KEPT -- never adopt a broken program. Returns true iff a swap happened.
     bool Reload();
 
-    void setBool(const std::string& name, bool value) const;
-    void setInt(const std::string& name, int value) const;
-    void setFloat(const std::string& name, float value) const;
-    void setVec2(const std::string& name, const glm::vec2& value) const;
-    void setVec2(const std::string& name, float x, float y) const;
-    void setVec3(const std::string& name, const glm::vec3& value) const;
-    void setVec3(const std::string& name, float x, float y, float z) const;
-    void setVec4(const std::string& name, const glm::vec4& value) const;
-    void setVec4(const std::string& name, float x, float y, float z, float w) const;
-    void setMat2(const std::string& name, const glm::mat2& mat) const;
-    void setMat3(const std::string& name, const glm::mat3& mat) const;
-    void setMat4(const std::string& name, const glm::mat4& mat) const;
+    void setBool(std::string_view name, bool value) const;
+    void setInt(std::string_view name, int value) const;
+    void setFloat(std::string_view name, float value) const;
+    void setVec2(std::string_view name, const glm::vec2& value) const;
+    void setVec2(std::string_view name, float x, float y) const;
+    void setVec3(std::string_view name, const glm::vec3& value) const;
+    void setVec3(std::string_view name, float x, float y, float z) const;
+    void setVec4(std::string_view name, const glm::vec4& value) const;
+    void setVec4(std::string_view name, float x, float y, float z, float w) const;
+    void setMat2(std::string_view name, const glm::mat2& mat) const;
+    void setMat3(std::string_view name, const glm::mat3& mat) const;
+    void setMat4(std::string_view name, const glm::mat4& mat) const;
 
 private:
     std::vector<std::string> m_feedback_varyings;
     std::vector<std::string> m_defines;
     std::uint64_t m_program_generation = 0;
     bool checkCompileErrors(GLuint shader, const std::string& type);
-    GLint getUniformLocation(const std::string& name) const; // Helper to use the cache
+    GLint getUniformLocation(std::string_view name) const; // Helper to use the cache
 
     // Single compile+link path shared by the ctor and Reload. Reads the two
     // source files, compiles+links, and returns a NEW program name (0 on any
@@ -100,8 +103,15 @@ private:
     bool m_valid = false;
     std::string m_debug_name;
     std::string m_diagnostic;
-    // The cache for uniform locations. mutable allows it to be modified in const functions.
-    mutable std::unordered_map<std::string, GLint> m_uniformLocationCache;
+    struct UniformNameHash {
+        using is_transparent = void;
+        std::size_t operator()(std::string_view name) const noexcept {
+            return std::hash<std::string_view>{}(name);
+        }
+    };
+    // Own keys across caller lifetimes; cache hits accept views without allocating.
+    mutable std::unordered_map<std::string, GLint, UniformNameHash, std::equal_to<>>
+        m_uniformLocationCache;
 
     // stored source paths (for Reload), the reflected resource
     // layout, and the optional pass-declared expectation re-checked on reload.

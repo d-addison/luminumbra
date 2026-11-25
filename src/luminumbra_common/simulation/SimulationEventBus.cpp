@@ -80,6 +80,7 @@ std::uint64_t OrderedEventBus::publish(std::uint64_t tick,
                                },
                                0,
                                std::nullopt});
+    order_dirty_ = true;
     const auto& event = pending_events_.back().event;
     pending_bytes_[event.topic] += event.canonical_size() + 1;
     return sequence;
@@ -94,11 +95,39 @@ OrderedEventBus::drain(std::uint64_t inclusive_tick,
     return drain(inclusive_tick, [] { return true; });
 }
 
+void OrderedEventBus::drain_without_capture(std::uint64_t inclusive_tick,
+                                            const std::function<bool()>& continue_delivery) {
+    if (continue_delivery) {
+        drain_without_capture(inclusive_tick, [&continue_delivery] { return continue_delivery(); });
+        return;
+    }
+    drain_without_capture(inclusive_tick, [] { return true; });
+}
+
+void OrderedEventBus::sort_pending_if_needed() {
+    if (!order_dirty_) {
+        return;
+    }
+    std::stable_sort(
+        pending_events_.begin(), pending_events_.end(), [this](const auto& lhs, const auto& rhs) {
+            count_work(drain_work_.sort_comparisons, 1);
+            if (lhs.event.tick != rhs.event.tick) {
+                return lhs.event.tick < rhs.event.tick;
+            }
+            if (lhs.event.lane != rhs.event.lane) {
+                return lhs.event.lane < rhs.event.lane;
+            }
+            return lhs.event.sequence < rhs.event.sequence;
+        });
+    order_dirty_ = false;
+}
+
 void OrderedEventBus::subscribe(Handler handler) {
     handlers_.push_back(std::move(handler));
 }
 
 void OrderedEventBus::clear() {
+    order_dirty_ = false;
     pending_events_.clear();
     pending_batch_size_ = 0;
     pending_bytes_.clear();
@@ -127,6 +156,7 @@ std::vector<SimulationEvent> OrderedEventBus::pending_events() const {
 
 void OrderedEventBus::restore_pending(std::vector<SimulationEvent> events,
                                       std::uint64_t next_sequence) {
+    order_dirty_ = true;
     pending_events_.clear();
     pending_batch_size_ = 0;
     pending_bytes_.clear();

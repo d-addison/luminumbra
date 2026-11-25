@@ -15,6 +15,8 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -125,6 +127,189 @@ void ExpectParticleStates(const ParticlePass& pass,
         EXPECT_EQ(actual[i].age, expected[i].age);
         EXPECT_EQ(actual[i].lifetime, expected[i].lifetime);
         EXPECT_EQ(actual[i].emitter_index, expected[i].emitter_index);
+    }
+}
+
+// Independent full-pool oracle: holes are visited and rejected in slot order.
+// Both the pool and every per-frame output are bounded by kMaxInstances.
+class FullPoolReference {
+public:
+    struct Emitter {
+        ParticlePass::EmitterData data;
+        uint64_t rng = 0;
+        double credit = 0.0;
+    };
+    struct Slot {
+        ParticlePass::LiveParticleState state;
+        bool alive = false;
+    };
+    std::vector<Emitter> emitters;
+    std::vector<Slot> slots = std::vector<Slot>(ParticlePass::kMaxInstances);
+    std::vector<ParticlePass::InstanceRecord> records;
+    std::size_t head = 0;
+    std::size_t visits = 0;
+    std::size_t participating = 0;
+    std::size_t impact_count = 0;
+    std::size_t splash_count = 0;
+    glm::vec3 wind{0.0f};
+
+    static float Unit(uint64_t& rng) {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        return static_cast<float>(rng >> 40) / 16777216.0f;
+    }
+    static float Signed(uint64_t& rng) {
+        return Unit(rng) * 2.0f - 1.0f;
+    }
+    void Spawn(std::size_t index, const glm::vec3* impact = nullptr) {
+        auto& emitter = emitters[index];
+        auto& slot = slots[head];
+        slot.alive = true;
+        slot.state.age = 0.0f;
+        slot.state.lifetime = emitter.data.lifetime;
+        slot.state.emitter_index = static_cast<uint32_t>(index);
+        if (impact) {
+            slot.state.pos =
+                *impact +
+                glm::vec3(Signed(emitter.rng) * 0.15f, 0.02f, Signed(emitter.rng) * 0.15f);
+            slot.state.vel =
+                emitter.data.base_velocity +
+                glm::vec3(Signed(emitter.rng), Unit(emitter.rng), Signed(emitter.rng)) *
+                    emitter.data.velocity_jitter;
+            ++splash_count;
+        } else {
+            slot.state.pos =
+                emitter.data.origin + glm::vec3(Signed(emitter.rng) * emitter.data.origin_extent.x,
+                                                Signed(emitter.rng) * emitter.data.origin_extent.y,
+                                                Signed(emitter.rng) * emitter.data.origin_extent.z);
+            slot.state.vel =
+                emitter.data.base_velocity +
+                glm::vec3(Signed(emitter.rng), Signed(emitter.rng), Signed(emitter.rng)) *
+                    emitter.data.velocity_jitter;
+        }
+        head = (head + 1) % slots.size();
+    }
+    void Update(float dt) {
+        for (std::size_t index = 0; index < emitters.size(); ++index) {
+            auto& emitter = emitters[index];
+            emitter.credit +=
+                static_cast<double>(emitter.data.spawn_rate) * static_cast<double>(dt);
+            const auto count = static_cast<std::size_t>(emitter.credit);
+            emitter.credit -= static_cast<double>(count);
+            for (std::size_t spawn = 0; spawn < std::min(count, slots.size()); ++spawn) {
+                Spawn(index);
+            }
+        }
+        records.clear();
+        visits = 0;
+        participating = 0;
+        std::vector<glm::vec3> impacts;
+        for (auto& slot : slots) {
+            ++visits;
+            if (!slot.alive) {
+                continue;
+            }
+            ++participating;
+            auto& particle = slot.state;
+            particle.age += dt;
+            if (particle.age >= particle.lifetime) {
+                slot.alive = false;
+                continue;
+            }
+            const auto& data = emitters[particle.emitter_index].data;
+            const auto velocity = particle.vel + wind * data.wind_response;
+            particle.pos += velocity * dt;
+            if (data.impact_splash && velocity.y < 0.0f && particle.pos.y <= data.impact_plane_y) {
+                impacts.emplace_back(particle.pos.x, data.impact_plane_y, particle.pos.z);
+                slot.alive = false;
+                ++impact_count;
+                continue;
+            }
+            const float t = particle.age / particle.lifetime;
+            float rotation = t * 6.2831853f;
+            if (data.streak_aspect > 1.0f) {
+                rotation = std::atan2(-velocity.x, velocity.y);
+            }
+            ParticlePass::InstanceRecord record{};
+            record.pos[0] = particle.pos.x;
+            record.pos[1] = particle.pos.y;
+            record.pos[2] = particle.pos.z;
+            record.size = data.size_curve.sample(t);
+            record.color[0] = Unorm(data.r_curve.sample(t));
+            record.color[1] = Unorm(data.g_curve.sample(t));
+            record.color[2] = Unorm(data.b_curve.sample(t));
+            record.color[3] = Unorm(data.a_curve.sample(t));
+            record.atlas_layer = data.atlas_layer;
+            const float angle =
+                std::clamp(rotation * (1.0f / 3.14159265358979323846f), -1.0f, 1.0f);
+            record.rotation = static_cast<int8_t>(std::lround(angle * 127.0f));
+            record.streak = Unorm(data.streak_aspect / ParticlePass::kMaxStreakAspect);
+            records.push_back(record);
+        }
+        for (std::size_t index = 0; index < impacts.size(); index += 4) {
+            for (int crown = 0; crown < 3; ++crown) {
+                Spawn(2, &impacts[index]);
+            }
+        }
+    }
+    std::vector<ParticlePass::LiveParticleState> States() const {
+        std::vector<ParticlePass::LiveParticleState> states;
+        for (const auto& slot : slots) {
+            if (slot.alive) {
+                states.push_back(slot.state);
+            }
+        }
+        return states;
+    }
+
+private:
+    static uint8_t Unorm(float value) {
+        return static_cast<uint8_t>(std::lround(std::clamp(value, 0.0f, 1.0f) * 255.0f));
+    }
+};
+
+void WriteEmitter(const fs::path& path, const ParticlePass::EmitterData& data) {
+    const nlohmann::json doc{
+        {"spawn_rate", data.spawn_rate},
+        {"lifetime", data.lifetime},
+        {"origin", {data.origin.x, data.origin.y, data.origin.z}},
+        {"origin_extent", {data.origin_extent.x, data.origin_extent.y, data.origin_extent.z}},
+        {"base_velocity", {data.base_velocity.x, data.base_velocity.y, data.base_velocity.z}},
+        {"velocity_jitter", data.velocity_jitter},
+        {"wind_response", data.wind_response},
+        {"streak_aspect", data.streak_aspect},
+        {"impact_splash", data.impact_splash},
+        {"impact_plane_y", data.impact_plane_y},
+        {"atlas_layer", data.atlas_layer},
+        {"size_curve", data.size_curve.points},
+        {"color_r_curve", data.r_curve.points},
+        {"color_g_curve", data.g_curve.points},
+        {"color_b_curve", data.b_curve.points},
+        {"color_a_curve", data.a_curve.points}};
+    std::ofstream output(path);
+    output << doc.dump();
+    output.close();
+    ASSERT_TRUE(output);
+}
+
+void ExpectStateBits(const ParticlePass& pass, const FullPoolReference& reference) {
+    const auto actual = pass.live_particle_states();
+    const auto expected = reference.States();
+    ASSERT_EQ(actual.size(), expected.size());
+    for (std::size_t index = 0; index < actual.size(); ++index) {
+        SCOPED_TRACE(index);
+        for (int axis = 0; axis < 3; ++axis) {
+            EXPECT_EQ(std::bit_cast<uint32_t>(actual[index].pos[axis]),
+                      std::bit_cast<uint32_t>(expected[index].pos[axis]));
+            EXPECT_EQ(std::bit_cast<uint32_t>(actual[index].vel[axis]),
+                      std::bit_cast<uint32_t>(expected[index].vel[axis]));
+        }
+        EXPECT_EQ(std::bit_cast<uint32_t>(actual[index].age),
+                  std::bit_cast<uint32_t>(expected[index].age));
+        EXPECT_EQ(std::bit_cast<uint32_t>(actual[index].lifetime),
+                  std::bit_cast<uint32_t>(expected[index].lifetime));
+        EXPECT_EQ(actual[index].emitter_index, expected[index].emitter_index);
     }
 }
 
@@ -336,8 +521,9 @@ TEST_F(ParticleLiveTest, WaterfallRemovalPreservesAndRemapsEveryUnrelatedParticl
             survivors.push_back(particle);
         }
     }
-    for (const auto count : owned)
+    for (const auto count : owned) {
         ASSERT_GT(count, 0u); // Every emitter, including both falls, rain, snow and splash.
+    }
     ASSERT_LT(survivors.size(), before.size());
 
     pass.clear_waterfall_spray();
@@ -446,17 +632,19 @@ TEST_F(ParticleLiveTest, AmbientMotesTickAfterPreviewFullReset) {
 }
 
 TEST_F(ParticleLiveTest, WaterfallOnlyLiveSetBecomesEmpty) {
-    for (int site = 0; site < 2; ++site)
+    for (int site = 0; site < 2; ++site) {
         ASSERT_NE(pass.add_waterfall_spray(spray_file, glm::vec3(20.0f), 8.0f, 4.0f),
                   ParticlePass::kInvalidEmitter);
+    }
     pass.rebuild_emitter_descriptors(777u, 10u);
     pass.update(0.125f);
     ASSERT_GT(pass.live_particle_count(), 0u);
     const auto before = pass.live_particle_states();
-    for (uint32_t index = 0; index < 2; ++index)
+    for (uint32_t index = 0; index < 2; ++index) {
         ASSERT_TRUE(std::any_of(before.begin(), before.end(), [index](const auto& particle) {
             return particle.emitter_index == index;
         }));
+    }
     pass.clear_waterfall_spray();
     ExpectParticleStates(pass, {});
     EXPECT_FALSE(pass.has_emitters());
@@ -479,4 +667,137 @@ TEST_F(ParticleLiveTest, NoWaterfallParticlesLeavesLiveSetUnchanged) {
     ExpectParticleStates(pass, before);
     pass.clear_waterfall_spray();
     ExpectParticleStates(pass, before);
+}
+
+TEST_F(ParticleLiveTest, ActiveTraversalMatchesSeededFullPoolBytesAndWork) {
+    const Luminumbra::TestSupport::ScopedTempFile fixture("particle-reference-", ".json");
+    for (const bool dense : {false, true}) {
+        SCOPED_TRACE(dense);
+        pass.clear_emitters();
+        FullPoolReference reference;
+        reference.wind = glm::vec3(0.75f, 0.0f, -0.5f);
+        pass.set_wind(reference.wind);
+        for (std::size_t index = 0; index < 3; ++index) {
+            ParticlePass::EmitterData data;
+            data.spawn_rate = index == 2   ? 0.0f
+                              : dense      ? 262144.0f
+                              : index == 0 ? 4096.0f
+                                           : 3072.0f;
+            data.lifetime = index == 0 ? 0.5f : 0.25f;
+            data.origin = glm::vec3(1.0f, index == 1 ? 0.125f : 2.0f, -3.0f);
+            data.origin_extent = glm::vec3(0.5f, 0.25f, 0.75f);
+            data.base_velocity = glm::vec3(0.125f, index == 1 ? -2.0f : 1.0f, -0.25f);
+            data.velocity_jitter = 0.5f;
+            data.wind_response = 0.75f;
+            data.streak_aspect = index == 1 ? 8.0f : 1.0f;
+            data.impact_splash = index == 1;
+            data.atlas_layer = static_cast<uint16_t>(index + 1);
+            data.size_curve.points = {0.125f, 0.25f, 0.5f, 0.25f, 0.0f};
+            data.r_curve.points = {0.25f, 0.5f, 0.75f, 1.0f, 0.5f};
+            data.g_curve.points = {0.5f, 1.0f, 0.75f, 0.5f, 0.25f};
+            data.b_curve.points = {1.0f, 0.75f, 0.5f, 0.25f, 0.0f};
+            data.a_curve.points = {0.0f, 0.5f, 1.0f, 0.5f, 0.0f};
+            ASSERT_NO_FATAL_FAILURE(WriteEmitter(fixture.Path(), data));
+            const auto id = index == 2 ? pass.add_splash_emitter(fixture.Path())
+                                       : pass.add_emitter(fixture.Path(), glm::vec3(0.0f));
+            ASSERT_EQ(id, index);
+            reference.emitters.push_back({.data = data,
+                                          .rng = ParticlePass::derive_emitter_seed(777u, 10u, id),
+                                          .credit = 0.0});
+        }
+        pass.rebuild_emitter_descriptors(777u, 10u);
+        const int frames = dense ? 4 : 160;
+        for (int frame = 0; frame < frames; ++frame) {
+            SCOPED_TRACE(frame);
+            // Zero dt also includes deferred splash particles without drawing RNG.
+            const float dt = frame % 7 == 6 ? 0.0f : 0.125f;
+            reference.Update(dt);
+            pass.update(dt);
+            ASSERT_EQ(pass.frame_instance_count(), reference.records.size());
+            EXPECT_EQ(pass.live_particle_count(), reference.records.size());
+            if (!reference.records.empty()) {
+                EXPECT_EQ(
+                    std::memcmp(Mapping().records.data(),
+                                reference.records.data(),
+                                reference.records.size() * sizeof(ParticlePass::InstanceRecord)),
+                    0);
+            }
+            ASSERT_NO_FATAL_FAILURE(ExpectStateBits(pass, reference));
+            EXPECT_EQ(reference.visits, ParticlePass::kMaxInstances);
+            EXPECT_EQ(pass.update_slot_visits(), reference.participating);
+            if (!dense) {
+                EXPECT_LT(pass.update_slot_visits(), ParticlePass::kMaxInstances / 16);
+            }
+        }
+        EXPECT_GT(reference.impact_count, 0u);
+        EXPECT_GT(reference.splash_count, 0u);
+    }
+}
+
+TEST_F(ParticleLiveTest, ActiveTraversalEmptyExpiryRemovalAndBufferReset) {
+    pass.update(0.125f);
+    EXPECT_EQ(pass.update_slot_visits(), 0u);
+    ASSERT_NE(pass.add_splash_emitter(FixtureEmitter()), ParticlePass::kInvalidEmitter);
+    pass.update(0.125f); // An emitter with no live slots must do no slot work.
+    EXPECT_EQ(pass.update_slot_visits(), 0u);
+    pass.clear_emitters();
+    ASSERT_NE(pass.add_emitter(FixtureEmitter(), glm::vec3(0.0f)), ParticlePass::kInvalidEmitter);
+    pass.rebuild_emitter_descriptors(777u, 10u);
+    pass.update(0.125f);
+    EXPECT_EQ(pass.update_slot_visits(), 15u);
+    pass.update(3.0f); // Every existing and newly spawned particle expires.
+    EXPECT_EQ(pass.frame_instance_count(), 0u);
+    EXPECT_EQ(pass.live_particle_count(), 0u);
+    pass.update(0.0f);
+    EXPECT_EQ(pass.update_slot_visits(), 0u);
+    pass.clear_emitters();
+    ASSERT_NE(pass.add_waterfall_spray(spray_file, glm::vec3(0.0f), 8.0f, 4.0f),
+              ParticlePass::kInvalidEmitter);
+    pass.rebuild_emitter_descriptors(777u, 10u);
+    pass.update(0.125f);
+    ASSERT_GT(pass.update_slot_visits(), 0u);
+    pass.clear_waterfall_spray();
+    ASSERT_NE(pass.add_splash_emitter(FixtureEmitter()), ParticlePass::kInvalidEmitter);
+    pass.update(0.0f);
+    EXPECT_EQ(pass.update_slot_visits(), 0u);
+    pass.clear_emitters();
+    ASSERT_NE(pass.add_emitter(FixtureEmitter(), glm::vec3(0.0f)), ParticlePass::kInvalidEmitter);
+    pass.update(0.125f);
+    ASSERT_GT(pass.update_slot_visits(), 0u);
+    pass.destroy_buffers();
+    pass.update(0.125f);
+    EXPECT_EQ(pass.update_slot_visits(), 0u);
+    pass.init_buffers();
+    pass.update(0.0f);
+    EXPECT_EQ(pass.update_slot_visits(), 0u);
+    pass.update(0.125f);
+    EXPECT_EQ(pass.update_slot_visits(), 15u);
+    pass.clear_emitters();
+    ASSERT_NE(pass.add_splash_emitter(FixtureEmitter()), ParticlePass::kInvalidEmitter);
+    pass.update(0.0f);
+    EXPECT_EQ(pass.update_slot_visits(), 0u);
+    pass.clear_emitters();
+    const Luminumbra::TestSupport::ScopedTempFile fixture("particle-capacity-", ".json");
+    ParticlePass::EmitterData data;
+    data.spawn_rate = static_cast<float>(ParticlePass::kMaxInstances) * 8.0f;
+    ASSERT_NO_FATAL_FAILURE(WriteEmitter(fixture.Path(), data));
+    ASSERT_NE(pass.add_emitter(fixture.Path(), glm::vec3(0.0f)), ParticlePass::kInvalidEmitter);
+    pass.update(0.125f);
+    EXPECT_EQ(pass.update_slot_visits(), ParticlePass::kMaxInstances);
+    EXPECT_EQ(pass.frame_instance_count(), ParticlePass::kMaxInstances);
+    pass.update(0.0f); // Includes the highest slot and the capacity sentinel.
+    EXPECT_EQ(pass.update_slot_visits(), ParticlePass::kMaxInstances);
+    pass.destroy_buffers();
+    {
+        ScopedParticleGlCall<PFNGLMAPBUFFERRANGEPROC> unmapped{glad_glMapBufferRange};
+        pass.init_buffers();
+    }
+    pass.update(0.125f); // Spawns remain live when the mapping is unavailable.
+    EXPECT_EQ(pass.update_slot_visits(), 0u);
+    EXPECT_EQ(pass.frame_instance_count(), 0u);
+    EXPECT_EQ(pass.live_particle_count(), ParticlePass::kMaxInstances);
+    pass.destroy_buffers();
+    pass.init_buffers();
+    pass.update(0.0f);
+    EXPECT_EQ(pass.update_slot_visits(), 0u);
 }

@@ -1,0 +1,18 @@
+{
+  "id": "render.visual-diagnostic-runtime-requests",
+  "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+  "statement": "Other diagnostic views and runtime bundle requests remain planned. Implemented bundle validation and advisory ROI image checks are recorded separately.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticCaptureIntegration.*",
+      "planned": "Add and run GPU attribution and scenario capture bundle regressions; owner: maintainers"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development/visual-diagnostics.md"
+    }
+  ],
+  "requirements": []
+}

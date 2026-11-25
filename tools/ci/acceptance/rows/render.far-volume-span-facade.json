@@ -1,0 +1,28 @@
+{
+  "id": "render.far-volume-span-facade",
+  "source": "issue #239",
+  "statement": "Dormant explicit-span generic and pristine compilation shares the existing authority session, canonical charged generation and meshing, and one pristine world sampling scope. Charged, uncharged and null-pool wrappers preserve exact request bounds and transactional outputs and reservations. Registered regressions cover full-span/page geometry and retained-brick equivalence, Y-face/XZ-edge/corner halo normals, a torus crossing zero, boundary material disagreement, invalid requests, pre-callback refusal, cancellation and exhaustive sparse mixed-page allocation admission refusal for both numeric profiles. Only tests call these paths. Native execution, production page ownership and streaming remain pending.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "FarVolumeFacade.ExplicitSpan*",
+      "planned": "Run registered explicit-span facade regressions; owner: rendering"
+    },
+    {
+      "kind": "ctest",
+      "ref": "FarVolumeFacadeMemory.ExplicitSpan*",
+      "planned": "Run registered explicit-span facade regressions; owner: rendering"
+    },
+    {
+      "kind": "ctest",
+      "ref": "FarVolumeWorld.ExplicitSpan*",
+      "planned": "Run registered explicit-span facade regressions; owner: rendering"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/far-volume-memory.md"
+    }
+  ],
+  "requirements": []
+}

@@ -1,6 +1,11 @@
 # This file lists test source files that are shared by CTest executables.
 # Paths are anchored to this file so it is safe to include from any test
 # CMakeLists.txt in the tree.
+set(LUMPACK_TEST_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/tools/Lumpack_test.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/../tools/lumpack/Lumpack.cpp
+)
+
 set(GPU_FRAME_ARENA_TEST_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/GpuFrameArenaGl_test.cpp
 )

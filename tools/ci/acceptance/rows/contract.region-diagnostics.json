@@ -1,0 +1,14 @@
+{
+  "id": "contract.region-diagnostics",
+  "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
+  "statement": "Diagnostics and measured budget activation remain separate qualification work.",
+  "status": "planned",
+  "requirements": [],
+  "evidence": [
+    {
+      "kind": "doc",
+      "ref": "docs/distant-world.md",
+      "planned": "Qualify the regional diagnostic panel and measured budget activation together with representative-world evidence; owner: ds"
+    }
+  ]
+}

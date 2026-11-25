@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.tier-api.01",
+  "source": "docs/distant-world.md#far-range-declaration-and-compatibility",
+  "statement": "Acceptance obligations: New volumetric far code reads this table instead of introducing local range constants. / Actual live coverage, arrival fallback and one-brick overlap remain obligations of later slices. / This is a source API addition, with no serialized file, record, field, artifact key or feature switch added to the engine. / invalid table dimensions fail its compile-time invariants. / There is no runtime table loader or format version to accept, migrate or reinterpret. / a missing source fails configuration or build, and a broken contract fails its tests.",
+  "status": "planned",
+  "requirements": [
+    "dw.tier-api.002",
+    "dw.tier-api.008",
+    "dw.tier-api.009",
+    "dw.tier-api.011",
+    "dw.tier-api.014",
+    "dw.tier-api.016"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwTierApiContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.tier-api.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: fw"
+    }
+  ]
+}

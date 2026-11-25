@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.hash.01",
+  "source": "docs/active-regions.md#hash-and-replay",
+  "statement": "Acceptance obligations: This contribution follows the existing clock bytes within the existing ecology fold. / The outer composition remains `chunk|wind|weather|aether|scents|ecology|plants`. / Storage paths and transaction generations are not ledger fields and never enter this projection. / The enabled replay trace carries the digest outside unchanged LREC1 checkpoint and container bytes. / No trace file or artifact key is emitted with the switch off. / Schedule trace validation refuses missing, corrupt or future traces on an enabled replay;",
+  "status": "planned",
+  "requirements": [
+    "ar.hash.004",
+    "ar.hash.005",
+    "ar.hash.006",
+    "ar.hash.008",
+    "ar.hash.009",
+    "ar.hash.010"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArHashContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.hash.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

@@ -45,7 +45,8 @@ INPUTS = {'res/shaders/instanced_mesh.vert', 'res/shaders/static_asset.vert', 'r
           'res/shaders/lighting_pass.frag', 'res/shaders/magical_particles.frag',
           'src/luminumbra_client/rendering/Camera.h',
           'res/shaders/ssao.vert', 'res/shaders/taau_resolve.frag',
-          'res/shaders/grass_compact_prefix.comp', 'res/shaders/foliage.vert', 'res/shaders/foliage.frag',
+          'res/shaders/grass_compact_prefix.comp', 'res/shaders/grass_scatter.comp',
+          'res/shaders/foliage.vert', 'res/shaders/foliage.frag',
           'test/rendering/shader_scene_render_test.cpp'}
 
 

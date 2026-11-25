@@ -1,5 +1,17 @@
 # tools/CMakeLists.txt
 
+option(LUMINUMBRA_BUILD_TOOLS "Build optional command-line content tools" OFF)
+if(LUMINUMBRA_BUILD_TOOLS)
+    add_executable(lumpack lumpack/main.cpp lumpack/Lumpack.cpp)
+    target_include_directories(lumpack PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(lumpack PRIVATE luminumbra_common nlohmann_json)
+    luminumbra_configure_first_party_target(lumpack)
+    luminumbra_pin_fp_determinism(lumpack)
+    if(MINGW)
+        target_link_options(lumpack PRIVATE -municode)
+    endif()
+endif()
+
 add_executable(asset_processor
     asset_processor.cpp
     morph_asset_processor.cpp
@@ -99,6 +111,9 @@ if(BUILD_TESTING)
                     "-DNETWORK_TEST_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
                     "-DNETWORK_TEST_COMPILER=${CMAKE_CXX_COMPILER}"
                     "-DNETWORK_TEST_COMPILER_INFO=${CMAKE_PLATFORM_INFO_DIR}/CMakeCXXCompiler.cmake"
+                    "-DNETWORK_TEST_OBJDUMP=${CMAKE_OBJDUMP}"
+                    "-DNETWORK_TEST_DUMPBIN=${CMAKE_DUMPBIN}"
+                    "-DNETWORK_TEST_NM=${CMAKE_NM}"
                     -P "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_networking_runtime_integration.cmake")
         set_tests_properties(NetworkingRuntimeBuildIntegration
             PROPERTIES LABELS "ci;tools;net" TIMEOUT 90)
@@ -1829,8 +1844,7 @@ if(BUILD_TESTING)
         NAME AcceptanceMatrixTree
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/check_acceptance_matrix.py"
-                --root "${CMAKE_SOURCE_DIR}"
-                --check-doc "${CMAKE_SOURCE_DIR}/docs/acceptance-matrix.md")
+                --root "${CMAKE_SOURCE_DIR}")
     set_tests_properties(AcceptanceMatrixTree
         PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
     add_test(
@@ -1922,6 +1936,11 @@ if(BUILD_TESTING)
         NAME CTestShardContractPart8
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py" --partition 8)
     set_tests_properties(CTestShardContractPart8
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME SelfHostedAdmissionContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_self_hosted_admission.py")
+    set_tests_properties(SelfHostedAdmissionContract
         PROPERTIES LABELS "ci;tools" TIMEOUT 30)
     # Disjoint policy partitions preserve every unittest case and the 30s deadline.
     # Direct Python invocation and unittest discovery still execute the full suite.

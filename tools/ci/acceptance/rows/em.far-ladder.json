@@ -1,0 +1,19 @@
+{
+  "id": "em.far-ladder",
+  "source": "docs/distant-world.md#evidence-map",
+  "statement": "The far ladder, caves and seams are covered on default, mountains, archipelago and cave-dense fixtures.",
+  "status": "planned",
+  "evidence": [
+    {
+      "kind": "native",
+      "ref": "tools/gates/validate-engine-frontier.ps1",
+      "planned": "Ladder qualification refuses until immutable fixture authority is supported; owner: fw",
+      "command": "pwsh tools/gates/validate-engine-frontier.ps1 -Mode FarLodHorizon -FarWorldRenderer Ladder",
+      "receipt_schema": "luminumbra.farlod_horizon.v2"
+    }
+  ],
+  "requirements": [
+    "dw.evidence.001",
+    "dw.mappings.018"
+  ]
+}

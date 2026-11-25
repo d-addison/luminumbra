@@ -1956,7 +1956,7 @@ RenderPipeline::get_render_health_snapshot(bool drain_gl_errors) const {
     snapshot.runtime = get_runtime_render_stats();
     snapshot.resources = get_resource_registry_stats();
     snapshot.shaders = get_shader_health();
-    snapshot.passes = m_last_render_pass_metadata;
+    snapshot.passes = m_render_pass_metadata.passes();
     snapshot.started = m_started;
 
     auto fail = [&snapshot](std::string message) {
@@ -2075,122 +2075,21 @@ RenderPipeline::get_render_health_snapshot(bool drain_gl_errors) const {
 }
 
 void RenderPipeline::refresh_render_pass_metadata() {
-    m_last_render_pass_metadata.clear();
-    auto add_pass = [this](std::string name,
-                           std::vector<std::string> inputs,
-                           std::vector<std::string> outputs,
-                           u32 width,
-                           u32 height,
-                           std::string clear,
-                           std::string load_store,
-                           size_t draw_count,
-                           size_t dispatch_count = 0u) {
-        RenderPassMetadata metadata;
-        metadata.name = std::move(name);
-        metadata.inputs = std::move(inputs);
-        metadata.outputs = std::move(outputs);
-        metadata.width = width;
-        metadata.height = height;
-        metadata.clear = std::move(clear);
-        metadata.load_store = std::move(load_store);
-        metadata.draw_count = draw_count;
-        metadata.dispatch_count = dispatch_count;
-        m_last_render_pass_metadata.push_back(std::move(metadata));
-    };
-
-    add_pass("shadow",
-             {"terrain_depth"},
-             {"shadow.depth_texture_array"},
-             m_shadow_pass->shadow_map().resolution,
-             m_shadow_pass->shadow_map().resolution,
-             "depth",
-             "store depth cascades",
-             m_last_render_pass_stats.shadow_draws);
-    add_pass("gbuffer",
-             {"terrain_meshes",
-              "farlod_region_meshes",
-              "static_meshes",
-              "skinned_meshes",
-              "material_lut",
-              "terrain_texture_array",
-              "terrain_normal_array"},
-             {"gbuffer.position",
-              "gbuffer.normal_material",
-              "gbuffer.albedo_roughness",
-              "gbuffer.metallic_ao",
-              "gbuffer.depth"},
-             m_screen_width,
-             m_screen_height,
-             "color+depth",
-             "store deferred attachments",
-             m_last_render_pass_stats.terrain_draws + m_last_render_pass_stats.far_region_draws +
-                 m_last_render_pass_stats.skinned_draws + m_last_render_pass_stats.authored_draws);
-    if (m_gbuffer_pass->gbuffer().authored_texture != 0) {
-        m_last_render_pass_metadata.back().inputs.push_back("authored_static_meshes");
-        m_last_render_pass_metadata.back().outputs.push_back("gbuffer.authored_surface");
-    }
-    add_pass("ssao",
-             {"gbuffer.position", "gbuffer.normal_material", "ssao.noise"},
-             {"ssao.raw"},
-             m_screen_width,
-             m_screen_height,
-             "color",
-             "store ambient occlusion",
-             m_last_render_pass_stats.ssao_draws);
-    add_pass("ssao_blur",
-             {"ssao.raw"},
-             {"ssao.blur"},
-             m_screen_width,
-             m_screen_height,
-             "color",
-             "store blurred ambient occlusion",
-             m_last_render_pass_stats.ssao_blur_draws);
-    add_pass("lighting",
-             {"gbuffer.*",
-              "shadow.depth_texture_array",
-              "ssao.blur",
-              "terrain_texture_array",
-              "material_lut",
-              "lighting.environment_brdf",
-              "water.fallback.black"},
-             {"lighting.color", "lighting.depth"},
-             m_screen_width,
-             m_screen_height,
-             "color+depth",
-             "store lit scene",
-             m_last_render_pass_stats.lighting_draws);
-    add_pass("skybox",
-             {"skybox_vertices"},
-             {"lighting.color"},
-             m_screen_width,
-             m_screen_height,
-             "load lighting",
-             "store sky contribution",
-             m_last_render_pass_stats.skybox_draws);
-    add_pass("water",
-             {"lighting.opaque_color_copy", "gbuffer.depth", "water_meshes", "water.fallback.*"},
-             {"lighting.color"},
-             m_screen_width,
-             m_screen_height,
-             "load sky+lighting",
-             "blend water over sky+lighting",
-             m_last_render_pass_stats.water_draws);
-    add_pass("particles",
-             {"particle_instances", "gbuffer.depth"},
-             {"lighting.color"},
-             m_screen_width,
-             m_screen_height,
-             "load lighting",
-             "blend forward-lit particles",
-             m_last_render_pass_stats.particle_draws);
-    add_pass("final_blit",
-             {"lighting.color"},
-             {"swapchain.color"},
-             m_screen_width,
-             m_screen_height,
-             "default color+depth",
-             "present-ready color",
-             m_last_render_pass_stats.final_blits);
+    m_render_pass_metadata.Refresh(
+        m_screen_width,
+        m_screen_height,
+        m_shadow_pass->shadow_map().resolution,
+        m_gbuffer_pass->gbuffer().authored_texture != 0,
+        {m_last_render_pass_stats.shadow_draws,
+         m_last_render_pass_stats.terrain_draws + m_last_render_pass_stats.far_region_draws +
+             m_last_render_pass_stats.skinned_draws + m_last_render_pass_stats.authored_draws,
+         m_last_render_pass_stats.ssao_draws,
+         m_last_render_pass_stats.ssao_blur_draws,
+         m_last_render_pass_stats.lighting_draws,
+         m_last_render_pass_stats.skybox_draws,
+         m_last_render_pass_stats.water_draws,
+         m_last_render_pass_stats.particle_draws,
+         m_last_render_pass_stats.final_blits});
 }
 
 // --- PER-PASS GPU TIMERS ---
@@ -2402,7 +2301,8 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
     // origin attribute (binding 1, divisor 1) fetches origins[baseInstance] for
     // that draw. This is portable to GL 4.3 (no gl_BaseInstance/gl_DrawID in the
     // shader required). One glMultiDrawElementsIndirect per block (per bucket).
-    std::vector<std::size_t> per_block_count(block_count, 0u);
+    // The geometry pool bounds all bucket indices to kMaxBlocks (16).
+    std::array<std::size_t, ChunkGeometryPool::kMaxBlocks> per_block_count{};
     for (const ChunkCullEntry* chunk : visible_chunks) {
         auto it = m_chunk_render_data.find(chunk->id);
         if (it == m_chunk_render_data.end())
@@ -2412,7 +2312,7 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
             continue;
         ++per_block_count[m_chunk_geometry_pool.allocation(rd.pool_handle).block_index];
     }
-    std::vector<std::size_t> block_offset(block_count, 0u);
+    std::array<std::size_t, ChunkGeometryPool::kMaxBlocks> block_offset{};
     std::size_t running = 0;
     for (std::size_t b = 0; b < block_count; ++b) {
         block_offset[b] = running;
@@ -2444,7 +2344,7 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
     m_mdi_command_scratch.resize(running);
     m_mdi_origin_scratch.resize(running);
 
-    std::vector<std::size_t> write_cursor = block_offset;
+    auto write_cursor = block_offset;
     for (const ChunkCullEntry* chunk : visible_chunks) {
         auto it = m_chunk_render_data.find(chunk->id);
         if (it == m_chunk_render_data.end())
@@ -2845,11 +2745,8 @@ void RenderPipeline::gather_lights(entt::registry& registry, const glm::vec3& ca
     // NEAREST MAX_POINT_LIGHTS. Fixes the gap where the old code took the first 32 in
     // arbitrary ECS order — so a cave full of crystals lights the ones AROUND the player,
     // not random distant ones. Render-only (never touches world_hash).
-    struct Cand {
-        PointLight light;
-        float d2;
-    };
-    std::vector<Cand> cands;
+    auto& cands = m_light_candidate_scratch;
+    cands.clear();
     for (auto entity : view) {
         auto const& transform = view.get<const Components::TransformComponent>(entity);
         auto const& light_data = view.get<const Components::PointLightComponent>(entity);
@@ -2863,21 +2760,29 @@ void RenderPipeline::gather_lights(entt::registry& registry, const glm::vec3& ca
         cands.push_back({light, glm::dot(d, d)});
     }
     if (static_cast<int>(cands.size()) > MAX_POINT_LIGHTS) {
-        std::nth_element(cands.begin(),
-                         cands.begin() + MAX_POINT_LIGHTS,
-                         cands.end(),
-                         [](const Cand& a, const Cand& b) { return a.d2 < b.d2; });
+        std::nth_element(
+            cands.begin(),
+            cands.begin() + MAX_POINT_LIGHTS,
+            cands.end(),
+            [](const LightCandidate& a, const LightCandidate& b) { return a.d2 < b.d2; });
         cands.resize(static_cast<std::size_t>(MAX_POINT_LIGHTS));
     }
-    m_point_lights_this_frame.reserve(cands.size());
+    if (m_point_lights_this_frame.capacity() < cands.size()) {
+        m_point_lights_this_frame.reserve(cands.size());
+        ++m_preparation_scratch_allocations;
+    }
     for (const auto& c : cands)
         m_point_lights_this_frame.push_back(c.light);
 }
 
-std::vector<RenderPipeline::ChunkMeshSnapshot>
-RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const {
-    std::vector<ChunkMeshSnapshot> snapshots;
-    snapshots.reserve(renderable_chunks.size());
+void RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) {
+    auto& snapshots = m_frame_prepared.renderable_chunk_snapshots;
+    snapshots.clear();
+    if (snapshots.capacity() < renderable_chunks.size()) {
+        snapshots.reserve(renderable_chunks.size());
+        ++m_preparation_scratch_allocations;
+    }
+    m_terrain_residency.begin_frame();
 
     for (const auto* chunk : renderable_chunks) {
         if (!chunk) {
@@ -2914,42 +2819,29 @@ RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chun
         }
 
         snapshots.push_back(snapshot);
+        if (snapshot.has_terrain_mesh()) {
+            m_terrain_residency.mark(snapshot.id);
+        }
     }
-
-    return snapshots;
+    m_terrain_residency.end_frame();
 }
 
 void RenderPipeline::ensure_terrain_culling_hierarchy(
     const std::vector<ChunkMeshSnapshot>& renderable_chunks) {
-    std::vector<ChunkID> sorted_chunk_ids;
-    sorted_chunk_ids.reserve(renderable_chunks.size());
-    for (const auto& chunk : renderable_chunks) {
-        if (chunk.has_terrain_mesh()) {
-            sorted_chunk_ids.push_back(chunk.id);
-        }
-    }
-    std::sort(sorted_chunk_ids.begin(), sorted_chunk_ids.end());
-
-    u64 signature = 1469598103934665603ull;
-    for (const ChunkID id : sorted_chunk_ids) {
-        signature ^= id;
-        signature *= 1099511628211ull;
-    }
-
-    const bool needs_rebuild = !m_terrainCullingCache.valid ||
-                               m_terrainCullingCache.chunk_count != sorted_chunk_ids.size() ||
-                               m_terrainCullingCache.chunk_set_signature != signature;
+    const bool needs_rebuild =
+        !m_terrainCullingCache.valid ||
+        m_terrainCullingCache.residency_revision != m_terrain_residency.revision();
     if (!needs_rebuild) {
         m_last_render_pass_stats.culling_hierarchy_chunks = m_terrainCullingCache.chunk_count;
         return;
     }
 
     m_hierarchicalCuller.BuildHierarchy(renderable_chunks);
-    m_terrainCullingCache.chunk_set_signature = signature;
-    m_terrainCullingCache.chunk_count = sorted_chunk_ids.size();
+    m_terrainCullingCache.residency_revision = m_terrain_residency.revision();
+    m_terrainCullingCache.chunk_count = m_terrain_residency.size();
     m_terrainCullingCache.valid = true;
     m_last_render_pass_stats.culling_hierarchy_rebuilds++;
-    m_last_render_pass_stats.culling_hierarchy_chunks = sorted_chunk_ids.size();
+    m_last_render_pass_stats.culling_hierarchy_chunks = m_terrain_residency.size();
 }
 
 void RenderPipeline::render_frame(entt::registry& registry,
@@ -3116,6 +3008,8 @@ bool RenderPipeline::render_far_world_off_pair(const Camera& camera) {
     auto gl = MakeFarWorldReplayGlAccess();
     std::unique_ptr<RenderView> authored_view;
     bool replay_ready = false;
+    const ReplayRollback release_replay(
+        [this]() noexcept { m_taau_pass->release_replay(m_render_registry); });
     RunFarWorldReplay(
         *gl,
         [this, &authored_view] {
@@ -3243,7 +3137,8 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     m_last_mesh_upload_stats.asset_uploads_deferred = assets.pending;
     const auto snapshot_start = std::chrono::steady_clock::now();
     const auto& renderable_chunks = world_system.renderable_chunks_view();
-    auto renderable_chunk_snapshots = build_chunk_snapshots(renderable_chunks);
+    build_chunk_snapshots(renderable_chunks);
+    const auto& renderable_chunk_snapshots = m_frame_prepared.renderable_chunk_snapshots;
     m_last_mesh_upload_stats.snapshot_count = renderable_chunk_snapshots.size();
     m_last_render_pass_stats = {};
     m_last_render_pass_stats.snapshot_count = renderable_chunk_snapshots.size();
@@ -3375,7 +3270,6 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     m_frame_prepared.world_system = &world_system;
     m_frame_prepared.delta_time = deltaTime;
     m_frame_prepared.wireframe = wireframe;
-    m_frame_prepared.renderable_chunk_snapshots = std::move(renderable_chunk_snapshots);
     m_frame_prepared.valid = true;
 
     m_cpu_frame_prep = std::chrono::steady_clock::now(); //
@@ -3672,8 +3566,9 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         gbuffer_input.tree_impostor_grid = tree_impostor_grid();
         gbuffer_input.tree_impostor_radius = tree_impostor_radius();
         gbuffer_input.tree_impostor_center = tree_impostor_center();
+        const GBufferPass::CallerState caller{.cull_enabled = GL_TRUE};
         const GBufferDrawStats gstats =
-            m_gbuffer_pass->execute(gbuffer_ctx, registry, gbuffer_input);
+            m_gbuffer_pass->execute(gbuffer_ctx, registry, gbuffer_input, caller);
         if (gstats.refusal != FarWorldRefusal::None)
             m_frame_far_selection.refusal = gstats.refusal;
         // Fold with the EXACT current policy: terrain_visible_chunks '=', rest '+='.
@@ -3813,7 +3708,9 @@ void RenderPipeline::execute_stage_lighting(const Camera& camera) {
     // G-buffer establishes depth testing; plant/decal stages retain or restore it,
     // SSAO only changes bindings, and diagnostic replay restores its entry state.
     const LightingPass::CallerState caller{.depth_test_enabled = GL_TRUE};
-    m_lighting_pass->execute(m_frame_lighting_ctx, caller);
+    const bool sky_replaces_color = m_cloud_quality > 0 && m_halfres_cloud.fbo &&
+                                    m_cloud_composite_shader && m_cloud_composite_shader->IsValid();
+    m_lighting_pass->execute(m_frame_lighting_ctx, caller, sky_replaces_color);
     end_gpu_pass_timer(GpuTimerPass::Lighting);
     glBindVertexArray(0); // Unbind after lighting pass
 }
@@ -3826,19 +3723,23 @@ void RenderPipeline::execute_stage_depth_blit_to_lighting(const Camera& camera) 
     begin_gpu_pass_timer(GpuTimerPass::DepthBlitToLighting);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
-    // both G-buffer and lighting are internal-sized; copy the internal depth rect
-    // (a screen-sized rect would leave the internal depth garbage at scale<1.0 -> the skybox
-    // depth-mask fails and the sky goes dark). At scale 1.0 internal==screen (byte-identical).
-    glBlitFramebuffer(0,
-                      0,
-                      static_cast<GLint>(m_internal_width),
-                      static_cast<GLint>(m_internal_height),
-                      0,
-                      0,
-                      static_cast<GLint>(m_internal_width),
-                      static_cast<GLint>(m_internal_height),
-                      GL_DEPTH_BUFFER_BIT,
-                      GL_NEAREST);
+    // Lighting already copied the depth when the sky depth test rejected sky pixels.
+    if (!m_lighting_pass->depth_copied_from_gbuffer()) {
+        // both G-buffer and lighting are internal-sized; copy the internal depth rect
+        // (a screen-sized rect would leave the internal depth garbage at scale<1.0 -> the skybox
+        // depth-mask fails and the sky goes dark). At scale 1.0 internal==screen
+        // (byte-identical).
+        glBlitFramebuffer(0,
+                          0,
+                          static_cast<GLint>(m_internal_width),
+                          static_cast<GLint>(m_internal_height),
+                          0,
+                          0,
+                          static_cast<GLint>(m_internal_width),
+                          static_cast<GLint>(m_internal_height),
+                          GL_DEPTH_BUFFER_BIT,
+                          GL_NEAREST);
+    }
     end_gpu_pass_timer(GpuTimerPass::DepthBlitToLighting);
 }
 
@@ -4181,7 +4082,8 @@ void RenderPipeline::execute_stage_particles(const Camera& camera) {
         // motion advance hoisted to prepare_frame (dispatch only draws).
         RenderContext particle_ctx = make_particle_context(camera);
         begin_gpu_pass_timer(GpuTimerPass::Particle);
-        const std::size_t particles_drawn = m_particle_pass->execute(particle_ctx, camera);
+        const ParticlePass::CallerState caller{.cull_enabled = GL_TRUE};
+        const std::size_t particles_drawn = m_particle_pass->execute(particle_ctx, camera, caller);
         end_gpu_pass_timer(GpuTimerPass::Particle);
         // stat bumps relocated out of the pass; bump only
         // when the pass actually drew (preserves the original guarded behavior).
@@ -5069,7 +4971,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_shadow_pass->reset_shader();
     m_ssao_pass->reset_shaders();
     m_water_pass->reset_shader();
-    m_last_render_pass_metadata.clear();
+    m_render_pass_metadata.Clear();
     m_terrain_texture_fallback_layers = 0;
     m_started = false;
 }
@@ -5112,7 +5014,7 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                                                double preparation_ms) {
     const auto limits = upload_limits(presentation, Water);
     const auto start = std::chrono::steady_clock::now();
-    // Construct before scratch containers, so their destruction is timed too.
+    // Include all resource preparation in the upload measurement.
     struct UploadMeasurement {
         UploadWorkStats& work;
         const std::size_t& pending;
@@ -5147,19 +5049,22 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
             return m_chunk_render_data;
     }();
     constexpr u32 inactive_ttl = Water ? 30 : 15;
-    std::unordered_set<ChunkID> active;
-    active.reserve(chunks.size());
+    auto& resource_frame = Water ? m_water_resource_frame : m_terrain_resource_frame;
+    resource_frame = NextRenderFrameStamp(resource_frame, records);
     for (const auto& chunk : chunks) {
         // Water-only owners keep their water record alive, but terrain activity
-        // ends with its geometry. The terrain grace period then releases both
-        // the pool allocation and foliage ground support through the usual unload.
+        // ends with its geometry. Retain the independent inactivity grace periods.
         if (Water || chunk.has_terrain_mesh()) {
-            active.insert(chunk.id);
+            const auto found = records.find(chunk.id);
+            if (found != records.end()) {
+                found->second.last_seen_frame = resource_frame;
+            }
         }
     }
-    std::vector<ChunkID> expired;
+    auto& expired = m_expired_scratch;
+    expired.clear();
     for (auto& [id, data] : records) {
-        if (active.contains(id))
+        if (data.last_seen_frame == resource_frame)
             data.frames_since_inactive = 0;
         else {
             if constexpr (!Water) {
@@ -5177,10 +5082,11 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
             unload_chunk_resources(id);
     }
 
-    std::vector<MeshUploadCandidate> candidates;
-    candidates.reserve(chunks.size());
+    auto& candidates = m_upload_candidate_scratch;
+    candidates.clear();
     // Metadata only: each visible chunk enters at most one of these queues.
-    std::vector<MeshUploadCandidate> refinement_candidates;
+    auto& refinement_candidates = m_refinement_candidate_scratch;
+    refinement_candidates.clear();
     std::size_t invalid_payloads = 0;
     for (const auto& chunk : chunks) {
         if constexpr (Water) {
@@ -5392,6 +5298,9 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
     if (queue.size() || (!Water && m_near_terrain_upload_queue.size()))
         (Water ? stats.water_nearest_deferred_distance_sq
                : stats.terrain_nearest_deferred_distance_sq) = nearest_deferred;
+    // Release snapshot owners at the same boundary as the local candidate lists.
+    candidates.clear();
+    refinement_candidates.clear();
 }
 
 bool RenderPipeline::copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk,

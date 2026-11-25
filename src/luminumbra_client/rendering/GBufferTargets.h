@@ -11,6 +11,7 @@
 namespace Luminumbra::Rendering {
 class RenderResourceRegistry;
 class DiagnosticDrawTable;
+class DiagnosticForwardPresence;
 struct DiagnosticSubmission;
 class Shader;
 
@@ -27,7 +28,8 @@ public:
     // overwriting deferred identities. Both targets and the table outlive the scope.
     GBufferDiagnosticCapture(DiagnosticTargets& targets,
                              DiagnosticDrawTable& table,
-                             DiagnosticTargets* forward_targets = nullptr);
+                             DiagnosticTargets* forward_targets = nullptr,
+                             DiagnosticForwardPresence* forward_presence = nullptr);
     ~GBufferDiagnosticCapture();
     GBufferDiagnosticCapture(const GBufferDiagnosticCapture&) = delete;
     GBufferDiagnosticCapture& operator=(const GBufferDiagnosticCapture&) = delete;
@@ -75,6 +77,8 @@ private:
         // The target owner outlives this scope. Detach before resetting the lease.
         DiagnosticTargets::AttachmentLease attachment_lease;
         DiagnosticTargets* forward_targets = nullptr;
+        // Optional caller-owned, frame-bound evidence; outlives the scope.
+        DiagnosticForwardPresence* forward_presence = nullptr;
         std::uint32_t framebuffer = 0;
         // GL guarantees at least eight draw buffers; refuse contexts above this
         // bounded snapshot capacity rather than partially restoring their state.
@@ -104,6 +108,8 @@ private:
     bool
     attach_target(const GBuffer& gbuffer, const DiagnosticExtent& extent, bool forward = false);
     void detach_target();
+    void sample_forward_presence() noexcept;
+    void forward_presence_unavailable() noexcept;
     std::unique_ptr<State> state_;
 };
 

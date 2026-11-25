@@ -1,0 +1,12 @@
+{
+  "id": "render.benchmark-workload-assignments",
+  "source": "docs/render-benchmark.md#compatibility-and-commands",
+  "statement": "Assignment-form workload options do not become debug overrides or consume successor arguments; non-workload options remain observable overrides.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "RenderBenchmarkOverrides.WorkloadAssignmentsDoNotConsumeSuccessorsOrHideOverrides"
+    }
+  ]
+}

@@ -104,13 +104,21 @@ _HEADER_SEARCH_LOCK = threading.RLock()
 _PCH_SEARCH_CACHE: dict[tuple, tuple[dict, Path | None, int]] = {}
 
 
+_CONFIGURATION_ONLY_SOURCES = frozenset({
+    "test/core/profiler_enabled_compile.cpp",
+    "test/static_scene/static_scene_test.cpp",
+})
+
+
 def first_party(relative: Path) -> bool:
-    # This fixture requires the Tracy-enabled configuration, qualified by the
-    # existing profile compile probe. Like the GL3 backend, changes still force
-    # full selection instead of claiming replay coverage in the default build.
+    # The profiler fixture requires the Tracy-enabled configuration, qualified
+    # by the existing profile compile probe. The static-scene test only builds
+    # in the standalone tools/static_scene project, so the repository compile
+    # database never lists it. Like the GL3 backend, changes to either still
+    # force full selection instead of claiming coverage in the default build.
     return (relative.parts[0] in {"src", "include", "test", "tools"}
             and relative.parts[:4] != ("src", "luminumbra_client", "ui", "gl3")
-            and relative.as_posix() != "test/core/profiler_enabled_compile.cpp")
+            and relative.as_posix() not in _CONFIGURATION_ONLY_SOURCES)
 
 
 def changed_paths(root: Path, base_ref: str, worktree=True, include_untracked=True) -> set[Path]:

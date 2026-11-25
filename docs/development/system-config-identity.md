@@ -88,6 +88,13 @@ still requires a boot contract supplying its stable IDs and cursor.
 
 ## Setter audit and pins
 
+Regional foliage pages, plant ownership and water continuation use the existing
+identity slots. Fixed-tick regional water remains behind the test-only authority
+profile; the active-region switch alone does not select it. This integration adds
+no configuration field, identity domain, authority revision or mutable-state hash
+binding. Persistence resource limits and autosave intervals remain outside the
+simulation identity.
+
 `GameSession` supplies the current finite-hydrology boolean, signed rain scale, all
 three live ledger `RegionSchedulerConfig` fields and its resolved calendar to the core encoder.
 With active regions enabled, the clock supplies the calendar; otherwise a render marker
@@ -391,3 +398,19 @@ and excluded from the world hash. The frozen preset also preserves the disabled 
 mask; disabling simulation flags alone would not restore historical terrain. Shipping
 defaults remain exercised by the unpinned headless, moving, and water trace workloads.
 Capturing shipping-default absolute hashes still requires native runs.
+
+
+## Water scheduling and peer refusal
+
+Authority rules revision 8 retains the current configuration identity encoding and
+its existing raw global water-scheduler cursor binding. Nonzero cursors contribute
+the existing water-cursor suffix to streamed world and water hashes; regional
+chunk captures also include the raw cursor in their established regional
+projection. Zero retains the existing bytes. Frozen region digests and per-chunk
+content projections do not acquire another cursor envelope. Both load entries
+restore the saved cursor before subsequent captures or water updates.
+
+A mismatched Hello is terminal before simulation, input admission, checkpoint
+comparison or replay publication. Pending connected handshakes and transient send
+refusals remain retryable without duplicate Hello transmission. This changes no
+Hello, checkpoint, replay, configuration or save layout.

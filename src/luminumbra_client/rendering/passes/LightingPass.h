@@ -51,11 +51,15 @@ public:
 
     void copy_lighting_color_to_opaque_texture(const RenderContext& ctx);
     // Shipping dispatch supplies known enable state; direct hosts preserve arbitrary state.
-    void execute(const RenderContext& ctx, const CallerState& caller);
-    void execute_external(const RenderContext& ctx);
+    // Opt in only when a skybox replaces cleared-depth color before any reader.
+    void execute(const RenderContext& ctx, const CallerState& caller, bool skybox_follows = false);
+    void execute_external(const RenderContext& ctx, bool skybox_follows = false);
     // Preserve the existing direct-call boundary for previews and pass consumers.
-    void execute(const RenderContext& ctx) {
-        return execute_external(ctx);
+    void execute(const RenderContext& ctx, bool skybox_follows = false) {
+        return execute_external(ctx, skybox_follows);
+    }
+    bool depth_copied_from_gbuffer() const {
+        return m_depth_copied_from_gbuffer;
     }
 
     // full-scene lightning light-pulse + bolt overlay. A strike is a
@@ -82,6 +86,7 @@ private:
     struct UniformNames;
     std::unique_ptr<UniformNames> m_uniform_names;
     FrameBufferObject m_lighting_fbo;
+    bool m_depth_copied_from_gbuffer = false;
     u32 m_environment_brdf = 0; // registry-owned; independent of framebuffer size
     std::unique_ptr<Shader> m_lighting_shader;
     std::unique_ptr<Shader> m_contribution_shader;

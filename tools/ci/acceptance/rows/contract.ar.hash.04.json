@@ -1,0 +1,16 @@
+{
+  "id": "contract.ar.hash.04",
+  "source": "docs/active-regions.md#hash-and-replay",
+  "statement": "Acceptance obligations: LREC1 payloads and checkpoint fields are unchanged.",
+  "status": "planned",
+  "requirements": [
+    "ar.hash.023"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArHashContract.Requirements04",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.hash.04.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

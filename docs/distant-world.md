@@ -811,7 +811,7 @@ fills in fixture identifiers, thresholds and artifact schemas per row.
 
 This is the authoritative list of required mappings for the performance contract,
 evidence map, simulation budgets and associated acceptance issues. Each ID must
-have one evidence row in `tools/ci/acceptance_matrix.json`, even when its evidence
+have one evidence row in `tools/ci/acceptance/rows/`, even when its evidence
 is partial, planned or awaiting native qualification. Add requirements here before
 mapping their evidence; the checker reads this list independently of the matrix.
 The descriptions identify requirements, not their current coverage status.

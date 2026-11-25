@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.activation.01",
+  "source": "docs/active-regions.md#activation-and-ordering",
+  "statement": "Acceptance obligations: The host's last walking feet position is stored as an optional anchor and restored before ticking. / Camera movement and noclip updates cannot replace it. / Replicated server avatar positions are supplied at the host tick boundary; / avatar persistence remains outside this slice. / an explicitly empty server list visits no regions, even when the ledger holds a local anchor. / Voxel edits notify each modified chunk's region.",
+  "status": "planned",
+  "requirements": [
+    "ar.activation.006",
+    "ar.activation.007",
+    "ar.activation.008",
+    "ar.activation.009",
+    "ar.activation.011",
+    "ar.activation.012"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArActivationContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.activation.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

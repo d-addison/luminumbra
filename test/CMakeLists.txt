@@ -32,6 +32,11 @@ target_link_libraries(capture_profile_test_support PRIVATE gtest_main luminumbra
 luminumbra_configure_first_party_target(capture_profile_test_support)
 
 include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
+add_executable(lumpack_test ${LUMPACK_TEST_SOURCES})
+target_include_directories(lumpack_test PRIVATE ../src)
+target_link_libraries(lumpack_test PRIVATE gtest_main luminumbra_common nlohmann_json)
+luminumbra_configure_first_party_target(lumpack_test)
+
 add_executable(mod_dependency_solver_test ${MOD_DEPENDENCY_TEST_SOURCES})
 target_include_directories(mod_dependency_solver_test PRIVATE ../src)
 target_link_libraries(mod_dependency_solver_test PRIVATE gtest_main luminumbra_common)
@@ -66,6 +71,7 @@ endforeach()
 # Add the world generation test executable
 add_executable(world_generation_test
     shield/test_world_generation.cpp
+    shield/water_column_diagnostics_test.cpp
     shield/test_meshing_determinism.cpp
     shield/worldgen_hardening_test.cpp
     shield/meshing_hardening_test.cpp
@@ -340,6 +346,7 @@ add_executable(common_tests
     # Sole definition of the test-only GameSession authority-profile constructor.
     common/GameSessionAuthorityProfileTestSeam.cpp
     common/GameSessionPlantPersistence_test.cpp
+    common/PlantTerrainCache_test.cpp
     common/RegionFixtureCapture_test.cpp
     # Incremental cursor layout and staged-load refusal regressions use the same discovery.
     persistence/world_state_commit_test.cpp
@@ -374,6 +381,7 @@ add_executable(common_tests
     common/ServerHeadlessHygiene_test.cpp
     common/SimulationClock_test.cpp
     common/ActiveRegionLedger_test.cpp
+    common/ActiveRegionPriority_test.cpp
     common/SimulationIdentityAllocator_test.cpp
     common/PlantCreationIdentity_test.cpp
     common/GroundObjectStore_test.cpp
@@ -410,6 +418,7 @@ add_executable(common_tests
     sim/soil_nutrient_test.cpp
     sim/soil_fire_disease_ordering_test.cpp
     sim/pollination_test.cpp
+    sim/PollinationSpatial_test.cpp
     sim/plant_disease_test.cpp
     sim/irrigation_test.cpp
     sim/lifespan_test.cpp
@@ -765,8 +774,16 @@ else()
     target_link_libraries(render_smoke_test PRIVATE OpenGL::GL)
 endif()
 
+add_executable(shader_uniform_lookup_test rendering/shader_uniform_lookup_test.cpp)
+target_compile_definitions(shader_uniform_lookup_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+)
+target_include_directories(shader_uniform_lookup_test PRIVATE ../src ../src/luminumbra_client)
+target_link_libraries(shader_uniform_lookup_test PRIVATE luminumbra_client gtest_main glad glm::glm)
+
 add_executable(render_capture_test
     rendering/render_capture_test.cpp
+    rendering/capture_forward_presence_test.cpp
     # the capture-hooks TU under test (GL-free; direct source, same as
     # shader_reflection_test's ShaderReflection.cpp -- render_capture_test links
     # luminumbra_common, not luminumbra_client, so no duplicate symbols).
@@ -786,7 +803,9 @@ target_include_directories(render_capture_test PRIVATE
 
 target_link_libraries(render_capture_test PRIVATE
     gtest_main
+    capture_launch_test_support
     luminumbra_common
+    nlohmann_json::nlohmann_json
     glfw
     glad
 )
@@ -1826,6 +1845,7 @@ target_link_libraries(frontier_gates_test PRIVATE
 # Exercise the shipping server runner and the client's GameSession open paths.
 add_executable(world_open_refusal_test
     persistence/world_open_refusal_test.cpp
+    persistence/requested_subhash_test.cpp
     ../src/luminumbra_client/ui/core/UIHotReload.cpp
     common/SimBudgetWorldParity_test.cpp
     common/EffectivePresetIdentity_test.cpp
@@ -1997,19 +2017,33 @@ target_link_libraries(audio_physics_binding_test PRIVATE
 
 find_package(Threads REQUIRED)
 
+add_executable(inspector_registry_test common/InspectorRegistry_test.cpp)
+target_include_directories(inspector_registry_test PRIVATE ../src/luminumbra_common)
+target_link_libraries(inspector_registry_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(inspector_registry_test)
+
 # Developer foundations compile directly, without the client or graphics libraries.
+add_library(command_registry_test_support STATIC
+    ../src/luminumbra_common/core/CommandRegistry.cpp
+)
+target_include_directories(command_registry_test_support PUBLIC ../src/luminumbra_common)
+luminumbra_configure_first_party_target(command_registry_test_support)
+
 add_executable(developer_console_pure_test
     client/developer_console_pure_test.cpp
+    client/ui_input_service_test.cpp
     ../src/luminumbra_client/app/RegisterDeveloperWidgets.cpp
     ../src/luminumbra_client/debug/DeveloperWidgetRegistry.cpp
     ../src/luminumbra_client/debug/DeveloperCommandRegistry.cpp
     ../src/luminumbra_client/debug/DeveloperConsole.cpp
     ../src/luminumbra_client/debug/DeveloperLogSink.cpp
+    ../src/luminumbra_client/app/UiInputService.cpp
     ../src/luminumbra_client/app/UiInputRouter.cpp
 )
 target_include_directories(developer_console_pure_test PRIVATE
     ../src/luminumbra_client ../src/luminumbra_common)
-target_link_libraries(developer_console_pure_test PRIVATE gtest_main Threads::Threads spdlog::spdlog)
+target_link_libraries(developer_console_pure_test PRIVATE
+    gtest_main Threads::Threads spdlog::spdlog command_registry_test_support)
 luminumbra_configure_first_party_target(developer_console_pure_test)
 
 # CPU-only ImGui acceptance compiles the pinned core directly, without GL backends
@@ -2034,7 +2068,8 @@ add_executable(developer_console_imgui_test
 target_include_directories(developer_console_imgui_test PRIVATE
     ../src/luminumbra_client ../src/luminumbra_common)
 target_include_directories(developer_console_imgui_test SYSTEM PRIVATE "${_developer_imgui_source}")
-target_link_libraries(developer_console_imgui_test PRIVATE gtest_main Threads::Threads)
+target_link_libraries(developer_console_imgui_test PRIVATE
+    gtest_main Threads::Threads command_registry_test_support)
 luminumbra_configure_first_party_target(developer_console_imgui_test)
 
 # User-overlay persistence uses common services only; no client or GL linkage.
@@ -2265,6 +2300,26 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME JoltStartupPatchContract COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/tools/ci/test_jolt_startup.py")
 set_tests_properties(JoltStartupPatchContract PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+add_test(NAME InlineTextureQualification COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/tools/test_inline_texture_qualification.py")
+set_tests_properties(InlineTextureQualification PROPERTIES LABELS "tools" TIMEOUT 30)
+# Compile database coverage for the independent fixture, without default outputs.
+add_library(installed_sdk_abi_compile OBJECT EXCLUDE_FROM_ALL sdk/installed_consumer/abi.c)
+target_link_libraries(installed_sdk_abi_compile PRIVATE Luminumbra::ABI)
+set_target_properties(installed_sdk_abi_compile PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES)
+add_library(installed_sdk_modules_compile OBJECT EXCLUDE_FROM_ALL sdk/installed_consumer/main.cpp)
+target_link_libraries(installed_sdk_modules_compile PRIVATE Luminumbra::ModuleContracts)
+luminumbra_configure_first_party_target(installed_sdk_modules_compile)
+add_test(NAME InstalledSdkPackageContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/sdk/test_installed_sdk.py")
+set_tests_properties(InstalledSdkPackageContract PROPERTIES TIMEOUT 30)
+# Nested compiler startup has little margin on loaded Windows runners. Keep the
+# build/run fixture on Linux; configure/install contracts run on every platform.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_test(NAME InstalledSdkConsumer COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/test/sdk/test_installed_sdk.py" --consume)
+    set_tests_properties(InstalledSdkConsumer PROPERTIES TIMEOUT 30)
+endif()
 add_test(NAME DiagnosticCapturePython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/tools/gates/test_diagnostic_capture.py")
 set_tests_properties(DiagnosticCapturePython PROPERTIES LABELS "tools" TIMEOUT 60)
@@ -2274,8 +2329,16 @@ set_tests_properties(DiagnosticRoisPython PROPERTIES LABELS "tools" TIMEOUT 60)
 add_test(NAME DiagnosticChecksPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/tools/gates/test_diagnostic_checks.py")
 set_tests_properties(DiagnosticChecksPython PROPERTIES LABELS "tools" TIMEOUT 60)
+add_test(NAME TemporalCapturePython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/gates/test_temporal_capture.py")
+set_tests_properties(TemporalCapturePython PROPERTIES LABELS "tools" TIMEOUT 60)
+add_test(NAME TemporalMontagesPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/gates/test_temporal_montages.py")
+set_tests_properties(TemporalMontagesPython PROPERTIES LABELS "tools" TIMEOUT 60)
 
 set(LUMINUMBRA_GTEST_TARGETS
+    inspector_registry_test
+    lumpack_test
     content_vfs_test
     mod_dependency_solver_test
     native_plugin_loader_test
@@ -2354,6 +2417,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     frontier_gates_test
     regional_scent_allocation_test
     replication_delta_allocation_test
+    shader_uniform_lookup_test
     native_file_ownership_test
     world_open_refusal_test
     runtime_surface_options_test
@@ -2942,6 +3006,10 @@ add_test(NAME RenderOptionalAudioContent COMMAND render_configuration_test optio
 if(NOT Python3_FOUND)
     message(FATAL_ERROR "RenderContractPython requires a Python3 interpreter")
 endif()
+add_test(NAME BlenderReviewedRecipesPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/blender/authoring/extension_tests/test_recipes.py)
+add_test(NAME BlenderRecipeOperatorPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/blender/authoring/extension_tests/test_recipe_operator.py)
 add_test(NAME RenderContractPython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_contract.py)
 add_test(NAME ContainmentLinkClosurePython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_containment_link_closure.py)
@@ -2977,6 +3045,8 @@ if(WIN32)
 endif()
 add_test(NAME AudioPropagationMetricsContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_audio_propagation_metrics.py)
+add_test(NAME EngineGameBoundarySourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/ci/test_engine_game_boundary.py)
 add_test(NAME ReplaySourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_replay_source_contract.py)
 add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner_evidence.py)
@@ -3029,6 +3099,14 @@ add_test(NAME RenderBenchmarkAssets COMMAND "${Python3_EXECUTABLE}"
     ${CMAKE_SOURCE_DIR}/tools/perf/synthetic_render_content.py
     --root ${CMAKE_BINARY_DIR}/test-artifacts/render-synthetic-content)
 set_tests_properties(RenderBenchmarkAssets PROPERTIES FIXTURES_SETUP render_benchmark_assets TIMEOUT 30)
+# A fresh client entry runs the shared boot water settle (#1210), about 170 s
+# under ASan. Scale only the sanitizer build; other builds keep 180 s and 600 s.
+set(_render_runner_asan_args)
+set(_render_runner_ctest_timeout 600)
+if(LUMINUMBRA_ENABLE_ASAN)
+    set(_render_runner_asan_args --process-timeout 540)
+    set(_render_runner_ctest_timeout 1200)
+endif()
 foreach(case IN ITEMS
     "RenderTraversalIntegrated;test_traversal_twice"
     "RenderWorkloadSaveLoadIntegrated;test_v4_save_load_success"
@@ -3056,7 +3134,9 @@ foreach(case IN ITEMS
         --source ${CMAKE_SOURCE_DIR}
         --assets ${CMAKE_BINARY_DIR}/test-artifacts/render-synthetic-content
         --artifacts ${CMAKE_BINARY_DIR}/test-artifacts/render-runner
+        ${_render_runner_asan_args}
         RenderRunnerTests.${test_method})
-    set_tests_properties(${test_name} PROPERTIES TIMEOUT 600 FIXTURES_REQUIRED render_benchmark_assets
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT ${_render_runner_ctest_timeout}
+        FIXTURES_REQUIRED render_benchmark_assets
         RESOURCE_LOCK luminumbra_gl_context)
 endforeach()

@@ -1076,7 +1076,8 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                 self.assertEqual(value(job, "shell", 8), "bash")
             else:
                 self.assertIn("$env:LOCALAPPDATA", job)
-                self.assertEqual(value(job, "CCACHE_MAXSIZE", 6), "1200M")
+                self.assertEqual(value(job, "CCACHE_MAXSIZE", 6),
+                                 "4G" if job_id == "windows-msvc" else "1200M")
                 self.assertLess(job.index(preflight), job.index("      - name: Stage software OpenGL"))
                 self.assertIn("try { Remove-Item -Recurse -Force $mesaRoot -ErrorAction Stop }", job)
         ucrt = jobs(reusable)["windows-ucrt64"]
@@ -1370,7 +1371,9 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
             self.assertIn(f"cmake --build build/fast-{compiler} --target glad --parallel 2", fast)
         self.assertEqual(fast.count("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"), 2)
         for flag in ("-DLUMINUMBRA_WARNINGS_AS_ERRORS=ON", "-DBUILD_TESTING=ON",
-                     "-DCMAKE_BUILD_TYPE=Release", "-DLUMINUMBRA_ENABLE_DILIGENT=OFF"):
+                     "-DCMAKE_BUILD_TYPE=Release", "-DLUMINUMBRA_ENABLE_DILIGENT=OFF",
+                     # Optional content tools (lumpack) are only compiled and tidied here.
+                     "-DLUMINUMBRA_BUILD_TOOLS=ON"):
             self.assertEqual(fast.count(flag), 2)
         for flag in ("-DCMAKE_C_COMPILER=gcc", "-DCMAKE_CXX_COMPILER=g++",
                      "-DCMAKE_C_COMPILER=clang-18", "-DCMAKE_CXX_COMPILER=clang++-18"):
@@ -1522,7 +1525,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
             "lint": "dd5aa1be75b2a7139dc2fc676293422207c80c6b031b5df0d21e60dc615faa32",
             "tidy-shard": "46faf8410f18629a107172a8dcc148e88f7df8b693541835fccfe53c3c34307a",
             "tidy": "9c7e37ba07488aefd7232a216a927229f1a0a7b83820f4439187f1972f057ad8",
-            "public-tree": "032ff20e807665460da7c2bd1d3343dd3e949cd904b8e3a2f5074d3d852f8d21",
+            "public-tree": "d3cfdd450c2ea85d89c4945441db64963945f07c4e817f706b61dbe266be09b4",
         }
         actual = jobs(self.workflows["ci.yml"])
         self.assertTrue(all(not key.startswith("windows-") for key in actual))
@@ -1534,7 +1537,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         # Retain whole-job pins after moving the full Windows coverage out of CI.
         expected = {
             "changes": "719c7357c8f60592b41f4299e01d25ded1e320489601aef0e79a279ff43000de",
-            "windows-msvc": "b96064f047734fd564a75694ae7bfa08eb329d0896e66f612d95da83c6e78a45",
+            "windows-msvc": "7d9390c04323d060602c7a6c37bf22bfb8fd7809135f536b6c26e4df1ef05245",
             "windows-ucrt64": "6ac45a8cc93bea871e9557351708e6b23d0314cfa20fdea4875cfdc909610b36",
             "windows-msvc-result": "2af91683329c582ac65a4b73b975bb19f2a83350dcd268be0c9039df2c3723b2",
             "windows-ucrt64-result": "a8564410c6e255d3968c3a4d95ff6129dc3a5ba34cbae43f1a4a25c3bfcedd3f",
@@ -1878,7 +1881,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertEqual(value(shard, "needs", 4), "[changes, fast-lane]")
         self.assertEqual(value(shard, "if", 4), "${{ !cancelled() && ((github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) != 'false') || needs.changes.outputs.needs_cpp != 'false') && (github.event_name != 'pull_request' || toJSON(github.event.pull_request.draft) != 'false' || needs.fast-lane.result == 'success') }}")
         self.assertEqual(value(shard, "runs-on", 4), "ubuntu-24.04")
-        self.assertEqual(value(shard, "timeout-minutes", 4), "75")
+        self.assertEqual(value(shard, "timeout-minutes", 4), "90")
         self.assertEqual(value(shard, "fail-fast", 6), "false")
         self.assertEqual(value(shard, "shard", 8), "[1, 2, 3]")
         self.assertIsNone(value(shard, "continue-on-error", 4))
@@ -2314,7 +2317,13 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertEqual(value(upload, "retention-days", 10), "30")
         public = ci["public-tree"]
         self.assertIn("python3 tools/ci/test_check_acceptance_matrix.py", public)
-        self.assertIn("python3 tools/ci/check_acceptance_matrix.py --check-doc docs/acceptance-matrix.md", public)
+        self.assertIn("python3 tools/ci/check_acceptance_matrix.py --write-doc build/acceptance-matrix.md --check-doc build/acceptance-matrix.md", public)
+        document_upload = {step.splitlines()[0].removeprefix("      - name: "): step
+                           for step in steps(public)}["Upload acceptance matrix"]
+        self.assertEqual(value(document_upload, "name", 10), "acceptance-matrix")
+        self.assertEqual(value(document_upload, "path", 10), "build/acceptance-matrix.md")
+        self.assertEqual(value(document_upload, "if-no-files-found", 10), "error")
+        self.assertNotIn("--check-doc docs/acceptance-matrix.md", public)
         # Run the actual evidence-selection script for both execution routes.
         for full, owner in (("false", 1), ("true", 0)):
             for missing in (None, "ctest-discovery.json", "netsoak.junit.xml"):

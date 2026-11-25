@@ -1,0 +1,20 @@
+{
+  "id": "iss.173",
+  "source": "issue #173",
+  "statement": "Wind's short position-array call sites must provide whole-vector padded storage so SIMD tail loads stay within the allocation. AmbientInputBounds demonstrates that an unpadded two-element input faults and sixteen-element padding succeeds; a bounds regression tied to the production wind call sites remains planned.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "AmbientInputBounds.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WindFieldSystem.ShortPositionArrayCallSiteBounds",
+      "planned": "exercise production wind call sites with guard-page bounds evidence; existing probes call the noise library directly; owner: ac"
+    }
+  ],
+  "requirements": [
+    "dw.mappings.039"
+  ]
+}

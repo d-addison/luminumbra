@@ -41,6 +41,9 @@ foreach(_generator IN LISTS _generators)
     set(_configure_args -S "${_source}" -B "${_build}" -G "${_generator}"
         "-DCMAKE_CXX_COMPILER=${NETWORK_TEST_COMPILER}"
         "-DNETWORK_TEST_COMPILER_INFO=${NETWORK_TEST_COMPILER_INFO}"
+        "-DCMAKE_OBJDUMP=${NETWORK_TEST_OBJDUMP}"
+        "-DCMAKE_DUMPBIN=${NETWORK_TEST_DUMPBIN}"
+        "-DCMAKE_NM=${NETWORK_TEST_NM}"
         -DCMAKE_BUILD_TYPE=Release)
     # Preserve the host generator's platform/toolset, but do not pass those
     # options to Ninja Multi-Config (which does not accept them).

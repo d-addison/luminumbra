@@ -1,0 +1,26 @@
+{
+  "id": "render.visual-diagnostic-contribution-views",
+  "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+  "statement": "Deferred shader contribution views are implemented as opt-in live overlays. Native execution remains pending; fog and separate forward/sky/shadow planes are explicitly unsupported.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticContributions.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticContributionsGl.*"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development/visual-diagnostics.md"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticCaptureIntegration.*",
+      "planned": "Add and run GPU attribution and scenario capture bundle regressions; owner: maintainers"
+    }
+  ],
+  "requirements": []
+}

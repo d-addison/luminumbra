@@ -10,7 +10,7 @@ diagnostics and measured budget activation remain separate work.
 
 Indexed authority durability and rehydration are in preparation with native qualification pending.
 Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water
-continuation (issue #242), and strict distant policy and distant creatures (S8)
+continuation (issue #242), and strict distant policy and distant creatures
 are planned for v0.3.1. Regional continuation performance/default enablement is planned for v0.4.0
 as [issue #320](https://github.com/d-addison/luminumbra/issues/320). These consumers
 are outside the shipping scheduler foundation. The dedicated server autosaves
@@ -362,7 +362,7 @@ portable hash oracle. Missing or changed fixture bytes still fail the tests.
 ### Historical ambient hash portability investigation
 
 The historical world-hash literals encode the ambient fields' selected FastNoise
-instruction set. At the time of the C2 investigation, terrain used `NewWorldNoise`
+instruction set. At the time of the terrain-consumer investigation, terrain used `NewWorldNoise`
 with an AVX2 cap; wind, weather and aether used automatic CPU dispatch. With identical GCC ASan objects,
 changing only the diagnostic dispatch from native AVX-512 to AVX2 reproduces every
 reported CI value:
@@ -383,7 +383,7 @@ regression. An identical runner image does not guarantee identical CPU features.
 The dispatch-only reproduction establishes the cause of these failures without
 relying on uninitialized memory or pointer ordering.
 
-That C2 change left ambient runtime behavior unchanged and did not resolve
+That terrain-consumer change left ambient runtime behavior unchanged and did not resolve
 cross-CPU ambient hash equality. These persistence tests use expected sessions computed in
 the same build, retain the exact devel save bytes, and print all seven actual and
 expected component hashes on mismatch. Diagnostic sources, component values,
@@ -434,3 +434,23 @@ and format-patch artifacts, not engine inputs. Absence supplies no commit;
 corruption or an unsupported bundle version is refused by Git's bundle verifier,
 and a patch with invalid context is refused by Git's patch application. Neither
 artifact grants permission to alter another checkout.
+
+
+## Snapshot decoding and peer admission
+
+Plain JSON terrain snapshots stream SDF and heightmap samples into native float arrays while retaining the existing snapshot schema, record encoding and serialization bytes.
+Duplicate terrain keys and noncanonical containers use the legacy decoder with its last-key-wins semantics, and both paths reject boolean samples consistently across all four float arrays.
+Snapshot publication follows complete record validation, preserves serialized insertion order and leaves no partial world on refusal.
+
+A terminal Hello refusal prevents later inputs, checkpoints, replay output and simulation ticks while draining received frames under the existing receive budgets.
+A connected peer with no Hello yet or a transient send refusal can retry, and a successfully sent Hello is not transmitted twice.
+
+The current authority rules revision remains 8, and existing captures already bind the persisted raw water-scheduler cursor in both active-region modes without introducing another hash envelope.
+Both world load entries restore that cursor, including empty and below-budget worlds whose later continuation can depend on its unnormalized value.
+
+## Regional continuation compatibility
+
+The [regional continuation implementation](regional-water-continuation.md) retains bounded foliage pages, persistent plant identities, due growth, capped resume acknowledgement and conserving irrigation seam transfers.
+Fixed-tick regional water remains behind the test-only authority profile, which the active-region switch alone does not select.
+The current transaction planner validates immutable inputs, funds preparation and seam reservations, and publishes only completed work without elapsed-time catch-up on restore.
+This integration preserves authority revision 8, existing hash bindings and all save, replay, checkpoint, Hello and configuration layouts.

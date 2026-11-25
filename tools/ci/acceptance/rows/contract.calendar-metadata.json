@@ -1,0 +1,34 @@
+{
+  "id": "contract.calendar-metadata",
+  "source": "docs/distant-world.md#simulation-clock-and-calendar",
+  "statement": "Calendar version 2 has five bounded integer parameters. Invalid members, versions, rational fractions, lunar periods and clock ticks refuse transactionally through metadata and world-open paths; the engine guide records the schema.",
+  "status": "covered",
+  "requirements": [
+    "dw.calendar.034",
+    "dw.calendar.013",
+    "dw.calendar.014",
+    "dw.calendar.037"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "WorldClockTest.StrictV2AndMarkerRefusalMatrixLeavesOutputUnchanged"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldClockTest.ConstructorChecksRationalAndLunarBounds"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldClockInvalidMetadata.RefusesWithoutChangingClock"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldOpenRefusal.CalendarAndMarkerRefusalMatrixPreservesInitializedAndMetadataOnlySaves"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/engine-guide.md"
+    }
+  ]
+}

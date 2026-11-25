@@ -155,6 +155,8 @@ struct ServerWorldRunnerConfig {
     // in the other smoke lanes. DEFAULT false -> byte-identical to the existing lanes
     // (no new reads, no anchor change).
     bool water_smoke = false;
+    // Workload input only; dormant unless the session host authority profile is enabled.
+    bool simulation_smoke = false;
     bool sim_budget = false; // Opt-in simulation stage observation; default artifact unchanged.
     // Applied via GameSession::SetRegionSchedulerConfig right after the root path is set, so it
     // takes effect for the fresh world Boot() creates. A loaded ledger must match an explicit
@@ -304,6 +306,11 @@ public:
     // entities (for the gate's non-vacuity check: start != end => births/culls).
     [[nodiscard]] std::size_t CreatureCount() const;
 
+    // The boot-selected smoke input, absent for ordinary server workloads.
+    [[nodiscard]] const std::optional<Vec3>& SimulationSmokeAnchor() const {
+        return m_simulationSmokeAnchor;
+    }
+
     world::GameSession* Session() {
         return m_session.get();
     }
@@ -387,6 +394,8 @@ private:
     std::vector<Vec3> m_ownerStreamingAnchors;
     Luminumbra::JobSystem m_jobSystem;
     std::unique_ptr<world::GameSession> m_session;
+    // Selected once at boot from fixed seam candidates; never follows presentation.
+    std::optional<Vec3> m_simulationSmokeAnchor;
     std::vector<World::PlayerAvatar> m_avatars; // Deterministic player avatars.
     //  gate: per-tick (tick_index, availability digest), filled by RunFixedTicks
     // only when m_config.availability_trace is set. See AvailabilityTrace.

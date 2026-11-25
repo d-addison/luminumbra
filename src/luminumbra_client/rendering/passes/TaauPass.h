@@ -22,6 +22,8 @@ public:
     void init(RenderResourceRegistry& registry, u32 width, u32 height);
     // Call inside the replay GL guard, before dispatching a frozen resolve.
     bool prepare_replay(RenderResourceRegistry& registry);
+    // Release scratch storage after the replay GL guard has restored its objects.
+    void release_replay(RenderResourceRegistry& registry);
     void destroy(RenderResourceRegistry& registry);
     void reset_shader();
     void invalidate_history();

@@ -1,0 +1,17 @@
+{
+  "id": "render.content-directory-identity",
+  "source": "docs/render-benchmark.md#scripted-workloads-issue-403",
+  "statement": "Schema v4 content manifests include every scanned subdirectory, including empty ones, as a null entry keyed by its portable relative path with a trailing slash. Directory entries share the 65,536-entry, 4096-byte key and depth-64 bounds. Adding an empty directory changes render identity, removing it restores identity, and identical trees have identical identities regardless of enumeration order. Malformed directory markers and content beneath an absent audio tree are refused.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "RenderResolvedConfiguration",
+      "planned": "native directory identity verification; owner: ac"
+    },
+    {
+      "kind": "ctest",
+      "ref": "RenderContractPython"
+    }
+  ]
+}

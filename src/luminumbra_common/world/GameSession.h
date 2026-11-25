@@ -47,6 +47,8 @@ class CreatedWorldArtifacts;
 struct AuthorityCaptureResult;
 struct OwnerContinuation;
 enum class AuthorityCaptureParts;
+enum class AuthoritySubHashMask : std::uint16_t;
+struct AuthorityHashWork;
 } // namespace Luminumbra::Persistence
 
 namespace luminumbra::fields {
@@ -62,6 +64,7 @@ class CreatureSpeciesRegistry; // per-world species definition table
 } // namespace luminumbra::ai
 
 namespace luminumbra::foliage {
+class PlantTerrainCache;
 class SoilGrid;       // soil nutrient field (systems/SoilNutrientSystem.h)
 class IrrigationGrid; // soil-moisture field (systems/IrrigationSystem.h)
 } // namespace luminumbra::foliage
@@ -127,6 +130,7 @@ public:
         bool residency_free_eviction = false;
         // Dormant until negotiated authority enables fixed-tick water ownership.
         bool regional_water = false;
+        bool simulation_host_integration = false;
     };
 
     // Selects the test-only opt-in constructor below.
@@ -356,6 +360,31 @@ public:
     const std::vector<std::filesystem::path>& GetRequiredClientAssets() const {
         return m_requiredClientAssets;
     }
+
+    struct BootSettleStats {
+        std::size_t water_chunks = 0;
+        std::size_t awake = 0;
+        std::size_t uninited = 0;
+        int iterations = 0;
+        bool water_settle_skipped = false; // Loaded water was preserved throughout boot.
+        bool contract_ok() const {
+            return uninited == 0;
+        }
+    };
+
+    // Owner-thread entry only, after world/state adoption and before ticks or capture.
+    // Prepares the surface, bounded residency and fresh water, then publishes authority.
+    // Every fresh entry settles streaming and water, including radius-zero entry.
+    // Loaded water is paused throughout; cancellation refuses entry without saving.
+    bool PrepareInitialSimulation(int surface_radius,
+                                  int collision_radius,
+                                  const std::stop_token& stop = {});
+    // Runner variant: surface/rosters are already ready, loaded water already paused.
+    // Empty anchors select spawn. Continuations skip streaming; callers resume loaded
+    // water and publish authority after success. Never call from a live tick/frame.
+    bool SettleInitialSimulation(const std::vector<Vec3>& anchors,
+                                 BootSettleStats& stats,
+                                 const std::stop_token& stop = {});
 
     // Get world metadata
     const WorldMetadata& GetMetadata() const {
@@ -636,6 +665,8 @@ public:
     [[nodiscard]] const FieldPageState& GetFieldPages() const {
         return m_fieldPages;
     }
+    // Session-lifetime executed ecology schedule trace; excluded from identity and saves.
+    [[nodiscard]] std::uint64_t GetEcologyScheduleTraceHash() const;
     // Observational foliage preparation/publication counts; excluded from identity and saves.
     [[nodiscard]] std::uint64_t GetFoliageSelectionVisits() const;
     [[nodiscard]] std::uint64_t GetFoliageRegistryStageVisits() const;
@@ -647,6 +678,8 @@ public:
     [[nodiscard]] std::uint32_t GetFoliageReplayRemainingSteps() const;
     [[nodiscard]] std::uint64_t GetFoliageReplayCellVisits() const;
     [[nodiscard]] std::uint64_t GetFoliageReplayPreparationPages() const;
+    // Lifetime terrain height/material query pairs; derived cache work, never hashed or saved.
+    [[nodiscard]] std::uint64_t GetPlantTerrainQueryMisses() const;
     // Read-only diagnostics of the live legacy foliage grids.
     [[nodiscard]] const luminumbra::foliage::SoilGrid* GetFoliageSoilGrid() const;
     [[nodiscard]] const luminumbra::foliage::IrrigationGrid* GetFoliageIrrigationGrid() const;
@@ -701,6 +734,20 @@ public:
     void SetRegionSchedulerConfig(RegionSchedulerConfig config);
     void SetLocalPlayerSimulationPosition(const Vec3& feet, bool walking);
     void SetReplicatedSimulationAnchors(std::vector<Vec3> anchors);
+    // Dormant host wiring shares the ownership profile until negotiated activation.
+    [[nodiscard]] bool SimulationHostIntegrationEnabled() const {
+        return m_activeRegionsEnabled && m_authorityProfile.simulation_host_integration;
+    }
+    // Bounded host input publication. Refusal leaves the previous inputs intact.
+    bool SetHostSimulationAnchors(std::span<const Vec3> anchors);
+    // Called before host physics and again before session consumers; R2 reuses a
+    // successful publication for the same tick. Never accepts render anchors.
+    bool PrepareSimulationCollisions(std::uint64_t tick);
+    // Select once at host boot from fixed world-space seam candidates.
+    // Pure preset samplers only; absence refuses a dry workload.
+    [[nodiscard]] std::optional<Vec3> DefaultSimulationSmokeAnchor() const;
+    // Const diagnostic: count wet cell pairs at the selected X region seam.
+    [[nodiscard]] int SimulationSmokeWetRegionSeamPairs(const Vec3& anchor) const;
     void NotifyGroundObjectEdit(const Vec3& position);
     void PinActiveRegion(RegionKey key, bool pinned);
     void RecordActiveRegionWork(RegionWork work);
@@ -729,6 +776,11 @@ public:
     [[nodiscard]] Persistence::AuthorityCaptureResult
     CaptureAuthorityHashes(const std::string& entity_snapshot_json,
                            Persistence::AuthorityCaptureParts parts);
+    [[nodiscard]] Persistence::AuthorityCaptureResult
+    CaptureAuthorityHashes(const std::string& entity_snapshot_json,
+                           Persistence::AuthorityCaptureParts parts,
+                           Persistence::AuthoritySubHashMask requested,
+                           Persistence::AuthorityHashWork* work = nullptr);
     [[nodiscard]] bool IsSimulationTickBoundary() const {
         return !m_activeRegionsEnabled || (!m_simulationBatchInProgress && m_regionWork.empty());
     }
@@ -784,7 +836,9 @@ private:
     // The single real constructor; the default and the test-only constructors delegate here.
     GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTag);
 
+    struct EcologySchedule;
     const AuthorityProfileOptions m_authorityProfile;
+    std::unique_ptr<EcologySchedule> m_ecologySchedule;
     OwnerContinuationOptions m_continuationOptions;
     const std::vector<World::PlayerAvatar>* m_ownerAvatarSources = nullptr;
     std::optional<std::uint32_t> m_ownerRosterCount;
@@ -795,6 +849,8 @@ private:
     std::uint64_t m_ownerStreamTick = 0;
     bool m_ownerAnchorSet = false;
     std::shared_ptr<Persistence::OwnerContinuation> m_restoredOwnerContinuation;
+    [[nodiscard]] std::span<const Vec3> SimulationAnchors() const;
+    void StepHostPhysics();
     void DisableFarWorldAuthorityProducer();
     std::unique_ptr<World::FarWorldAuthorityProducer> m_farWorldAuthorityProducer;
     bool m_farWorldSourceNeedsRefresh = false;
@@ -802,6 +858,7 @@ private:
     entt::registry m_registry;
     struct FoliageStep;
     std::unique_ptr<FoliageStep> m_foliageStep;
+    std::unique_ptr<luminumbra::foliage::PlantTerrainCache> m_plantTerrainCache;
     luminumbra::ai::EcologyTuning m_ecologyTuning{}; // Defaults match compiled constants.
     luminumbra::ai::WildlifeFoliageTuning
         m_wildlifeFoliageTuning{}; // full-control: defaults preserved

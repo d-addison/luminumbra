@@ -1,0 +1,21 @@
+{
+  "id": "contract.region-input-bounds",
+  "source": "docs/active-regions.md#activation-and-ordering",
+  "statement": "Walking anchors and ground-object edit positions require finite coordinates and -2^24 <= x,z < 2^24; region pins require -32768 <= x,z < 32768. Invalid inputs are ignored and counted observationally. The boundary predicate and host refusal paths have authored unit evidence; static validation does not prove execution.",
+  "status": "covered",
+  "requirements": [],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.ValidAnchorBoundaries"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.InvalidHostInputsNeverThrowAndAreCounted"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.PinBoundariesOnBothAxes"
+    }
+  ]
+}

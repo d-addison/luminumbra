@@ -1,0 +1,39 @@
+{
+  "id": "perf.invalid-capture",
+  "source": "docs/distant-world.md#performance-measurement-contract",
+  "statement": "A capture is invalid, independent of thresholds, on incomplete timers, an undeclared calendar or render debug override, a workload manifest mismatch, or an unsettled far ladder.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "RenderContractPython"
+    },
+    {
+      "kind": "ctest",
+      "ref": "RenderRunnerEvidencePython"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/perf/validate_render_capture.py"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/perf/far_settle_check.py",
+      "planned": "far ladder settle evidence (90 s limit) is not yet in the artifact or validator; owner: fw"
+    },
+    {
+      "kind": "ctest",
+      "ref": "RenderCrashCapturePython"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/render-benchmark.md",
+      "detail": "V4 qualification requires a nonempty named graphics preset; RenderContractPython rejects null presets and not_exposed status for every scripted workload. Cave qualification awaits live Ladder activation. Frame evidence uses bounded records serialized after measurement; RenderResolvedConfiguration checks record bounds and workload option forms. RenderSavedAuthorityTampering and HostSchedulerFault cover verified snapshots and refusal without save replacement. Windows failure diagnostics retain bounded matching images and exception dumps before fixture cleanup; RenderCrashCapturePython checks event ownership, refusal/success, crash, timeout, identity, bounds and CI upload wiring. Native crash resolution remains pending matching CI evidence. Save/load drains streaming at a fixed script pose until all gates settle, with a 300-pass no-progress watchdog over resident chunks, ready chunks, admitted meshes and foliage generation. The reload report includes a positive settling_passes count; RenderContractPython checks missing, malformed and long-progress counts. RenderReloadInterval and RenderMeasurementGpuQueries register long-progress, stalled, oscillating, empty and partial-timer regressions; native execution remains pending. Per-pass query segments accumulate without growing storage or accepting incomplete segments. Extra residency passes pause loaded water, restore live stepping on success or failure, and do not present additional frames. FrameAttributionWiringPython checks the shared reload drain wiring. Capture galleries omit optional personal ratings without reading them or clearing required thumbnail containment; the public UI regression and RenderContractPython cover that boundary. Windows-only RenderCrashCaptureWindows smoke entries require real debug events, bounded minidumps and retained executable identity; their native execution remains pending. One frame simulation decision gates capture ticks, physics and water initialization and stepping; warmup, paused menus and report frames keep streaming, meshing, uploads and rendering active without advancing simulation. Both world update overloads preserve live stepping by default; reload settling explicitly disables simulation. FrameAttributionWiringPython covers the policy branches and production wiring; RenderReloadInterval registers the native policy regression, whose execution remains pending."
+    }
+  ],
+  "requirements": [
+    "dw.perf.012",
+    "dw.perf.013",
+    "dw.mappings.014"
+  ]
+}
