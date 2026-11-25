@@ -110,7 +110,7 @@ public:
         return m_retired.size();
     }
     // All allocated GL backing storage, including pending/quarantined bytes.
-    std::size_t storage_bytes() const {
+    const std::size_t& storage_bytes() const {
         return m_storage_bytes;
     }
 
@@ -132,7 +132,7 @@ public:
     }
 
     // Sum of reserved vertex/index slot capacities across live allocations
-    // (feeds the runtime VRAM estimate, matching the old per-chunk accounting).
+    // for suballocation pressure; backing storage is reported by storage_bytes().
     void resident_capacity(std::size_t& vertices, std::size_t& indices) const;
 
     // Retire a world's live slices without resetting storage/retirement caps.

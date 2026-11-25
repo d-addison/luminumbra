@@ -129,7 +129,9 @@ void delete_chunk_slot(ChunkRenderData& data) {
     data = {};
 }
 
-void delete_water_slot(WaterRenderData& data) {
+void delete_water_slot(WaterRenderData& data, RenderResourceRegistry& registry) {
+    registry.forget_buffer_allocation(data.vbo_id);
+    registry.forget_buffer_allocation(data.ebo_id);
     if (data.vao_id) {
         glDeleteVertexArrays(1, &data.vao_id);
         data.vao_id = 0;
@@ -257,6 +259,78 @@ RenderPipeline::RenderPipeline()
     , m_waterfall_pass(std::make_unique<WaterfallPass>())
     , m_luminance_meter_pass(std::make_unique<LuminanceMeterPass>()) {
     m_foliage_pass->begin_ground_frame();
+    m_render_registry.track_backing_allocation("terrain_pool",
+                                               m_chunk_geometry_pool.storage_bytes());
+    m_render_registry.track_backing_allocation("legacy_far", m_legacy_far_resident_bytes);
+    const auto track_texture = [this](const char* name,
+                                      const u32& id,
+                                      u32 width,
+                                      u32 height,
+                                      u32 layers,
+                                      u32 format,
+                                      u32 levels) {
+        TextureDesc desc;
+        desc.width = width;
+        desc.height = height;
+        desc.layers = layers;
+        desc.internal_format = format;
+        m_render_registry.track_texture_allocation(name, id, desc, levels);
+    };
+    track_texture("terrain_albedo",
+                  m_terrainTextureArray,
+                  kTerrainTextureResolution,
+                  kTerrainTextureResolution,
+                  5,
+                  GL_SRGB8_ALPHA8,
+                  11);
+    track_texture("terrain_normal",
+                  m_terrainNormalArray,
+                  kTerrainTextureResolution,
+                  kTerrainTextureResolution,
+                  5,
+                  GL_RGBA8,
+                  11);
+    track_texture("terrain_roughness",
+                  m_terrainRoughnessArray,
+                  kTerrainTextureResolution,
+                  kTerrainTextureResolution,
+                  5,
+                  GL_RGBA8,
+                  11);
+    track_texture("skinned_array",
+                  m_skinnedTextureArray,
+                  kSkinnedTextureResolution,
+                  kSkinnedTextureResolution,
+                  2,
+                  GL_SRGB8_ALPHA8,
+                  11);
+    track_texture("static_model_albedo",
+                  m_staticModelTextureArray,
+                  kStaticModelTextureResolution,
+                  kStaticModelTextureResolution,
+                  kStaticModelTextureLayers,
+                  GL_SRGB8_ALPHA8,
+                  10);
+    track_texture("static_model_normal",
+                  m_staticModelNormalArray,
+                  kStaticModelTextureResolution,
+                  kStaticModelTextureResolution,
+                  kStaticModelTextureLayers,
+                  GL_RGBA8,
+                  10);
+    track_texture("static_model_surface",
+                  m_staticModelSurfaceArray,
+                  kStaticModelTextureResolution,
+                  kStaticModelTextureResolution,
+                  kStaticModelTextureLayers,
+                  GL_RGBA8,
+                  10);
+    track_texture("material_lut", m_materialLUT, 256, 4, 1, GL_RGBA8, 1);
+    track_texture("ssao_noise", m_ssao_pass->ssao().noiseTexture, 4, 4, 1, GL_RGB16F, 1);
+    m_render_registry.track_buffer_allocation(
+        "screen_quad", m_screen_quad_vbo, 20u * sizeof(float));
+    // Unregistered: foliage, froxels, glass, readback, cached meshes, sky and
+    // lighting scratch. Their owners can register backing without changing draws.
 }
 
 // forward the one-way scent snapshot to the decal pass (render-only;
@@ -374,6 +448,14 @@ bool RenderPipeline::startup(u32 screen_width,
                 m_treeImpostorNormal = ia.normalTex;
                 m_treeImpostorGrid = ia.grid;
                 m_treeImpostorAtlasSize = g.gridResolution * g.tileResolution;
+                TextureDesc atlas;
+                atlas.width = static_cast<u32>(m_treeImpostorAtlasSize);
+                atlas.height = atlas.width;
+                atlas.internal_format = GL_RGBA8;
+                m_render_registry.track_texture_allocation(
+                    "tree_impostor_albedo", m_treeImpostorAlbedo, atlas);
+                m_render_registry.track_texture_allocation(
+                    "tree_impostor_normal", m_treeImpostorNormal, atlas);
                 m_treeImpostorRadius = ia.radius;
                 m_treeImpostorCenter = glm::vec3(ia.center.x, ia.center.y, ia.center.z);
                 m_treeImpostorsEnabled = true;
@@ -1598,92 +1680,29 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
         add_water_capacity(data, stats.water_vertex_capacity, stats.water_index_capacity);
     }
 
-    const size_t pixel_count =
-        static_cast<size_t>(m_screen_width) * static_cast<size_t>(m_screen_height);
-    size_t estimated_vram_bytes = 0;
-    estimated_vram_bytes +=
-        (stats.terrain_vertex_capacity + stats.water_vertex_capacity) * sizeof(VoxelVertex);
-    estimated_vram_bytes +=
-        (stats.terrain_index_capacity + stats.water_index_capacity) * sizeof(u32);
-    const FrameBufferObject& lighting_fbo = m_lighting_pass->lighting_fbo();
-    if (lighting_fbo.color_texture)
-        estimated_vram_bytes += pixel_count * 8u; // RGBA16F
-    if (lighting_fbo.opaque_color_texture)
-        estimated_vram_bytes += pixel_count * 8u; // RGBA16F
-    if (lighting_fbo.depth_texture)
-        estimated_vram_bytes += pixel_count * 4u;
-    const GBuffer& gbuffer = m_gbuffer_pass->gbuffer();
-    if (gbuffer.position_texture)
-        estimated_vram_bytes += pixel_count * 6u; // RGB16F
-    if (gbuffer.normal_texture)
-        estimated_vram_bytes += pixel_count * 4u;
-    if (gbuffer.albedo_texture)
-        estimated_vram_bytes += pixel_count * 4u;
-    if (gbuffer.material_texture)
-        estimated_vram_bytes += pixel_count * 4u; // RG16F
-    if (gbuffer.depth_texture)
-        estimated_vram_bytes += pixel_count * 4u;
-    if (m_shadow_pass->shadow_map().depth_texture_array) {
-        estimated_vram_bytes += static_cast<size_t>(m_shadow_pass->shadow_map().resolution) *
-                                static_cast<size_t>(m_shadow_pass->shadow_map().resolution) *
-                                static_cast<size_t>(ShadowMap::CASCADE_COUNT) * 4u;
-    }
-    if (m_ssao_pass->ssao().ssaoColorBuffer)
-        estimated_vram_bytes += pixel_count * 2u;
-    if (m_ssao_pass->ssao().ssaoColorBufferBlur)
-        estimated_vram_bytes += pixel_count * 2u;
-    if (m_ssao_pass->ssao().noiseTexture)
-        estimated_vram_bytes += 4u * 4u * 6u;
-    if (m_screen_quad_vbo)
-        estimated_vram_bytes += 20u * sizeof(float);
-    if (m_skybox_pass->vbo())
-        estimated_vram_bytes += 108u * sizeof(float);
-    if (m_gbuffer_pass->instance_matrix_vbo())
-        estimated_vram_bytes += 10000u * sizeof(glm::mat4);
-    if (m_terrainTextureArray)
-        estimated_vram_bytes +=
-            static_cast<size_t>(kTerrainTextureResolution) * kTerrainTextureResolution * 5u * 4u;
-    if (m_terrainNormalArray)
-        estimated_vram_bytes +=
-            static_cast<size_t>(kTerrainTextureResolution) * kTerrainTextureResolution * 5u * 4u;
-    if (m_skinnedTextureArray)
-        estimated_vram_bytes +=
-            static_cast<size_t>(kSkinnedTextureResolution) * kSkinnedTextureResolution * 2u * 4u;
+    TextureDesc model_array;
+    model_array.width = kStaticModelTextureResolution;
+    model_array.height = kStaticModelTextureResolution;
+    model_array.layers = kStaticModelTextureLayers;
+    model_array.internal_format = GL_RGBA8;
     for (const GLuint texture :
          {m_staticModelTextureArray, m_staticModelNormalArray, m_staticModelSurfaceArray}) {
         if (texture) {
-            for (int mip = 0; mip < 10; ++mip) {
-                const size_t size =
-                    static_cast<size_t>(std::max(1, kStaticModelTextureResolution >> mip));
-                stats.static_model_texture_bytes += size * size * kStaticModelTextureLayers * 4u;
-            }
+            stats.static_model_texture_bytes +=
+                RenderResourceRegistry::texture_allocation_bytes(model_array, 10);
         }
     }
+    TextureDesc atlas;
+    atlas.width = static_cast<u32>(m_treeImpostorAtlasSize);
+    atlas.height = atlas.width;
+    atlas.internal_format = GL_RGBA8;
     for (const GLuint texture : {m_treeImpostorAlbedo, m_treeImpostorNormal}) {
-        if (texture)
-            stats.tree_impostor_texture_bytes += static_cast<size_t>(m_treeImpostorAtlasSize) *
-                                                 static_cast<size_t>(m_treeImpostorAtlasSize) * 4u;
+        if (texture) {
+            stats.tree_impostor_texture_bytes +=
+                RenderResourceRegistry::texture_allocation_bytes(atlas);
+        }
     }
-    estimated_vram_bytes += stats.static_model_texture_bytes + stats.tree_impostor_texture_bytes;
-    if (m_materialLUT)
-        estimated_vram_bytes +=
-            256u * 4u * 4u; // 256 ids x 4 rows x RGBA8 (: was stale 2-row estimate)
-    if (m_lighting_pass->environment_brdf_texture())
-        estimated_vram_bytes += 64u * 64u * 4u; // RG16F environment BRDF, no mipmaps
-    if (m_water_pass->flat_normal_texture())
-        estimated_vram_bytes += 4u;
-    if (m_water_pass->neutral_flow_texture())
-        estimated_vram_bytes += 4u;
-    if (m_water_pass->black_fallback_texture())
-        estimated_vram_bytes += 4u;
-    if (m_water_pass->underwater_texture())
-        estimated_vram_bytes += 4u;
-    if (m_water_pass->caustics_texture()) {
-        estimated_vram_bytes += static_cast<size_t>(WaterPass::kCausticsResolution) *
-                                static_cast<size_t>(WaterPass::kCausticsResolution) * 4u; // RGBA8
-    }
-    estimated_vram_bytes += m_legacy_far_resident_bytes;
-    stats.estimated_vram_bytes = estimated_vram_bytes;
+    stats.estimated_vram_bytes = m_render_registry.allocated_bytes();
 
     stats.geometry_shader_ok =
         m_gbuffer_pass->geometry_shader() && m_gbuffer_pass->geometry_shader()->IsValid();
@@ -4473,12 +4492,12 @@ void RenderPipeline::clear_all_chunk_data() {
 
     for (auto& [id, data] : m_water_render_data) {
         (void)id;
-        delete_water_slot(data);
+        delete_water_slot(data, m_render_registry);
     }
     m_water_render_data.clear();
     m_water_upload_queue.clear();
     for (auto& data : m_free_water_render_slots) {
-        delete_water_slot(data);
+        delete_water_slot(data, m_render_registry);
     }
     m_free_water_render_slots.clear();
     LUMINUMBRA_CORE_INFO("Cleared chunk render data cache");
@@ -4833,12 +4852,12 @@ void RenderPipeline::cleanup_gpu_resources() {
 
     for (auto& [id, d] : m_water_render_data) {
         (void)id;
-        delete_water_slot(d);
+        delete_water_slot(d, m_render_registry);
     }
     m_water_render_data.clear();
     m_water_upload_queue.clear();
     for (auto& d : m_free_water_render_slots) {
-        delete_water_slot(d);
+        delete_water_slot(d, m_render_registry);
     }
     m_free_water_render_slots.clear();
     m_glass_oit_pass->destroy(); // detach borrowed depth before its owner releases it
@@ -4846,7 +4865,8 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_gbuffer_pass->destroy_gbuffer(m_render_registry);
     m_shadow_pass->destroy_shadow_map(m_render_registry);
     m_ssao_pass->destroy_ssao(m_render_registry);
-    destroy_halfres_cloud(); // render-optimization: reduced-res sky-dome target
+    m_taau_pass->destroy(m_render_registry); // registry-owned output-res history and replay
+    destroy_halfres_cloud();                 // render-optimization: reduced-res sky-dome target
     if (m_screen_quad_vao) {
         glDeleteVertexArrays(1, &m_screen_quad_vao);
         m_screen_quad_vao = 0;
@@ -5458,9 +5478,13 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
     const bool attributes_valid = glGetError() == GL_NO_ERROR;
     if (!vertex_uploaded || !index_uploaded || !attributes_valid || data.vao_id == 0 ||
         data.vbo_id == 0 || data.ebo_id == 0) {
-        delete_water_slot(data);
+        delete_water_slot(data, m_render_registry);
         m_last_mesh_upload_stats.water_upload_failures++;
         return;
+    }
+    if (needs_growth) {
+        m_render_registry.record_buffer_allocation(data.vbo_id, checked_sizes.vertex_bytes);
+        m_render_registry.record_buffer_allocation(data.ebo_id, checked_sizes.index_bytes);
     }
     data.ladder_upload_version = ladder ? std::optional<u32>(payload.mesh_version) : std::nullopt;
     data.element_count = index_count;
@@ -5477,7 +5501,7 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
         if (m_free_water_render_slots.size() < kMaxFreeWaterRenderSlots)
             m_free_water_render_slots.push_back(previous);
         else
-            delete_water_slot(previous);
+            delete_water_slot(previous, m_render_registry);
     }
 
     if (slot_created) {
@@ -5553,8 +5577,8 @@ void RenderPipeline::upload_chunk_mesh(const ChunkMeshSnapshot& chunk,
     m_foliage_pass->update_ground_mesh(chunk.id, chunk.coords, payload.vertices, payload.indices);
     const ChunkGeometryPool::Allocation& alloc = m_chunk_geometry_pool.allocation(new_handle);
     // Track the reserved slot capacity (not just the written count) so the
-    // distance-budget "needs growth" intuition and the VRAM estimate match the
-    // pool's actual reservation.
+    // distance-budget "needs growth" checks match the pool's reservation.
+    // The allocation ledger counts complete backing storage separately.
     render_data.vertex_capacity = alloc.vertex_slot;
     render_data.index_capacity = alloc.index_slot;
     render_data.element_count = index_count;
@@ -5594,7 +5618,7 @@ void RenderPipeline::unload_water_resources(ChunkID chunk_id) {
         if (m_free_water_render_slots.size() < kMaxFreeWaterRenderSlots) {
             m_free_water_render_slots.push_back(data);
         } else {
-            delete_water_slot(data);
+            delete_water_slot(data, m_render_registry);
         }
         m_water_render_data.erase(it);
     }

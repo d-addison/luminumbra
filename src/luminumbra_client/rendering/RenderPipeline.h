@@ -614,6 +614,10 @@ public:
         return m_frame_stage_trace;
     }
     RuntimeRenderStats get_runtime_render_stats() const;
+    // Read-only logical allocation inventory for diagnostics and reconciliation.
+    std::vector<RenderResourceRegistry::AllocationRecord> allocation_ledger() const {
+        return m_render_registry.allocation_ledger();
+    }
     RenderResourceRegistryStats get_resource_registry_stats() const;
     std::vector<ShaderHealthEntry> get_shader_health() const;
 

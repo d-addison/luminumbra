@@ -24,6 +24,52 @@ namespace Luminumbra::Rendering {
 
 namespace {
 
+std::size_t add_allocation_bytes(std::size_t total, std::size_t bytes) {
+    return bytes > std::numeric_limits<std::size_t>::max() - total
+               ? std::numeric_limits<std::size_t>::max()
+               : total + bytes;
+}
+
+std::size_t format_bytes(u32 format) {
+    switch (format) {
+        case GL_R8:
+            return 1;
+        case GL_R16F:
+        case GL_RG8:
+            return 2;
+        case GL_RGB8:
+        case GL_SRGB8:
+            return 3;
+        case GL_R32F:
+        case GL_RG16F:
+        case GL_RGBA8:
+        case GL_SRGB8_ALPHA8:
+        case GL_RGB10_A2:
+        case GL_DEPTH_COMPONENT24: // Estimate the 32-bit depth storage slot.
+        case GL_DEPTH_COMPONENT32F:
+            return 4;
+        case GL_RGB16F:
+            return 6;
+        case GL_RG32F:
+        case GL_RGBA16F:
+            return 8;
+        case GL_RGB32F:
+            return 12;
+        case GL_RGBA32F:
+            return 16;
+        default:
+            return std::numeric_limits<std::size_t>::max();
+    }
+}
+
+std::size_t target_bytes(const RenderbufferDesc& desc) {
+    TextureDesc texture;
+    texture.width = desc.width;
+    texture.height = desc.height;
+    texture.internal_format = desc.internal_format;
+    return RenderResourceRegistry::texture_allocation_bytes(texture);
+}
+
 bool allocate_texture_storage(u32 gl_id, const TextureDesc& desc) {
     // GL error state is global and sticky: drain any pre-existing flag so the
     // post-allocation check reflects THIS allocation only (init runs right
@@ -74,6 +120,126 @@ bool allocate_texture_storage(u32 gl_id, const TextureDesc& desc) {
 }
 
 } // namespace
+
+std::size_t RenderResourceRegistry::texture_allocation_bytes(const TextureDesc& desc,
+                                                             u32 mip_levels) {
+    if (desc.width == 0 || desc.height == 0 || desc.layers == 0 || mip_levels == 0) {
+        return 0;
+    }
+    const auto maximum = std::numeric_limits<std::size_t>::max();
+    const auto texel_bytes = format_bytes(desc.internal_format);
+    if (texel_bytes == maximum) {
+        return maximum;
+    }
+    std::size_t total = 0;
+    u32 width = desc.width;
+    u32 height = desc.height;
+    // A u32 extent has at most 32 mip levels; array layers never shrink.
+    for (u32 mip = 0; mip < std::min(mip_levels, 32u); ++mip) {
+        if (static_cast<std::size_t>(width) > maximum / height / desc.layers / texel_bytes) {
+            return maximum;
+        }
+        total = add_allocation_bytes(
+            total, static_cast<std::size_t>(width) * height * desc.layers * texel_bytes);
+        if (width == 1 && height == 1) {
+            break;
+        }
+        width = std::max(1u, width / 2u);
+        height = std::max(1u, height / 2u);
+    }
+    return total;
+}
+
+void RenderResourceRegistry::track_texture_allocation(std::string_view name,
+                                                      const u32& gl_id,
+                                                      const TextureDesc& desc,
+                                                      u32 mip_levels) {
+    m_tracked_allocations.insert_or_assign(
+        std::string(name),
+        TrackedAllocation{
+            AllocationKind::Texture, &gl_id, nullptr, texture_allocation_bytes(desc, mip_levels)});
+}
+
+void RenderResourceRegistry::track_buffer_allocation(std::string_view name,
+                                                     const u32& gl_id,
+                                                     std::size_t bytes) {
+    m_tracked_allocations.insert_or_assign(
+        std::string(name), TrackedAllocation{AllocationKind::Buffer, &gl_id, nullptr, bytes});
+}
+
+void RenderResourceRegistry::track_backing_allocation(std::string_view name,
+                                                      const std::size_t& bytes) {
+    m_tracked_allocations.insert_or_assign(
+        std::string(name), TrackedAllocation{AllocationKind::BackingStorage, nullptr, &bytes, 0});
+}
+
+void RenderResourceRegistry::record_buffer_allocation(u32 gl_id, std::size_t bytes) {
+    if (gl_id == 0) {
+        return;
+    }
+    const auto entry = m_buffer_allocations.try_emplace(gl_id, 0).first;
+    if (m_buffer_bytes_low < entry->second) {
+        --m_buffer_bytes_high;
+    }
+    m_buffer_bytes_low -= entry->second;
+    if (bytes > std::numeric_limits<std::size_t>::max() - m_buffer_bytes_low) {
+        ++m_buffer_bytes_high;
+    }
+    m_buffer_bytes_low += bytes;
+    entry->second = bytes;
+}
+
+void RenderResourceRegistry::forget_buffer_allocation(u32 gl_id) {
+    const auto entry = m_buffer_allocations.find(gl_id);
+    if (entry != m_buffer_allocations.end()) {
+        if (m_buffer_bytes_low < entry->second) {
+            --m_buffer_bytes_high;
+        }
+        m_buffer_bytes_low -= entry->second;
+        m_buffer_allocations.erase(entry);
+    }
+}
+
+std::size_t RenderResourceRegistry::allocated_bytes() const {
+    std::size_t total = 0;
+    for (const auto& [name, texture] : m_owned_textures) {
+        total = add_allocation_bytes(total, texture.allocation_bytes);
+    }
+    for (const auto& [name, buffer] : m_owned_renderbuffers) {
+        total = add_allocation_bytes(total, target_bytes(buffer.desc));
+    }
+    for (const auto& [name, allocation] : m_tracked_allocations) {
+        total = add_allocation_bytes(total, allocation.current_bytes());
+    }
+    return add_allocation_bytes(total,
+                                m_buffer_bytes_high == 0 ? m_buffer_bytes_low
+                                                         : std::numeric_limits<std::size_t>::max());
+}
+
+std::vector<RenderResourceRegistry::AllocationRecord>
+RenderResourceRegistry::allocation_ledger() const {
+    std::vector<AllocationRecord> result;
+    for (const auto& [name, texture] : m_owned_textures) {
+        result.push_back({name, AllocationKind::Texture, texture.gl_id, texture.allocation_bytes});
+    }
+    for (const auto& [name, buffer] : m_owned_renderbuffers) {
+        result.push_back(
+            {name, AllocationKind::Renderbuffer, buffer.gl_id, target_bytes(buffer.desc)});
+    }
+    for (const auto& [name, allocation] : m_tracked_allocations) {
+        if (const auto bytes = allocation.current_bytes(); bytes != 0) {
+            result.push_back(
+                {name, allocation.kind, allocation.gl_id ? *allocation.gl_id : 0, bytes});
+        }
+    }
+    for (const auto& [id, bytes] : m_buffer_allocations) {
+        result.push_back({"buffer." + std::to_string(id), AllocationKind::Buffer, id, bytes});
+    }
+    std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) {
+        return left.name < right.name;
+    });
+    return result;
+}
 
 bool RenderResourceRegistry::replace_targets(std::span<const TargetExtent> extents) {
     if (extents.empty() || extents.size() > 32)
@@ -173,6 +339,7 @@ TextureHandle RenderResourceRegistry::create_texture(std::string_view name,
     if (desc.debug_label != nullptr) {
         PassGl::label_gl_object(GL_TEXTURE, owned.gl_id, desc.debug_label);
     }
+    owned.allocation_bytes = texture_allocation_bytes(owned.desc);
     const TextureHandle handle{owned.gl_id};
     m_owned_textures.emplace(key, owned);
     return handle;
@@ -305,6 +472,7 @@ bool RenderResourceRegistry::resize_texture(std::string_view name, u32 new_width
         LUMINUMBRA_CORE_ERROR("RenderResourceRegistry: resize storage failed for '{}'", it->first);
         return false;
     }
+    owned.allocation_bytes = texture_allocation_bytes(owned.desc);
     bool ok = true;
     for (auto& [fbo_name, fbo_entry] : m_owned_fbos) {
         for (const FboAttachment& attachment : fbo_entry.desc.attachments) {

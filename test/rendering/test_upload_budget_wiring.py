@@ -1922,7 +1922,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("WaterRenderData data;", water)
         self.assertLess(water.index("if (!vertex_uploaded"), water.index("it->second = data;"))
         self.assertIn("!vertex_uploaded || !index_uploaded || !attributes_valid", water)
-        self.assertIn("delete_water_slot(data);", water)
+        self.assertIn("delete_water_slot(data, m_render_registry);", water)
         draw = body(self.pipeline, "void RenderPipeline::execute_stage_opaque_snapshot(")
         self.assertIn("PresentedLadderWaterEligible(", draw)
         self.assertIn("water_data.SetPresentedLadderWaterUpload(", self.pipeline)
