@@ -41,18 +41,24 @@ struct WaterUploadTestPeer {
     static void Upload(RenderPipeline& pipeline,
                        u32 version,
                        std::size_t count,
-                       FarWorldMode effective = FarWorldMode::Ladder) {
+                       FarWorldMode effective = FarWorldMode::Ladder,
+                       int storage_y = 0,
+                       float surface_y = 0) {
         pipeline.m_frame_far_selection.effective = effective;
         RenderPipeline::ChunkMeshSnapshot chunk;
         chunk.id = 42;
+        chunk.coords.y = storage_y;
         chunk.water_mesh_version = version;
         RenderPipeline::ChunkMeshPayload payload;
         payload.mesh_version = version;
         payload.vertices.resize(count);
         payload.indices.resize(count);
         for (std::size_t index = 0; index < count; ++index) {
-            payload.vertices[index].position = {
-                static_cast<float>(version), static_cast<float>(index), 0};
+            payload.vertices[index].position = {static_cast<float>(version),
+                                                surface_y -
+                                                    static_cast<float>(storage_y) * CHUNK_SIZE_Y +
+                                                    static_cast<float>(index),
+                                                0};
             payload.indices[index] = static_cast<u32>(index);
         }
         pipeline.upload_water_mesh(chunk, payload);
@@ -406,6 +412,8 @@ TEST_F(FarWorldWaterGl, ProductionUploadedSeaPixelsOwnershipArrivalAndActualSubm
         upload.water_uploaded_indices = 6;
         upload.water_valid_allocation = water_ready;
         upload.water_pass_eligible = water_ready;
+        const std::array<std::int32_t, 1> surface_cells{0};
+        upload.water_surface_cells = surface_cells;
         EXPECT_TRUE(renderer.AddLiveUpload(upload));
         EXPECT_TRUE(renderer.FinishLiveOwnership());
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -486,6 +494,7 @@ protected:
         EXPECT_EQ(failed_data.vbo_id, old_data.vbo_id);
         EXPECT_EQ(failed_data.ebo_id, old_data.ebo_id);
         EXPECT_EQ(failed_data.ladder_upload_version, old_data.ladder_upload_version);
+        EXPECT_EQ(failed_data.water_surface_cells, old_data.water_surface_cells);
         EXPECT_TRUE(failed_data.LadderUploadValid());
         glBindVertexArray(failed_data.vao_id);
         glBindBuffer(GL_ARRAY_BUFFER, failed_data.vbo_id);
@@ -2735,6 +2744,41 @@ TEST_F(FarWorldWaterGl, LegacyUploadDoesNotPublishLadderCertificate) {
     EXPECT_FALSE(data.LadderUploadValid());
 }
 
+TEST_F(FarWorldWaterGl, SeabedWaterUploadRetainsSurfaceCellsUntilReplacementAdoption) {
+    RenderPipeline pipeline;
+    WaterUploadTestPeer::Upload(pipeline, 8, 3, FarWorldMode::Ladder, -3);
+    EXPECT_EQ(WaterUploadTestPeer::Data(pipeline).water_surface_cells,
+              (std::vector<std::int32_t>{0}));
+    {
+        FailedWaterUpload failure(true, GL_ELEMENT_ARRAY_BUFFER);
+        WaterUploadTestPeer::Upload(pipeline, 9, 6, FarWorldMode::Ladder, -3, 32);
+        EXPECT_EQ(failure.failures(), 1);
+    }
+    auto upload = WaterUploadTestPeer::PresentedUpload(pipeline);
+    upload.cell.y = -3;
+    FarWorldOwnership mask;
+    mask.Begin(1);
+    ASSERT_TRUE(mask.Add(upload));
+    ASSERT_TRUE(mask.Finish());
+    EXPECT_TRUE(mask.OwnsWater({-248, 0, -248}));
+    EXPECT_FALSE(mask.OwnsWater({-248, -40, -248}));
+    EXPECT_FALSE(mask.OwnsWater({-248, 32, -248}));
+    WaterUploadTestPeer::Upload(pipeline, 9, 6, FarWorldMode::Ladder, -3, 32);
+    EXPECT_EQ(WaterUploadTestPeer::Data(pipeline).water_surface_cells,
+              (std::vector<std::int32_t>{2}));
+    {
+        FailedWaterUpload failure(false, GL_ELEMENT_ARRAY_BUFFER);
+        WaterUploadTestPeer::Upload(
+            pipeline, 10, 3, FarWorldMode::Ladder, -3, std::numeric_limits<float>::infinity());
+        EXPECT_EQ(failure.failures(), 0); // Metadata refusal precedes GPU writes.
+    }
+    EXPECT_EQ(WaterUploadTestPeer::Data(pipeline).mesh_version, 9u);
+    EXPECT_EQ(WaterUploadTestPeer::Data(pipeline).water_surface_cells,
+              (std::vector<std::int32_t>{2}));
+    WaterUploadTestPeer::AdoptEmpty(pipeline, FarWorldMode::Ladder);
+    EXPECT_FALSE(WaterUploadTestPeer::HasWater(pipeline));
+}
+
 struct WaterSnapshot {
     WaterRenderData data{};
     std::vector<unsigned char> vertices;
@@ -2773,6 +2817,7 @@ void ExpectRetainedWater(const RenderPipeline& pipeline, const WaterSnapshot& ex
     EXPECT_EQ(actual.data.vertex_capacity, expected.data.vertex_capacity);
     EXPECT_EQ(actual.data.index_capacity, expected.data.index_capacity);
     EXPECT_EQ(actual.data.ladder_upload_version, expected.data.ladder_upload_version);
+    EXPECT_EQ(actual.data.water_surface_cells, expected.data.water_surface_cells);
     EXPECT_EQ(actual.data.LadderUploadValid(), expected.data.LadderUploadValid());
     EXPECT_EQ(actual.vertices, expected.vertices);
     EXPECT_EQ(actual.indices, expected.indices);

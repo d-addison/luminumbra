@@ -169,6 +169,8 @@ struct WaterRenderData {
     u64 last_seen_frame = 0;
     // Only a validated Ladder upload certifies this exact mesh version.
     std::optional<u32> ladder_upload_version;
+    // Sorted world Y cells of that upload, bounded by kFarWorldLiveCellLimit.
+    std::vector<std::int32_t> water_surface_cells;
 
     bool LadderUploadValid() const noexcept {
         return vao_id != 0 && vbo_id != 0 && ebo_id != 0 && ladder_upload_version == mesh_version;
@@ -190,6 +192,7 @@ struct WaterRenderData {
         upload.water_snapshot_version = snapshot_version;
         upload.water_uploaded_version = mesh_version;
         upload.water_uploaded_indices = element_count;
+        upload.water_surface_cells = water_surface_cells;
         upload.water_valid_allocation = LadderUploadValid();
         upload.water_pass_eligible = LadderWaterPassEligible(snapshot_version,
                                                              mesh_version,
