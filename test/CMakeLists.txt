@@ -3099,6 +3099,14 @@ add_test(NAME RenderBenchmarkAssets COMMAND "${Python3_EXECUTABLE}"
     ${CMAKE_SOURCE_DIR}/tools/perf/synthetic_render_content.py
     --root ${CMAKE_BINARY_DIR}/test-artifacts/render-synthetic-content)
 set_tests_properties(RenderBenchmarkAssets PROPERTIES FIXTURES_SETUP render_benchmark_assets TIMEOUT 30)
+# A fresh client entry runs the shared boot water settle (#1210), about 170 s
+# under ASan. Scale only the sanitizer build; other builds keep 180 s and 600 s.
+set(_render_runner_asan_args)
+set(_render_runner_ctest_timeout 600)
+if(LUMINUMBRA_ENABLE_ASAN)
+    set(_render_runner_asan_args --process-timeout 540)
+    set(_render_runner_ctest_timeout 1200)
+endif()
 foreach(case IN ITEMS
     "RenderTraversalIntegrated;test_traversal_twice"
     "RenderWorkloadSaveLoadIntegrated;test_v4_save_load_success"
@@ -3126,7 +3134,9 @@ foreach(case IN ITEMS
         --source ${CMAKE_SOURCE_DIR}
         --assets ${CMAKE_BINARY_DIR}/test-artifacts/render-synthetic-content
         --artifacts ${CMAKE_BINARY_DIR}/test-artifacts/render-runner
+        ${_render_runner_asan_args}
         RenderRunnerTests.${test_method})
-    set_tests_properties(${test_name} PROPERTIES TIMEOUT 600 FIXTURES_REQUIRED render_benchmark_assets
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT ${_render_runner_ctest_timeout}
+        FIXTURES_REQUIRED render_benchmark_assets
         RESOURCE_LOCK luminumbra_gl_context)
 endforeach()

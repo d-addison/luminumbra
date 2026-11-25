@@ -182,7 +182,7 @@ cleanup, dependencies and resource locks stay together; CTest keeps its existing
 qualification still sees all required cases. Explicit serial NetSoak, packaging
 checks and diagnostic artifacts remain enabled.
 
-The shared helper partitions ASan across three shards with a 75-minute job
+The shared helper partitions ASan across three shards with a 90-minute job
 deadline. Fixture groups and each of `SimBudgetWorldParity.` and
 `AmbientDeterminismReceipt.` stay together. Groups are assigned in descending
 cost order to the least-loaded shard, with stable name and shard-index ties.
