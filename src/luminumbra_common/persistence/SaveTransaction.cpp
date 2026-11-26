@@ -26,6 +26,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -284,6 +285,7 @@ struct JournalEntry {
 
 struct RetirementReceipt {
     std::string path;
+    std::uint64_t generation = 0;
     detail::NamespaceReceipt completion;
     bool directory = false;
     bool absent_only = false;
@@ -297,7 +299,9 @@ struct JournalDocument {
     bool external_control = false;
     std::array<std::uint64_t, 3> root_identity{};
     std::array<std::uint64_t, 3> control_identity{};
-    std::map<std::string, RetirementReceipt> receipts;
+    std::map<std::pair<std::string, std::uint64_t>, RetirementReceipt> receipts;
+    // Derived only from ownership records, bounded by the control-stream byte limit.
+    std::map<std::string, std::set<std::array<std::uint64_t, 3>>> recorded_slots;
     std::uint64_t txn_id = 0;
     std::uint64_t base_generation = 0;
     std::uint64_t new_generation = 0;
@@ -305,6 +309,26 @@ struct JournalDocument {
     std::array<std::uint64_t, 3> journal_identity{};
     std::array<std::uint64_t, 3> undo_directory_identity{};
 };
+
+auto LatestReceipt(JournalDocument& document, const std::string& path) {
+    const auto found =
+        document.receipts.upper_bound({path, std::numeric_limits<std::uint64_t>::max()});
+    if (found == document.receipts.begin() || std::prev(found)->first.first != path)
+        return document.receipts.end();
+    return std::prev(found);
+}
+
+bool HasReceipt(const JournalDocument& document, const std::string& path) {
+    const auto found = document.receipts.lower_bound({path, 0});
+    return found != document.receipts.end() && found->first.first == path;
+}
+
+RetirementReceipt& ReceiptFor(JournalDocument& document, const std::string& path) {
+    const auto found = LatestReceipt(document, path);
+    if (found == document.receipts.end())
+        throw std::out_of_range("snapshot receipt missing");
+    return found->second;
+}
 
 bool ReadIdentity(const nlohmann::json& object,
                   const char* key,
@@ -402,8 +426,10 @@ bool ParseJournalRecord(std::string_view bytes, JournalDocument& out, std::strin
                 const auto* directory = Field(item, "directory");
                 const auto* absent_only = Field(item, "absent_only");
                 RetirementReceipt receipt;
-                if (!item.is_object() || item.size() != 4 || !path || !path->is_string() ||
-                    !directory || !directory->is_boolean() || !absent_only ||
+                const auto* generation = Field(item, "generation");
+                if (!item.is_object() || item.size() != (generation ? 5u : 4u) ||
+                    (generation && !generation->is_number_unsigned()) || !path ||
+                    !path->is_string() || !directory || !directory->is_boolean() || !absent_only ||
                     !absent_only->is_boolean() ||
                     (directory->get<bool>() && absent_only->get<bool>()) ||
                     !ReadIdentity(item, "identity", receipt.completion.identity) ||
@@ -412,6 +438,7 @@ bool ParseJournalRecord(std::string_view bytes, JournalDocument& out, std::strin
                     return false;
                 }
                 receipt.path = path->get<std::string>();
+                receipt.generation = generation ? generation->get<std::uint64_t>() : 0;
                 // Inventory validation additionally confines every name before removal.
                 if (receipt.path.empty() || receipt.path.front() == '/' ||
                     receipt.path.find('\\') != std::string::npos ||
@@ -428,7 +455,8 @@ bool ParseJournalRecord(std::string_view bytes, JournalDocument& out, std::strin
                     static_cast<detail::NamespaceReceiptPhase>(std::min(phase_number, 2u));
                 receipt.directory = directory->get<bool>();
                 receipt.absent_only = absent_only->get<bool>();
-                if (!parsed.receipts.emplace(receipt.path, receipt).second) {
+                if (!parsed.receipts.emplace(std::pair{receipt.path, receipt.generation}, receipt)
+                         .second) {
                     error = "journal duplicate receipt path";
                     return false;
                 }
@@ -587,8 +615,15 @@ bool ParseJournal(std::string_view bytes, JournalDocument& out, std::string& err
             std::size_t additions = 0;
             for (const auto& [name, receipt] : record.receipts) {
                 const auto found = out.receipts.find(name);
+                const auto latest = LatestReceipt(out, receipt.path);
                 if (found == out.receipts.end()) {
                     if (record.record == "receipt-reset" ||
+                        (latest == out.receipts.end()
+                             ? receipt.generation != 0
+                             : latest->second.generation ==
+                                       std::numeric_limits<std::uint64_t>::max() ||
+                                   receipt.generation != latest->second.generation + 1 ||
+                                   !latest->second.retired) ||
                         receipt.completion.phase != detail::NamespaceReceiptPhase::Prepared ||
                         receipt.retired || additions == kMaxSnapshotMembers - out.receipts.size()) {
                         error = "journal receipt requires preparation";
@@ -608,7 +643,8 @@ bool ParseJournal(std::string_view bytes, JournalDocument& out, std::string& err
                         record.record == "receipt-reset"
                             ? next_phase == 0 && previous_phase != 0
                             : next_phase == previous_phase || next_phase == previous_phase + 1;
-                    if (receipt.completion.identity != previous.completion.identity ||
+                    if (latest != found ||
+                        receipt.completion.identity != previous.completion.identity ||
                         receipt.directory != previous.directory ||
                         receipt.absent_only != previous.absent_only || !ordered) {
                         error = "journal receipt transition invalid";
@@ -625,6 +661,16 @@ bool ParseJournal(std::string_view bytes, JournalDocument& out, std::string& err
             return false;
         }
         auto& entry = record.entries.front();
+        for (const auto& [phase, identity] :
+             {std::pair{"incoming", entry.incoming_identity},
+              std::pair{"retired", entry.installed_identity},
+              std::pair{"restored", entry.restored_identity},
+              std::pair{"rollback-retired", entry.rollback_retired_identity}}) {
+            const auto slot = "journal/undo/" + std::string(phase) + "." +
+                              Filesystem::GenericUtf8PathString(fs::path(entry.path).filename());
+            if (identity != std::array<std::uint64_t, 3>{})
+                out.recorded_slots[slot].insert(identity);
+        }
         const auto known = entries.find(entry.path);
         if (known == entries.end()) {
             if (out.entries.size() == kMaxSnapshotMembers) {
@@ -925,6 +971,7 @@ bool RecordReceipts(const fs::path& save_dir,
     for (std::size_t i = 0; i < receipts.size(); ++i) {
         const auto& receipt = *receipts[i];
         nlohmann::json item{{"path", receipt.path},
+                            {"generation", receipt.generation},
                             {"identity", receipt.completion.identity},
                             {"directory", receipt.directory},
                             {"absent_only", receipt.absent_only}};
@@ -955,21 +1002,26 @@ bool PrepareReceipts(const fs::path& save_dir,
                      std::vector<std::string>* errors) {
     std::vector<RetirementReceipt*> pending;
     for (auto& [name, receipt] : candidates) {
-        const auto found = document.receipts.find(name);
+        const auto found = LatestReceipt(document, name);
         if (found != document.receipts.end()) {
-            if (found->second.completion.identity != receipt.completion.identity ||
-                found->second.directory != receipt.directory ||
-                found->second.absent_only != receipt.absent_only)
+            receipt.generation = found->second.generation;
+            if (found->second.completion.identity == receipt.completion.identity &&
+                found->second.directory == receipt.directory &&
+                found->second.absent_only == receipt.absent_only)
+                continue;
+            if (!found->second.retired ||
+                found->second.generation == std::numeric_limits<std::uint64_t>::max())
                 return false;
-        } else {
-            if (pending.size() == kMaxSnapshotMembers - document.receipts.size())
-                return false;
-            pending.push_back(&receipt);
+            ++receipt.generation;
         }
+        if (pending.size() == kMaxSnapshotMembers - document.receipts.size())
+            return false;
+        pending.push_back(&receipt);
     }
     if (!RecordReceipts(save_dir, document, pending, 0, control, errors))
         return false;
-    document.receipts.merge(candidates);
+    for (auto* receipt : pending)
+        document.receipts.emplace(std::pair{receipt->path, receipt->generation}, *receipt);
     return true;
 }
 
@@ -1200,10 +1252,11 @@ bool CompleteRemoval(const fs::path& save_dir,
 #if !defined(_WIN32)
     const auto recorded_slot = stage ? stage->directory / stage->name : fs::path{};
     if (document.modern &&
-        !document.receipts.contains(
-            Filesystem::GenericUtf8PathString(path.lexically_relative(save_dir))) &&
-        (recorded_slot.empty() || !document.receipts.contains(Filesystem::GenericUtf8PathString(
-                                      recorded_slot.lexically_relative(save_dir))))) {
+        !HasReceipt(document,
+                    Filesystem::GenericUtf8PathString(path.lexically_relative(save_dir))) &&
+        (recorded_slot.empty() || !HasReceipt(document,
+                                              Filesystem::GenericUtf8PathString(
+                                                  recorded_slot.lexically_relative(save_dir))))) {
         // POSIX has a namespace barrier. The existing ownership records plus
         // repeated parent fsync suffice; per-file NTFS phase records would
         // consume the bounded control stream before large saves can roll back.
@@ -1284,7 +1337,7 @@ bool CompleteRemoval(const fs::path& save_dir,
             continue;
         const auto name = Filesystem::GenericUtf8PathString(candidate.lexically_relative(save_dir));
         removals.push_back(ReceiptRemovalFor(
-            save_dir, document, document.receipts.at(name), candidate == path ? stage : nullptr));
+            save_dir, document, ReceiptFor(document, name), candidate == path ? stage : nullptr));
         if (candidate == slot)
             break;
     }
@@ -1438,7 +1491,7 @@ bool RollbackEntries(const fs::path& save_dir,
         if (entry->action == "create") {
             const auto identity = missing ? entry->rollback_retired_identity : current;
             if (document.modern && identity == ArtifactIdentity{} &&
-                (kNeedsFileReceipts || document.receipts.contains(entry->path))) {
+                (kNeedsFileReceipts || HasReceipt(document, entry->path))) {
                 if (!PrepareReceipt(save_dir,
                                     document,
                                     destination,
@@ -1448,7 +1501,7 @@ bool RollbackEntries(const fs::path& save_dir,
                                     errors,
                                     true))
                     return false;
-                auto& receipt = document.receipts.at(entry->path);
+                auto& receipt = ReceiptFor(document, entry->path);
                 if (CompleteReceipt(save_dir, document, receipt, control, nullptr, errors) !=
                     detail::NamespaceRetirementOutcome::Retired)
                     return false;
@@ -1600,7 +1653,8 @@ bool JournalInventory(const fs::path& save_dir,
     for (const auto& entry : document.entries)
         if (entry.action == "create")
             creates.emplace(entry.path, entry.rollback_retired_identity);
-    for (const auto& [name, receipt] : document.receipts) {
+    for (const auto& [key, receipt] : document.receipts) {
+        const auto& name = key.first;
         const auto path = save_dir / name;
         bool allowed =
             receipt.directory
@@ -1608,6 +1662,11 @@ bool JournalInventory(const fs::path& save_dir,
                       (path == journal / "undo" &&
                        receipt.completion.identity == document.undo_directory_identity)
                 : files.contains(path) && files.at(path) == receipt.completion.identity;
+        if (!allowed && !receipt.directory) {
+            const auto history = document.recorded_slots.find(name);
+            allowed = history != document.recorded_slots.end() &&
+                      history->second.contains(receipt.completion.identity);
+        }
         if (!allowed && !receipt.directory) {
             const auto created = creates.find(name);
             allowed =
@@ -1777,7 +1836,7 @@ bool FinishJournal(const fs::path& save_dir,
             continue;
         const auto name = Filesystem::GenericUtf8PathString(path.lexically_relative(save_dir));
         const auto slot = CleanupStage(save_dir, document.undo_directory_identity, path);
-        const auto found = document.receipts.find(name);
+        const auto found = LatestReceipt(document, name);
         if (found == document.receipts.end()) {
             ArtifactIdentity actual{};
             bool missing = false;
@@ -1807,7 +1866,7 @@ bool FinishJournal(const fs::path& save_dir,
     for (const auto& path : {journal / "undo", journal}) {
         const auto name = Filesystem::GenericUtf8PathString(path.lexically_relative(save_dir));
         directory_removals.push_back(
-            ReceiptRemovalFor(save_dir, document, document.receipts.at(name), nullptr));
+            ReceiptRemovalFor(save_dir, document, ReceiptFor(document, name), nullptr));
     }
     const auto directory_outcome =
         CompleteReceipts(save_dir, document, directory_removals, control, errors);
@@ -1892,8 +1951,7 @@ bool RecoverReceiptCarriers(const fs::path& save_dir, std::vector<std::string>* 
                                 return item.second.completion.phase ==
                                        detail::NamespaceReceiptPhase::Prepared;
                             }) ||
-                !document.receipts.contains("journal") ||
-                !document.receipts.contains("journal/undo")) {
+                !HasReceipt(document, "journal") || !HasReceipt(document, "journal/undo")) {
                 AddError(errors, "snapshot receipt directory ownership changed");
                 return false;
             }

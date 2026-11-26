@@ -1466,6 +1466,36 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn('"crash-before-restoration-completion"', rollback)
         self.assertNotIn('if (!missing && !WorldSaveService::remove_owned_entry(', rollback)
 
+    def assert_receipt_generation_contract(self, source):
+        parse = self.function(source, "ParseJournalRecord", "")
+        self.assertIn('generation ? generation->get<std::uint64_t>() : 0', parse)
+        self.assertIn('generation && !generation->is_number_unsigned()', parse)
+        self.assertIn('std::pair{receipt.path, receipt.generation}', parse)
+        stream = self.function(source, "ParseJournal", "")
+        for token in ('receipt.generation != 0',
+                      'receipt.generation != latest->second.generation + 1',
+                      '!latest->second.retired', 'latest != found',
+                      'out.recorded_slots[slot].insert(identity)'):
+            self.assertIn(token, stream)
+        encoder = self.function(source, "RecordReceipts", "")
+        self.assertIn('{"generation", receipt.generation}', encoder)
+        inventory = self.function(source, "JournalInventory", "")
+        self.assertIn('history->second.contains(receipt.completion.identity)', inventory)
+
+    def test_receipt_generations_preserve_identity_and_refuse_unordered_reuse(self):
+        source = read_source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        self.assert_receipt_generation_contract(source)
+        for token in ('generation ? generation->get<std::uint64_t>() : 0',
+                      'receipt.generation != latest->second.generation + 1',
+                      '!latest->second.retired', 'latest != found',
+                      'out.recorded_slots[slot].insert(identity)',
+                      '{"generation", receipt.generation}',
+                      'history->second.contains(receipt.completion.identity)'):
+            with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):
+                self.assert_receipt_generation_contract(source.replace(token, 'removed', 1))
+        self.assertIn('TEST(SaveTransaction, ReceiptGenerationsRetainEachRecordedPublicationIdentity)',
+                      read_source("test/persistence/SaveTransaction_test.cpp"))
+
     def test_transaction_v5_receipts_survive_control_cleanup_and_complete_absent_retries(self):
         source = read_source("src/luminumbra_common/persistence/SaveTransaction.cpp")
         self.assert_transaction_receipt_integration(source)

@@ -2681,6 +2681,101 @@ TEST(SaveTransaction, ReceiptDiscoveryRefusesMalformedOrForeignEvidence) {
     EXPECT_NE(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
 }
 
+TEST(SaveTransaction, ReceiptGenerationsRetainEachRecordedPublicationIdentity) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+    const auto baseline = Tree(save.path());
+    SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+    WorldSaveService::ArtifactIdentity original{}, first{};
+    bool missing = false;
+    ASSERT_TRUE(
+        WorldSaveService::artifact_identity(save.path() / "world_info.json", original, missing));
+    ASSERT_FALSE(missing);
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "first"));
+    ASSERT_TRUE(
+        WorldSaveService::artifact_identity(save.path() / "world_info.json", first, missing));
+    ASSERT_FALSE(missing);
+    ASSERT_NE(original, first);
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "second"));
+    {
+        const HookGuard hook(+[](const char* step, const fs::path&) {
+            if (std::string_view(step) == "crash-receipt-carrier-published")
+                throw std::runtime_error("carrier publication interrupted");
+        });
+        transaction.abort(nullptr);
+    }
+    const auto carrier = FindReceiptCarrier(save.path());
+    ASSERT_FALSE(carrier.empty());
+    const auto retained = Get(carrier);
+    std::istringstream lines(retained);
+    std::vector<nlohmann::json> records;
+    std::string line;
+    while (std::getline(lines, line))
+        records.push_back(nlohmann::json::parse(line));
+    auto receipt = records.front();
+    receipt["record"] = "receipt";
+    receipt["receipts"] = nlohmann::json::array({{{"path", "journal/undo/retired.world_info.json"},
+                                                  {"generation", 0u},
+                                                  {"identity", original},
+                                                  {"directory", false},
+                                                  {"absent_only", false}}});
+    // Four phase records per generation. The second identity was bound by a
+    // preceding entry record, even though the slot's final identity is different.
+    for (unsigned generation = 0; generation < 2; ++generation) {
+        receipt["receipts"][0]["generation"] = generation;
+        receipt["receipts"][0]["identity"] = generation == 0 ? original : first;
+        for (unsigned phase = 0; phase < 4; ++phase) {
+            receipt["phase"] = phase;
+            records.push_back(receipt);
+        }
+    }
+    for (const std::string_view mutation : {"gap",
+                                            "regression",
+                                            "second live",
+                                            "old generation",
+                                            "duplicate",
+                                            "negative",
+                                            "string",
+                                            "foreign",
+                                            "changed retired"}) {
+        SCOPED_TRACE(mutation);
+        auto invalid = records;
+        const auto start = invalid.size() - 8;
+        if (mutation == "gap")
+            invalid[start + 4]["receipts"][0]["generation"] = 2u;
+        else if (mutation == "regression")
+            invalid[start + 4]["receipts"][0]["generation"] = 0u;
+        else if (mutation == "second live")
+            invalid.erase(invalid.begin() + static_cast<std::ptrdiff_t>(start + 3));
+        else if (mutation == "old generation")
+            invalid.push_back(invalid[start + 3]);
+        else if (mutation == "duplicate")
+            invalid[start]["receipts"].push_back(invalid[start]["receipts"][0]);
+        else if (mutation == "negative")
+            invalid[start]["receipts"][0]["generation"] = -1;
+        else if (mutation == "string")
+            invalid[start]["receipts"][0]["generation"] = "0";
+        else if (mutation == "foreign") {
+            for (std::size_t index = start; index < start + 4; ++index)
+                invalid[index]["receipts"][0]["identity"] = std::array<std::uint64_t, 3>{1, 2, 3};
+        } else if (mutation == "changed retired")
+            invalid[start + 3]["receipts"][0]["identity"] = first;
+        Put(carrier, EncodeJournalRecords(invalid));
+        const auto evidence = Tree(save.path());
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        EXPECT_EQ(Tree(save.path()), evidence);
+    }
+    // Absence of generation continues to mean zero for earlier v5 writers.
+    for (std::size_t index = records.size() - 8; index < records.size() - 4; ++index)
+        records[index]["receipts"][0].erase("generation");
+    Put(carrier, EncodeJournalRecords(records));
+    EXPECT_NE(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+    EXPECT_FALSE(journal_pending(save.path()));
+    EXPECT_EQ(Tree(save.path()), baseline);
+}
+
 TEST(SaveTransaction, RecoveryRejectsUnparsableJournal) {
     TempSave save;
     Put(journal_directory(save.path()) / "txn.json", "garbage");
