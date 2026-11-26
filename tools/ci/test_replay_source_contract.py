@@ -1477,6 +1477,17 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                       '!latest->second.retired', 'latest != found',
                       'out.recorded_slots[slot].insert(identity)'):
             self.assertIn(token, stream)
+        self.assertGreaterEqual(stream.count('out.recorded_slots[slot].insert(identity)'), 2)
+        self.assertIn('!latest->second.reset', stream)
+        capacity = self.function(source, 'AppendMetadata', '')
+        self.assertLess(capacity.index('ReservePendingReceipts(document, reserve)'),
+                        capacity.index('WorldSaveService::append_journal_record('))
+        self.assertIn('!document.receipts.contains({name, generation})', capacity)
+        reserve = self.function(source, 'ReservePendingReceipts', '')
+        self.assertIn('ReserveReceiptPhaseBytes(key.first, reserve)', reserve)
+        writer = self.function(source, 'write_journal', 'SaveTransaction::')
+        self.assertLess(writer.index('ReservePendingReceipts(document, append_reserve)'),
+                        writer.index('record,\n', writer.index('ReservePendingReceipts(')))
         encoder = self.function(source, "RecordReceipts", "")
         self.assertIn('{"generation", receipt.generation}', encoder)
         inventory = self.function(source, "JournalInventory", "")
@@ -1489,11 +1500,82 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                       'receipt.generation != latest->second.generation + 1',
                       '!latest->second.retired', 'latest != found',
                       'out.recorded_slots[slot].insert(identity)',
+                      'ReservePendingReceipts(document, reserve)',
+                      'ReservePendingReceipts(document, append_reserve)',
                       '{"generation", receipt.generation}',
                       'history->second.contains(receipt.completion.identity)'):
             with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):
                 self.assert_receipt_generation_contract(source.replace(token, 'removed', 1))
         self.assertIn('TEST(SaveTransaction, ReceiptGenerationsRetainEachRecordedPublicationIdentity)',
+                      read_source("test/persistence/SaveTransaction_test.cpp"))
+
+    def assert_world_cleanup_consumers(self, source):
+        removal = self.function(source, "durable_remove", "WorldSaveService::")
+        self.assertLess(removal.index('SaveTransaction::publication_identity('),
+                        removal.index('StagingFile retained('))
+        self.assertIn('SaveTransaction::complete_owned_removal(path, errors)', removal)
+        self.assertIn('if (!completed.has_value() || !*completed)', removal)
+        publication = self.function(source, "PublishProtectedMember", "")
+        self.assertLess(publication.index('SaveTransaction::complete_owned_removal(destination, errors)'),
+                        publication.index('source.publish_bound('))
+        staging = self.function(source, "ReclaimAbandonedStaging", "")
+        self.assertIn('if (world_owned)', staging)
+        self.assertIn('SaveTransaction::complete_owned_removal(entry.path(), nullptr, false)', staging)
+        self.assertLess(staging.index('ReclaimClaimedLedgerStaging('),
+                        staging.index('if (world_owned)'))
+        shared = self.function(source, "remove_file_and_staging", "WorldSaveService::")
+        self.assertLess(shared.index('SaveTransaction::publication_identity('),
+                        shared.index('std::filesystem::remove(destination, error)'))
+        self.assertIn('return durable_remove(destination, errors);', shared)
+        reclaim = self.function(source, "reclaim_file_staging", "WorldSaveService::")
+        self.assertIn('SaveTransaction::publication_identity(destination, expected, incoming)', reclaim)
+
+    def test_world_cleanup_consumers_require_recorded_namespace_completion(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        self.assert_world_cleanup_consumers(source)
+        for token in ('SaveTransaction::complete_owned_removal(path, errors)',
+                      'SaveTransaction::complete_owned_removal(destination, errors)',
+                      'SaveTransaction::complete_owned_removal(entry.path(), nullptr, false)',
+                      'return durable_remove(destination, errors);'):
+            with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):
+                self.assert_world_cleanup_consumers(source.replace(token, 'removed', 1))
+        self.assertIn('TEST(WorldSaveService, RemovalCompletionFailureRemainsRetryable)',
+                      read_source("test/persistence/world_save_service_test.cpp"))
+
+    def assert_creation_completion_order(self, source, registry):
+        abort = self.function(source, "abort", "SaveTransaction::")
+        self.assertIn('ParseJournal(bytes, document, error)', abort)
+        self.assertLess(abort.index('m_artifacts->complete_files('),
+                        abort.index('if (FinishJournal(m_save_dir, document,'))
+        complete = self.function(source, "CompleteCreatedFiles", "")
+        self.assertLess(complete.index('JournalInventory('), complete.index('AppendMetadata('))
+        self.assertLess(complete.index('AppendMetadata('),
+                        complete.index('for (const bool index_batch : {true, false})'))
+        self.assertLess(complete.index('PrepareReceipts('),
+                        complete.index('WorldSaveService::remove_owned_entry('))
+        self.assertIn('CompleteReceipts(save_dir, document, completions, control, errors)', complete)
+        registered = self.function(registry, "complete_files", "")
+        self.assertLess(registered.index('if (!complete(files))'),
+                        registered.index('artifact.identity.reset();'))
+        self.assertIn('!tracked(child.path()) && child.path() != control_directory &&', registered)
+        self.assertIn('!admitted(child.path())', registered)
+        self.assertIn('creation_inventory.contains(path)', abort)
+        self.assertNotIn('directory = true', complete)
+
+    def test_creation_registry_completes_files_before_releasing_evidence(self):
+        source = read_source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        registry = read_source("src/luminumbra_common/persistence/CreatedWorldArtifacts.h")
+        self.assert_creation_completion_order(source, registry)
+        for token in ('m_artifacts->complete_files(', 'PrepareReceipts(',
+                      'CompleteReceipts(save_dir, document, completions, control, errors)'):
+            complete = self.function(source, "CompleteCreatedFiles", "")
+            mutated = (source.replace(complete, complete.replace(token, 'removed', 1), 1)
+                       if token in complete else source.replace(token, 'removed', 1))
+            with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):
+                self.assert_creation_completion_order(mutated, registry)
+        with self.assertRaises((AssertionError, ValueError)):
+            self.assert_creation_completion_order(source, registry.replace('if (!complete(files))', 'if (false)', 1))
+        self.assertIn('CreationRollbackCompletesFilesBeforeJournalAndRetriesEveryInterruption',
                       read_source("test/persistence/SaveTransaction_test.cpp"))
 
     def test_transaction_v5_receipts_survive_control_cleanup_and_complete_absent_retries(self):

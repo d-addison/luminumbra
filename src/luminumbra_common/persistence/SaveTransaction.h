@@ -18,6 +18,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <stop_token>
 #include <string>
@@ -184,6 +185,12 @@ public:
     static bool publication_stages(const std::filesystem::path& destination,
                                    BoundPublicationStage& source,
                                    BoundPublicationStage& retired);
+    // Completes only ownership admitted by the active v5 inventory. nullopt means
+    // this caller is outside that transaction; false preserves evidence for retry.
+    // publication=false admits recorded staging only, never adopts scanned debris.
+    static std::optional<bool> complete_owned_removal(const std::filesystem::path& path,
+                                                      std::vector<std::string>* errors,
+                                                      bool publication = true);
     static bool check_publication_target(const std::filesystem::path& destination,
                                          std::vector<std::string>* errors);
     // A writer may supply a digest of its admitted output, bound to the installed native

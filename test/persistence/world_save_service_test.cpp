@@ -2939,6 +2939,80 @@ void SubstituteBeforeRemoval(const char* step, const std::filesystem::path& path
 }
 } // namespace
 
+namespace {
+struct RemovalCompletionFailure {
+    unsigned remaining = 0;
+    unsigned observed = 0;
+};
+RemovalCompletionFailure& RemovalCompletionSchedule() {
+    static RemovalCompletionFailure schedule;
+    return schedule;
+}
+void InterruptRemovalCompletion(const char* step, const std::filesystem::path&) {
+    auto& schedule = RemovalCompletionSchedule();
+    if (std::string_view(step) == "crash-before-namespace-completion" && schedule.remaining != 0) {
+        --schedule.remaining;
+        ++schedule.observed;
+        throw std::runtime_error("interrupted removal completion");
+    }
+}
+struct RemovalHookReset {
+    ~RemovalHookReset() {
+        Luminumbra::Persistence::set_snapshot_step_hook_for_testing(nullptr);
+    }
+};
+} // namespace
+
+TEST(WorldSaveService, RemovalCompletionFailureRemainsRetryable) {
+    using namespace Luminumbra::Persistence;
+    const TempSaveDir save("removal_completion_retry");
+    const auto member = save.path() / "world_info.json";
+    ASSERT_TRUE(WorldSaveService::create_file_durably(member, "original"));
+    SaveTransaction transaction(
+        save.path(),
+        1,
+        {},
+        +[](const std::filesystem::path& root,
+            std::string_view relative,
+            MemberDigest& digest,
+            std::string&) {
+            return hash_file(
+                root / std::string(relative), digest.bytes, digest.fnv64, digest.present, nullptr);
+        });
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+    const TempSaveDir outside("removal_completion_outside");
+    const auto foreign = outside.path() / "world_info.json.tmp.1.2";
+    ASSERT_TRUE(WorldSaveService::create_file_durably(foreign, "foreign"));
+    const auto refused = SaveTransaction::complete_owned_removal(foreign, nullptr, false);
+    ASSERT_TRUE(refused.has_value());
+    if (refused.has_value())
+        EXPECT_FALSE(*refused);
+    EXPECT_EQ(ReadFileBytes(foreign), "foreign");
+    const auto unrecorded = save.path() / "world_info.json.tmp.1.2";
+    ASSERT_TRUE(WorldSaveService::create_file_durably(unrecorded, "unrecorded"));
+    WorldSaveService::reclaim_file_staging(member);
+    EXPECT_EQ(ReadFileBytes(unrecorded), "unrecorded");
+    ASSERT_TRUE(std::filesystem::remove(unrecorded));
+    const RemovalHookReset reset;
+    RemovalCompletionSchedule() = {.remaining = 2, .observed = 0};
+    set_snapshot_step_hook_for_testing(&InterruptRemovalCompletion);
+    for (unsigned attempt = 0; attempt < 2; ++attempt) {
+        SCOPED_TRACE(attempt);
+        EXPECT_THROW(WorldSaveService::durable_remove(member), std::runtime_error);
+        EXPECT_FALSE(std::filesystem::exists(member));
+        EXPECT_TRUE(journal_pending(save.path()));
+    }
+    EXPECT_EQ(RemovalCompletionSchedule().observed, 2u);
+    set_snapshot_step_hook_for_testing(nullptr);
+    // The shared helper must join the explicitly registered world member too.
+    EXPECT_TRUE(WorldSaveService::remove_file_and_staging(member));
+    EXPECT_FALSE(std::filesystem::exists(member));
+    transaction.abort(nullptr);
+    EXPECT_EQ(ReadFileBytes(member), "original");
+    EXPECT_FALSE(journal_pending(save.path()));
+}
+
 TEST(WorldSaveService, DurableRemovalRefusesSubstitutedOccupant) {
     const TempSaveDir save("remove_substitution");
     const auto path = save.path() / "world_info.json";

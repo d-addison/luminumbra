@@ -1662,7 +1662,8 @@ bool StagingNameEquals(const std::filesystem::path& name, const std::filesystem:
 // active in-process writer. Independently launched processes sharing a save
 // directory are outside the persistence ownership contract. Best effort: one
 // pass over the staging directory, outside strict save scans.
-std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
+std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination,
+                                    bool world_owned = false) {
     std::error_code list_error;
     const auto directory =
         destination.has_parent_path() ? destination.parent_path() : std::filesystem::path(".");
@@ -1691,6 +1692,15 @@ std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
             } else if (ReclaimOwnedLedgerStaging(entry.path()))
                 ++reclaimed;
             continue;
+        }
+        if (world_owned) {
+            const auto completed =
+                SaveTransaction::complete_owned_removal(entry.path(), nullptr, false);
+            if (completed.has_value()) {
+                if (*completed)
+                    ++reclaimed;
+                continue;
+            }
         }
         StagingFile abandoned(entry.path(), StagingFile::Mode::Inspect);
         StagingIdentity identity{};
@@ -1721,13 +1731,19 @@ bool PublishProtectedMember(const std::filesystem::path& temp,
         return false;
     }
     if (expected != std::array<std::uint64_t, 3>{}) {
-        StagingFile current(destination, StagingFile::Mode::Inspect);
-        StagingIdentity actual{};
-        if (!current.identity(actual) ||
-            !std::equal(expected.begin(), expected.end(), actual.begin()) ||
-            !current.remove_bound(false, retired_stage)) {
-            AddError(errors, "snapshot publication occupant changed");
-            return false;
+        const auto completed = SaveTransaction::complete_owned_removal(destination, errors);
+        if (completed.has_value()) {
+            if (!*completed)
+                return false;
+        } else {
+            StagingFile current(destination, StagingFile::Mode::Inspect);
+            StagingIdentity actual{};
+            if (!current.identity(actual) ||
+                !std::equal(expected.begin(), expected.end(), actual.begin()) ||
+                !current.remove_bound(false, retired_stage)) {
+                AddError(errors, "snapshot publication occupant changed");
+                return false;
+            }
         }
         report_snapshot_step("after-retire", destination);
     }
@@ -3023,7 +3039,7 @@ bool WriteRegionFile(const std::filesystem::path& path,
                           DigestRegionRecords(path, records, written.digest, admission_error);
     std::filesystem::path temp_path;
     const auto staging = WorldSaveService::region_staging_path(path);
-    ReclaimAbandonedStaging(staging);
+    ReclaimAbandonedStaging(staging, true);
     if (admitted)
         written.observation_revision = snapshot_observation_revision();
     if (!WriteDurableRegionTemp(staging,
@@ -3825,7 +3841,7 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
         return PublishTransactionManifest(save_dir, bytes, errors);
     std::filesystem::path temp;
     const auto staging = WorldSaveService::region_staging_path(manifest_path);
-    ReclaimAbandonedStaging(staging);
+    ReclaimAbandonedStaging(staging, true);
     // An identical manifest is already durable, so it stays in place.
     const bool unchanged = FileBytesEqual(manifest_path, bytes);
     if (!unchanged && !WriteDurableRegionTemp(staging, bytes, temp, errors))
@@ -4823,7 +4839,7 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
     if (artifacts)
         artifacts->reserve_file(destination);
     else
-        ReclaimAbandonedStaging(destination);
+        ReclaimAbandonedStaging(destination, true);
     if (!artifacts && FileBytesEqual(destination, output_bytes))
         return SaveTransaction::check_publication_target(destination, errors) &&
                scope.commit(errors);
@@ -5381,10 +5397,10 @@ bool WorldSaveService::PreparedPlantWrite::publish(const std::filesystem::path& 
     // Like ledger staging, abandoned plant copies must live outside the strict
     // region scan. Reclaim them even when the new roster is empty.
     const auto staging = save_dir / path.filename();
-    ReclaimAbandonedStaging(staging);
+    ReclaimAbandonedStaging(staging, true);
     const auto identity_path = plant_identities_path(save_dir);
     const detail::RegionFileWriteGuard identity_guard(identity_path);
-    ReclaimAbandonedStaging(save_dir / identity_path.filename());
+    ReclaimAbandonedStaging(save_dir / identity_path.filename(), true);
     // Protect both before publishing either; the index commits their binding last.
     if (auto* active = SaveTransaction::active_for(save_dir);
         active &&
@@ -6953,7 +6969,7 @@ bool WorldSaveService::upsert_container_records(const SaveOwnership&,
         if (!AdmitRegionWrite(raw_records, errors))
             return false;
         if (!changed) {
-            ReclaimAbandonedStaging(region_staging_path(region_file));
+            ReclaimAbandonedStaging(region_staging_path(region_file), true);
             return !scope || scope->commit(errors);
         }
         return WriteRegionFile(region_file, raw_records, errors) &&
@@ -7523,6 +7539,20 @@ bool WorldSaveService::durable_remove(const std::filesystem::path& path,
     const auto publish = LockPublication(path);
     if (!AllowPublication(path, true, errors))
         return false;
+    ArtifactIdentity expected_identity{}, incoming_identity{};
+    if (SaveTransaction::publication_identity(path, expected_identity, incoming_identity)) {
+        report_snapshot_step("before-delete", path);
+        PublicationRevision().fetch_add(1, std::memory_order_relaxed);
+        if (!SaveTransaction::check_publication_target(path, errors))
+            return false;
+        if (ActiveFacts() != nullptr)
+            ActiveFacts()->invalidate_presence_facts();
+        const auto completed = SaveTransaction::complete_owned_removal(path, errors);
+        if (!completed.has_value() || !*completed)
+            return false;
+        report_snapshot_step("after-delete", path);
+        return true;
+    }
     StagingFile retained(path, StagingFile::Mode::Inspect);
     StagingIdentity expected{};
     if (!retained.identity(expected)) {
@@ -7786,7 +7816,8 @@ bool WorldSaveService::write_member_bytes(const std::filesystem::path& save_dir,
     if (!scope.ok())
         return false;
     const std::filesystem::path destination = save_dir / relative;
-    ReclaimAbandonedStaging(scope.engaged() ? save_dir / destination.filename() : destination);
+    ReclaimAbandonedStaging(scope.engaged() ? save_dir / destination.filename() : destination,
+                            true);
     if (FileBytesEqual(destination, bytes))
         return scope.commit(errors);
     if (auto* transaction = SaveTransaction::active_for(save_dir);
@@ -8380,7 +8411,10 @@ bool WorldSaveService::write_file_durably(const std::filesystem::path& destinati
                                           CreatedWorldArtifacts* artifacts) {
     const SaveGuard guard;
     if (!artifacts)
-        ReclaimAbandonedStaging(destination);
+        ReclaimAbandonedStaging(destination, [&] {
+            ArtifactIdentity expected{}, incoming{};
+            return SaveTransaction::publication_identity(destination, expected, incoming);
+        }());
     const auto staging = artifacts ? region_staging_path(destination) : destination;
     return WriteFileDurably(destination, bytes, staging, errors, nullptr, artifacts);
 }
@@ -8536,13 +8570,22 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
 
 void WorldSaveService::reclaim_file_staging(const std::filesystem::path& destination) {
     const SaveGuard guard;
-    ReclaimAbandonedStaging(destination);
+    ReclaimAbandonedStaging(destination, [&] {
+        ArtifactIdentity expected{}, incoming{};
+        return SaveTransaction::publication_identity(destination, expected, incoming);
+    }());
 }
 
 bool WorldSaveService::remove_file_and_staging(const std::filesystem::path& destination,
                                                std::vector<std::string>* errors) {
     const SaveGuard guard;
-    ReclaimAbandonedStaging(destination);
+    ReclaimAbandonedStaging(destination, [&] {
+        ArtifactIdentity expected{}, incoming{};
+        return SaveTransaction::publication_identity(destination, expected, incoming);
+    }());
+    ArtifactIdentity expected{}, incoming{};
+    if (SaveTransaction::publication_identity(destination, expected, incoming))
+        return durable_remove(destination, errors);
     std::error_code error;
     std::filesystem::remove(destination, error);
     if (error) {
@@ -10002,7 +10045,7 @@ bool WorldSaveService::PreparedWorldWrite::publish(std::vector<std::string>* err
             return false;
         const AncestorFlushBatch directory_flushes(prepared->save_dir);
         for (const auto& path : prepared->unchanged_regions)
-            ReclaimAbandonedStaging(region_staging_path(path));
+            ReclaimAbandonedStaging(region_staging_path(path), true);
         for (auto& [path, records] : prepared->regions) {
             if (!WriteRegionFile(path, records, errors))
                 return false;
