@@ -79,7 +79,11 @@ SkyPixelMask ReadScenarioSkyMask(const Luminumbra::Rendering::RenderPipeline& pi
     if (!source.read_aov(DiagnosticAov::Depth, depth)) {
         return {};
     }
-    if (include_water && pipeline.isolation_config().renders(IsolationLayer::Water)) {
+    // No forward submissions means no water coverage to merge. In particular,
+    // legacy captures need not have requested a visibility replay for a dry frame.
+    // Submitted water still requires its complete, matching visibility evidence.
+    if (include_water && pipeline.isolation_config().renders(IsolationLayer::Water) &&
+        pipeline.get_last_render_pass_stats().water_draws != 0) {
         const auto& water = pipeline.water_visibility_mask();
         if (!water.valid() || water.width != width || water.height != height) {
             return {};
@@ -445,8 +449,15 @@ bool ScenarioRunnerImpl::writeScenarioBackbuffer(const std::filesystem::path& pa
                                                  int height,
                                                  ScreenshotPixelStats* out_stats,
                                                  LodHolePixelStats* out_lod_hole_stats) {
+    SkyPixelMask sky_mask;
+    if (out_stats || out_lod_hole_stats) {
+        sky_mask = ReadScenarioSkyMask(renderPipeline, width, height);
+        if (!sky_mask.valid_for(width, height)) {
+            return refuseScenarioCapture("scenario_geometry_readback_unavailable");
+        }
+    }
     return writeScenarioCapture(path, width, height, [&] {
-        return WriteBackbufferPpm(path, width, height, out_stats, out_lod_hole_stats);
+        return WriteBackbufferPpm(path, width, height, out_stats, out_lod_hole_stats, &sky_mask);
     });
 }
 
@@ -557,7 +568,9 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
 
 void ScenarioRunnerImpl::onPreRenderCapturePins() {
     if (scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke() ||
-        scenario_config.creature_slice_smoke()) {
+        scenario_config.creature_slice_smoke() || scenario_config.lod_ground_smoke() ||
+        scenario_config.lod_seam_arrival_smoke() || scenario_config.water_visual_smoke() ||
+        scenario_config.material_visual_smoke() || scenario_config.window_mode_stress_smoke()) {
         renderPipeline.set_water_visibility_capture_enabled(true);
     }
 
@@ -911,8 +924,13 @@ void ScenarioRunnerImpl::captureWaterVisual(std::chrono::steady_clock::time_poin
             int sample_width = 0;
             int sample_height = 0;
             glfwGetFramebufferSize(window, &sample_width, &sample_height);
-            WaterCausticsSample caustics_sample =
-                SampleBackbufferWaterLuminance(sample_width, sample_height, elapsed_play_seconds);
+            const auto sky_mask = ReadScenarioSkyMask(renderPipeline, sample_width, sample_height);
+            if (!sky_mask.valid_for(sample_width, sample_height)) {
+                (void)refuseScenarioCapture("scenario_geometry_readback_unavailable");
+                return;
+            }
+            WaterCausticsSample caustics_sample = SampleBackbufferWaterLuminance(
+                sky_mask, sample_width, sample_height, elapsed_play_seconds);
             caustics_sample.texture_mean_abs_delta = SampleCausticsTextureDelta(
                 renderPipeline.water_caustics_texture(), water_caustics_previous_texels);
             water_caustics_samples.push_back(caustics_sample);
@@ -926,6 +944,13 @@ void ScenarioRunnerImpl::captureWaterVisual(std::chrono::steady_clock::time_poin
             int screenshot_height = 0;
             glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
             if (screenshot_width > 0 && screenshot_height > 0) {
+                auto sky_mask =
+                    ReadScenarioSkyMask(renderPipeline, screenshot_width, screenshot_height);
+                if (!sky_mask.valid_for(screenshot_width, screenshot_height)) {
+                    (void)refuseScenarioCapture("scenario_geometry_readback_unavailable");
+                    return;
+                }
+
                 std::vector<unsigned char> frame_pixels(
                     static_cast<std::size_t>(screenshot_width) *
                     static_cast<std::size_t>(screenshot_height) * 3u);
@@ -945,8 +970,8 @@ void ScenarioRunnerImpl::captureWaterVisual(std::chrono::steady_clock::time_poin
                                         screenshot_height,
                                         frame_pixels)) {
                     water_visual_capture_written = true;
-                    water_visual_pixel_stats =
-                        AnalyzeScreenshotPixels(frame_pixels, screenshot_width, screenshot_height);
+                    water_visual_pixel_stats = AnalyzeScreenshotPixels(
+                        frame_pixels, sky_mask, screenshot_width, screenshot_height);
 
                     // depth tint gradient + shoreline foam
                     // probes around the projected shallow/deep points.
@@ -1013,6 +1038,13 @@ void ScenarioRunnerImpl::captureWaterVisual(std::chrono::steady_clock::time_poin
             int screenshot_height = 0;
             glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
             if (screenshot_width > 0 && screenshot_height > 0) {
+                auto sky_mask =
+                    ReadScenarioSkyMask(renderPipeline, screenshot_width, screenshot_height);
+                if (!sky_mask.valid_for(screenshot_width, screenshot_height)) {
+                    (void)refuseScenarioCapture("scenario_geometry_readback_unavailable");
+                    return;
+                }
+
                 std::vector<unsigned char> frame_pixels(
                     static_cast<std::size_t>(screenshot_width) *
                     static_cast<std::size_t>(screenshot_height) * 3u);
@@ -1032,6 +1064,7 @@ void ScenarioRunnerImpl::captureWaterVisual(std::chrono::steady_clock::time_poin
                 // near zenith), so the sun intensity is 1.0.
                 const WaterReflectionStats reflection_stats = AnalyzeWaterReflection(
                     frame_pixels,
+                    sky_mask,
                     screenshot_width,
                     screenshot_height,
                     Luminumbra::Rendering::WaterPass::approximate_sky_reflection_color(1.0f));
@@ -1073,6 +1106,13 @@ void ScenarioRunnerImpl::captureMaterialVisual(std::chrono::steady_clock::time_p
             int screenshot_height = 0;
             glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
             if (screenshot_width > 0 && screenshot_height > 0) {
+                auto sky_mask =
+                    ReadScenarioSkyMask(renderPipeline, screenshot_width, screenshot_height);
+                if (!sky_mask.valid_for(screenshot_width, screenshot_height)) {
+                    (void)refuseScenarioCapture("scenario_geometry_readback_unavailable");
+                    return;
+                }
+
                 std::vector<unsigned char> frame_pixels(
                     static_cast<std::size_t>(screenshot_width) *
                     static_cast<std::size_t>(screenshot_height) * 3u);
@@ -1088,10 +1128,10 @@ void ScenarioRunnerImpl::captureMaterialVisual(std::chrono::steady_clock::time_p
 
                 const std::string screenshot_path = "screenshots/material-visual.ppm";
                 const std::string heatmap_path = "screenshots/material-id-heatmap.ppm";
-                const MaterialPixelStats material_stats =
-                    AnalyzeMaterialPixels(frame_pixels, screenshot_width, screenshot_height);
-                const std::vector<unsigned char> heatmap_pixels =
-                    BuildMaterialHeatmap(frame_pixels, screenshot_width, screenshot_height);
+                const MaterialPixelStats material_stats = AnalyzeMaterialPixels(
+                    frame_pixels, sky_mask, screenshot_width, screenshot_height);
+                const std::vector<unsigned char> heatmap_pixels = BuildMaterialHeatmap(
+                    frame_pixels, sky_mask, screenshot_width, screenshot_height);
                 const bool wrote_screenshot =
                     writeScenarioPixels(scenario_config.artifact_dir / screenshot_path,
                                         screenshot_width,
@@ -1953,8 +1993,8 @@ void ScenarioRunnerImpl::capturePlayerView(std::chrono::steady_clock::time_point
                                                       screenshot_width,
                                                       screenshot_height,
                                                       horizon_row_from_top);
-                capture.holes =
-                    AnalyzeLodHolePixels(frame_pixels, screenshot_width, screenshot_height);
+                capture.holes = AnalyzeLodHolePixels(
+                    frame_pixels, sky_mask, screenshot_width, screenshot_height);
                 capture.coverage =
                     gameSession->GetWorldSystem()->get_frustum_surface_coverage_stats(
                         g_camera->Position,
