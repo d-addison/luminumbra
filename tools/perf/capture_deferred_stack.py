@@ -35,7 +35,8 @@ RENDER_CASES = {
     'RenderTraversalEmbeddedPresetRefusal': 'test_embedded_preset_refusal',
 }
 RENDER_PROCESSES = {
-    'RenderTraversalIntegrated': {'first': 0, 'second': 0},
+    # test_traversal_twice also runs two expected frame-option refusals.
+    'RenderTraversalIntegrated': {'first': 0, 'second': 0, 'separate': 2, 'assigned': 2},
     'RenderBenchmarkIsolationSubmission': {'isolated': 0},
     'RenderBenchmarkOverrideCollection': {'undeclared': 0, 'declared': 0},
     'RenderTraversalEmbeddedPresetRefusal': {'original': 0, 'loaded': 0, 'altered': 2, 'refused': 2},

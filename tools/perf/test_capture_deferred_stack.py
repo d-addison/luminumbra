@@ -69,7 +69,9 @@ class DeferredStackEvidenceTests(unittest.TestCase):
         else:
             artifact = Path(command[1])
             data = {'schema': 'synthetic'}
-        exit_code = 2 if artifact.stem in ('altered', 'refused') else 0
+        expected = {label: code for processes in capture.RENDER_PROCESSES.values()
+                    for label, code in processes.items()}
+        exit_code = expected.get(artifact.stem, 0)
         if not exit_code:
             artifact.write_bytes(capture.encode(data))
         return subprocess.CompletedProcess(command, exit_code)
@@ -93,6 +95,21 @@ class DeferredStackEvidenceTests(unittest.TestCase):
             stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
             return capture.capture(self.source, self.assets, self.binaries, self.build, self.evidence)
 
+    def test_process_map_matches_the_render_regressions(self):
+        # The mocked runs replay RENDER_PROCESSES, so check the map against the
+        # real regressions' process labels and expected exits.
+        import inspect
+        import re
+        for case, method in capture.RENDER_CASES.items():
+            with self.subTest(case=case):
+                source = inspect.getsource(getattr(capture.render_tests.RenderRunnerTests, method))
+                labels = {label: 0 for label in re.findall(r"run_client\('([a-z-]+)',", source)}
+                looped = re.findall(r"(?<!run_client)\('([a-z-]+)',\s*\[", source)
+                if looped:
+                    self.assertIn('expected_exit=2', source)
+                labels.update({label: 2 for label in looped})
+                self.assertEqual(capture.RENDER_PROCESSES[case], labels)
+
     def test_fixed_deadlines_and_failure_receipts(self):
         for failure in (None, 'timeout', 'spawn'):
             with self.subTest(failure=failure):
@@ -100,7 +117,7 @@ class DeferredStackEvidenceTests(unittest.TestCase):
                 self.failure = failure
                 self.deadlines.clear()
                 manifest = self.collect()
-                self.assertEqual(self.deadlines, [180] * (9 if failure is None else 4) + [1800] * 2)
+                self.assertEqual(self.deadlines, [180] * (11 if failure is None else 4) + [1800] * 2)
                 self.assertEqual(capture.render_tests.PROCESS_TIMEOUT_SECONDS, 180)
                 self.assertEqual(len(manifest['runs']), 6)
                 report = capture.report(self.evidence)
@@ -323,7 +340,8 @@ class DeferredStackEvidenceTests(unittest.TestCase):
         path.write_bytes(capture.encode(original))
         result = capture.report(self.evidence)
         self.assertFalse(result['passed'])
-        self.assertFalse(result['runs'][0]['processes'][0]['binary_verified'])
+        first = next(item for item in result['runs'][0]['processes'] if item['label'] == 'first')
+        self.assertFalse(first['binary_verified'])
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(capture.main(['report', '--evidence-dir', str(self.evidence)]), 1)
 
