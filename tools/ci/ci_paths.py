@@ -286,6 +286,7 @@ def needs_python(path: str) -> bool:
                            or PurePosixPath(path).name == "CMakeLists.txt"))
     return (source_ratchet or path.endswith(".py") or path.startswith(CI_PREFIXES) or path in RMLUI_CALLER_INPUTS
             or path in {"res/shaders/g_buffer.frag",
+                        "res/shaders/water.frag",
                         "src/luminumbra_common/world/MarchingCubes.cpp",
                         "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"}
             or path.startswith("src/luminumbra_common/world/MarchingCubes")

@@ -272,6 +272,36 @@ void ExpectLegacyEquivalent(const SnapshotMsg& baseline, const SnapshotMsg& curr
     ExpectSameSnapshot(ApplySnapshotDelta(baseline, actual_delta), *expected_full);
 }
 
+TEST(ReplicationDelta, SparseChangesKeepOutputStorageProportionalToDelta) {
+    SnapshotMsg baseline = snap(1, {});
+    // A fixed 4096-record input makes snapshot-sized output reserves observable
+    // without depending on the standard library's exact vector growth factor.
+    for (std::uint32_t id = 4096; id > 0; --id)
+        baseline.entities.push_back(ent(id, static_cast<std::int32_t>(id)));
+    for (const std::size_t changed_count : {0u, 1u, 3u}) {
+        for (const std::size_t removed_count : {0u, 2u}) {
+            for (const bool explicit_removals : {false, true}) {
+                SCOPED_TRACE(::testing::Message()
+                             << changed_count << ',' << removed_count << ',' << explicit_removals);
+                auto current = baseline;
+                current.server_tick = 7;
+                current.snapshot_seq = 9;
+                current.acked_usercmd_tick = 5;
+                for (std::size_t index = 0; index < changed_count; ++index)
+                    ++current.entities[index].px_mm;
+                current.entities.resize(current.entities.size() - removed_count);
+                if (explicit_removals)
+                    current.removed_ids = {7000, 1, 7000};
+                const auto expected = LegacyMakeSnapshotDelta(baseline, current);
+                const auto actual = MakeSnapshotDelta(baseline, current);
+                ExpectSameSnapshot(actual, expected);
+                EXPECT_LE(actual.entities.capacity(), 64u);
+                EXPECT_LE(actual.removed_ids.capacity(), 64u);
+            }
+        }
+    }
+}
+
 TEST(ReplicationDelta, FlatIndicesMatchLegacyEdgeRecordBytesAndAdmission) {
     ExpectLegacyEquivalent(snap(1, {}), snap(2, {}));
     ExpectLegacyEquivalent(snap(1, {ent(3, 1), ent(3, 2)}), snap(2, {}));
