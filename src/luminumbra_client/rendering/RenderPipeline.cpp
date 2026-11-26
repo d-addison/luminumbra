@@ -5500,6 +5500,13 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
         return;
     }
 
+    std::vector<std::int32_t> water_surface_cells;
+    if (ladder && !BuildFarWorldWaterSurfaceCells(
+                      payload.vertices, payload.indices, chunk.coords.y, water_surface_cells)) {
+        m_last_mesh_upload_stats.water_upload_failures++;
+        return;
+    }
+
     auto it = m_water_render_data.find(chunk.id);
     const bool version_reused =
         it != m_water_render_data.end() && it->second.mesh_version != payload.mesh_version;
@@ -5590,6 +5597,7 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
         m_render_registry.record_buffer_allocation(data.ebo_id, checked_sizes.index_bytes);
     }
     data.ladder_upload_version = ladder ? std::optional<u32>(payload.mesh_version) : std::nullopt;
+    data.water_surface_cells = std::move(water_surface_cells);
     data.element_count = index_count;
     data.mesh_version = payload.mesh_version;
     data.frames_since_inactive = 0;
@@ -5600,6 +5608,7 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
         it->second = data;
         previous.mesh_version = previous.element_count = previous.frames_since_inactive = 0;
         previous.ladder_upload_version.reset();
+        previous.water_surface_cells.clear();
         // At most kMaxFreeWaterRenderSlots spare GPU slots are retained.
         if (m_free_water_render_slots.size() < kMaxFreeWaterRenderSlots)
             m_free_water_render_slots.push_back(previous);
@@ -5717,6 +5726,7 @@ void RenderPipeline::unload_water_resources(ChunkID chunk_id) {
         data.element_count = 0;
         data.mesh_version = 0;
         data.ladder_upload_version.reset();
+        data.water_surface_cells.clear();
         data.frames_since_inactive = 0;
         if (m_free_water_render_slots.size() < kMaxFreeWaterRenderSlots) {
             m_free_water_render_slots.push_back(data);
