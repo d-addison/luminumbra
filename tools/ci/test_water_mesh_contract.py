@@ -1,6 +1,7 @@
 """Source contracts for live water mesh interpolation and consumer-driven preparation."""
 
 import importlib.util
+import math
 from pathlib import Path
 import re
 import unittest
@@ -13,6 +14,72 @@ def source(path):
     text = (ROOT / path).read_text(encoding="utf-8-sig")
     text = re.sub(r"//[^\n]*|/\*.*?\*/", "", text, flags=re.DOTALL)
     return re.sub(r"\s+", " ", text)
+
+
+class WaterSpecularContract(unittest.TestCase):
+    def setUp(self):
+        shader = source("res/shaders/water.frag")
+        self.assertIn("vec3 view_dir = normalize(fs_in.world_pos - u_camera_pos);", shader)
+        # Evaluate the shipping expression's signs, rather than an independent
+        # corrected formula. Unknown expressions fail instead of using a fallback.
+        expression = re.search(
+            r"vec3 half_vector = normalize\(\s*(-?)\s*u_sun_direction\s*([+-])\s*view_dir\s*\);",
+            shader)
+        self.assertIsNotNone(expression)
+        self.light_sign = -1 if expression[1] == "-" else 1
+        self.view_sign = -1 if expression[2] == "-" else 1
+        self.assertIn('setVec3("u_sun_direction", ctx.sun.direction);',
+                      source("src/luminumbra_client/rendering/passes/WaterPass.cpp"))
+
+    @staticmethod
+    def dot(left, right):
+        return sum(a * b for a, b in zip(left, right))
+
+    def normalized(self, vector):
+        length = math.sqrt(self.dot(vector, vector))
+        self.assertGreater(length, 1e-12, "half vector must be defined at the reflection")
+        return tuple(value / length for value in vector)
+
+    def half_vector(self, travel, view):
+        return self.normalized(tuple(self.light_sign * light + self.view_sign * eye
+                                     for light, eye in zip(travel, view)))
+
+    def test_sun_reflection_aligns_half_vector_with_flat_and_ripple_normals(self):
+        # Fixed 24 cases, each using three-component vectors. Reflection of the
+        # incident light independently constructs the surface-to-camera ray.
+        normals = ((0, 1, 0), self.normalized((.08, 1, -.06)))
+        for elevation in (5, 30, 60, 90):
+            height, radius = math.sin(math.radians(elevation)), math.cos(math.radians(elevation))
+            for azimuth in (0, 90, 225):
+                angle = math.radians(azimuth)
+                travel = (-radius * math.cos(angle), -height, -radius * math.sin(angle))
+                for normal in normals:
+                    with self.subTest(elevation=elevation, azimuth=azimuth, normal=normal):
+                        incidence = self.dot(travel, normal)
+                        self.assertLess(incidence, 0)
+                        to_eye = tuple(light - 2 * incidence * axis
+                                       for light, axis in zip(travel, normal))
+                        view = tuple(-axis for axis in to_eye)
+                        half = self.half_vector(travel, view)
+                        ndoth = self.dot(normal, half)
+                        self.assertAlmostEqual(ndoth, 1, places=12)
+                        self.assertAlmostEqual(max(0, ndoth) ** 64, 1, places=12)
+                        self.assertEqual(max(0, -ndoth) ** 64, 0)
+                        # The old formula is tangent to the surface, or zero at
+                        # exact normal incidence; neither can produce the peak.
+                        old = tuple(light - eye for light, eye in zip(travel, view))
+                        if self.dot(old, old) > 1e-24:
+                            self.assertAlmostEqual(self.dot(normal, self.normalized(old)),
+                                                   0, places=12)
+                        else:
+                            self.assertLessEqual(self.dot(old, old), 1e-24)
+
+    def test_camera_away_from_the_sun_road_has_no_peak(self):
+        travel = (-math.sqrt(.75), -.5, 0)
+        # Same camera elevation, a quarter-turn away from the reflected sun.
+        view = (0, -.5, -math.sqrt(.75))
+        half = self.half_vector(travel, view)
+        self.assertLess(max(0, half[1]) ** 64, 1e-10)
 
 
 class WaterMeshContract(unittest.TestCase):
@@ -75,6 +142,7 @@ class WaterMeshContract(unittest.TestCase):
         spec.loader.exec_module(gate)
         self.assertIn("tools/ci/test_water_mesh_contract.py", gate.PYTHON_TESTS)
         self.assertTrue(gate.needs_python("src/luminumbra_common/world/MarchingCubes.cpp"))
+        self.assertTrue(gate.needs_python("res/shaders/water.frag"))
         self.assertRegex(source("tools/CMakeLists.txt"), r"NAME WaterMeshContract COMMAND "
                          r'"\$\{Python3_EXECUTABLE\}" -I -B '
                          r'"\$\{CMAKE_CURRENT_SOURCE_DIR\}/ci/test_water_mesh_contract.py"')

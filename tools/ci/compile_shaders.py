@@ -36,7 +36,7 @@ STAGE_FILES = {
     "frag": """basic.frag caustics_generator.frag cloud_composite.frag debug_view.frag
         enhanced_skybox.frag foliage.frag g_buffer.frag glass_oit.frag glass_oit_resolve.frag
         god_rays.frag lighting_pass.frag lightning_overlay.frag loading_hologram.frag
-        loading_visual.frag magical_particles.frag plant_procgen.frag rml.frag scent_decal.frag
+        loading_visual.frag magical_particles.frag plant_procgen.frag post.frag rml.frag scent_decal.frag
         shadow_map.frag shadow_tint.frag ssao.frag ssao_bilateral_upsample.frag ssao_blur.frag
         ssao_gtao.frag static_asset.frag taau_resolve.frag tree_impostor.frag
         volumetric_lighting.frag water.frag waterfall.frag weather_system.frag""".split(),

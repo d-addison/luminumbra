@@ -4721,7 +4721,8 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
     def test_compute_regression_source_pin_matches_the_production_shader(self):
         import hashlib
         inventory = json.loads(read(ROOT / "test/rendering/shader_scenes/scenes.json"))
-        self.assertEqual(set(inventory["regression_inputs"]), {"res/shaders/froxel_inject.comp"})
+        self.assertEqual(set(inventory["regression_inputs"]),
+                         {"res/shaders/froxel_inject.comp", "res/shaders/water.frag"})
         for path, expected in inventory["regression_inputs"].items():
             self.assertEqual(hashlib.sha256(read(ROOT / path).encode()).hexdigest(), expected)
 
