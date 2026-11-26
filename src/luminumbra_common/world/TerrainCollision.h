@@ -7,6 +7,33 @@
 #include <span>
 
 namespace Luminumbra::World {
+// Requires a complete finite SDF lattice and in-range x/z. Visits at most
+// 2 * CHUNK_SIZE_Y endpoints (some inputs are shared by adjacent pairs).
+inline float
+TerrainCollisionSurface(const Chunk& chunk, std::size_t x, std::size_t z, u64* work = nullptr) {
+    constexpr std::size_t kSide = CHUNK_SIZE_X + 1;
+    constexpr std::size_t kVertical = CHUNK_SIZE_Y + 1;
+    const float base = static_cast<float>(chunk.get_coords().y * CHUNK_SIZE_Y);
+    const auto density = [&](std::size_t y) {
+        if (work)
+            ++*work;
+        return chunk.sdf_data[x + y * kSide + z * kSide * kVertical];
+    };
+    for (std::size_t y = CHUNK_SIZE_Y; y > 0; --y) {
+        const float lower = density(y - 1);
+        const float upper = density(y);
+        if (upper < 0)
+            return base + static_cast<float>(y);
+        if (lower < 0) {
+            // Scale before subtracting: even finite SDF endpoints may overflow.
+            const float scale = std::max(-lower, upper);
+            const float fraction = (-lower / scale) / (upper / scale - lower / scale);
+            return base + static_cast<float>(y - 1) + fraction;
+        }
+    }
+    return base;
+}
+
 // Overlay one authoritative slab, highest slabs first. This remains a heightfield:
 // caves below the top solid surface and overhang undersides cannot be represented.
 // Generated chunks retain their original height samples, including their exact bits.
@@ -28,25 +55,7 @@ inline bool OverlayTerrainCollision(const Chunk& chunk, std::span<float> heights
     for (std::size_t z = 0; z <= CHUNK_SIZE_Z; ++z) {
         for (std::size_t x = 0; x < kSide; ++x) {
             auto& height = heights[z * kSide + x];
-            const auto density = [&](std::size_t y) {
-                return chunk.sdf_data[x + y * kSide + z * kSide * kVertical];
-            };
-            float surface = base;
-            for (std::size_t y = CHUNK_SIZE_Y; y > 0; --y) {
-                const float lower = density(y - 1);
-                const float upper = density(y);
-                if (upper < 0) {
-                    surface = base + static_cast<float>(y);
-                    break;
-                }
-                if (lower < 0) {
-                    // Scale before subtracting: even finite SDF endpoints may overflow.
-                    const float scale = std::max(-lower, upper);
-                    const float fraction = (-lower / scale) / (upper / scale - lower / scale);
-                    surface = base + static_cast<float>(y - 1) + fraction;
-                    break;
-                }
-            }
+            const float surface = TerrainCollisionSurface(chunk, x, z);
             if (height >= base && height <= base + CHUNK_SIZE_Y)
                 height = surface;
             else if (surface > base)

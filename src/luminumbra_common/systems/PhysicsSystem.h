@@ -126,6 +126,9 @@ public:
     bool
     prepare_simulation_collisions(std::span<const Vec3> anchors,
                                   std::uint64_t tick = std::numeric_limits<std::uint64_t>::max());
+    // Owner-thread collision mode/readiness queries used by terrain refresh.
+    bool simulation_collisions_enabled() const;
+    bool simulation_collisions_ready() const;
     void clear_simulation_collisions();
     // Const diagnostics, never session hash/save inputs. Counts actual sampled columns.
     std::size_t simulation_collision_sample_count() const;
@@ -371,8 +374,6 @@ private:
                               std::span<const World::PhysicsOwnerState> remaining_frozen = {});
     struct SimulationCollisions;
     std::unique_ptr<SimulationCollisions> m_simulation_collisions;
-    bool simulation_collisions_enabled() const;
-    bool simulation_collisions_ready() const;
     bool can_admit_simulation_owner(const glm::vec3& position, bool replacing_player) const;
     std::uint32_t non_simulation_body_count() const;
 

@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -1363,12 +1364,40 @@ private:
     std::function<void(std::string)> m_durable_chunk_fault;
     mutable bool m_durable_read_failed = false;
     // Derived column membership; never serialized or hashed.
-    std::unordered_map<u64, std::set<i32>> m_collision_layers;
-    void invalidate_collision_samples(const IVec3& coords);
+    static constexpr std::size_t kCollisionSamples = (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1);
+    struct CollisionSlab {
+        std::array<float, kCollisionSamples> surfaces{};
+        u64 revision = 0;
+        bool prepared = false;
+        bool valid = true;
+        bool active = false;
+    };
+    struct CollisionColumn {
+        // One fixed lattice per indexed slab, including generated inputs staged
+        // before their first edit. No SDF copies or LRU-dependent reprojection.
+        std::map<i32, CollisionSlab> slabs;
+        std::set<i32> pending;
+        // Disjoint inclusive runs of active slabs, for clearing baseline heights.
+        std::map<i32, i32> runs;
+        std::array<float, kCollisionSamples> highest{};
+        std::array<i32, kCollisionSamples> owners{};
+        u64 revision = 0;
+        std::size_t invalid = 0;
+        CollisionColumn() {
+            highest.fill(-std::numeric_limits<float>::infinity());
+            owners.fill(std::numeric_limits<i32>::min());
+        }
+    };
+    mutable std::unordered_map<u64, CollisionColumn> m_collision_columns;
+    void update_collision_slab(const IVec3& coords,
+                               const std::shared_ptr<Chunk>& source,
+                               std::span<const bool> changed = {}) const;
+    void invalidate_collision_samples(const IVec3& coords, std::span<const bool> changed = {});
     struct CollisionSamples {
         i32 x = 0;
         i32 z = 0;
         u64 generation = 0;
+        u64 column_revision = 0;
         u64 last_use = 0;
         float centre = 0;
         bool saved = false;
