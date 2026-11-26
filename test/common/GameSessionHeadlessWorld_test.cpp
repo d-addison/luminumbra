@@ -8,6 +8,7 @@
 #include "../support/PersistenceFileOps.h"
 #include "../support/SessionEnergyTick.h"
 #include "../support/UniqueTempPath.h"
+#include "../support/WorldSaveTestAccess.h"
 #include "../support/WorldgenTestData.h"
 
 #include "../support/SystemConfigVariants.h"
@@ -6085,9 +6086,9 @@ TEST(GameSessionHeadlessWorldTest, SnapshotSaveDecodesTheWorldAtMostOnce) {
     ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
     ASSERT_TRUE(owner.SaveWorldState());
     chunk->mark_voxel_data_dirty(); // the warm-up save cleared the dirty flag
-    const auto before = P::WorldSaveService::decode_count_for_testing();
+    const auto before = P::detail::decode_count_for_testing();
     ASSERT_TRUE(owner.SaveWorldState());
-    const auto after = P::WorldSaveService::decode_count_for_testing();
+    const auto after = P::detail::decode_count_for_testing();
     EXPECT_LE(after - before, std::uint64_t{1});
 }
 

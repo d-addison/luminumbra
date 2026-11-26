@@ -18,6 +18,7 @@
 #include "player/PlayerController.h"
 #include "rendering/Camera.h"
 #include "rendering/ExposureModel.h"
+#include "rendering/FarWorldBudgetDisplay.h"
 #include "rendering/PixelIo.h"
 #include "rendering/RenderPipeline.h"
 #include "rendering/Shader.h"
@@ -791,13 +792,25 @@ void DrawGpuProfilerContents(Luminumbra::Rendering::RenderPipeline& renderPipeli
                 fw.indices,
                 fw.selection.submit ? "None" : "SubmissionOverride",
                 static_cast<int>(fw.water_capability));
-    ImGui::Text("upload attempts %zu debit %llu success %llu horizon refusal %d",
-                fw.upload.upload_attempts,
-                static_cast<unsigned long long>(fw.upload.upload_bytes),
-                static_cast<unsigned long long>(fw.upload.successful_upload_bytes),
-                fw.upload.horizon_refused);
-    for (std::size_t ti = 0; ti < fw.tiers.size(); ++ti) {
-        const auto& t = fw.tiers[ti];
+    if (fw.captured && fw.advanced && fw.selection.effective == FarWorldMode::Ladder) {
+        ImGui::Text("upload attempts %zu debit %llu success %llu horizon refusal %d",
+                    fw.upload.upload_attempts,
+                    static_cast<unsigned long long>(fw.upload.upload_bytes),
+                    static_cast<unsigned long long>(fw.upload.successful_upload_bytes),
+                    fw.upload.horizon_refused);
+    } else {
+        ImGui::TextUnformatted("Frame streaming work unavailable (no Ladder advancement).");
+    }
+    if (fw.captured && !fw.complete)
+        ImGui::TextUnformatted("Incomplete snapshot: tier tile counts may be partial.");
+    const auto budget_display = ProjectFarWorldBudgetDisplay(fw);
+    for (std::size_t ti = 0; ti < budget_display.size(); ++ti) {
+        const auto& tier_display = budget_display[ti];
+        if (!tier_display.diagnostic) {
+            ImGui::Text("V%zu residency, pool sample and streaming work unavailable", ti + 1);
+            continue;
+        }
+        const auto& t = *tier_display.diagnostic;
         const auto& v = t.resident;
         ImGui::Text("V%zu wanted %zu pending %zu building %zu ready %zu pairs %zu/%zu "
                     "covering %zu drawn %zu/%zu",
@@ -827,6 +840,30 @@ void DrawGpuProfilerContents(Luminumbra::Rendering::RenderPipeline& renderPipeli
                     static_cast<unsigned long long>(v.memory.bytes_gpu),
                     static_cast<unsigned long long>(v.ready_cpu_bytes),
                     static_cast<unsigned long long>(v.retained_gpu_bytes));
+        ImGui::Text(
+            "  pool limit %llu; sampled total/peak bytes %llu/%llu; admission refusals %llu",
+            static_cast<unsigned long long>(v.memory.limit),
+            static_cast<unsigned long long>(v.memory.bytes_total),
+            static_cast<unsigned long long>(v.memory.peak_total),
+            static_cast<unsigned long long>(v.memory.admission_refusals));
+        if (tier_display.work) {
+            const auto& work = *tier_display.work;
+            ImGui::Text(
+                "  frame build attempts/dispatched/completed %zu/%zu/%zu; rejected/evicted %zu/%zu",
+                work.build_attempts,
+                work.dispatched,
+                work.completed,
+                work.rejected,
+                work.evicted);
+            ImGui::Text(
+                "  frame upload attempts/successes %zu/%zu; debited/successful bytes %llu/%llu",
+                work.upload_attempts,
+                work.uploaded,
+                static_cast<unsigned long long>(work.upload_bytes),
+                static_cast<unsigned long long>(work.successful_upload_bytes));
+        } else {
+            ImGui::TextUnformatted("  Frame streaming work unavailable (no Ladder advancement).");
+        }
     }
     ImGui::TextUnformatted(
         "Pool samples are asynchronous diagnostics, not atomic admission values.");

@@ -1,0 +1,84 @@
+{
+  "schema": "luminumbra.far_budget_matrix.v1",
+  "renderer": "NVIDIA GeForce RTX 5070 Ti",
+  "profiles": [
+    "quality",
+    "performance"
+  ],
+  "displays": [
+    "3840x1600",
+    "3440x1440"
+  ],
+  "worlds": [
+    {
+      "id": "default",
+      "preset": "default",
+      "preset_revision": 8,
+      "preset_identity": "56ffbe1771cddfa6",
+      "content_identity": "7583622726659997707",
+      "seed": 424242,
+      "inputs": {
+        "worlds/atlas/presets/default.json": "228dcc6ed261266fdbcd8a30fa6338e79ccdeb2971dc2fe82bfe13e356c0f22a",
+        "data/common/biomes.json": "89be737dc5be1833fdd11ce431ece3226f9bede839f2f275c051cc2333a4ec1e"
+      },
+      "script": "tools/perf/fixtures/surface-flight.traversal",
+      "script_sha256": "99d5ec201f0ac19118b05d6b5cebef9c7db9943aeaa3ca299339b85131393868",
+      "pose": null,
+      "blocked_by": null
+    },
+    {
+      "id": "mountains",
+      "preset": "mountains",
+      "preset_revision": 8,
+      "preset_identity": null,
+      "content_identity": null,
+      "seed": 424242,
+      "inputs": {
+        "worlds/atlas/presets/mountains.json": "9224ad8055f73f986bc85acfdabcd10b0d8765b4224db6cf3d1c66722a113b29",
+        "data/common/biomes.json": "89be737dc5be1833fdd11ce431ece3226f9bede839f2f275c051cc2333a4ec1e"
+      },
+      "script": null,
+      "script_sha256": null,
+      "pose": null,
+      "blocked_by": "native preset/content identities and traversal unavailable"
+    },
+    {
+      "id": "cave-dense",
+      "preset": "cave_dense",
+      "preset_revision": 8,
+      "preset_identity": null,
+      "content_identity": null,
+      "seed": 424242,
+      "inputs": {
+        "worlds/atlas/presets/cave_dense.json": "c2cf4b30fbe7196c43c9845c21a03b4f134cc150bcee2ae3d729cd3ef2da540a",
+        "data/common/biomes.json": "89be737dc5be1833fdd11ce431ece3226f9bede839f2f275c051cc2333a4ec1e"
+      },
+      "script": null,
+      "script_sha256": null,
+      "pose": null,
+      "blocked_by": "native preset/content identities and traversal unavailable"
+    },
+    {
+      "id": "edited",
+      "preset": "default",
+      "preset_revision": 8,
+      "preset_identity": "56ffbe1771cddfa6",
+      "content_identity": "7583622726659997707",
+      "seed": 424242,
+      "inputs": {
+        "worlds/atlas/presets/default.json": "228dcc6ed261266fdbcd8a30fa6338e79ccdeb2971dc2fe82bfe13e356c0f22a",
+        "data/common/biomes.json": "89be737dc5be1833fdd11ce431ece3226f9bede839f2f275c051cc2333a4ec1e"
+      },
+      "script": null,
+      "script_sha256": null,
+      "pose": null,
+      "blocked_by": "issue #132 committed edit and all-tier bake evidence unavailable"
+    }
+  ],
+  "workloads": [
+    "settled",
+    "traversal"
+  ],
+  "warmup_frames": 400,
+  "measured_frames": 240
+}

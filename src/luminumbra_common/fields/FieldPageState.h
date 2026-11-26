@@ -78,7 +78,12 @@ public:
     static constexpr int kChannels = 5; // wind_x, wind_z, moisture, front, charge (all u16)
     // Seed epoch = tick / kCadenceTicks (the relaxation target changes once per 8 world ticks).
     static constexpr std::uint64_t kCadenceTicks = 8;
+    // Append-only seed registry: +39 ambient cells; +40 regional weather. Spawn and strike
+    // streams share the weather offset but use distinct domains before splitmix64 mixing.
     static constexpr std::uint64_t kSeedOffset = 39;
+    static constexpr std::uint64_t kWeatherSeedOffset = 40;
+    static constexpr std::uint64_t kWeatherSpawnDomain = 0x535041574e000000ull;
+    static constexpr std::uint64_t kWeatherStrikeDomain = 0x535452494b455300ull;
     static constexpr unsigned kRelaxShift = 4;
     static constexpr std::size_t kMaxPages = 16384;
     static constexpr std::size_t kMaxStorms = 65536, kMaxStrikes = 65536, kMaxScentCells = 65536;
@@ -126,6 +131,8 @@ public:
     }
     void clear() {
         m_pages.clear();
+        m_activationBase = nullptr;
+        m_activationNewPages = 0;
         m_weatherOwners.clear();
         m_stormIdentities.clear();
         m_stormCount = m_strikeCount = m_clockCount = 0;
@@ -301,6 +308,8 @@ public:
     // Seeds every uninitialized cell owned by `key` with seed_value(.., tick / kCadenceTicks).
     // Initialized cells are never touched. Returns false and changes nothing (existing cells are
     // preserved) when creating the missing pages would exceed kMaxPages.
+    // On a scheduled snapshot, stages against its live source, counting live and newly staged
+    // pages together and retaining initialized source cells on shared pages.
     bool activate_region(RegionKey key, std::uint64_t world_seed, std::uint64_t tick);
     // One step per CALL (the caller calls it once per due tick of the region, so Reduced regions
     // step less often): for every initialized cell owned by `key` and every channel,
@@ -310,6 +319,8 @@ public:
 
     // Sealed page-only input for step_scheduled, captured BEFORE activation. Retains only
     // pages that can participate this tick; excludes scent, weather and frozen-only pages.
+    // Copies can serve as activation candidates. The source must outlive them and its pages
+    // must remain unchanged until publication. Keep the sealed input separate from activation.
     [[nodiscard]] FieldPageState
     scheduled_snapshot(const std::map<RegionKey, ActiveRegionRecord>& records,
                        std::span<const RegionKey> due,
@@ -328,10 +339,10 @@ public:
     // Runtime callers supply indexed participating owners, avoiding a ledger-wide discovery pass.
     [[nodiscard]] FieldPageState scheduled_snapshot(std::span<const RegionKey> participants) const;
 
-    // Commits the stepped pages of a scheduled-step candidate built from scheduled_snapshot.
-    // Overwrites exactly the pages held by `staged` and leaves every other page and all
-    // evolution state untouched. Allocation-free and non-throwing: it only assigns values into
-    // pages that already exist.
+    // Commits a prepared candidate whose combined live/new page count fits kMaxPages.
+    // Transfers new nodes and updates initialized candidate cells, retaining other live masks
+    // and all evolution state. Allocation-free and non-throwing; source pages must have stayed
+    // unchanged since the snapshot used for preparation.
     void adopt_scheduled_pages(FieldPageState&& staged) noexcept;
     // Full weather copy for diagnostic callers; advancement uses begin_weather_update.
     void copy_weather_from(const FieldPageState& source);
@@ -357,6 +368,10 @@ public:
 
 private:
     std::map<FieldPageKey, FieldPage> m_pages;
+    // Runtime activation bookkeeping only; never serialized or hashed. Activation visits at
+    // most 3 x 3 pages per owner, without scanning live or previously staged pages.
+    const FieldPageState* m_activationBase = nullptr;
+    std::size_t m_activationNewPages = 0;
     std::map<RegionKey, OwnerWeather> m_weatherOwners;
     std::map<StormIdentity, RegionKey> m_stormIdentities;
     std::size_t m_stormCount = 0, m_strikeCount = 0, m_clockCount = 0;

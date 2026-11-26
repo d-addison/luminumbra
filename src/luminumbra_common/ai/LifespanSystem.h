@@ -71,6 +71,9 @@ struct LifespanStats {
 // of registry state. id-ordered so the death-marking order (and thus any derived
 // telemetry) is deterministic. No creation/destruction -> no two-phase needed,
 // no view invalidation. Safe to call every tick; a no-op when no entity opts in.
+// Elapsed is an explicit opt-in until authority activation. Captured creature windows
+// survive movement; other mortals use their admitted owner. Inputs are sampled at due time.
+template<bool Elapsed = false>
 inline LifespanStats RunLifespanOnTick(entt::registry& reg,
                                        std::uint64_t /*tick*/ = 0,
                                        const ::Luminumbra::world::RegionConsumerGate& gate = {},
@@ -103,12 +106,26 @@ inline LifespanStats RunLifespanOnTick(entt::registry& reg,
             continue;
         }
 
-        ++stats.aged;
-
-        // Age (saturating so a long-lived entity can't wrap its clock).
-        if (mortal.age_ticks < 0xFFFFFFFFu) {
-            ++mortal.age_ticks;
+        std::uint32_t steps = 1;
+        if constexpr (Elapsed) {
+            steps = admission && reg.all_of<Comp::CreatureComponent>(e) ? admission->ElapsedTicks(e)
+                                                                        : gate.ElapsedTicks(e);
+            if (steps == 0)
+                continue;
+            // Closed-form integer path: stop at the FIRST fatal step, including
+            // already-overdue mortals and starvation (both still age once).
+            const auto* creature = reg.try_get<Comp::CreatureComponent>(e);
+            if (mortal.age_ticks >= mortal.lifespan_ticks ||
+                (creature && creature->hunger >= kStarvationHunger)) {
+                steps = 1;
+            } else {
+                steps = std::min(steps, mortal.lifespan_ticks - mortal.age_ticks);
+            }
         }
+        ++stats.aged; // entities advanced, regardless of elapsed step count
+
+        // Saturating addition, checked before adding (including UINT32_MAX).
+        mortal.age_ticks += std::min(steps, 0xFFFFFFFFu - mortal.age_ticks);
 
         // Old-age death: reaching lifespan is fatal.
         bool dies = mortal.age_ticks >= mortal.lifespan_ticks;

@@ -275,7 +275,7 @@ FarLodBoundaryBandStats AnalyzeFarLodBoundaryBand(const std::vector<unsigned cha
             if (sky_mask.pixels[offset / 3u] != 0) {
                 ++stats.band_sky_pixels;
             }
-            if (pixels[offset] <= 2u && pixels[offset + 1u] <= 2u && pixels[offset + 2u] <= 2u) {
+            if (sky_mask.pixels[offset / 3u] != 0) {
                 void_mask[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
                           static_cast<std::size_t>(x)] = 1u;
             }
@@ -286,8 +286,9 @@ FarLodBoundaryBandStats AnalyzeFarLodBoundaryBand(const std::vector<unsigned cha
             static_cast<double>(stats.band_sky_pixels) / static_cast<double>(stats.band_pixels);
     }
 
-    // Strict-void cluster pass (max(r,g,b) <= 2, 8-connectivity, >= 12 px)
-    // restricted to the boundary band.
+    // Exact clear depth replaces RGB <= 2 for voids in the boundary band.
+    // Keep 8-connectivity and the >= 12-pixel budget; finite dark geometry passes.
+    // The validated extent bounds both mask and flood stack to 4096 x 4096 entries.
     const std::uint64_t kMinVoidClusterPx =
         static_cast<std::uint64_t>(ScalePinnedArea(12, kCapturePinnedWidth, kCapturePinnedHeight));
     std::vector<std::size_t> flood_stack;

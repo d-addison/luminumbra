@@ -80,7 +80,7 @@ struct SnapshotIndex {
 };
 
 inline constexpr const char* kSnapshotIndexSchema = "luminumbra.snapshot.v1";
-inline constexpr const char* kJournalSchema = "luminumbra.journal.v4";
+inline constexpr const char* kJournalSchema = "luminumbra.journal.v5";
 inline constexpr std::size_t kMaxSnapshotMembers = 1'048'576;
 inline constexpr std::size_t kMaxSnapshotIndexBytes = 16u * 1024u * 1024u;
 inline constexpr const char* kSnapshotIndexRelativePath = "chunks/region/snapshot.json";
@@ -118,7 +118,7 @@ bool hash_file(const std::filesystem::path& path,
                std::vector<std::string>* errors,
                const std::stop_token& stop = {});
 
-// True when <save>/journal exists. Read-only; used by the catalog.
+// True when a journal or independent receipt carrier exists. Read-only; used by the catalog.
 bool journal_pending(const std::filesystem::path& save_dir);
 
 enum class RecoveryOutcome : std::uint8_t {
@@ -198,8 +198,13 @@ public:
     // Joined writers acknowledge memory only at this transaction's durable commit point.
     // Aborted transactions discard their callbacks.
     void defer_until_commit(std::function<void()> action);
-    // Rolls back (Open -> RolledBack). No-op after commit.
+    // Rolls back; an explicit retry completes interrupted cleanup. No-op after commit.
     void abort(std::vector<std::string>* errors);
+
+    // Control bytes reserved for rollback and namespace completion, for admission diagnostics.
+    [[nodiscard]] std::size_t rollback_reserve_bytes() const {
+        return m_rollback_reserve;
+    }
 
     [[nodiscard]] bool committed() const {
         return m_state == State::Committed;
@@ -224,6 +229,7 @@ private:
         Committing,
         Committed,
         RollingBack,
+        CleanupPending,
         RolledBack
     };
     struct Entry {
@@ -283,7 +289,9 @@ private:
 // Test hook: invoked at real publication sites ("journal-published", "before-replace",
 // "after-retire", "after-replace", "before-delete", "after-delete", "commit-point",
 // "journal-unlinked", "before-rollback", "rollback-entry", "publication-quarantined",
-// "retirement-quarantined").
+// "retirement-quarantined", "crash-before-restoration-completion",
+// "crash-before-namespace-completion", "crash-receipt-carrier-published",
+// "crash-before-receipt-retirement").
 using SnapshotStepHook = void (*)(const char* step, const std::filesystem::path& path);
 void set_snapshot_step_hook_for_testing(SnapshotStepHook hook);
 void report_snapshot_step(const char* step, const std::filesystem::path& path);

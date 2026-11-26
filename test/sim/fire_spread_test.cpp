@@ -6,16 +6,21 @@
 // run==replay, and an EMPTY roster no-op.
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <map>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 
+#include "ai/CreatureTickAdmission.h"
 #include "components/CombustionComponents.h"
 #include "components/CoreComponents.h"
+#include "components/CreatureComponents.h"
 #include "systems/FireSpreadSystem.h"
 
 namespace {
@@ -324,6 +329,169 @@ TEST(FireSpread, CandidateChecksIdentityAcrossListsAndAllowsOneEntityWithBothRol
     EXPECT_EQ(stats.ordering_visits, (18u * 2u - 1u) + (18u - 1u) + 1u);
     EXPECT_EQ(stateOf(registry, dry), Comp::BurnState::Burning);
     EXPECT_EQ(stateOf(registry, burning), Comp::BurnState::Burnt);
+}
+
+// Compare the elapsed candidate against repeated legacy snapshot/apply steps,
+// including delayed participation, frozen sources/targets and transient strikes.
+TEST(FireSpread, RegionalElapsedMatchesApprovedReference) {
+    namespace W = ::Luminumbra::world;
+    for (const bool stable : {false, true}) {
+        for (const std::uint32_t steps : {0u, 1u, 8u, 36000u, 36001u, 65536u}) {
+            SCOPED_TRACE(steps);
+            entt::registry actual, reference;
+            auto seed = [](entt::registry& registry) {
+                std::vector<entt::entity> entities;
+                entities.push_back(
+                    spawnFuel(registry, 0, 0, Comp::BurnState::Burning, 0, 1000, 2, 2));
+                entities.push_back(spawnFuel(registry, 1.5f, 0, Comp::BurnState::Unburnt));
+                entities.push_back(spawnFuel(registry, 3, 0, Comp::BurnState::Unburnt));
+                entities.push_back(spawnFuel(registry, 4.5f, 0, Comp::BurnState::Unburnt));
+                entities.push_back(
+                    spawnFuel(registry, 0, 0, Comp::BurnState::Burning, 0, 1000, 20, 7));
+                entities.push_back(spawnFuel(registry, 20, 0, Comp::BurnState::Unburnt));
+                entities.push_back(spawnFuel(registry, 30, 0, Comp::BurnState::Unburnt));
+                entities.push_back(spawnFuel(registry, 40, 0, Comp::BurnState::Unburnt));
+                entities.push_back(spawnFuel(registry,
+                                             1,
+                                             0,
+                                             Comp::BurnState::Unburnt,
+                                             1000)); // wet resistance
+                entities.push_back(
+                    spawnFuel(registry, 1, 0, Comp::BurnState::Unburnt, 0, 0)); // exhausted fuel
+                auto& source = registry.emplace<Comp::IgnitionSourceComponent>(entities[6]);
+                source.radius = 1;
+                source.intensity = 1;
+                registry.emplace<Comp::IgnitionSourceComponent>(entities[4]);
+                registry.emplace<Comp::IgnitionSourceComponent>(entities[7]);
+                entities.push_back(spawnFuel(registry, 38.5f, 0, Comp::BurnState::Unburnt));
+                for (std::size_t index = 0; index < entities.size(); ++index) {
+                    auto& owner = registry.emplace<Comp::PlantRegionComponent>(entities[index]);
+                    owner.owner_x = index == 3 || index == 4 ? 1 : (index == 7 ? 2 : 0);
+                    registry.emplace<Comp::SimulationIdentityComponent>(
+                        entities[index], static_cast<std::uint64_t>(index + 1));
+                }
+                return entities;
+            };
+            const auto entities = seed(actual);
+            const auto expected = seed(reference);
+            const std::array<W::RegionKey, 2> due{{{0, 0}, {2, 0}}};
+            const std::map<W::RegionKey, std::uint32_t> windows{{{0, 0}, steps},
+                                                                {{2, 0}, std::min(steps, 1u)}};
+            const W::RegionConsumerGate gate(actual, due, W::RegionElapsedTicks(windows));
+            const std::array<luminumbra::sim::FireIgnitionSource, 1> strikes{
+                luminumbra::sim::FireIgnitionSource{{20, 0}, 1, 1}};
+            const auto stats =
+                stable ? RunFireSpreadOnTick<true, true>(actual, 65536, {}, strikes, gate)
+                       : RunFireSpreadOnTick<false, true>(actual, 65536, {}, strikes, gate);
+            int ignited = 0, burnt = 0;
+            for (std::uint32_t step = 0; step < steps; ++step) {
+                const std::span<const W::RegionKey> admitted(due.data(), step + 1 == steps ? 2 : 1);
+                const W::RegionConsumerGate single(reference, admitted);
+                const auto events =
+                    step + 1 == steps
+                        ? std::span<const luminumbra::sim::FireIgnitionSource>(strikes)
+                        : std::span<const luminumbra::sim::FireIgnitionSource>();
+                const auto result =
+                    RunFireSpreadOnTick(reference, 65537 - steps + step, {}, events, single);
+                ignited += result.ignited;
+                burnt += result.burnt_out;
+            }
+            EXPECT_EQ(stats.ignited, ignited);
+            EXPECT_EQ(stats.burnt_out, burnt);
+            // Membership/identity preparation is once per participant, not per elapsed step.
+            EXPECT_LE(gate.owner_visits(), 100u);
+            EXPECT_LE(stats.ordering_visits, 20u * (entities.size() + 3u));
+            for (std::size_t index = 0; index < entities.size(); ++index) {
+                const auto& got = actual.get<Comp::CombustibleComponent>(entities[index]);
+                const auto& want = reference.get<Comp::CombustibleComponent>(expected[index]);
+                EXPECT_EQ(got.state(), want.state());
+                EXPECT_EQ(got.burn_ticks_remaining, want.burn_ticks_remaining);
+                EXPECT_EQ(got.fuel_milli, want.fuel_milli);
+            }
+            if (steps != 0) {
+                EXPECT_EQ(actual.get<Comp::CombustibleComponent>(entities[5]).burn_ticks_remaining,
+                          luminumbra::sim::kFireBurnTicks); // strike only at due time
+            }
+        }
+    }
+}
+
+TEST(FireSpread, RegionalElapsedRefusesInvalidWindowsAndIdentityBeforeMutation) {
+    namespace W = ::Luminumbra::world;
+    for (const bool ignition : {false, true}) {
+        entt::registry registry;
+        const auto fuel = spawnFuel(registry, 0, 0, Comp::BurnState::Burning, 0, 1000, 2, 7);
+        const auto other = spawnFuel(registry, 1, 0, Comp::BurnState::Unburnt);
+        if (ignition) {
+            registry.remove<Comp::CombustibleComponent>(other);
+            registry.emplace<Comp::IgnitionSourceComponent>(other);
+        }
+        registry.emplace<Comp::PlantRegionComponent>(other).owner_x = 1;
+        const std::array<W::RegionKey, 2> due{{{0, 0}, {1, 0}}};
+        const std::map<W::RegionKey, std::uint32_t> windows{{{0, 0}, 8}, {{1, 0}, 65537}};
+        const W::RegionConsumerGate gate(registry, due, W::RegionElapsedTicks(windows));
+        EXPECT_THROW((RunFireSpreadOnTick<false, true>(registry, 70000, {}, {}, gate)),
+                     std::invalid_argument);
+        EXPECT_EQ(registry.get<Comp::CombustibleComponent>(fuel).burn_ticks_remaining, 7u);
+        EXPECT_THROW((RunFireSpreadOnTick<true, true>(registry, 70000, {}, {}, gate)),
+                     std::logic_error); // absent stable identities
+        EXPECT_EQ(registry.get<Comp::CombustibleComponent>(fuel).burn_ticks_remaining, 7u);
+    }
+    entt::registry empty;
+    EXPECT_EQ((RunFireSpreadOnTick<true, true>(empty, 1).considered), 0);
+}
+
+TEST(FireSpread, RegionalElapsedRetainsCapturedCreatureSourcesAndTargets) {
+    namespace W = ::Luminumbra::world;
+    entt::registry registry;
+    const auto source = spawnFuel(registry, 0, 0, Comp::BurnState::Burning, 0, 1000, 2, 10);
+    const auto target = spawnFuel(registry, 0.5f, 0, Comp::BurnState::Unburnt);
+    const auto frozen_target = spawnFuel(registry, 512, 0, Comp::BurnState::Unburnt);
+    const auto frozen_source =
+        spawnFuel(registry, 512, 0, Comp::BurnState::Burning, 0, 1000, 2, 10);
+    const auto cold = spawnFuel(registry, 100, 0, Comp::BurnState::Unburnt);
+    const auto torch_target = spawnFuel(registry, 520, 0, Comp::BurnState::Unburnt);
+    const auto frozen_plant = spawnFuel(registry, 512.6f, 0, Comp::BurnState::Unburnt);
+    registry.emplace<Comp::PlantRegionComponent>(torch_target);
+    registry.emplace<Comp::PlantRegionComponent>(frozen_plant).owner_x = 1;
+    const auto torch = registry.create();
+    registry.emplace<Comp::TransformComponent>(torch);
+    registry.emplace<Comp::IgnitionSourceComponent>(torch);
+    const auto frozen_torch = registry.create();
+    registry.emplace<Comp::TransformComponent>(frozen_torch).position.x = 512;
+    registry.emplace<Comp::IgnitionSourceComponent>(frozen_torch);
+    const auto stationary = registry.create();
+    registry.emplace<Comp::TransformComponent>(stationary);
+    registry.emplace<Comp::IgnitionSourceComponent>(stationary);
+    for (auto entity : {source, target, frozen_target, frozen_source, torch, frozen_torch})
+        registry.emplace<Comp::CreatureComponent>(entity);
+    const std::array<W::RegionKey, 1> due{{{0, 0}}};
+    const std::map<W::RegionKey, std::uint32_t> windows{{{0, 0}, 3}};
+    const W::RegionConsumerGate gate(registry, due, W::RegionElapsedTicks(windows));
+    luminumbra::ai::CreatureTickAdmission captured;
+    captured.Capture(registry, gate);
+    registry.get<Comp::TransformComponent>(source).position.x = 512;
+    registry.get<Comp::TransformComponent>(target).position.x = 512.5f;
+    registry.get<Comp::TransformComponent>(frozen_target).position.x = 0;
+    registry.get<Comp::TransformComponent>(frozen_source).position.x = 100;
+    registry.get<Comp::TransformComponent>(torch).position.x = 520;
+    registry.get<Comp::TransformComponent>(frozen_torch).position.x = 100;
+    const auto admitted = [&](entt::entity entity) {
+        if (registry.all_of<Comp::CreatureComponent>(entity)) {
+            return W::RegionConsumerGate::Admission{captured.Allows(entity),
+                                                    captured.ElapsedTicks(entity)};
+        }
+        return gate.AdmissionFor(entity);
+    };
+    const auto stats = RunFireSpreadOnTick<false, true>(registry, 3, {}, {}, gate, admitted);
+    EXPECT_EQ(stats.ignited, 2);
+    EXPECT_EQ(registry.get<Comp::CombustibleComponent>(source).burn_ticks_remaining, 7u);
+    EXPECT_EQ(registry.get<Comp::CombustibleComponent>(target).burn_ticks_remaining, 88u);
+    EXPECT_EQ(registry.get<Comp::CombustibleComponent>(torch_target).burn_ticks_remaining, 88u);
+    EXPECT_EQ(registry.get<Comp::CombustibleComponent>(frozen_source).burn_ticks_remaining, 10u);
+    EXPECT_EQ(stateOf(registry, frozen_target), Comp::BurnState::Unburnt);
+    EXPECT_EQ(stateOf(registry, frozen_plant), Comp::BurnState::Unburnt);
+    EXPECT_EQ(stateOf(registry, cold), Comp::BurnState::Unburnt);
 }
 
 } // namespace

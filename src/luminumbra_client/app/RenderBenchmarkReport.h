@@ -1,5 +1,6 @@
 #pragma once
 
+#include "FarBudgetMeasurement.h"
 #include "RenderMeasurement.h"
 #include "RenderWorkload.h"
 #include "luminumbra_client/rendering/FarWorldDiagnostics.h"
@@ -61,6 +62,104 @@ inline nlohmann::json refresh_work_json(const std::optional<FarFrameSample::Refr
             {"admission_work", work->admission_work},
             {"admission_height_observations", work->admission_height_observations},
             {"source_ms", work->source_ms}};
+}
+
+inline void add_far_budget_reporting(nlohmann::json& report,
+                                     const FarBudgetMeasurement& measurement,
+                                     bool storage_complete) {
+    const auto kind_name = [](FarFillKind kind) {
+        switch (kind) {
+            case FarFillKind::Cold:
+                return "cold";
+            case FarFillKind::Epoch:
+                return "epoch";
+            case FarFillKind::EditBake:
+                return "edit_bake";
+            case FarFillKind::Cohort:
+                return "cohort";
+            case FarFillKind::Refill:
+                return "refill";
+        }
+        return "unknown";
+    };
+    nlohmann::json block = {{"schema", "luminumbra.far_budget.v1"},
+                            {"origin", "before_first_advancement"},
+                            {"origin_ms", 0},
+                            {"deadline_ms", 90000},
+                            {"storage_complete", storage_complete},
+                            {"frames", nlohmann::json::array()},
+                            {"fills", nlohmann::json::array()}};
+    for (const auto& frame : measurement.frames()) {
+        const auto& observed = frame.observed;
+        nlohmann::json row = {
+            {"render_frame", observed.render_frame},
+            {"timing_frame",
+             frame.timing_frame ? nlohmann::json(*frame.timing_frame) : nlohmann::json(nullptr)},
+            {"phase", frame.timing_frame ? "measured" : "cold_or_settling"},
+            {"elapsed_ms", frame.elapsed_ms},
+            {"render_wall_ms", frame.render_wall_ms},
+            {"event", frame.event},
+            {"world_epoch", observed.world_epoch},
+            {"target_serial", observed.target_serial},
+            {"target_cohort", std::to_string(observed.target_cohort)},
+            {"content_identity", std::to_string(observed.content_identity)},
+            {"bake_generation", observed.bake_generation},
+            {"accepted", observed.accepted},
+            {"current_coverage", observed.current_coverage},
+            {"tiers", nlohmann::json::array()}};
+        for (std::size_t i = 0; i < observed.tiers.size(); ++i) {
+            const auto& tier = observed.tiers[i];
+            const auto& resident = tier.observation.resident;
+            const auto& memory = resident.memory;
+            const auto& work = tier.work;
+            row["tiers"].push_back({{"tier", i + 1},
+                                    {"current_coverage", tier.current_coverage},
+                                    {"wanted", resident.wanted},
+                                    {"covering", resident.covering},
+                                    {"settled", resident.settled},
+                                    {"pending", resident.pending},
+                                    {"building", resident.building},
+                                    {"ready", resident.ready},
+                                    {"draws", tier.observation.draws},
+                                    {"indices", tier.observation.indices},
+                                    {"draw_refusals", tier.observation.draw_refusals},
+                                    {"memory",
+                                     {{"limit", memory.limit},
+                                      {"cpu_bytes", memory.bytes_cpu},
+                                      {"gpu_bytes", memory.bytes_gpu},
+                                      {"total_bytes", memory.bytes_total},
+                                      {"peak_bytes", memory.peak_total},
+                                      {"admission_refusals", memory.admission_refusals}}},
+                                    {"work",
+                                     {{"build_attempts", work.build_attempts},
+                                      {"dispatched", work.dispatched},
+                                      {"completed", work.completed},
+                                      {"upload_attempts", work.upload_attempts},
+                                      {"uploaded", work.uploaded},
+                                      {"upload_bytes", work.upload_bytes},
+                                      {"successful_upload_bytes", work.successful_upload_bytes},
+                                      {"rejected", work.rejected},
+                                      {"evicted", work.evicted}}}});
+        }
+        block["frames"].push_back(std::move(row));
+        nlohmann::json fill = {{"event", frame.event},
+                               {"kind", kind_name(frame.kind)},
+                               {"origin_ms", frame.origin_ms},
+                               {"accepted_ms", optional_value(frame.accepted_ms)},
+                               {"completed_ms", optional_value(frame.completed_ms)},
+                               {"status",
+                                frame.timed_out      ? "timeout"
+                                : frame.completed_ms ? "complete"
+                                                     : "incomplete"},
+                               {"tier_completed_ms", nlohmann::json::array()}};
+        for (const auto& completed : frame.tier_completed_ms)
+            fill["tier_completed_ms"].push_back(optional_value(completed));
+        if (block["fills"].size() == frame.event)
+            block["fills"].push_back(std::move(fill));
+        else
+            block["fills"].back() = std::move(fill);
+    }
+    report["far_budget"] = std::move(block);
 }
 
 inline void add_far_world_reporting(nlohmann::json& report, SampleRing& ring) {

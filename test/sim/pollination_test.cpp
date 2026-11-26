@@ -7,6 +7,8 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
+#include <map>
 #include <stdexcept>
 #include <vector>
 
@@ -364,6 +366,8 @@ TEST(Pollination, SimulationAdmissionRefusesInvalidIdentitiesBeforeAnyCross) {
         }
         const auto gate = Gate(Gate::PlantIdentity::Simulation);
         EXPECT_THROW(RunPollinationOnTick(registry, 7, {}, 0, 0.05f, gate), std::runtime_error);
+        EXPECT_THROW(luminumbra::foliage::RunPollinationRegional(registry, 7, gate),
+                     std::runtime_error);
         for (const auto entity : {first, second}) {
             const auto& pollen = registry.get<Comp::PollinationComponent>(entity);
             EXPECT_FALSE(pollen.pollinated);
@@ -399,6 +403,141 @@ TEST(Pollination, SimulationVisitCountExcludesUnrelatedResidentsAndNoDonorsIsNoO
     EXPECT_EQ(RunPollinationOnTick(empty, 4, {}, 0, 0.05f, Gate(Gate::PlantIdentity::Simulation))
                   .considered,
               0);
+}
+
+TEST(Pollination, RegionalElapsedMatchesIndependentTickSequence) {
+    namespace F = luminumbra::foliage;
+    namespace W = Luminumbra::world;
+    using Gate = W::RegionConsumerGate;
+    for (const bool simulation : {false, true}) {
+        SCOPED_TRACE(simulation);
+        entt::registry regional, reference;
+        const std::array positions{Luminumbra::Vec2(-1, -1),
+                                   Luminumbra::Vec2(1, -1),
+                                   Luminumbra::Vec2(-1, 1),
+                                   Luminumbra::Vec2(1, 1)};
+        const std::array owners{
+            W::RegionKey{-1, -1}, W::RegionKey{0, -1}, W::RegionKey{-1, 0}, W::RegionKey{0, 0}};
+        std::array<entt::entity, 4> entities{};
+        for (auto* registry : {&regional, &reference}) {
+            for (std::size_t index = 0; index < positions.size(); ++index) {
+                const auto entity = spawnPlant(*registry,
+                                               positions[index].x,
+                                               positions[index].y,
+                                               uniformGenome(0.2f * static_cast<float>(index + 1)),
+                                               Comp::PlantStage::Flowering);
+                entities[index] = entity;
+                const auto id = static_cast<std::uint64_t>(10 - index);
+                registry->emplace<Comp::PlantRegionComponent>(
+                    entity, Comp::PlantRegionComponent{id, owners[index].x, owners[index].z, 0u});
+                registry->emplace<Comp::SimulationIdentityComponent>(entity, id);
+                if (index == 0) {
+                    registry->get<Comp::PlantGrowthComponent>(entity).planted_tick = 99;
+                    registry->get<Comp::PollinationComponent>(entity).crosses =
+                        std::numeric_limits<std::uint32_t>::max() - 1u;
+                }
+            }
+        }
+        const auto identity =
+            simulation ? Gate::PlantIdentity::Simulation : Gate::PlantIdentity::Legacy;
+        const std::array due{owners[0], owners[1], owners[3]};
+        const std::map<W::RegionKey, std::uint32_t> windows{
+            {owners[0], 5}, {owners[1], 3}, {owners[2], 65536}, {owners[3], 0}};
+        std::vector<std::uint64_t> scratch;
+        const Gate gate(regional, due, scratch, identity, W::RegionElapsedTicks(windows));
+        const auto result = F::RunPollinationRegional(regional, 100, gate, {1, 0}, 123);
+        PollinationStats expected;
+        for (std::uint64_t tick = 96; tick <= 100; ++tick) {
+            std::vector<W::RegionKey> active;
+            if (tick >= 99)
+                active.push_back(owners[0]);
+            if (tick >= 98)
+                active.push_back(owners[1]);
+            std::vector<std::uint64_t> step_scratch;
+            const Gate step_gate(reference, active, step_scratch, identity);
+            const auto step = RunPollinationOnTick(reference, tick, {1, 0}, 123, 0.05f, step_gate);
+            expected.considered += step.considered;
+            expected.donors += step.donors;
+            expected.crossed += step.crossed;
+            expected.candidate_tests += step.candidate_tests;
+        }
+        EXPECT_EQ(result.considered, 5);
+        EXPECT_EQ(result.considered, expected.considered);
+        EXPECT_EQ(result.donors, expected.donors);
+        EXPECT_EQ(result.crossed, 4);
+        EXPECT_EQ(result.crossed, expected.crossed);
+        EXPECT_EQ(result.candidate_tests, expected.candidate_tests);
+        for (const auto entity : entities) {
+            const auto& actual = regional.get<Comp::PollinationComponent>(entity);
+            const auto& oracle = reference.get<Comp::PollinationComponent>(entity);
+            EXPECT_EQ(actual.pollinated, oracle.pollinated);
+            EXPECT_EQ(actual.crosses, oracle.crosses);
+            EXPECT_EQ(actual.last_pollen_tick, oracle.last_pollen_tick);
+            EXPECT_EQ(actual.next_genome.genes, oracle.next_genome.genes);
+        }
+        EXPECT_EQ(regional.get<Comp::PollinationComponent>(entities[0]).crosses,
+                  std::numeric_limits<std::uint32_t>::max());
+        // One collection and one elapsed lookup per admitted plant, independent of history.
+        EXPECT_EQ(gate.owner_visits(), 10u);
+    }
+}
+
+TEST(Pollination, RegionalWindowBoundsZeroAndLegacyEntryPoint) {
+    namespace F = luminumbra::foliage;
+    namespace W = Luminumbra::world;
+    for (const std::uint32_t elapsed : {0u, 1u, 36001u, 65536u, 65537u}) {
+        SCOPED_TRACE(elapsed);
+        entt::registry registry;
+        const auto receiver =
+            spawnPlant(registry, 100, 100, uniformGenome(0.2f), Comp::PlantStage::Seed);
+        const auto donor =
+            spawnPlant(registry, 101, 100, uniformGenome(0.8f), Comp::PlantStage::Flowering);
+        // Unrelated residents must not enter the replay scans.
+        for (int index = 0; index < 32; ++index)
+            (void)registry.create();
+        const std::array due{W::RegionKey{0, 0}};
+        const std::map<W::RegionKey, std::uint32_t> windows{{due[0], elapsed}};
+        const W::RegionConsumerGate gate(registry, due, W::RegionElapsedTicks(windows));
+        if (elapsed > 65536) {
+            EXPECT_THROW(F::RunPollinationRegional(registry, 65536, gate), std::invalid_argument);
+            EXPECT_EQ(registry.get<Comp::PollinationComponent>(receiver).crosses, 0u);
+        } else {
+            const auto result = F::RunPollinationRegional(registry, 65536, gate);
+            EXPECT_EQ(result.crossed, static_cast<int>(elapsed));
+            const auto& pollen = registry.get<Comp::PollinationComponent>(receiver);
+            EXPECT_EQ(pollen.crosses, elapsed);
+            EXPECT_EQ(pollen.last_pollen_tick, elapsed == 0 ? 0u : 65536u);
+            if (elapsed != 0) {
+                const auto expected = F::PollinateCross(uniformGenome(0.2f),
+                                                        uniformGenome(0.8f),
+                                                        F::PlantSimulationId(registry, receiver),
+                                                        F::PlantSimulationId(registry, donor),
+                                                        65536);
+                EXPECT_EQ(pollen.next_genome.genes, expected.genes);
+            }
+        }
+        const auto before = registry.get<Comp::PollinationComponent>(receiver).crosses;
+        EXPECT_EQ(RunPollinationOnTick(registry, 65537, {}, 0, 0.05f, gate).crossed, 1);
+        EXPECT_EQ(registry.get<Comp::PollinationComponent>(receiver).crosses, before + 1u);
+    }
+    entt::registry registry;
+    const auto plant = spawnPlant(registry, 100, 100, uniformGenome(0.5f), Comp::PlantStage::Seed);
+    const std::array due{W::RegionKey{0, 0}};
+    const std::map<W::RegionKey, std::uint32_t> windows{{due[0], 3}};
+    const W::RegionConsumerGate gate(registry, due, W::RegionElapsedTicks(windows));
+    EXPECT_THROW(F::RunPollinationRegional(registry, 1, gate), std::invalid_argument);
+    EXPECT_EQ(registry.get<Comp::PollinationComponent>(plant).crosses, 0u);
+    EXPECT_EQ(F::RunPollinationRegional(registry, 3, gate).considered, 3);
+    EXPECT_EQ(F::RunPollinationRegional(registry, 3, gate).crossed, 0);
+    registry.get<Comp::PlantGrowthComponent>(plant).planted_tick = 4;
+    EXPECT_EQ(F::RunPollinationRegional(registry, 3, gate).considered, 0);
+    registry.clear();
+    EXPECT_EQ(F::RunPollinationRegional(registry, 3, gate).considered, 0);
+    spawnPlant(registry, 100, 100, uniformGenome(0.5f), Comp::PlantStage::Seed);
+    EXPECT_EQ(F::RunPollinationRegional(registry, 0, {}).considered, 1);
+    EXPECT_EQ(F::RunPollinationRegional(registry, std::numeric_limits<std::uint64_t>::max(), {})
+                  .considered,
+              1);
 }
 
 } // namespace

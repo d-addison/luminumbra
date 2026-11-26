@@ -30,11 +30,26 @@ struct HeavyHashes {
     bool active_regions = false;
     std::string clock_bytes;
     std::string ledger_bytes;
+    // Exact canonical field-store authority, captured only at heavy checkpoints.
+    // Empty means no field-pages member; equality never relies on ambient hashes.
+    std::string field_page_bytes;
     // All durable object fields, in ascending persistent-id order. Compare independently
     // of world_hash: the composite also includes derived mesh state and is exempt below.
     std::vector<world::GroundObject> ground_objects;
     std::string ground_notifications;
 };
+
+inline std::string FieldPageDifference(const HeavyHashes& a, const HeavyHashes& b) {
+    if (a.active_regions || b.active_regions) {
+        if (a.field_page_bytes.empty() != b.field_page_bytes.empty()) {
+            return "field_pages.presence";
+        }
+        if (a.field_page_bytes != b.field_page_bytes) {
+            return "field_pages.bytes";
+        }
+    }
+    return {};
+}
 
 inline std::vector<std::uint64_t> CaptureScentBits(const luminumbra::ai::ScentField& field) {
     std::vector<std::uint64_t> bits;
@@ -127,7 +142,7 @@ struct HeavySubsystem {
 };
 
 inline std::span<const HeavySubsystem> HeavySubsystemTable() {
-    static const std::array<HeavySubsystem, 16> kTable{{
+    static const std::array<HeavySubsystem, 17> kTable{{
         {"terrain",
          true,
          false,
@@ -187,6 +202,13 @@ inline std::span<const HeavySubsystem> HeavySubsystemTable() {
          nullptr,
          [](HeavyHashes& h) {
              h.ledger_bytes += "x";
+         }},
+        {"field_pages",
+         true,
+         true,
+         nullptr,
+         [](HeavyHashes& h) {
+             h.field_page_bytes += "x";
          }},
         {"wind",
          true,
@@ -258,7 +280,7 @@ inline bool AuthoritativeStateEqual(const HeavyHashes& a, const HeavyHashes& b) 
             a.ledger_bytes != b.ledger_bytes || a.sub.wind != b.sub.wind ||
             a.sub.weather != b.sub.weather || a.sub.aether != b.sub.aether ||
             a.sub.aether_state != b.sub.aether_state || a.scent_hash != b.scent_hash ||
-            a.scent_bits != b.scent_bits) {
+            a.scent_bits != b.scent_bits || a.field_page_bytes != b.field_page_bytes) {
             return false;
         }
     }
