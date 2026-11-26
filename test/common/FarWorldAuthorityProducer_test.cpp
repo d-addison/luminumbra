@@ -1287,7 +1287,7 @@ TEST(FarWorldAuthorityProducer, RetiredBindingRefusesBeforeSampling) {
             ASSERT_TRUE(producer.capture_status().latest_ready);
         }
         auto world = std::make_shared<Systems::SHIELD_WorldSystem>(
-            nullptr, nullptr, Test::SyntheticTerrainParams(), 1337);
+            nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
         const std::weak_ptr<const Systems::SHIELD_WorldSystem> lifetime = world;
         World::FarFrozenCaptureWork work({100'000, 2'000'000, 200'000});
         World::FarFrozenCaptureLimits limits{1, 100'000, 2'000'000, 200'000, 32u * 1024u * 1024u};
