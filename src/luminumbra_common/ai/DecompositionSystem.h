@@ -128,7 +128,8 @@ inline void AdvanceParticipants(entt::registry& reg,
                                 Participants& ents,
                                 const CreatureTickAdmission* admission,
                                 const ::Luminumbra::world::RegionConsumerGate& gate,
-                                DecompositionStats& stats) {
+                                DecompositionStats& stats,
+                                bool use_elapsed) {
     for (auto next = ents.begin(); next != ents.end();) {
         const auto current = next++;
         const auto e = *current;
@@ -145,10 +146,14 @@ inline void AdvanceParticipants(entt::registry& reg,
             retire();
             continue; // A detached candidate can omit a live participant.
         }
-        const bool allowed = admission && reg.all_of<Comp::CreatureComponent>(e)
-                                 ? admission->Allows(e)
-                                 : gate.Allows(e);
+        const bool captured = admission && reg.all_of<Comp::CreatureComponent>(e);
+        const bool allowed = captured ? admission->Allows(e) : gate.Allows(e);
         if (!allowed) {
+            continue;
+        }
+        const auto ticks =
+            use_elapsed ? (captured ? admission->ElapsedTicks(e) : gate.ElapsedTicks(e)) : 1u;
+        if (ticks == 0) {
             continue;
         }
         auto& dc = *decay;
@@ -162,9 +167,10 @@ inline void AdvanceParticipants(entt::registry& reg,
         // The pre-tick cumulative release for this corpse (already accounted in the component).
         const std::uint32_t prev_total = dc.nutrient_released_milli;
 
-        // Advance the decomposition clock by one tick, saturating at the duration.
+        // Subtract before adding: even a UINT32_MAX window or duration cannot wrap.
+        // A single cumulative division telescopes exactly to repeated one-tick release.
         if (dc.decay_ticks < dc.decay_duration) {
-            ++dc.decay_ticks;
+            dc.decay_ticks += std::min(ticks, dc.decay_duration - dc.decay_ticks);
         }
         ++stats.decaying;
 
@@ -198,12 +204,17 @@ inline void AdvanceParticipants(entt::registry& reg,
 // participant. id-ordered, pure-integer, deterministic. `tick` is accepted for signature
 // parity with the other sim systems (it is NOT consumed — decomposition is tick-count driven,
 // not absolute-tick driven, so re-running from a snapshot reproduces exactly).
+// Elapsed opt-in uses captured ownership for creatures and the gate for other opt-ins;
+// death is sampled at due time. Zero windows leave corpses untouched. Stats count corpses,
+// not substeps; released_total is the exact cumulative delta for the whole window.
+// Default calls retain one-tick behaviour, including observational zero-window admission.
 inline DecompositionStats
 RunDecompositionOnTick(entt::registry& reg,
                        std::uint64_t /*tick*/,
                        const CreatureTickAdmission* admission = nullptr,
                        const ::Luminumbra::world::RegionConsumerGate& gate = {},
-                       const std::set<entt::entity>* participants = nullptr) {
+                       const std::set<entt::entity>* participants = nullptr,
+                       bool use_elapsed = false) {
     DecompositionStats stats;
 
     // Detached stages borrow the live roster: rebuilding an index from their
@@ -212,9 +223,10 @@ RunDecompositionOnTick(entt::registry& reg,
     const auto& ents = participants ? *participants : DecompositionParticipants(reg);
     auto* roster = reg.ctx().find<decomposition_detail::Roster>();
     if (roster && &ents == &roster->active) {
-        decomposition_detail::AdvanceParticipants(reg, roster->active, admission, gate, stats);
+        decomposition_detail::AdvanceParticipants(
+            reg, roster->active, admission, gate, stats, use_elapsed);
     } else {
-        decomposition_detail::AdvanceParticipants(reg, ents, admission, gate, stats);
+        decomposition_detail::AdvanceParticipants(reg, ents, admission, gate, stats, use_elapsed);
     }
     return stats;
 }
@@ -229,10 +241,11 @@ RunDetachedDecompositionOnTick(entt::registry& detached,
                                const CreatureTickAdmission* admission,
                                const ::Luminumbra::world::RegionConsumerGate& gate,
                                const std::set<entt::entity>& live,
-                               std::vector<entt::entity>& scratch) {
+                               std::vector<entt::entity>& scratch,
+                               bool use_elapsed = false) {
     const auto staged = detached.view<Comp::DecayComponent>();
     if (live.size() <= staged.size()) {
-        return RunDecompositionOnTick(detached, tick, admission, gate, &live);
+        return RunDecompositionOnTick(detached, tick, admission, gate, &live, use_elapsed);
     }
     scratch.clear();
     for (const auto entity : staged) {
@@ -243,7 +256,8 @@ RunDetachedDecompositionOnTick(entt::registry& detached,
     }
     std::sort(scratch.begin(), scratch.end());
     DecompositionStats stats;
-    decomposition_detail::AdvanceParticipants(detached, scratch, admission, gate, stats);
+    decomposition_detail::AdvanceParticipants(
+        detached, scratch, admission, gate, stats, use_elapsed);
     return stats;
 }
 
@@ -255,16 +269,17 @@ inline DecompositionStats RunDecompositionStage(entt::registry& reg,
                                                 const CreatureTickAdmission* admission,
                                                 const ::Luminumbra::world::RegionConsumerGate& gate,
                                                 const std::set<entt::entity>& participants,
-                                                bool detached) {
+                                                bool detached,
+                                                bool use_elapsed = false) {
     if (participants.empty()) {
         return {};
     }
     if (detached) {
         std::vector<entt::entity> staged_decay;
         return RunDetachedDecompositionOnTick(
-            reg, tick, admission, gate, participants, staged_decay);
+            reg, tick, admission, gate, participants, staged_decay, use_elapsed);
     }
-    return RunDecompositionOnTick(reg, tick, admission, gate, &participants);
+    return RunDecompositionOnTick(reg, tick, admission, gate, &participants, use_elapsed);
 }
 
 } // namespace luminumbra::ai

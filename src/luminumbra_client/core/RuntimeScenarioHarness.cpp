@@ -107,47 +107,20 @@ bool IsWaterLikePixel(unsigned char r, unsigned char g, unsigned char b) {
            gb_delta <= 95;
 }
 
-bool IsDarkVoidPixel(unsigned char r, unsigned char g, unsigned char b) {
-    return r < 24 && g < 34 && b < 54 &&
-           b >= static_cast<unsigned char>(std::min(255, static_cast<int>(r) + 8)) &&
-           b >= static_cast<unsigned char>(std::min(255, static_cast<int>(g) + 4));
-}
-
-bool IsNearBlackPixel(unsigned char r, unsigned char g, unsigned char b) {
-    return r < 24 && g < 24 && b < 24;
-}
-
-// Sliver-cluster predicate for LOD seam crack detection. True seam cracks are
-// holes through the terrain into the unrendered void, so they capture at
-// RGB <= 10 (pure black, at most slightly lifted by bloom/tonemap). The
-// legitimately dark scene content nearby (shaded crevices, steep trench
-// walls) measures RGB 17-28 in the seam-arrival captures, so the tight bound
-// keeps the gate exact: crack pixels are counted, dark-but-lit geometry is
-// not.
-bool IsSeamSliverPixel(unsigned char r, unsigned char g, unsigned char b) {
-    return r <= 10 && g <= 10 && b <= 10;
-}
-
-// Minimum connected-component size (in pixels) for a near-black run to count
-// as a seam crack sliver instead of legitimate point shadow/noise.
+// Retained artifact field names now count uncovered pixels, independent of RGB.
+// All former void/blue/black colour bounds expressed missing geometry and are
+// replaced by exact clear-depth evidence. ROI, area and cluster budgets stay fixed.
 const std::uint64_t kMinNearBlackClusterPx =
     static_cast<std::uint64_t>(ScalePinnedArea(12, kCapturePinnedWidth, kCapturePinnedHeight));
 
-bool IsBackgroundBluePixel(unsigned char r, unsigned char g, unsigned char b) {
-    return r >= 38 && r <= 110 && g >= 50 && g <= 130 && b >= 70 && b <= 150 &&
-           b >= static_cast<unsigned char>(std::min(255, static_cast<int>(r) + 8)) &&
-           std::abs(static_cast<int>(b) - static_cast<int>(g)) <= 55;
-}
-
-ScreenshotPixelStats
-AnalyzeScreenshotPixels(const std::vector<unsigned char>& pixels, int width, int height) {
+ScreenshotPixelStats AnalyzeScreenshotPixels(const std::vector<unsigned char>& pixels,
+                                             const SkyPixelMask& sky_mask,
+                                             int width,
+                                             int height) {
+    ValidateScenarioPixelBuffers(pixels, sky_mask, width, height);
     ScreenshotPixelStats stats;
     stats.width = width;
     stats.height = height;
-    if (width <= 0 || height <= 0 ||
-        pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u) {
-        return stats;
-    }
 
     const int min_x = width / 5;
     const int max_x = width - min_x;
@@ -168,14 +141,13 @@ AnalyzeScreenshotPixels(const std::vector<unsigned char>& pixels, int width, int
             const unsigned char g = pixels[offset + 1u];
             const unsigned char b = pixels[offset + 2u];
             ++stats.roi_pixels;
-            if (IsWaterLikePixel(r, g, b)) {
+            if (sky_mask.pixels[offset / 3u] == 0 && IsWaterLikePixel(r, g, b)) {
                 ++stats.water_like_pixels;
             }
             if (r < 16 && g < 20 && b < 28) {
                 ++stats.dark_pixels;
             }
-            if (r > 80 && g > 100 && b > 120 &&
-                std::abs(static_cast<int>(b) - static_cast<int>(g)) < 40) {
+            if (sky_mask.pixels[offset / 3u] != 0) {
                 ++stats.bright_sky_like_pixels;
             }
         }
@@ -189,15 +161,13 @@ AnalyzeScreenshotPixels(const std::vector<unsigned char>& pixels, int width, int
 }
 
 WaterReflectionStats AnalyzeWaterReflection(const std::vector<unsigned char>& pixels,
+                                            const SkyPixelMask& sky_mask,
                                             int width,
                                             int height,
                                             const Luminumbra::Vec3& sky_reference) {
+    ValidateScenarioPixelBuffers(pixels, sky_mask, width, height);
     WaterReflectionStats stats;
     stats.sky_reference = sky_reference;
-    if (width <= 0 || height <= 0 ||
-        pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u) {
-        return stats;
-    }
 
     // Upper third of the AnalyzeScreenshotPixels ROI: the shallowest view
     // angles, where the fresnel term makes the SSR/sky reflection dominate.
@@ -223,7 +193,7 @@ WaterReflectionStats AnalyzeWaterReflection(const std::vector<unsigned char>& pi
             const unsigned char g = pixels[offset + 1u];
             const unsigned char b = pixels[offset + 2u];
             ++stats.upper_roi_pixels;
-            if (IsWaterLikePixel(r, g, b)) {
+            if (sky_mask.pixels[offset / 3u] == 0 && IsWaterLikePixel(r, g, b)) {
                 ++stats.upper_roi_water_pixels;
                 sum_r += static_cast<double>(r);
                 sum_g += static_cast<double>(g);
@@ -324,19 +294,29 @@ WaterRegionPatch AnalyzeWaterRegionPatch(const std::vector<unsigned char>& pixel
 // Mean luminance (Rec.601, 0-255) of the water-like pixels inside the same
 // ROI AnalyzeScreenshotPixels gates on. Read back from the back buffer so the
 // caustics-animation probe samples exactly what the screenshot capture sees.
-WaterCausticsSample SampleBackbufferWaterLuminance(int width, int height, double elapsed_seconds) {
-    WaterCausticsSample sample;
-    sample.elapsed_seconds = elapsed_seconds;
-    if (width <= 0 || height <= 0) {
-        return sample;
+WaterCausticsSample SampleBackbufferWaterLuminance(const SkyPixelMask& sky_mask,
+                                                   int width,
+                                                   int height,
+                                                   double elapsed_seconds) {
+    if (!sky_mask.valid_for(width, height)) {
+        throw std::invalid_argument("Water sample geometry evidence must match");
     }
-
-    std::vector<unsigned char> pixels(static_cast<std::size_t>(width) *
-                                      static_cast<std::size_t>(height) * 3u);
+    // The validated mask bounds RGB allocation to 4096 x 4096 x 3 bytes.
+    std::vector<unsigned char> pixels(sky_mask.pixels.size() * 3u);
     glReadBuffer(GL_BACK);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+    return AnalyzeWaterLuminance(pixels, sky_mask, width, height, elapsed_seconds);
+}
 
+WaterCausticsSample AnalyzeWaterLuminance(const std::vector<unsigned char>& pixels,
+                                          const SkyPixelMask& sky_mask,
+                                          int width,
+                                          int height,
+                                          double elapsed_seconds) {
+    ValidateScenarioPixelBuffers(pixels, sky_mask, width, height);
+    WaterCausticsSample sample;
+    sample.elapsed_seconds = elapsed_seconds;
     const int min_x = width / 5;
     const int max_x = width - min_x;
     const int min_top_y = height / 4;
@@ -355,7 +335,7 @@ WaterCausticsSample SampleBackbufferWaterLuminance(int width, int height, double
             const unsigned char r = pixels[offset + 0u];
             const unsigned char g = pixels[offset + 1u];
             const unsigned char b = pixels[offset + 2u];
-            if (IsWaterLikePixel(r, g, b)) {
+            if (sky_mask.pixels[offset / 3u] == 0 && IsWaterLikePixel(r, g, b)) {
                 ++sample.water_pixels;
                 luminance_sum += 0.299 * static_cast<double>(r) + 0.587 * static_cast<double>(g) +
                                  0.114 * static_cast<double>(b);
@@ -404,21 +384,19 @@ double SampleCausticsTextureDelta(unsigned int texture_id,
     return delta;
 }
 
-LodHolePixelStats
-AnalyzeLodHolePixels(const std::vector<unsigned char>& pixels, int width, int height) {
+LodHolePixelStats AnalyzeLodHolePixels(const std::vector<unsigned char>& pixels,
+                                       const SkyPixelMask& sky_mask,
+                                       int width,
+                                       int height) {
+    ValidateScenarioPixelBuffers(pixels, sky_mask, width, height);
     LodHolePixelStats stats;
     stats.width = width;
     stats.height = height;
-    if (width <= 0 || height <= 0 ||
-        pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u) {
-        return stats;
-    }
 
     const int min_x = width / 64;
     const int max_x = width - min_x;
     const int min_top_y = height / 4;
     const int max_top_y = height;
-    const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
 
     for (int y = 0; y < height; ++y) {
         const int y_from_top = height - 1 - y;
@@ -427,19 +405,12 @@ AnalyzeLodHolePixels(const std::vector<unsigned char>& pixels, int width, int he
         }
 
         for (int x = min_x; x < max_x; ++x) {
-            const std::size_t offset =
-                static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
-            const unsigned char r = pixels[offset + 0u];
-            const unsigned char g = pixels[offset + 1u];
-            const unsigned char b = pixels[offset + 2u];
+            const auto index = static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                               static_cast<std::size_t>(x);
             ++stats.roi_pixels;
-            if (IsDarkVoidPixel(r, g, b)) {
+            if (sky_mask.pixels[index] != 0) {
                 ++stats.dark_void_pixels;
-            }
-            if (IsNearBlackPixel(r, g, b)) {
                 ++stats.near_black_pixels;
-            }
-            if (IsBackgroundBluePixel(r, g, b)) {
                 ++stats.background_blue_pixels;
             }
         }
@@ -454,10 +425,9 @@ AnalyzeLodHolePixels(const std::vector<unsigned char>& pixels, int width, int he
                                       static_cast<double>(stats.roi_pixels);
     }
 
-    // Sliver-cluster pass: connected components (8-connectivity) of void
-    // (RGB <= 10) pixels inside the enforced ROI. Persistent LOD seam cracks
-    // show up as narrow runs of tens of connected pixels while the overall
-    // near-black ratio stays below the area threshold.
+    // Existing 8-connected seam budget applied to uncovered pixels in the ROI.
+    // Mask and flood stack are bounded to 4096 x 4096 entries by validation;
+    // every pixel is pushed at most once, with eight neighbor checks per pixel.
     std::vector<std::uint8_t> sliver_mask(
         static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0u);
     for (int y = 0; y < height; ++y) {
@@ -466,9 +436,9 @@ AnalyzeLodHolePixels(const std::vector<unsigned char>& pixels, int width, int he
             continue;
         }
         for (int x = min_x; x < max_x; ++x) {
-            const std::size_t offset =
-                static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
-            if (IsSeamSliverPixel(pixels[offset + 0u], pixels[offset + 1u], pixels[offset + 2u])) {
+            const auto index = static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                               static_cast<std::size_t>(x);
+            if (sky_mask.pixels[index] != 0) {
                 sliver_mask[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
                             static_cast<std::size_t>(x)] = 1u;
             }
@@ -527,7 +497,12 @@ bool WriteBackbufferPpm(const std::filesystem::path& path,
                         int width,
                         int height,
                         ScreenshotPixelStats* out_stats,
-                        LodHolePixelStats* out_lod_hole_stats) {
+                        LodHolePixelStats* out_lod_hole_stats,
+                        const SkyPixelMask* sky_mask) {
+    if ((out_stats || out_lod_hole_stats) &&
+        (sky_mask == nullptr || !sky_mask->valid_for(width, height))) {
+        return false;
+    }
     std::size_t bytes = 0;
     if (!Rendering::CapturePixelBytes(width, height, 3, bytes)) {
         return false;
@@ -538,18 +513,26 @@ bool WriteBackbufferPpm(const std::filesystem::path& path,
     glReadBuffer(GL_BACK);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+    const auto stats = out_stats ? AnalyzeScreenshotPixels(pixels, *sky_mask, width, height)
+                                 : ScreenshotPixelStats{};
+    const auto hole_stats = out_lod_hole_stats
+                                ? AnalyzeLodHolePixels(pixels, *sky_mask, width, height)
+                                : LodHolePixelStats{};
+    if (!WritePixelBufferPpm(path, width, height, pixels)) {
+        return false;
+    }
     if (out_stats) {
-        *out_stats = AnalyzeScreenshotPixels(pixels, width, height);
+        *out_stats = stats;
     }
     if (out_lod_hole_stats) {
-        *out_lod_hole_stats = AnalyzeLodHolePixels(pixels, width, height);
+        *out_lod_hole_stats = hole_stats;
     }
-
-    return WritePixelBufferPpm(path, width, height, pixels);
+    return true;
 }
 
 nlohmann::json LodHolePixelStatsToJson(const LodHolePixelStats& stats) {
-    return {{"width", stats.width},
+    return {{"sky_classifier", "reversed_z_depth_water"},
+            {"width", stats.width},
             {"height", stats.height},
             {"roi_pixels", stats.roi_pixels},
             {"dark_void_pixels", stats.dark_void_pixels},
@@ -563,7 +546,8 @@ nlohmann::json LodHolePixelStatsToJson(const LodHolePixelStats& stats) {
 }
 
 nlohmann::json ScreenshotPixelStatsToJson(const ScreenshotPixelStats& stats) {
-    return {{"width", stats.width},
+    return {{"sky_classifier", "reversed_z_depth_water"},
+            {"width", stats.width},
             {"height", stats.height},
             {"roi_pixels", stats.roi_pixels},
             {"water_like_pixels", stats.water_like_pixels},

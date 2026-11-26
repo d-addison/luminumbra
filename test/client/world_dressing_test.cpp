@@ -10,6 +10,7 @@
 // synthetic callbacks (no GL, no world system, no entt).
 
 #include "WorldDressing.h"
+#include "luminumbra_common/core/IntegerPrimitives.h"
 
 #include <gtest/gtest.h>
 
@@ -33,7 +34,7 @@ using Luminumbra::Client::WorldDressingResult;
 // FNV-1a over the bytes of each FIELD in declaration order (never over whole
 // structs — padding bytes are indeterminate and would make the hash lie).
 struct FnvHasher {
-    std::uint64_t h = 1469598103934665603ull;
+    std::uint64_t h = Luminumbra::Core::kFnv1a64StandardBasis;
     void bytes(const void* p, std::size_t n) {
         const auto* b = static_cast<const unsigned char*>(p);
         for (std::size_t i = 0; i < n; ++i) {
@@ -154,6 +155,12 @@ WorldDressingParams SyntheticParams() {
 }
 
 } // namespace
+
+// This helper only compares local test results; no persisted or cross-process digest uses it.
+TEST(WorldDressing, EmptyPlacementHashUsesStandardBasis) {
+    const WorldDressingResult empty;
+    EXPECT_EQ(HashPlacements(empty), Luminumbra::Core::kFnv1a64StandardBasis);
+}
 
 // Same params + same callbacks twice -> byte-identical placement stream (hash
 // AND field-by-field), non-empty in every lane, order stable by construction

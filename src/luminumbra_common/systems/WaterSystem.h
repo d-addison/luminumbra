@@ -299,6 +299,14 @@ public:
         m_boot_settle_mode = on;
     }
 
+    // Owner-thread boot continuation immediately after update of this same chunk map.
+    // Registry/residency must stay fixed until return.
+    // Refusal changes nothing. Wall-clock timings retain only work actually executed.
+    bool
+    TryContinueSleepingBootPasses(entt::registry& registry,
+                                  const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& chunks,
+                                  std::uint64_t skipped);
+
     // gated High-resolution water (sim.water_high_res). The session owner calls
     // this ONCE at construction, BEFORE the first update() — never mid-run: the hashed
     // mm grids are sized by it, the seam pass hard-gates on one uniform resolution, and

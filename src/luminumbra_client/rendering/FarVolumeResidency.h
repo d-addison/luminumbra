@@ -51,12 +51,24 @@ struct FarVolumeResidentObservation {
 struct FarVolumeAdmissionWork {
     std::size_t key_comparisons = 0, descriptor_visits = 0;
 };
+// Owner-thread work collected in this frame. Completions include failed and
+// Empty results, counted once when taken from the queue; result-slot deferrals
+// do not count as build attempts. Bytes retain the geometry allowance debit
+// semantics: before backend entry, after byte/headroom admission, even on failure.
+struct FarVolumeTierWork {
+    std::size_t dispatched = 0, completed = 0, uploaded = 0, rejected = 0, evicted = 0;
+    std::size_t build_attempts = 0, upload_attempts = 0;
+    std::uint64_t upload_bytes = 0, successful_upload_bytes = 0;
+};
 struct FarVolumeFrameResult {
     std::size_t dispatched = 0, uploaded = 0, rejected = 0, evicted = 0;
     std::size_t build_attempts = 0, upload_attempts = 0;
     // Geometry allowance debited before backend entry, including failed work.
     std::uint64_t upload_bytes = 0, successful_upload_bytes = 0;
     bool horizon_refused = false;
+    std::size_t completed = 0;
+    // Fixed V1-V5 storage, indexed by tier - 1. Each counter sums to its frame total.
+    std::array<FarVolumeTierWork, World::kFarTierCount> tiers{};
 };
 struct FarVolumeTierObservation {
     std::size_t wanted = 0, pending = 0, building = 0, ready = 0, settled = 0;

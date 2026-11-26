@@ -55,6 +55,21 @@ class PathGateTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertIn('python3 -B tools/ci/ci_paths.py python-tests', workflow)
 
+    def test_sim_budget_report_is_registered_in_all_shared_lanes(self):
+        path = "tools/perf/test_report_sim_budget.py"
+        self.assertEqual(gate.python_test_commands(ROOT).count((path,)), 1)
+        for entry in (path, "tools/perf/report_sim_budget.py"):
+            self.assertIn(entry, gate.COVERED_PYTHON_FILES)
+            self.assertTrue(gate.needs_python(entry))
+            self.assertTrue(gate.needs_cpp(entry))
+            self.assertTrue(gate.needs_server_perf(entry))
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn('add_test(NAME SimBudgetReportContract\n'
+                      '    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/' + path + '")',
+                      cmake)
+        self.assertIn('set_tests_properties(SimBudgetReportContract PROPERTIES '
+                      'LABELS "simulation;tools" TIMEOUT 5)', cmake)
+
     def test_fixture_refusal_suite_is_in_standalone_plan(self):
         path = "tools/perf/test_prepare_server_comparison.py"
         self.assertEqual(gate.python_test_commands(ROOT).count((path,)), 1)

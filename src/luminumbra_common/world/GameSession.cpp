@@ -388,9 +388,9 @@ bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
         stable = (count == last_count) ? stable + 1 : 0;
         last_count = count;
     }
-    // Fresh water has no global all-asleep fixed point: wet/dry seams can
-    // perpetually wake neighbours. Initialize the backlog, then consume the
-    // original fixed transient budget. Loaded/continued water must not advance.
+    // Wet/dry seams can perpetually wake neighbours. Keep the original bounded
+    // transient budget unless the complete boot state admits an exact continuation.
+    // Loaded/continued water must not advance.
     int settle_iters = 0;
     if (!continuation && !water_loaded_from_save) {
         ws->SetWaterBootSettleMode(true);
@@ -417,16 +417,20 @@ bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
             if (uninited_now == 0)
                 break;
         }
-        // 2b: exactly kPostInitSettleTicks full-set sim iterations — the flood
-        // transient (lakes/rivers redistributing from their seeded rest levels)
-        // drains and the calm-able majority of chunks reaches sleep. A fixed count
-        // is deterministic (run==replay, host==peer) and bounded by construction.
+        // 2b: at most 240 full-set passes. Once all water and streaming state is
+        // fixed, continue non-timing observations exactly for the omitted suffix.
+        // The synchronous loop keeps anchors, registry and configuration unchanged.
         constexpr int kPostInitSettleTicks = 240;
+        const std::vector<Vec3> spawn_anchor{m_metadata.spawnPoint};
+        const auto& settle_anchors = anchors.empty() ? spawn_anchor : anchors;
         for (int i = 0; i < kPostInitSettleTicks; ++i) {
             ++settle_iters;
             if (stop.stop_requested())
                 return false;
             stream_once();
+            const auto skipped = static_cast<std::uint64_t>(kPostInitSettleTicks - i - 1);
+            if (ws->TryCompleteBootWaterSettle(m_registry, settle_anchors, phys, skipped))
+                break;
         }
     }
     if (stop.stop_requested())
@@ -450,11 +454,12 @@ bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
         }
         LUMINUMBRA_CORE_INFO(
             "Boot water settle exit: {} water-inited ({} awake), {} NOT water-inited, {} "
-            "chunks total{}",
+            "chunks total, {} settle passes{}",
             water_chunks,
             awake,
             uninited,
             ws->snapshot_streamed_chunks().size(),
+            settle_iters,
             water_loaded_from_save ? " [loaded: water settle skipped, state preserved]" : "");
         stats.water_chunks = water_chunks;
         stats.awake = awake;
@@ -1861,6 +1866,8 @@ GameSession::~GameSession() {
         .disconnect<&RemoveCreatureAvatar>(*this);
     if (m_physicsSystem)
         m_physicsSystem->set_world_system(nullptr);
+    if (m_worldSystem)
+        m_worldSystem->release_session_services();
     m_worldSystem.reset();
 }
 
@@ -1874,9 +1881,11 @@ void GameSession::ResetWorldSystems() {
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
     m_registry.clear();
-    // Keep all dependencies alive while the world destructor fences admitted work.
+    // Keep dependencies alive through the world's final service fence.
     if (m_physicsSystem)
         m_physicsSystem->set_world_system(nullptr);
+    if (m_worldSystem)
+        m_worldSystem->release_session_services();
     ++m_worldRevision;
     m_worldSystem.reset();
     m_physicsSystem.reset();
@@ -3259,10 +3268,9 @@ bool GameSession::AdoptCreatedWorld(WorldPreparation& prepared,
 
     // 1. Create the World System
     m_worldSystem =
-        std::make_unique<Systems::SHIELD_WorldSystem>(m_jobSystem, nullptr, params, world_seed);
-    // Worldgen seam for audio-raycast surface materials (non-owning; physics
-    // is destroyed before the world system by member order, so the pointer
-    // cannot dangle).
+        std::make_shared<Systems::SHIELD_WorldSystem>(m_jobSystem, nullptr, params, world_seed);
+    // Physics borrows the world for procedural audio queries. Teardown detaches
+    // this pointer before releasing the world's session services.
     m_physicsSystem->set_world_system(m_worldSystem.get());
     LUMINUMBRA_CORE_INFO("World system initialized for seed {}.", world_seed);
 
@@ -3513,10 +3521,9 @@ bool GameSession::AdoptLoadedWorld(WorldPreparation& prepared) {
     m_physicsSystem->startup();
 
     m_worldSystem =
-        std::make_unique<Systems::SHIELD_WorldSystem>(m_jobSystem, nullptr, params, world_seed);
-    // Worldgen seam for audio-raycast surface materials (non-owning; physics
-    // is destroyed before the world system by member order, so the pointer
-    // cannot dangle).
+        std::make_shared<Systems::SHIELD_WorldSystem>(m_jobSystem, nullptr, params, world_seed);
+    // Physics borrows the world for procedural audio queries. Teardown detaches
+    // this pointer before releasing the world's session services.
     m_physicsSystem->set_world_system(m_worldSystem.get());
     m_waterSystem = std::make_unique<Systems::WaterSystem>(m_jobSystem, m_worldSystem.get());
     m_worldSystem->SetWaterSystem(m_waterSystem.get());
@@ -5340,6 +5347,10 @@ bool GameSession::EnableFarWorldAuthorityProducer(const World::FarWorldAuthority
         error = "Source capture attachment requires settled streaming publication.";
         return false;
     }
+    if (m_farWorldBindingEpoch == std::numeric_limits<std::uint64_t>::max()) {
+        error = "Source capture binding epoch exhausted.";
+        return false;
+    }
     try {
         if (!config.source.memory) {
             error = "Source capture requires a memory domain.";
@@ -5350,8 +5361,10 @@ bool GameSession::EnableFarWorldAuthorityProducer(const World::FarWorldAuthority
             error = "Source capture control admission refused.";
             return false;
         }
-        auto candidate =
-            std::make_unique<World::FarWorldAuthorityProducer>(config.source, std::move(control));
+        auto candidate = std::allocate_shared<World::FarWorldAuthorityProducer>(
+            World::FarVolumePoolAllocator<World::FarWorldAuthorityProducer>(config.source.memory),
+            config.source,
+            std::move(control));
         if (!candidate->configure_capture(config.capture)) {
             error = "Source capture requires finite limits.";
             return false;
@@ -5368,7 +5381,12 @@ bool GameSession::EnableFarWorldAuthorityProducer(const World::FarWorldAuthority
             error = "Source capture membership exceeds its limit.";
             return false;
         }
+        // Membership attachment is transactional. Retire the previous epoch only
+        // after every candidate admission succeeds, before releasing its owner.
+        if (m_farWorldAuthorityProducer)
+            m_farWorldAuthorityProducer->retire();
         m_farWorldAuthorityProducer = std::move(candidate);
+        ++m_farWorldBindingEpoch;
         m_farWorldSourceNeedsRefresh = false;
         return true;
     } catch (const std::bad_alloc&) {
@@ -5381,6 +5399,16 @@ bool GameSession::EnableFarWorldAuthorityProducer(const World::FarWorldAuthority
 }
 World::FarWorldAuthorityProducer* GameSession::GetFarWorldAuthorityProducer() {
     return m_farWorldAuthorityProducer.get();
+}
+bool GameSession::FarCaptureBinding::current() const {
+    return producer && world && epoch != 0 && !producer->retired();
+}
+GameSession::FarCaptureBinding GameSession::AcquireFarWorldCaptureBinding() const {
+    if (!m_worldUsable || !m_worldSystem || !m_farWorldAuthorityProducer ||
+        !IsSimulationTickBoundary()) {
+        return {};
+    }
+    return {m_farWorldAuthorityProducer, m_worldSystem, m_worldRevision, m_farWorldBindingEpoch};
 }
 void GameSession::PumpFarWorldAuthorityCapture() {
     if (!m_farWorldAuthorityProducer || !m_worldUsable || !IsSimulationTickBoundary()) {
@@ -5454,6 +5482,9 @@ void GameSession::FenceFarWorldAuthorityReads(bool paused) {
 void GameSession::DisableFarWorldAuthorityProducer() {
     m_farWorldSourceNeedsRefresh = false;
     if (m_farWorldAuthorityProducer) {
+        // Cancel retained sampling before membership detach can publish work or
+        // any world service can be destroyed. External owners remain retired.
+        m_farWorldAuthorityProducer->retire();
         if (m_worldSystem) {
             m_worldSystem->set_far_world_authority_changes({});
         }
@@ -6256,6 +6287,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         // Recovery refusal leaves the faulted session available for another replacement.
         if (!m_regionFault) {
             if (!state.input_refused) {
+                DisableFarWorldAuthorityProducer();
                 ++m_worldRevision;
                 m_lastLoadedChunkCount = 0;
                 m_worldUsable = false;

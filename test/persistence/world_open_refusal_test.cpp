@@ -3,6 +3,7 @@
 #include "../support/IndexedSaveFixture.h"
 #include "../support/PersistenceFileOps.h"
 #include "../support/SessionEnergyTick.h"
+#include "../support/WorldSaveTestAccess.h"
 #include "../support/WorldgenTestData.h"
 #include "core/EngineVersion.h"
 #include "luminumbra_client/app/SessionExit.h"
@@ -151,7 +152,7 @@ void ExpectMissingPresetReason(const std::string& error, const fs::path& expecte
 void ExpectWarmReaderPasses(const fs::path& save_dir,
                             std::uint32_t count,
                             WorldSaveService::ChunkReader& reader) {
-    const auto validations = WorldSaveService::decode_count_for_testing();
+    const auto validations = Persistence::detail::decode_count_for_testing();
     const auto compressions = WorldSaveService::record_compression_count_for_testing();
     const auto coordinates = Persistence::SyntheticChunkCoords(count);
     const auto reads_before_passes = WorldSaveService::region_read_count_for_testing();
@@ -183,7 +184,7 @@ void ExpectWarmReaderPasses(const fs::path& save_dir,
         EXPECT_EQ(Persistence::saved_json_parse_count_for_testing(), admitted_parses);
         EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(),
                   admitted_decodes + (pass_number + 1) * count);
-        EXPECT_EQ(WorldSaveService::decode_count_for_testing(), validations);
+        EXPECT_EQ(Persistence::detail::decode_count_for_testing(), validations);
         EXPECT_EQ(WorldSaveService::record_compression_count_for_testing(), compressions);
     }
 }
@@ -1867,12 +1868,12 @@ TEST_F(WorldOpenRefusal, IndexedOpenValidatesOnceWithoutCompressionAcrossRepeate
         reopened.SetJobSystem(&jobs);
         for (int opening = 0; opening < 3; ++opening) {
             SCOPED_TRACE(opening);
-            const auto validations = WorldSaveService::decode_count_for_testing();
+            const auto validations = Persistence::detail::decode_count_for_testing();
             const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
             const auto compressions = WorldSaveService::record_compression_count_for_testing();
             const auto parses = Persistence::saved_json_parse_count_for_testing();
             ASSERT_TRUE(reopened.LoadWorld(spec.world_id)) << reopened.GetWorldOpenError();
-            EXPECT_EQ(WorldSaveService::decode_count_for_testing(), validations + 1);
+            EXPECT_EQ(Persistence::detail::decode_count_for_testing(), validations + 1);
             EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + count);
             EXPECT_EQ(WorldSaveService::record_compression_count_for_testing(), compressions);
             // Metadata, embedded preset and manifest: each DOM is parsed once per open.

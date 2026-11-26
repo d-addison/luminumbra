@@ -8,6 +8,7 @@
 #include <set>
 #include <span>
 #include <string>
+#include <string_view>
 #include <system_error>
 
 #include "../fixtures/AvatarContinuationWorld.h"
@@ -30,12 +31,14 @@ namespace {
 using Luminumbra::Server::AuthoritativeStateEqual;
 using Luminumbra::Server::CaptureGroundObjects;
 using Luminumbra::Server::CaptureScentBits;
+using Luminumbra::Server::FieldPageDifference;
 using Luminumbra::Server::GroundObjectDifference;
 using Luminumbra::Server::HeavyHashes;
 using Luminumbra::Server::HeavySubsystem;
 using Luminumbra::Server::HeavySubsystemTable;
 using Luminumbra::Server::MeshEqual;
 using Luminumbra::Server::ScentDifference;
+using Luminumbra::world::FieldPageState;
 using Luminumbra::world::GameSession;
 using Luminumbra::world::GroundObject;
 using Luminumbra::world::GroundObjectStore;
@@ -79,6 +82,7 @@ void ExpectFieldArityMatchesTable(const HeavyHashes& hashes, std::size_t table_r
                                   active_regions,
                                   clock_bytes,
                                   ledger_bytes,
+                                  field_page_bytes,
                                   ground_objects,
                                   ground_notifications] = hashes;
     [[maybe_unused]] const auto& [terrain,
@@ -89,7 +93,7 @@ void ExpectFieldArityMatchesTable(const HeavyHashes& hashes, std::size_t table_r
                                   weather,
                                   aether,
                                   aether_state] = hashes.sub;
-    constexpr std::size_t kTopLevelFields = 9;
+    constexpr std::size_t kTopLevelFields = 10;
     constexpr std::size_t kSubFields = 8;
     // One table row per leaf field; `sub` is a container of the kSubFields rows.
     EXPECT_EQ(table_rows, kTopLevelFields - 1 + kSubFields);
@@ -106,6 +110,7 @@ TEST(HeavyComparison, TableCoversEveryHashField) {
                                          "active_regions",
                                          "clock",
                                          "ledger",
+                                         "field_pages",
                                          "wind",
                                          "weather",
                                          "aether",
@@ -183,6 +188,172 @@ TEST(HeavyComparison, OneSideActiveIsNotEqual) {
     const HeavyHashes inactive = MakeBase(false);
     EXPECT_FALSE(AuthoritativeStateEqual(active, inactive));
     EXPECT_FALSE(AuthoritativeStateEqual(inactive, active));
+}
+
+void PopulateFieldPages(FieldPageState& store) {
+    ASSERT_TRUE(store.activate_region({0, 0}, 1337, 0));
+    ASSERT_TRUE(store.activate_region({1, 0}, 1337, 0));
+    const Luminumbra::world::RegionalStorm storm{.owner = {0, 0},
+                                                 .center_x = std::bit_cast<std::uint32_t>(256.0f),
+                                                 .center_z = std::bit_cast<std::uint32_t>(256.0f),
+                                                 .velocity_x = 0,
+                                                 .velocity_z = 0,
+                                                 .intensity = std::bit_cast<std::uint32_t>(0.5f),
+                                                 .spawn_tick = 11,
+                                                 .lifetime_ticks = 240,
+                                                 .seed_salt = 17,
+                                                 .active_age = 2};
+    ASSERT_TRUE(store.replace_weather({storm}, {}, {{{0, 0}, 7}}));
+}
+
+// Mutate admitted FPG v2 input through the public codec. The third page, (1,0),
+// is shared by both owners; cell (16,0) belongs to owner (0,0). File/section
+// headers = 12+10 bytes, page = 2600, key = 8, mask = 32, five u16 channels.
+// This tiny two-owner fixture is bounded by six pages and one storm/clock.
+enum class FieldCellMutation {
+    Value,
+    ZeroValues,
+    Initialization
+};
+
+void MutateSharedFieldCell(FieldPageState& store, FieldCellMutation mutation) {
+    auto bytes = store.serialize();
+    constexpr std::size_t kFirstMask = 12 + 10 + 2 * 2600 + 8;
+    constexpr std::size_t kFirstValue = kFirstMask + 32;
+    ASSERT_GT(bytes.size(), kFirstValue + 4 * Luminumbra::world::FieldPage::kCells * 2 + 8);
+    if (mutation == FieldCellMutation::Initialization) {
+        bytes.at(kFirstMask) =
+            static_cast<char>(static_cast<unsigned char>(bytes.at(kFirstMask)) & 0xfeU);
+    } else if (mutation == FieldCellMutation::ZeroValues) {
+        for (std::size_t channel = 0; channel < 5; ++channel) {
+            const auto offset = kFirstValue + channel * Luminumbra::world::FieldPage::kCells * 2;
+            bytes.at(offset) = bytes.at(offset + 1) = 0;
+        }
+    } else {
+        bytes.at(kFirstValue) =
+            static_cast<char>(static_cast<unsigned char>(bytes.at(kFirstValue)) ^ 1U);
+    }
+    const std::size_t footer = bytes.size() - 8;
+    std::uint64_t checksum = 14695981039346656037ULL;
+    for (const char byte : std::string_view(bytes).substr(0, footer)) {
+        checksum ^= static_cast<unsigned char>(byte);
+        checksum *= 1099511628211ULL;
+    }
+    for (std::size_t index = 0; index < 8; ++index) {
+        bytes.at(footer + index) = static_cast<char>((checksum >> (8 * index)) & 0xffU);
+    }
+    std::string error;
+    ASSERT_TRUE(FieldPageState::parse(bytes, store, error)) << error;
+}
+
+TEST(HeavyComparison, FieldPageBytesDetectUnhashedMutation) {
+    FieldPageState store;
+    ASSERT_NO_FATAL_FAILURE(PopulateFieldPages(store));
+    ASSERT_NO_FATAL_FAILURE(MutateSharedFieldCell(store, FieldCellMutation::ZeroValues));
+    HeavyHashes base = MakeBase(true);
+    base.field_page_bytes = store.canonical_bytes();
+    ASSERT_FALSE(base.field_page_bytes.empty());
+    const std::array<void (*)(FieldPageState&), 4> controls{{
+        [](FieldPageState& state) { MutateSharedFieldCell(state, FieldCellMutation::Value); },
+        [](FieldPageState& state) {
+            MutateSharedFieldCell(state, FieldCellMutation::Initialization);
+        },
+        [](FieldPageState& state) {
+            auto storms = state.storms();
+            ASSERT_EQ(storms.size(), 1u);
+            storms.front().spawn_tick ^= 1;
+            ASSERT_TRUE(state.replace_weather(storms, {}, {{{0, 0}, 7}}));
+        },
+        [](FieldPageState& state) { ASSERT_TRUE(state.set_weather_age({0, 0}, 8)); },
+    }};
+    for (std::size_t index = 0; index < controls.size(); ++index) {
+        SCOPED_TRACE(index);
+        auto mutated_store = store;
+        ASSERT_NO_FATAL_FAILURE(controls[index](mutated_store));
+        HeavyHashes mutated = base;
+        mutated.field_page_bytes = mutated_store.canonical_bytes();
+        ASSERT_NE(mutated.field_page_bytes, base.field_page_bytes);
+        EXPECT_EQ(mutated.world_hash, base.world_hash);
+        EXPECT_EQ(mutated.sub.wind, base.sub.wind);
+        EXPECT_EQ(mutated.sub.weather, base.sub.weather);
+        EXPECT_EQ(mutated.sub.aether, base.sub.aether);
+        EXPECT_EQ(mutated.sub.aether_state, base.sub.aether_state);
+        EXPECT_EQ(mutated.clock_bytes, base.clock_bytes);
+        EXPECT_EQ(mutated.ledger_bytes, base.ledger_bytes);
+        EXPECT_FALSE(AuthoritativeStateEqual(base, mutated));
+        EXPECT_FALSE(AuthoritativeStateEqual(mutated, base));
+        EXPECT_EQ(FieldPageDifference(base, mutated), "field_pages.bytes");
+        EXPECT_EQ(FieldPageDifference(mutated, base), "field_pages.bytes");
+    }
+}
+
+TEST(HeavyComparison, FieldPagePresenceAndOwnerMasksCompare) {
+    HeavyHashes absent = MakeBase(true);
+    EXPECT_TRUE(AuthoritativeStateEqual(absent, absent));
+    EXPECT_TRUE(FieldPageDifference(absent, absent).empty());
+    FieldPageState store;
+    ASSERT_NO_FATAL_FAILURE(PopulateFieldPages(store));
+    ASSERT_NO_FATAL_FAILURE(MutateSharedFieldCell(store, FieldCellMutation::ZeroValues));
+    HeavyHashes present = absent;
+    present.field_page_bytes = store.canonical_bytes();
+    EXPECT_TRUE(AuthoritativeStateEqual(present, present));
+    EXPECT_TRUE(FieldPageDifference(present, present).empty());
+    EXPECT_FALSE(AuthoritativeStateEqual(absent, present));
+    EXPECT_FALSE(AuthoritativeStateEqual(present, absent));
+    EXPECT_EQ(FieldPageDifference(absent, present), "field_pages.presence");
+    EXPECT_EQ(FieldPageDifference(present, absent), "field_pages.presence");
+
+    auto partial = store;
+    ASSERT_NO_FATAL_FAILURE(MutateSharedFieldCell(partial, FieldCellMutation::Initialization));
+    EXPECT_EQ(partial.pages().at({1, 0}).cells, store.pages().at({1, 0}).cells);
+    EXPECT_EQ(partial.page_count(), store.page_count());
+    EXPECT_EQ(partial.owned_initialized_cells({0, 0}) + 1, store.owned_initialized_cells({0, 0}));
+    EXPECT_EQ(partial.region_bytes({1, 0}), store.region_bytes({1, 0}));
+    HeavyHashes changed = present;
+    changed.field_page_bytes = partial.canonical_bytes();
+    EXPECT_EQ(changed.field_page_bytes.size(), present.field_page_bytes.size());
+    EXPECT_FALSE(AuthoritativeStateEqual(present, changed));
+    EXPECT_EQ(FieldPageDifference(present, changed), "field_pages.bytes");
+}
+
+TEST(HeavyComparison, DisabledFieldsKeepLegacyComparison) {
+    FieldPageState store;
+    ASSERT_NO_FATAL_FAILURE(PopulateFieldPages(store));
+    const HeavyHashes base = MakeBase(false);
+    HeavyHashes changed = base;
+    changed.field_page_bytes = store.canonical_bytes();
+    EXPECT_TRUE(AuthoritativeStateEqual(base, changed));
+    EXPECT_TRUE(AuthoritativeStateEqual(changed, base));
+    EXPECT_TRUE(FieldPageDifference(base, changed).empty());
+    EXPECT_TRUE(FieldPageDifference(changed, base).empty());
+    changed.active_regions = true;
+    EXPECT_FALSE(AuthoritativeStateEqual(base, changed));
+    EXPECT_FALSE(AuthoritativeStateEqual(changed, base));
+}
+
+TEST(HeavyComparison, FieldPageCaptureSurvivesRoundtripAndContinuation) {
+    FieldPageState original, loaded;
+    ASSERT_NO_FATAL_FAILURE(PopulateFieldPages(original));
+    std::string error;
+    ASSERT_TRUE(FieldPageState::parse(original.serialize(), loaded, error)) << error;
+    const auto frozen_bytes = original.region_bytes({1, 0});
+    HeavyHashes saved = MakeBase(true);
+    saved.field_page_bytes = original.canonical_bytes();
+    HeavyHashes reopened = saved;
+    reopened.field_page_bytes = loaded.canonical_bytes();
+    EXPECT_TRUE(AuthoritativeStateEqual(saved, reopened));
+    for (std::uint64_t tick = 8; tick <= 24; tick += 8) {
+        ASSERT_GT(original.step_region({0, 0}, 1337, tick), 0u);
+        ASSERT_GT(loaded.step_region({0, 0}, 1337, tick), 0u);
+        HeavyHashes original_final = saved, loaded_final = reopened;
+        original_final.field_page_bytes = original.canonical_bytes();
+        loaded_final.field_page_bytes = loaded.canonical_bytes();
+        EXPECT_NE(original_final.field_page_bytes, saved.field_page_bytes);
+        EXPECT_TRUE(AuthoritativeStateEqual(original_final, loaded_final));
+        EXPECT_TRUE(FieldPageDifference(original_final, loaded_final).empty());
+        EXPECT_EQ(original.region_bytes({1, 0}), frozen_bytes);
+        EXPECT_EQ(loaded.region_bytes({1, 0}), frozen_bytes);
+    }
 }
 
 void CheckScentHashComparison() {
@@ -275,6 +446,9 @@ HeavyHashes CaptureSessionState(GameSession& session) {
     h.active_regions = session.ActiveRegionsEnabled();
     h.clock_bytes = session.GetWorldClock().canonical_bytes();
     h.ledger_bytes = session.GetActiveRegionLedger().canonical_bytes();
+    if (h.active_regions) {
+        h.field_page_bytes = session.GetFieldPages().canonical_bytes();
+    }
     h.ground_objects = CaptureGroundObjects(session.GetGroundObjects());
     h.ground_notifications = session.CaptureGroundNotifications().canonical_bytes();
     h.scent_hash = session.ComputeScentSubHash();
@@ -315,6 +489,8 @@ bool AdvanceScentSession(GameSession& session) {
 }
 
 void ExpectSessionStateEqual(const HeavyHashes& a, const HeavyHashes& b) {
+    EXPECT_EQ(a.field_page_bytes, b.field_page_bytes);
+    EXPECT_TRUE(FieldPageDifference(a, b).empty());
     EXPECT_EQ(a.scent_bits, b.scent_bits);
     EXPECT_EQ(a.scent_hash, b.scent_hash);
     EXPECT_TRUE(ScentDifference(a, b).empty());
@@ -343,6 +519,7 @@ TEST_F(HeavyScentSessionTest, SavedScentMatchesReopenedSessionAndContinuedSimula
     ASSERT_TRUE(
         Luminumbra::Persistence::WorldSaveService::validate_save(original.GetWorldSaveDir()));
     const auto saved = CaptureSessionState(original);
+    ASSERT_FALSE(saved.field_page_bytes.empty());
     ASSERT_FALSE(saved.scent_hash.empty());
     ASSERT_EQ(saved.scent_bits.size(), 65536u);
 

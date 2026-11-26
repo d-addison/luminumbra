@@ -3,6 +3,7 @@
 #include "../support/UniqueTempPath.h"
 #include "luminumbra/core/Types.h"
 #include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/core/IntegerPrimitives.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/WaterAttribution.h"
 #include "luminumbra_common/core/WaterComponents.h"
@@ -165,7 +166,7 @@ void ExpectInlineSeed(SeedFixture& fixture, int resolution) {
     }
     EXPECT_EQ(chunk.water_bed_mm, beds);
     EXPECT_EQ(chunk.water_depth_mm, depths);
-    std::uint64_t expected_hash = 1469598103934665603ull;
+    std::uint64_t expected_hash = Luminumbra::Core::kFnv1a64HistoricalBasis;
     const auto mix = [&expected_hash](std::uint64_t value) {
         expected_hash ^= value;
         expected_hash *= 1099511628211ull;

@@ -5,6 +5,8 @@
 // the brain system as a no-op, so the canonical headless world_hash stays byte-identical.
 // All fields are sim state (integer-ish floats, deterministic); geometry/rendering is separate.
 
+#include "../core/IntegerPrimitives.h"
+
 #include <cstddef>
 #include <cstdint>
 
@@ -20,7 +22,7 @@ namespace Luminumbra::Components {
 // not alter sim behaviour, and leaving it out keeps every existing determinism baseline
 // byte-identical. The PHOTO CODEX (client-only, hash-free) reads it as the species key.
 [[nodiscard]] inline std::uint16_t CreatureSpeciesId16(const char* id) {
-    std::uint64_t h = 1469598103934665603ull; // FNV offset basis
+    std::uint64_t h = Core::kFnv1a64HistoricalBasis;
     for (const char* p = id; p && *p; ++p) {
         h ^= static_cast<unsigned char>(*p);
         h *= 1099511628211ull; // FNV prime

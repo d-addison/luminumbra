@@ -721,6 +721,15 @@ public:
                                     std::vector<std::string>* errors,
                                     const BoundPublicationStage* source_stage = nullptr,
                                     const BoundPublicationStage* retired_stage = nullptr);
+    // Complete a matching or newly published restoration before advancing rollback.
+    // Rebinds the recorded identity; Windows retries its writable-handle flush, POSIX
+    // repeats all four relevant parent barriers. Failure retains the recovery journal.
+    // Replay companions may retain other names; snapshot restorations require one link.
+    static bool complete_restoration(const std::filesystem::path& destination,
+                                     const ArtifactIdentity& expected,
+                                     const std::array<std::filesystem::path, 4>& parents,
+                                     std::vector<std::string>* errors,
+                                     unsigned max_links = 1);
     // Unlinks `path` when it exists (a missing file is success) and flushes the parent directory.
     // Fires "before-delete"/"after-delete".
     static bool durable_remove(const std::filesystem::path& path,
@@ -728,8 +737,6 @@ public:
     // fsync of a directory (no-op success where the platform cannot open directories).
     static bool durable_flush_directory(const std::filesystem::path& directory,
                                         std::vector<std::string>* errors = nullptr);
-    // Number of full load_world decodes since process start (single-decode contract tests).
-    static std::uint64_t decode_count_for_testing();
     // Number of region record payload compressions since process start.
     static std::uint64_t record_compression_count_for_testing();
     // Number of lod-0 chunk record payload decodes since process start.
