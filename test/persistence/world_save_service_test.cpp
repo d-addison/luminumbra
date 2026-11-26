@@ -3060,7 +3060,16 @@ TEST(WorldSaveService, AbsentRegionRemovalRefusesNonDirectoryAncestors) {
         ASSERT_TRUE(WorldSaveService::create_file_durably(obstruction, "foreign"));
         SaveTransaction transaction(save.path(), 1, {}, &WorldSaveService::member_digest);
         std::vector<std::string> errors;
-        ASSERT_TRUE(transaction.begin(&errors));
+        if (!chunks_directory) {
+            // A non-directory chunks entry is already refused when the transaction
+            // inventories the save, before any removal can reach it.
+            EXPECT_FALSE(transaction.begin(&errors));
+            EXPECT_FALSE(errors.empty());
+            EXPECT_EQ(ReadFileBytes(obstruction), "foreign");
+            EXPECT_FALSE(journal_pending(save.path()));
+            continue;
+        }
+        ASSERT_TRUE(transaction.begin(&errors)) << ::testing::PrintToString(errors);
         EXPECT_FALSE(WorldSaveService::remove_member(
             save.path(), "chunks/region/plant-identities.json", &errors));
         EXPECT_FALSE(errors.empty());
