@@ -65,8 +65,8 @@ def shipping_simulation_gates() -> tuple[str, ...]:
                         if isinstance(gate, dict) and "enabled" in gate))
 
 
-def validate_artifact(data: dict[str, Any], preset: str, seed: str, ticks: int) -> None:
-    """Ignore unknown object keys; refuse incomplete, corrupt or future evidence."""
+def validate_smoke_identity(data: dict[str, Any], preset: str, seed: str, ticks: int) -> None:
+    """Validate the shared telemetry-on/off smoke identity and shipping gates."""
     for field in ("world_hash", "world_hash_replay"):
         value = data.get(field)
         if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{16}", value) is None:
@@ -81,6 +81,11 @@ def validate_artifact(data: dict[str, Any], preset: str, seed: str, ticks: int) 
     required = shipping_simulation_gates() + ("finite_hydrology", "weather_rain")
     if not isinstance(effective, dict) or any(effective.get(key) is not True for key in required):
         raise ValueError("capture did not activate the shipping simulation defaults")
+
+
+def validate_artifact(data: dict[str, Any], preset: str, seed: str, ticks: int) -> None:
+    """Ignore unknown object keys; refuse incomplete, corrupt or future evidence."""
+    validate_smoke_identity(data, preset, seed, ticks)
     budget = data.get("sim_budget")
     if not isinstance(budget, dict) or budget.get("schema") != "luminumbra.sim_budget.v2":
         raise ValueError("missing or unsupported sim_budget schema")
@@ -132,6 +137,29 @@ def validate_artifact(data: dict[str, Any], preset: str, seed: str, ticks: int) 
         raise ValueError("capture did not exercise the populated simulation")
 
 
+def validate_neutrality(traced: dict[str, Any], disabled: dict[str, Any],
+                        preset: str, seed: str, ticks: int) -> None:
+    """Compare an already validated trace with its ordinary smoke counterpart."""
+    validate_smoke_identity(disabled, preset, seed, ticks)
+    if "sim_budget" in disabled:
+        raise ValueError("telemetry-disabled artifact contains sim_budget")
+    if any(disabled[field] != traced["world_hash"]
+           for field in ("world_hash", "world_hash_replay")):
+        raise ValueError("telemetry neutrality world hash mismatch")
+    if (disabled["effective_simulation"] != traced["effective_simulation"]
+            or any(type(value) is not bool for data in (traced, disabled)
+                   for value in data["effective_simulation"].values())):
+        raise ValueError("telemetry neutrality effective gates mismatch")
+    # Exactly two smoke runs, each bounded by the requested tick count.
+    for data in (traced, disabled):
+        runs = data.get("runs")
+        if (not isinstance(runs, list) or len(runs) != 2
+                or any(not isinstance(run, dict)
+                       or not integer(run.get("ticks_executed"))
+                       or run["ticks_executed"] != ticks for run in runs)):
+            raise ValueError("telemetry neutrality requires two complete smoke runs")
+
+
 def command(binary: Path, root: Path, artifact: Path, preset: str,
             seed: str, ticks: int, radius: int, collision_radius: int) -> list[str]:
     return [str(binary), "--root", str(root), "--smoke", "--no-audio", "--sim-budget",
@@ -158,6 +186,8 @@ def main() -> int:
     parser.add_argument("--seed", default="1337")
     parser.add_argument("--radius", type=positive_int, default=1)
     parser.add_argument("--collision-radius", type=positive_int, default=1)
+    parser.add_argument("--check-neutrality", action="store_true",
+                        help="also capture telemetry-off smoke runs and require matching hashes/gates")
     args = parser.parse_args()
     binary = args.binary.resolve()
     evidence = args.evidence_dir.resolve()
@@ -165,6 +195,8 @@ def main() -> int:
         parser.error(f"server executable does not exist: {binary}")
     if evidence.exists():
         parser.error(f"evidence directory already exists: {evidence}")
+    if args.check_neutrality and evidence.is_relative_to(root):
+        parser.error("neutrality evidence directory must be outside the checkout")
     if not args.seed:
         parser.error("seed must be explicit and nonempty")
     try:
@@ -198,7 +230,22 @@ def main() -> int:
                 subprocess.run(argv, cwd=root, stdout=log, stderr=subprocess.STDOUT, check=True)
             data = json.loads(read_text(evidence, resolve_reference(evidence, artifact.name), encoding="utf-8-sig"))
             validate_artifact(data, preset, args.seed, args.ticks)
-            manifest["runs"].append({"preset": preset, "artifact": artifact.name, "command": argv})
+            run = {"preset": preset, "artifact": artifact.name, "command": argv}
+            if args.check_neutrality:
+                counterpart = evidence / f"{preset}-telemetry-off.json"
+                # Derive from the exact traced command: only telemetry and output differ.
+                disabled_argv = argv.copy()
+                disabled_argv.remove("--sim-budget")
+                disabled_argv[-1] = str(counterpart)
+                print(f"Checking telemetry neutrality for {preset}", flush=True)
+                with counterpart.with_suffix(".log").open("wb") as log:
+                    subprocess.run(disabled_argv, cwd=root, stdout=log,
+                                   stderr=subprocess.STDOUT, check=True)
+                disabled = json.loads(read_text(evidence, resolve_reference(evidence, counterpart.name),
+                                                encoding="utf-8-sig"))
+                validate_neutrality(data, disabled, preset, args.seed, args.ticks)
+                run["telemetry_off"] = {"artifact": counterpart.name, "command": disabled_argv}
+            manifest["runs"].append(run)
         final_input_hash = capture_fixture_hash(root)
         final_preset_hash = fixture_hash(resolve_reference(root, "worlds/atlas/presets"),
                                          reference_root=resolve_reference(root, "data"))
