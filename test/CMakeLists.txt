@@ -2625,6 +2625,13 @@ set_tests_properties(StationDiscoveryNumericRefusals PROPERTIES LABELS "world;to
 set_tests_properties(StationDiscoveryContract StationDiscoveryCliSmoke
     PROPERTIES LABELS "world;tools" TIMEOUT 120)
 
+add_test(NAME ActiveRegionCaptureContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_active_regions.py")
+add_test(NAME ActiveRegionEvidenceContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_check_active_regions.py")
+set_tests_properties(ActiveRegionCaptureContract ActiveRegionEvidenceContract
+    PROPERTIES LABELS "simulation;tools" TIMEOUT 5)
+
 add_test(NAME SimBudgetCaptureContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py")
 set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)

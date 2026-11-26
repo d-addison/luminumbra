@@ -49,9 +49,10 @@ enum class NamespaceEntryState : std::uint8_t {
 // Recovery repeats inspection even for a recorded completion. A resurrected entry
 // invalidates that completion durably BEFORE another removal. An absent entry reuses
 // recorded phases, so failed retirement does not append records on every retry.
+// POSIX callers select RequireNtfs=false only after completing their directory barriers.
 // There are at most seven operations, no scan or allocation. Storage operations own
 // the existing journal byte/artifact limits and refuse before exceeding them.
-template<typename Operations>
+template<bool RequireNtfs = true, typename Operations>
 NamespaceRetirementOutcome CompleteNamespaceRetirement(NamespaceReceipt& receipt,
                                                        Operations& operations) {
     if ((receipt.identity[1] == 0 && receipt.identity[2] == 0) ||
@@ -82,9 +83,11 @@ NamespaceRetirementOutcome CompleteNamespaceRetirement(NamespaceReceipt& receipt
         const NamespaceFlushObservation observation = operations.flush_later_commit();
         if (!observation.succeeded)
             return NamespaceRetirementOutcome::Failed;
-        if (!observation.volume_known || !observation.ntfs ||
-            observation.volume != receipt.identity.front())
-            return NamespaceRetirementOutcome::Retained;
+        if constexpr (RequireNtfs) {
+            if (!observation.volume_known || !observation.ntfs ||
+                observation.volume != receipt.identity.front())
+                return NamespaceRetirementOutcome::Retained;
+        }
         if (!operations.record_flush_observed(receipt.identity, observation))
             return NamespaceRetirementOutcome::Failed;
         receipt.phase = NamespaceReceiptPhase::FlushObserved;

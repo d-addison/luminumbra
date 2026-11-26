@@ -4521,8 +4521,8 @@
     {
       "id": "indexed.persistence.011",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Journal v4 binds undo, publication and quarantine identities before either POSIX move;",
-      "text": "Journal v4 binds undo, publication and quarantine identities before either POSIX move;"
+      "quote": "Journal v5 binds undo, publication and quarantine identities before either POSIX move, retains historical v4 decoding, and records identity-bound receipts discoverable as `<save>/journal.receipts.<txn_id>.<volume>.<file_id_high>.<file_id_low>` after control-file cleanup;",
+      "text": "Journal v5 binds undo, publication and quarantine identities before either POSIX move, retains historical v4 decoding, and records identity-bound receipts discoverable as `<save>/journal.receipts.<txn_id>.<volume>.<file_id_high>.<file_id_low>` after control-file cleanup;"
     },
     {
       "id": "indexed.persistence.012",
@@ -5261,6 +5261,42 @@
       "source": "docs/active-regions.md#historical-ambient-hash-portability-investigation",
       "text": "Here “afterwards” refers to the investigation: both fixes were included in the ledger merge.",
       "quote": "Here “afterwards” refers to the investigation: both fixes were included in the ledger merge."
+    },
+    {
+      "id": "indexed.persistence.022",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Receipt phases record namespace completion, a later successful same-volume NTFS file flush, and separate receipt retirement, while POSIX repeats directory fsync.",
+      "text": "Receipt phases record namespace completion, a later successful same-volume NTFS file flush, and separate receipt retirement, while POSIX repeats directory fsync."
+    },
+    {
+      "id": "indexed.persistence.023",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "On ReFS, FAT/exFAT, network and unknown volumes, receipts remain retained and durability remains unqualified.",
+      "text": "On ReFS, FAT/exFAT, network and unknown volumes, receipts remain retained and durability remains unqualified."
+    },
+    {
+      "id": "indexed.persistence.024",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Recovery verifies identities again, refuses removal of foreign and unknown artifacts, and re-deletes resurrected owned names before completing their receipts.",
+      "text": "Recovery verifies identities again, refuses removal of foreign and unknown artifacts, and re-deletes resurrected owned names before completing their receipts."
+    },
+    {
+      "id": "indexed.persistence.025",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Receipt streams retain the 16 MiB journal limit, reserve completion capacity before forward publication, and bound save-root discovery by the existing member ceiling.",
+      "text": "Receipt streams retain the 16 MiB journal limit, reserve completion capacity before forward publication, and bound save-root discovery by the existing member ceiling."
+    },
+    {
+      "id": "indexed.persistence.026",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "NTFS abrupt VM reset qualification remains pending in a later native slice.",
+      "text": "NTFS abrupt VM reset qualification remains pending in a later native slice."
+    },
+    {
+      "id": "indexed.persistence.027",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Ordinary service-level removal and artifact-registry cleanup completion remain pending.",
+      "text": "Ordinary service-level removal and artifact-registry cleanup completion remain pending."
     }
   ],
   "exclusions": [
