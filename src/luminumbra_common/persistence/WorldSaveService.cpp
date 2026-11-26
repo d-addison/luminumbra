@@ -7115,8 +7115,11 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
                                              const std::string& record,
                                              ArtifactIdentity& expected,
                                              std::vector<std::string>* errors,
-                                             std::size_t rollback_reserve) {
+                                             std::size_t rollback_reserve,
+                                             detail::NamespaceFlushObservation* observation) {
     const SaveOwnership ownership;
+    if (observation)
+        *observation = {};
     if (record.empty() || record.back() != '\n' || rollback_reserve > kMaxSnapshotIndexBytes ||
         record.size() > kMaxSnapshotIndexBytes - rollback_reserve) {
         AddError(errors, "invalid snapshot journal record");
@@ -7328,12 +7331,49 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
     if (ok)
         report("crash-record-body-flushed");
     ok = ok && write_bytes("\n", 1) && flush();
+    detail::NamespaceFlushObservation completed_flush{};
+    if (ok && observation) {
+        completed_flush.succeeded = true;
+#if defined(_WIN32)
+        // Both queries use the SAME verified handle as FlushFileBuffers above.
+        // A remote server can report NTFS, so require a local volume GUID too.
+        // The extended Win32 path bound includes its terminating UTF-16 null.
+        std::array<wchar_t, 32768> final_name{};
+        const auto name_length =
+            ::GetFinalPathNameByHandleW(file,
+                                        final_name.data(),
+                                        static_cast<DWORD>(final_name.size()),
+                                        FILE_NAME_NORMALIZED | VOLUME_NAME_GUID);
+        const bool local_volume =
+            name_length != 0 && name_length < final_name.size() &&
+            std::wstring_view(final_name.data(), name_length).starts_with(L"\\\\?\\Volume{");
+        // The filesystem name has its own fixed bound, independent of volume labels.
+        std::array<wchar_t, 64> filesystem_name{};
+        DWORD serial = 0;
+        if (local_volume &&
+            ::GetVolumeInformationByHandleW(file,
+                                            nullptr,
+                                            0,
+                                            &serial,
+                                            nullptr,
+                                            nullptr,
+                                            filesystem_name.data(),
+                                            static_cast<DWORD>(filesystem_name.size())) &&
+            serial == actual.front()) {
+            completed_flush.volume_known = true;
+            completed_flush.volume = serial;
+            completed_flush.ntfs = std::wstring_view(filesystem_name.data()) == L"NTFS";
+        }
+#endif
+    }
     const bool closed = close();
     if (!ok || !closed) {
         AddError(errors, "snapshot journal append failed or exceeded control byte limit");
         return false;
     }
     report_snapshot_step("crash-record-published", path);
+    if (observation)
+        *observation = completed_flush;
     return true;
 }
 

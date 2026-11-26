@@ -2484,6 +2484,41 @@ int main(int argc, char* argv[]) {
 
     render_pipeline_owner = std::make_unique<Luminumbra::Rendering::RenderPipeline>();
     auto& renderPipeline = *render_pipeline_owner;
+    // Arm before any world render can advance the far renderer, including loading.
+    std::unique_ptr<Measurement::FarBudgetMeasurement> budget_measurement;
+    if (!g_app.capture.render_benchmark_path.empty())
+        budget_measurement = std::make_unique<Measurement::FarBudgetMeasurement>(
+            Measurement::FarBudgetMeasurement::kMaxObservations);
+    std::optional<std::chrono::steady_clock::time_point> budget_origin;
+    std::optional<std::uint64_t> budget_timing_frame;
+    bool budget_storage_complete = true;
+    const auto begin_budget_frame = [&] {
+        if (!budget_measurement)
+            return std::chrono::steady_clock::time_point{};
+        const auto begin = std::chrono::steady_clock::now();
+        if (!budget_origin)
+            budget_origin = begin;
+        return begin;
+    };
+    const auto finish_budget_frame = [&](std::chrono::steady_clock::time_point begin) {
+        if (!budget_measurement || !budget_origin)
+            return;
+        const auto end = std::chrono::steady_clock::now();
+        auto observed =
+            Measurement::ProjectFarBudget(renderPipeline.far_world_diagnostic(),
+                                          !Luminumbra::Rendering::FarWorldReportSuppressed(
+                                              renderPipeline.far_world_reporting_state()));
+        if (observed.render_frame != renderPipeline.far_world_render_frame()) {
+            observed = {};
+            observed.render_frame = renderPipeline.far_world_render_frame();
+        }
+        if (!budget_measurement->record(
+                observed,
+                std::chrono::duration<double, std::milli>(end - *budget_origin).count(),
+                std::chrono::duration<double, std::milli>(end - begin).count(),
+                budget_timing_frame))
+            budget_storage_complete = false;
+    };
     renderPipeline.set_capture_diagnostics(path_options.diagnostics);
     renderPipeline.set_diagnostic_capture_armed(g_app.capture.render_benchmark_path.empty());
     //  isolation/layer mode: parse CLI strings -> IsolationConfig (default
@@ -3962,11 +3997,13 @@ int main(int argc, char* argv[]) {
                     break;
                 }
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                const auto runtime_budget_begin = begin_budget_frame();
                 renderPipeline.render_frame(gameSession->GetRegistry(),
                                             *gameSession->GetWorldSystem(),
                                             *g_camera,
                                             capture_delta_time,
                                             g_app.overlay.wireframe_mode);
+                finish_budget_frame(runtime_budget_begin);
                 runtime_boot_recorder.record_frame(capture_delta_time, renderPipeline);
                 LUMIN_PROFILE_WAIT("Client present wait", glfwSwapBuffers(window));
             }
@@ -4222,12 +4259,14 @@ int main(int argc, char* argv[]) {
             }
             {
                 Attribution::StageTimer render_timer(entry_presentation_work.render, true);
+                const auto entry_budget_begin = begin_budget_frame();
                 renderPipeline.render_frame(gameSession->GetRegistry(),
                                             *world,
                                             *g_camera,
                                             0.0f,
                                             g_app.overlay.wireframe_mode,
                                             Luminumbra::Rendering::UploadPresentation::Loading);
+                finish_budget_frame(entry_budget_begin);
             }
             Attribution::StageTimer observe_timer(entry_presentation_work.observe, true);
             readiness = ObserveWorldPresentation(*world,
@@ -4856,6 +4895,10 @@ int main(int argc, char* argv[]) {
             g_app.benchmark.measuredFrames < g_app.capture.render_benchmark_frames;
         const auto measured_frame_id = static_cast<std::uint64_t>(
             g_app.capture.render_benchmark_warmup + g_app.benchmark.measuredFrames);
+        budget_timing_frame.reset();
+        if (!benchmark_v3 && g_rb_active && upload_warmup_complete &&
+            g_app.benchmark.measuredFrames < g_app.capture.render_benchmark_frames)
+            budget_timing_frame = measured_frame_id;
         if (benchmark_v3 && !benchmark_world_checked && gameSession &&
             gameStateManager.GetCurrentState() == GameState::IN_GAME) {
             try {
@@ -4911,6 +4954,7 @@ int main(int argc, char* argv[]) {
             Luminumbra::Client::presentation_clock().set_capture_tick(
                 *frame_presentation.tick, static_cast<std::uint32_t>(traversal->tickRate));
         if (measuring_v3) {
+            budget_timing_frame = measured_frame_id;
             measured_samples->append(measured_frame_id);
             benchmark_queries->begin_frame(measured_frame_id);
         }
@@ -5908,11 +5952,13 @@ int main(int argc, char* argv[]) {
                                      g_playerController && g_playerController->photo_mode_active(),
                                      scatter_ms,
                                      foliage_ms);
+                const auto reload_budget_begin = begin_budget_frame();
                 renderPipeline.render_frame(gameSession->GetRegistry(),
                                             *world,
                                             *g_camera,
                                             0.0f,
                                             g_app.overlay.wireframe_mode);
+                finish_budget_frame(reload_budget_begin);
                 benchmark_queries->checkpoint_passes();
                 glfwPollEvents();
                 MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
@@ -6589,6 +6635,7 @@ int main(int argc, char* argv[]) {
                          .benchmark = !g_app.capture.render_benchmark_path.empty(),
                          .headless = hidden_window || g_windowState.mode == WindowMode::Headless,
                          .test_harness = sky_test_harness});
+                    const auto scene_budget_begin = begin_budget_frame();
                     renderPipeline.set_diagnostic_capture_armed(
                         !g_rb_active ||
                         g_app.benchmark.measuredFrames == g_app.capture.render_benchmark_frames);
@@ -6603,6 +6650,7 @@ int main(int argc, char* argv[]) {
                             : Luminumbra::Rendering::UploadPresentation::Streaming,
                         Luminumbra::Rendering::RenderPipeline::DiagnosticCapturePolicy::Complete,
                         sky_publication);
+                    finish_budget_frame(scene_budget_begin);
                     if (scenario_config.temporal_audit) {
                         // Fixed-site observation visits at most 25x25 columns;
                         // never scan the resident world store per temporal step.
@@ -8003,6 +8051,8 @@ int main(int argc, char* argv[]) {
                 // CPU submit dominates the GPU pass-timer sum.
                 j["bound"] = (cpu > gpu_sum * 1.1) ? "cpu" : "gpu_or_present";
                 Measurement::add_far_world_reporting(j, *measured_samples);
+                Measurement::add_far_budget_reporting(
+                    j, *budget_measurement, budget_storage_complete);
                 if (const auto* world = gameSession->GetWorldSystem())
                     j["world_content_identity"] =
                         std::to_string(Luminumbra::World::ComputeTerrainParamsHash(

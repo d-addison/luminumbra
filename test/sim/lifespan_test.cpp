@@ -3,7 +3,12 @@
 // Deterministic (id-ordered, integer ticks, no rng), gated by MortalComponent.
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
+#include <map>
+#include <span>
+#include <stdexcept>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -134,6 +139,96 @@ TEST(Lifespan, Deterministic) {
         return out;
     };
     EXPECT_EQ(run(), run());
+}
+
+TEST(Lifespan, RegionalElapsedStopsAtDeathAndMatchesSingleTicks) {
+    namespace W = ::Luminumbra::world;
+    namespace A = luminumbra::ai;
+    for (const std::uint32_t steps : {0u, 1u, 8u, 36000u, 36001u, 65536u}) {
+        SCOPED_TRACE(steps);
+        entt::registry actual, reference;
+        auto seed = [](entt::registry& registry) {
+            const std::array entities{spawnMortal(registry, 5),
+                                      spawnMortal(registry, 0xFFFFFFFFu, 0xFFFFFFFDu),
+                                      spawnMortal(registry, 0xFFFFFFFFu, 0xFFFFFFFFu),
+                                      spawnMortal(registry, 20, 3),
+                                      spawnMortal(registry, 0),
+                                      spawnMortalCreature(registry, 1000000, 1.0f),
+                                      spawnMortalCreature(registry, 1000000, 0.5f),
+                                      spawnMortalCreature(registry, 1000000, 1.0f)};
+            registry.get<Comp::MortalComponent>(entities[3]).dead = 1;
+            for (std::size_t index = 0; index < 5; ++index)
+                registry.emplace<Comp::PlantRegionComponent>(entities[index]);
+            for (std::size_t index = 5; index < entities.size(); ++index)
+                registry.emplace<Comp::TransformComponent>(entities[index]).position.x =
+                    index == 7 ? 512.0f : 0.0f;
+            return entities;
+        };
+        const auto entities = seed(actual);
+        const auto expected = seed(reference);
+        const std::array<W::RegionKey, 1> due{{{0, 0}}};
+        const std::map<W::RegionKey, std::uint32_t> windows{{{0, 0}, steps}};
+        const W::RegionConsumerGate gate(actual, due, W::RegionElapsedTicks(windows));
+        const W::RegionConsumerGate single(reference, due);
+        A::CreatureTickAdmission captured, reference_capture;
+        captured.Capture(actual, gate);
+        reference_capture.Capture(reference, single);
+        actual.get<Comp::TransformComponent>(entities[6]).position.x = 512;
+        actual.get<Comp::TransformComponent>(entities[7]).position.x = 0;
+        reference.get<Comp::TransformComponent>(expected[6]).position.x = 512;
+        reference.get<Comp::TransformComponent>(expected[7]).position.x = 0;
+        const auto stats = RunLifespanOnTick<true>(actual, 65536, gate, &captured);
+        int deaths = 0;
+        for (std::uint32_t step = 0; step < steps; ++step)
+            deaths +=
+                RunLifespanOnTick(reference, 65537 - steps + step, single, &reference_capture).died;
+        EXPECT_EQ(stats.died, deaths);
+        EXPECT_LE(gate.owner_visits(), 40u);
+        for (std::size_t index = 0; index < entities.size(); ++index) {
+            const auto& got = actual.get<Comp::MortalComponent>(entities[index]);
+            const auto& want = reference.get<Comp::MortalComponent>(expected[index]);
+            EXPECT_EQ(got.age_ticks, want.age_ticks);
+            EXPECT_EQ(got.dead, want.dead);
+            if (index >= 5) {
+                EXPECT_EQ(actual.get<Comp::CreatureComponent>(entities[index]).eaten,
+                          reference.get<Comp::CreatureComponent>(expected[index]).eaten);
+            }
+        }
+        if (steps >= 8) {
+            EXPECT_EQ(RunLifespanOnTick<true>(actual, 65536, gate, &captured).died, 0);
+        }
+        EXPECT_EQ(actual.get<Comp::MortalComponent>(entities[7]).age_ticks, 0u);
+    }
+}
+
+TEST(Lifespan, RegionalElapsedNewbornAndReusedHandleHaveOnlyCurrentTick) {
+    namespace W = ::Luminumbra::world;
+    entt::registry registry;
+    const auto original = spawnMortalCreature(registry, 1000, 0.5f);
+    registry.emplace<Comp::TransformComponent>(original);
+    const std::array<W::RegionKey, 1> due{{{0, 0}}};
+    const std::map<W::RegionKey, std::uint32_t> windows{{{0, 0}, 8}};
+    const W::RegionConsumerGate gate(registry, due, W::RegionElapsedTicks(windows));
+    luminumbra::ai::CreatureTickAdmission admission;
+    admission.Capture(registry, gate);
+    registry.destroy(original);
+    const auto reused = spawnMortalCreature(registry, 1000, 0.5f);
+    const auto newborn = spawnMortalCreature(registry, 1000, 0.5f);
+    RunLifespanOnTick<true>(registry, 8, gate, &admission);
+    EXPECT_EQ(registry.get<Comp::MortalComponent>(reused).age_ticks, 1u);
+    EXPECT_EQ(registry.get<Comp::MortalComponent>(newborn).age_ticks, 1u);
+    // Without a capture, an admitted creature uses its due-time owner window.
+    entt::registry uncaptured;
+    const auto creature = spawnMortalCreature(uncaptured, 1000, 0.5f);
+    uncaptured.emplace<Comp::TransformComponent>(creature);
+    const W::RegionConsumerGate current(uncaptured, due, W::RegionElapsedTicks(windows));
+    RunLifespanOnTick<true>(uncaptured, 8, current);
+    EXPECT_EQ(uncaptured.get<Comp::MortalComponent>(creature).age_ticks, 8u);
+    // A default gate remains a single tick even on the explicit elapsed entry.
+    RunLifespanOnTick<true>(uncaptured);
+    EXPECT_EQ(uncaptured.get<Comp::MortalComponent>(creature).age_ticks, 9u);
+    entt::registry empty;
+    EXPECT_EQ(RunLifespanOnTick<true>(empty).aged, 0);
 }
 
 } // namespace

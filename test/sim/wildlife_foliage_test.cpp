@@ -6,7 +6,12 @@
 // canonical NetworkStateHash baseline stays byte-identical.
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
+#include <map>
+#include <span>
+#include <stdexcept>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -252,6 +257,116 @@ TEST(WildlifeFoliage, SystemDeterministicRunEqualsReplay) {
         return trail;
     };
     EXPECT_EQ(run(), run());
+}
+
+TEST(WildlifeFoliage, RegionalElapsedPreservesBiomassAndFrozenTargets) {
+    namespace W = ::Luminumbra::world;
+    namespace A = luminumbra::ai;
+    for (const std::uint32_t steps : {0u, 1u, 8u, 36000u, 36001u, 65536u}) {
+        SCOPED_TRACE(steps);
+        entt::registry actual, reference;
+        auto seed = [](entt::registry& registry) {
+            const std::array entities{
+                spawnPlant(registry, 512, 0, 0.23f), // grazed after captured-owner movement
+                spawnPlant(registry, 512, 0, 0.71f), // frozen target beside active grazer
+                spawnPlant(registry, 0, 0, 0.17f),   // frozen grazer cannot trample it
+                spawnPlant(registry, 512, 0, 0.31f), // multiple plants feed together
+                spawnCreature(registry, 0, 0, false, false, 0.93f),
+                spawnCreature(registry, 512, 0, false, false, 0.83f),
+                spawnCreature(registry, 512, 0, true),         // predators never graze
+                spawnCreature(registry, 512, 0, false, true)}; // carcasses never graze
+            for (std::size_t index = 0; index < 4; ++index)
+                registry.emplace<Comp::PlantRegionComponent>(entities[index]).owner_x =
+                    index == 1 ? 1 : 0;
+            return entities;
+        };
+        const auto entities = seed(actual);
+        const auto expected = seed(reference);
+        const std::array<W::RegionKey, 1> due{{{0, 0}}};
+        const std::map<W::RegionKey, std::uint32_t> windows{{{0, 0}, steps}};
+        const W::RegionConsumerGate gate(actual, due, W::RegionElapsedTicks(windows));
+        const W::RegionConsumerGate single(reference, due);
+        A::CreatureTickAdmission captured, reference_capture;
+        captured.Capture(actual, gate);
+        reference_capture.Capture(reference, single);
+        actual.get<Comp::TransformComponent>(entities[4]).position.x = 512;
+        actual.get<Comp::TransformComponent>(entities[5]).position.x = 0;
+        reference.get<Comp::TransformComponent>(expected[4]).position.x = 512;
+        reference.get<Comp::TransformComponent>(expected[5]).position.x = 0;
+        constexpr std::uint64_t tick = 0x100000003ull; // exercise 32-bit stamp wrap
+        const auto stats = RunWildlifeFoliageOnTick<true>(actual, tick, {}, gate, &captured);
+        for (std::uint32_t step = 0; step < steps; ++step)
+            RunWildlifeFoliageOnTick(
+                reference, tick - steps + step + 1, {}, single, &reference_capture);
+        EXPECT_LE(gate.owner_visits(), 40u); // no gate lookups in the substep loop
+        EXPECT_EQ(stats.plants, steps == 0 ? 0 : 3);
+        for (std::size_t index = 0; index < 4; ++index) {
+            const auto& got = actual.get<Comp::GrazeableComponent>(entities[index]);
+            const auto& want = reference.get<Comp::GrazeableComponent>(expected[index]);
+            EXPECT_EQ(got.biomass, want.biomass); // exact float, not an epsilon comparison
+            EXPECT_EQ(got.last_grazed_tick, want.last_grazed_tick);
+        }
+        EXPECT_EQ(actual.get<Comp::GrazeableComponent>(entities[1]).biomass, 0.71f);
+        for (std::size_t index = 4; index < entities.size(); ++index)
+            EXPECT_EQ(actual.get<Comp::CreatureComponent>(entities[index]).hunger,
+                      reference.get<Comp::CreatureComponent>(expected[index]).hunger);
+    }
+}
+
+TEST(WildlifeFoliage, RegionalElapsedPairsOnlyOverlappingWindowsAndNewbornCurrentTick) {
+    namespace W = ::Luminumbra::world;
+    namespace A = luminumbra::ai;
+    for (const bool capture : {false, true}) {
+        entt::registry registry;
+        const auto plant = spawnPlant(registry, 0, 0, 0.4f);
+        const auto grazer = spawnCreature(registry, 0, 0);
+        registry.emplace<Comp::PlantRegionComponent>(grazer).owner_x = 1;
+        const std::array<W::RegionKey, 2> due{{{0, 0}, {1, 0}}};
+        const std::map<W::RegionKey, std::uint32_t> windows{{{0, 0}, 8}, {{1, 0}, 2}};
+        const W::RegionConsumerGate gate(registry, due, W::RegionElapsedTicks(windows));
+        A::CreatureTickAdmission admission;
+        if (capture)
+            admission.Capture(registry, gate);
+        const auto newborn = capture ? spawnCreature(registry, 0, 0) : entt::null;
+        float biomass = 0.4f;
+        for (int step = 0; step < 6; ++step)
+            biomass = A::clampBiomass(biomass + A::kRegrowPerTick);
+        biomass = A::clampBiomass(biomass - A::kGrazePerCreature);
+        biomass = A::clampBiomass(biomass - A::kGrazePerCreature * (capture ? 2.0f : 1.0f));
+        RunWildlifeFoliageOnTick<true>(registry, 8, {}, gate, capture ? &admission : nullptr);
+        EXPECT_EQ(registry.get<Comp::GrazeableComponent>(plant).biomass, biomass);
+        EXPECT_EQ(registry.get<Comp::GrazeableComponent>(plant).last_grazed_tick, 8u);
+        float hunger = 0.5f;
+        hunger -= A::kFeedPerGraze;
+        hunger -= A::kFeedPerGraze;
+        EXPECT_EQ(registry.get<Comp::CreatureComponent>(grazer).hunger, hunger);
+        if (capture) {
+            EXPECT_EQ(registry.get<Comp::CreatureComponent>(newborn).hunger,
+                      0.5f - A::kFeedPerGraze);
+        }
+    }
+}
+
+TEST(WildlifeFoliage, RegionalElapsedRefusesOversizedPlantAndCapturedGrazerWindows) {
+    namespace W = ::Luminumbra::world;
+    for (const bool invalid_grazer : {false, true}) {
+        entt::registry registry;
+        const auto plant = spawnPlant(registry, 0, 0, 0.7f);
+        const auto grazer = spawnCreature(registry, 0, 0);
+        registry.emplace<Comp::PlantRegionComponent>(invalid_grazer ? grazer : plant).owner_x = 1;
+        const std::array<W::RegionKey, 2> due{{{0, 0}, {1, 0}}};
+        const std::map<W::RegionKey, std::uint32_t> windows{{{0, 0}, 8}, {{1, 0}, 65537}};
+        const W::RegionConsumerGate gate(registry, due, W::RegionElapsedTicks(windows));
+        luminumbra::ai::CreatureTickAdmission admission;
+        admission.Capture(registry, gate);
+        EXPECT_THROW(RunWildlifeFoliageOnTick<true>(registry, 70000, {}, gate, &admission),
+                     std::invalid_argument);
+        EXPECT_EQ(registry.get<Comp::GrazeableComponent>(plant).biomass, 0.7f);
+        EXPECT_EQ(registry.get<Comp::GrazeableComponent>(plant).last_grazed_tick, 0u);
+        EXPECT_EQ(registry.get<Comp::CreatureComponent>(grazer).hunger, 0.5f);
+    }
+    entt::registry empty;
+    EXPECT_EQ(RunWildlifeFoliageOnTick<true>(empty, 1).plants, 0);
 }
 
 } // namespace

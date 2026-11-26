@@ -300,6 +300,7 @@ add_executable(common_tests
     common/FarLodStore_test.cpp
     common/FarVolumeWorld_test.cpp
     common/FarWorldAuthorityProducer_test.cpp
+    common/FarWorldCapturePlan_test.cpp
     common/FarFrozenObservation_test.cpp
     common/FarVolumeRuntime_test.cpp
     common/FarVolumeTierMemory_test.cpp
@@ -368,6 +369,7 @@ add_executable(common_tests
     common/WorldDurableResidency_test.cpp
     common/WaterDeterminism_test.cpp
     common/RegionalWater_test.cpp
+    common/RegionalWaterCadence_test.cpp
     common/WaterSeedInputs_test.cpp
     common/PlayerAvatar_test.cpp
     common/ReplicationProtocol_test.cpp
@@ -2629,6 +2631,9 @@ set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tool
 add_test(NAME RegionalAdmissionReportContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_regional_admission_report.py")
 set_tests_properties(RegionalAdmissionReportContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
+add_test(NAME DeferredStackEvidenceContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_deferred_stack.py")
+set_tests_properties(DeferredStackEvidenceContract PROPERTIES LABELS "perf;tools" TIMEOUT 30)
 add_test(NAME SimBudgetNeutralityContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py"
         SimBudgetNeutralityTests)

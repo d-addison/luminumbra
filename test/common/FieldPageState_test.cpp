@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "luminumbra_common/core/DeterministicRng.h"
 #include "luminumbra_common/fields/FieldPageState.h"
 
 #include <array>
@@ -349,6 +350,30 @@ TEST(FieldPageStateTest, SeedValueGoldensAreStable) {
     EXPECT_EQ(FieldPageState::seed_value(1337, 0, 0, 0, 0), 7333);
     EXPECT_EQ(FieldPageState::seed_value(1337, 4, -1, 5, 3), 39276);
     EXPECT_EQ(FieldPageState::seed_value(4294967295ULL, 2, 699050, -699051, 123456789ULL), 29741);
+}
+
+TEST(FieldPageStateTest, RegionalSeedStreamsKeepExistingValues) {
+    EXPECT_EQ(FieldPageState::kSeedOffset, 39u);
+    EXPECT_EQ(FieldPageState::kWeatherSeedOffset, 40u);
+    // Naming the weather stream leaves the existing ambient seed results intact.
+    EXPECT_EQ(FieldPageState::seed_value(1337, 0, 0, 0, 0), 7333);
+    EXPECT_EQ(FieldPageState::seed_value(1337, 4, -1, 5, 3), 39276);
+    EXPECT_EQ(FieldPageState::seed_value(4294967295ULL, 2, 699050, -699051, 123456789ULL), 29741);
+}
+
+TEST(FieldPageStateTest, WeatherSeedDomainsRemainDistinct) {
+    EXPECT_EQ(FieldPageState::kWeatherSpawnDomain, 0x535041574e000000ull);
+    EXPECT_EQ(FieldPageState::kWeatherStrikeDomain, 0x535452494b455300ull);
+    EXPECT_NE(FieldPageState::kWeatherSpawnDomain, FieldPageState::kWeatherStrikeDomain);
+    // Domain separation also holds at unsigned seed-addition wraparound.
+    for (const std::uint64_t world_seed :
+         {std::uint64_t{0}, kSeed, std::numeric_limits<std::uint64_t>::max()}) {
+        const auto weather_seed = world_seed + FieldPageState::kWeatherSeedOffset;
+        EXPECT_NE(luminumbra::core::DeterministicRng::mix(weather_seed ^
+                                                          FieldPageState::kWeatherSpawnDomain),
+                  luminumbra::core::DeterministicRng::mix(weather_seed ^
+                                                          FieldPageState::kWeatherStrikeDomain));
+    }
 }
 
 TEST(FieldPageStateTest, SeedValueIsDeterministicAndSensitiveToEachInput) {

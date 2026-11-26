@@ -6,6 +6,7 @@
 #include "luminumbra_client/app/RenderMeasurement.h"
 #include "luminumbra_client/core/IsolationConfig.h"
 #include "luminumbra_client/rendering/FarVolumeResidency.h"
+#include "luminumbra_client/rendering/FarWorldBudgetDisplay.h"
 #include "luminumbra_client/rendering/FarWorldDiagnostics.h"
 #include "luminumbra_client/rendering/FarWorldHandoffDiagnostics.h"
 #include "luminumbra_client/rendering/FarWorldSelection.h"
@@ -36,6 +37,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <tuple>
 #include <type_traits>
 #include <vector>
 
@@ -43,6 +45,150 @@ namespace {
 using namespace Luminumbra::Rendering;
 using namespace Luminumbra::World;
 static_assert(std::is_trivially_copyable_v<FarWorldDiagnosticSnapshot>);
+static_assert(std::is_trivially_copyable_v<FarWorldBudgetDisplay>);
+
+TEST(FarWorldBudgetDisplay, ProjectsEveryTierWithoutChangingCounters) {
+    auto snapshot = std::make_unique<FarWorldDiagnosticSnapshot>();
+    snapshot->captured = snapshot->advanced = true;
+    snapshot->selection.effective = FarWorldMode::Ladder;
+    for (std::size_t i = 0; i < snapshot->tiers.size(); ++i) {
+        const auto count = i * 100;
+        const auto bytes = static_cast<std::uint64_t>(i) * 1000;
+        snapshot->tiers[i] = {.resident = {.wanted = count + 1,
+                                           .pending = count + 2,
+                                           .building = count + 3,
+                                           .ready = count + 4,
+                                           .settled = count + 5,
+                                           .request_rejected = count + 6,
+                                           .budget_evicted = count + 7,
+                                           .uploaded_pairs = count + 8,
+                                           .empty_pairs = count + 9,
+                                           .covering = count + 10,
+                                           .ready_cpu_bytes = bytes + 11,
+                                           .retained_gpu_bytes = bytes + 12,
+                                           // Deliberate sample skew: total must not be recomputed.
+                                           .memory = {.limit = bytes + 1000,
+                                                      .bytes_cpu = bytes + 20,
+                                                      .bytes_gpu = bytes + 30,
+                                                      .bytes_total = bytes + 99,
+                                                      .peak_total = bytes + 120,
+                                                      .admission_refusals = bytes + 4},
+                                           .water_known_dry_tiles = count + 13,
+                                           .water_wet_tiles = count + 14,
+                                           .retained_water_indices = bytes + 15,
+                                           .submitted_water_indices = bytes + 16},
+                              .evicted_range = bytes + 17,
+                              .evicted_budget = bytes + 18,
+                              .stale_rebuilds = bytes + 19,
+                              .draws = count + 20,
+                              .indices = count + 21,
+                              .draw_refusals = count + 22};
+        snapshot->upload.tiers[i] = {.dispatched = count + 7,
+                                     .completed = count + 5,
+                                     .uploaded = count + 2,
+                                     .rejected = count + 3,
+                                     .evicted = count + 1,
+                                     .build_attempts = count + 11,
+                                     .upload_attempts = count + 4,
+                                     .upload_bytes = bytes + 900,
+                                     .successful_upload_bytes = bytes + 800};
+    }
+    // Values near the integer limit must also survive without summing samples.
+    auto& memory = snapshot->tiers.back().resident.memory;
+    memory.limit = memory.peak_total = std::numeric_limits<std::uint64_t>::max();
+    memory.bytes_cpu = memory.limit - 1;
+    memory.bytes_gpu = memory.limit - 2;
+    memory.bytes_total = memory.limit - 3;
+    const auto expected_work = snapshot->upload.tiers;
+    const auto work_counters = [](const FarVolumeTierWork& work) {
+        return std::tie(work.dispatched,
+                        work.completed,
+                        work.uploaded,
+                        work.rejected,
+                        work.evicted,
+                        work.build_attempts,
+                        work.upload_attempts,
+                        work.upload_bytes,
+                        work.successful_upload_bytes);
+    };
+    auto projected = std::make_unique<FarWorldDiagnosticSnapshot>();
+    for (const auto authority : {FarWorldAuthorityKind::Fixture, FarWorldAuthorityKind::Session}) {
+        snapshot->authority_kind = authority;
+        for (const bool complete : {false, true}) {
+            snapshot->complete = complete;
+            const auto before = FarWorldDiagnosticJson(*snapshot);
+            for (int observation = 0; observation < 2; ++observation) {
+                const auto display = ProjectFarWorldBudgetDisplay(*snapshot);
+                EXPECT_EQ(display.size(), kFarTierCount);
+                for (std::size_t i = 0; i < display.size(); ++i) {
+                    SCOPED_TRACE(i);
+                    ASSERT_TRUE(display[i].diagnostic);
+                    ASSERT_TRUE(display[i].work);
+                    projected->tiers[i] = *display[i].diagnostic;
+                    EXPECT_EQ(work_counters(*display[i].work), work_counters(expected_work[i]));
+                    EXPECT_EQ(work_counters(snapshot->upload.tiers[i]),
+                              work_counters(expected_work[i]));
+                }
+                EXPECT_EQ(FarWorldDiagnosticJson(*projected)["tiers"], before["tiers"]);
+                EXPECT_EQ(FarWorldDiagnosticJson(*snapshot), before);
+            }
+        }
+    }
+}
+
+TEST(FarWorldBudgetDisplay, UnavailableSnapshotDoesNotDisplayMeasuredZero) {
+    auto snapshot = std::make_unique<FarWorldDiagnosticSnapshot>();
+    for (const bool captured : {false, true}) {
+        snapshot->captured = captured;
+        for (const auto& row : ProjectFarWorldBudgetDisplay(*snapshot)) {
+            EXPECT_FALSE(row.diagnostic);
+            EXPECT_FALSE(row.work);
+        }
+    }
+    // Nonzero stale values cannot turn an uncaptured snapshot into a sample.
+    snapshot->captured = false;
+    snapshot->advanced = true;
+    snapshot->selection.effective = FarWorldMode::Ladder;
+    for (auto& tier : snapshot->tiers) {
+        tier.resident.memory.limit = 128;
+        tier.resident.memory.bytes_total = 64;
+    }
+    snapshot->upload.tiers.back().build_attempts = 42;
+    for (const auto& row : ProjectFarWorldBudgetDisplay(*snapshot)) {
+        EXPECT_FALSE(row.diagnostic);
+        EXPECT_FALSE(row.work);
+    }
+    snapshot->captured = true;
+    // A valid empty pool, including an unlimited one, really measures zero.
+    snapshot->tiers.front().resident.memory.bytes_total = 0;
+    snapshot->tiers.front().resident.memory.limit = std::numeric_limits<std::uint64_t>::max();
+    for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+        snapshot->selection.effective = mode;
+        for (const bool advanced : {false, true}) {
+            snapshot->advanced = advanced;
+            const auto display = ProjectFarWorldBudgetDisplay(*snapshot);
+            for (const auto& row : display) {
+                ASSERT_TRUE(row.diagnostic);
+                EXPECT_EQ(row.work.has_value(), advanced && mode == FarWorldMode::Ladder);
+            }
+            ASSERT_TRUE(display.front().diagnostic);
+            EXPECT_EQ(display.front().diagnostic->resident.memory.bytes_total, 0u);
+            if (advanced && mode == FarWorldMode::Ladder) {
+                ASSERT_TRUE(display.front().work);
+                EXPECT_EQ(display.front().work->build_attempts, 0u);
+                ASSERT_TRUE(display.back().work);
+                EXPECT_EQ(display.back().work->build_attempts, 42u);
+            }
+        }
+    }
+    // One unavailable tier must not hide other measured tiers or expose stale work.
+    snapshot->tiers.back().resident.memory.limit = 0;
+    const auto partial = ProjectFarWorldBudgetDisplay(*snapshot);
+    EXPECT_FALSE(partial.back().diagnostic);
+    EXPECT_FALSE(partial.back().work);
+    ASSERT_TRUE(partial.front().diagnostic);
+    ASSERT_TRUE(partial.front().work);
+}
 
 TEST(RenderBenchmarkOverrides, WorkloadAssignmentsDoNotConsumeSuccessorsOrHideOverrides) {
     for (const char* option : {"--render-benchmark",
@@ -477,6 +623,221 @@ private:
     FarWorldDiagnosticSnapshot snapshot;
     std::vector<FarTileKey> expected;
 };
+
+TEST(FarBudgetMeasurement, ColdFillIncludesWarmupAndRequiresCurrentCoverage) {
+    using namespace Luminumbra::Client::Measurement;
+    auto station = std::make_unique<Station>();
+    auto& snapshot = station->Snapshot();
+    FarBudgetMeasurement measurement(3);
+    FarBudgetObservation unavailable;
+    unavailable.render_frame = 1;
+    ASSERT_TRUE(measurement.record(unavailable, 10, 10));
+    snapshot.frame = 2;
+    snapshot.tiers[0].resident.memory = {1024, 10, 20, 30, 40, 2};
+    snapshot.upload.tiers[0] = {1, 2, 1, 1, 1, 1, 2, 100, 50};
+    const auto identity = snapshot.tiles[0].built;
+    const auto stale_tier = static_cast<std::size_t>(identity.key.tier - 1);
+    snapshot.tiles[0].built.content_hash = 1;
+    const auto stale = ProjectFarBudget(snapshot);
+    ASSERT_TRUE(stale.accepted);
+    EXPECT_FALSE(stale.current_coverage);
+    EXPECT_FALSE(stale.tiers[stale_tier].current_coverage);
+    ASSERT_TRUE(measurement.record(stale, 20, 5));
+    snapshot.tiles[0].built = identity;
+    snapshot.frame = 3;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 30, 5, 60));
+    const auto& completed = measurement.frames().back();
+    EXPECT_EQ(completed.origin_ms, 0);
+    EXPECT_EQ(completed.accepted_ms, 20);
+    EXPECT_EQ(completed.completed_ms, 30);
+    for (std::size_t i = 0; i < completed.tier_completed_ms.size(); ++i)
+        EXPECT_EQ(completed.tier_completed_ms[i], i == stale_tier ? 30 : 20);
+    nlohmann::json report;
+    add_far_budget_reporting(report, measurement, true);
+    const auto& block = report["far_budget"];
+    EXPECT_EQ(block["frames"].size(), 3u);
+    EXPECT_TRUE(block["frames"][0]["timing_frame"].is_null());
+    EXPECT_EQ(block["frames"][2]["timing_frame"], 60);
+    EXPECT_EQ(block["fills"][0]["status"], "complete");
+    EXPECT_EQ(block["frames"][1]["tiers"][0]["memory"]["total_bytes"], 30);
+    EXPECT_EQ(block["frames"][1]["tiers"][0]["work"]["upload_bytes"], 100);
+    EXPECT_EQ(block["frames"][1]["tiers"][0]["work"]["successful_upload_bytes"], 50);
+    // Diagnostic order does not change cohort identity.
+    const auto original = ProjectFarBudget(snapshot);
+    std::swap(snapshot.tiles[0], snapshot.tiles[snapshot.tile_count - 1]);
+    EXPECT_EQ(ProjectFarBudget(snapshot).target_cohort, original.target_cohort);
+    snapshot.complete = false;
+    EXPECT_FALSE(ProjectFarBudget(snapshot).accepted);
+    snapshot.complete = true;
+    snapshot.tile_count = snapshot.tiles.size() + 1;
+    EXPECT_FALSE(ProjectFarBudget(snapshot).accepted);
+}
+
+TEST(FarBudgetMeasurement, EpochChangeResetsFill) {
+    using namespace Luminumbra::Client::Measurement;
+    auto station = std::make_unique<Station>();
+    auto& snapshot = station->Snapshot();
+    FarBudgetMeasurement measurement(7);
+    snapshot.frame = 1;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 10, 10));
+    snapshot.frame = 2;
+    ++snapshot.world_epoch;
+    // New epoch with stale resources must open an incomplete epoch event.
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 20, 5));
+    EXPECT_EQ(measurement.frames().back().kind, FarFillKind::Epoch);
+    EXPECT_FALSE(measurement.frames().back().completed_ms);
+    for (std::size_t i = 0; i < snapshot.tile_count; ++i) {
+        snapshot.tiles[i].desired.world_epoch = snapshot.world_epoch;
+        snapshot.tiles[i].built = snapshot.tiles[i].desired;
+    }
+    snapshot.frame = 3;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 30, 5));
+    EXPECT_EQ(measurement.frames().back().origin_ms, 15);
+    EXPECT_EQ(measurement.frames().back().accepted_ms, 30);
+    EXPECT_EQ(measurement.frames().back().completed_ms, 30);
+    snapshot.frame = 4;
+    ++snapshot.bake_generation;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 40, 5));
+    EXPECT_EQ(measurement.frames().back().kind, FarFillKind::EditBake);
+    EXPECT_FALSE(measurement.frames().back().completed_ms);
+    snapshot.frame = 5;
+    for (std::size_t i = 0; i < snapshot.tile_count; ++i) {
+        snapshot.tiles[i].desired.bake_generation = snapshot.bake_generation;
+        snapshot.tiles[i].built = snapshot.tiles[i].desired;
+    }
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 50, 5));
+    snapshot.frame = 6;
+    snapshot.tiles[0].coverage.current = false;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 60, 5));
+    EXPECT_EQ(measurement.frames().back().kind, FarFillKind::Refill);
+    snapshot.frame = 7;
+    snapshot.tiles[0].coverage.current = true;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 70, 5));
+    nlohmann::json report;
+    add_far_budget_reporting(report, measurement, true);
+    EXPECT_EQ(report["far_budget"]["fills"].size(), 4u);
+    EXPECT_EQ(report["far_budget"]["fills"][0]["completed_ms"], 10);
+    EXPECT_EQ(report["far_budget"]["fills"][3]["completed_ms"], 70);
+}
+
+TEST(FarBudgetMeasurement, UnavailableFramesCannotHideEpochChanges) {
+    using namespace Luminumbra::Client::Measurement;
+    auto station = std::make_unique<Station>();
+    auto& snapshot = station->Snapshot();
+    FarBudgetMeasurement measurement(4);
+    snapshot.frame = 1;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 10, 10));
+    FarBudgetObservation unavailable;
+    unavailable.render_frame = 2;
+    ASSERT_TRUE(measurement.record(unavailable, 20, 5));
+    snapshot.frame = 3;
+    ++snapshot.world_epoch;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 30, 5));
+    EXPECT_EQ(measurement.frames().back().kind, FarFillKind::Epoch);
+    EXPECT_FALSE(measurement.frames().back().accepted_ms);
+    snapshot.frame = 4;
+    for (std::size_t i = 0; i < snapshot.tile_count; ++i) {
+        snapshot.tiles[i].desired.world_epoch = snapshot.world_epoch;
+        snapshot.tiles[i].built = snapshot.tiles[i].desired;
+    }
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 40, 5));
+    EXPECT_EQ(measurement.frames().back().event, 2u);
+    EXPECT_EQ(measurement.frames().back().origin_ms, 25);
+    EXPECT_EQ(measurement.frames().back().completed_ms, 40);
+}
+
+TEST(FarBudgetMeasurement, SessionNeedsCurrentServingTargetAndKnownIdentity) {
+    using namespace Luminumbra::Client::Measurement;
+    auto station = std::make_unique<Station>();
+    auto& snapshot = station->Snapshot();
+    snapshot.authority_kind = FarWorldAuthorityKind::Session;
+    snapshot.content_identity = 0;
+    snapshot.target_serial = 4;
+    snapshot.serving_serial = 3;
+    snapshot.latest_target_ready = true;
+    for (std::size_t i = 0; i < snapshot.tile_count; ++i)
+        snapshot.tiles[i].accepted_content_identity = snapshot.tiles[i].desired.content_hash;
+    const auto waiting = ProjectFarBudget(snapshot);
+    EXPECT_TRUE(waiting.accepted);
+    EXPECT_NE(waiting.content_identity, 0u);
+    EXPECT_FALSE(waiting.current_coverage);
+    snapshot.serving_serial = snapshot.target_serial;
+    EXPECT_TRUE(ProjectFarBudget(snapshot).current_coverage);
+    EXPECT_FALSE(ProjectFarBudget(snapshot, false).current_coverage);
+    snapshot.tiles[0].accepted_content_identity = 0;
+    EXPECT_FALSE(ProjectFarBudget(snapshot).accepted);
+    snapshot.tiles[0].accepted_content_identity = snapshot.tiles[0].desired.content_hash;
+    snapshot.target_serial = 0;
+    EXPECT_FALSE(ProjectFarBudget(snapshot).accepted);
+}
+
+TEST(FarBudgetMeasurement, FrameStorageRefusesOverflow) {
+    using namespace Luminumbra::Client::Measurement;
+    EXPECT_THROW((FarBudgetMeasurement{0}), std::invalid_argument);
+    EXPECT_THROW((FarBudgetMeasurement{FarBudgetMeasurement::kMaxObservations + 1}),
+                 std::invalid_argument);
+    EXPECT_THROW((FarBudgetMeasurement{std::numeric_limits<std::size_t>::max()}),
+                 std::invalid_argument);
+    FarBudgetMeasurement validation(4);
+    FarBudgetObservation invalid;
+    EXPECT_FALSE(validation.record(invalid, 10, 10));
+    invalid.render_frame = 2;
+    EXPECT_FALSE(validation.record(invalid, 10, 10));
+    invalid.render_frame = 1;
+    EXPECT_FALSE(validation.record(invalid, 10, 5));
+    ASSERT_TRUE(validation.record(invalid, 10, 10));
+    EXPECT_FALSE(validation.record(invalid, 20, 5));
+    invalid.render_frame = 3;
+    EXPECT_FALSE(validation.record(invalid, 20, 5));
+    invalid.render_frame = 2;
+    EXPECT_FALSE(validation.record(invalid, 9, 1));
+    EXPECT_FALSE(validation.record(invalid, 20, 15));
+    ASSERT_EQ(validation.frames().size(), 1u);
+    ASSERT_TRUE(validation.record(invalid, 20, 5));
+    FarBudgetMeasurement measurement(1);
+    FarBudgetObservation observation;
+    observation.render_frame = 1;
+    EXPECT_FALSE(measurement.record(observation, -1, 0));
+    EXPECT_FALSE(measurement.record(observation, 0, 1));
+    EXPECT_FALSE(measurement.record(observation, std::numeric_limits<double>::infinity(), 0));
+    EXPECT_TRUE(measurement.frames().empty());
+    ASSERT_TRUE(measurement.record(observation, 10, 10));
+    observation.render_frame = 2;
+    EXPECT_FALSE(measurement.record(observation, 20, 10));
+    ASSERT_EQ(measurement.frames().size(), 1u);
+    EXPECT_EQ(measurement.frames()[0].observed.render_frame, 1u);
+    nlohmann::json report;
+    add_far_budget_reporting(report, measurement, false);
+    EXPECT_EQ(report["far_budget"]["storage_complete"], false);
+    EXPECT_EQ(report["far_budget"]["fills"][0]["status"], "incomplete");
+}
+
+TEST(FarBudgetMeasurement, DeadlineEmptyCohortAndRefillRemainDistinct) {
+    using namespace Luminumbra::Client::Measurement;
+    auto station = std::make_unique<Station>();
+    auto& snapshot = station->Snapshot();
+    FarBudgetMeasurement measurement(4);
+    snapshot.frame = 1;
+    snapshot.tiles[0].coverage.current = false;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 90000, 90000));
+    EXPECT_FALSE(measurement.frames().back().timed_out);
+    snapshot.frame = 2;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 90001, 1));
+    EXPECT_TRUE(measurement.frames().back().timed_out);
+    snapshot.frame = 3;
+    snapshot.tiles[0].coverage.current = true;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 90002, 1));
+    EXPECT_FALSE(measurement.frames().back().completed_ms);
+    snapshot.frame = 4;
+    ++snapshot.tiles[0].desired.span_generation;
+    snapshot.tiles[0].built = snapshot.tiles[0].desired;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 90003, 1));
+    EXPECT_EQ(measurement.frames().back().kind, FarFillKind::Cohort);
+    EXPECT_EQ(measurement.frames().back().completed_ms, 90003);
+    EXPECT_FALSE(measurement.record(ProjectFarBudget(snapshot), 90004, 1));
+    snapshot.tile_count = 0;
+    EXPECT_FALSE(ProjectFarBudget(snapshot).accepted);
+}
 
 TEST(FarWorldDiagnostics, EmptyCoverageDoesNotRequireGpuStoresOrSubmission) {
     const Station station;

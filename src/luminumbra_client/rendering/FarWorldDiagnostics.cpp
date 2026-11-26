@@ -1,6 +1,8 @@
 #include "FarWorldDiagnostics.h"
 #include "FarWorldHandoffDiagnostics.h"
+#include "luminumbra_client/app/FarBudgetMeasurement.h"
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <nlohmann/json.hpp>
 
@@ -548,3 +550,106 @@ bool FarWorldStationReady(const FarWorldDiagnosticSnapshot& snapshot,
     return CheckFarWorldStation(snapshot, expected, seconds) == FarWorldStationRefusal::None;
 }
 } // namespace Luminumbra::Rendering
+
+namespace Luminumbra::Client::Measurement {
+FarBudgetObservation ProjectFarBudget(const Rendering::FarWorldDiagnosticSnapshot& snapshot,
+                                      bool submission_allowed) noexcept {
+    FarBudgetObservation result;
+    result.render_frame = snapshot.frame;
+    result.world_epoch = snapshot.world_epoch;
+    result.target_serial = snapshot.target_serial;
+    result.bake_generation = snapshot.bake_generation;
+    result.content_identity = snapshot.content_identity;
+    result.accepted = snapshot.captured && snapshot.complete && snapshot.world_epoch != 0 &&
+                      snapshot.tile_count != 0 && snapshot.tile_count <= snapshot.tiles.size() &&
+                      snapshot.source_failure.ok() &&
+                      (snapshot.authority_kind == Rendering::FarWorldAuthorityKind::Fixture ||
+                       snapshot.target_serial != 0);
+    const auto reporting = Rendering::FarWorldReportState(snapshot, submission_allowed);
+    result.current_coverage =
+        reporting.coverage_settled && !Rendering::FarWorldReportSuppressed(reporting);
+    const bool usable = snapshot.captured && snapshot.complete && snapshot.advanced &&
+                        snapshot.selection.effective == Rendering::FarWorldMode::Ladder &&
+                        !Rendering::FarWorldReportSuppressed(reporting) &&
+                        snapshot.ladder_water_available && !snapshot.upload.horizon_refused;
+    std::array<std::size_t, World::kFarTierCount> counts{};
+    for (std::size_t i = 0; i < result.tiers.size(); ++i) {
+        result.tiers[i].observation = snapshot.tiers[i];
+        result.tiers[i].work = snapshot.upload.tiers[i];
+        result.tiers[i].current_coverage = true;
+    }
+    // The diagnostic value view has at most 512 slots. No world/residency
+    // lookup, allocation, callback or additional snapshot is performed here.
+    std::uint64_t content = 0;
+    for (std::size_t i = 0; i < std::min(snapshot.tile_count, snapshot.tiles.size()); ++i) {
+        const auto& tile = snapshot.tiles[i];
+        const auto& identity = tile.desired;
+        if (identity.key.tier < 1 || identity.key.tier > result.tiers.size()) {
+            result.accepted = false;
+            continue;
+        }
+        const auto slot = static_cast<std::size_t>(identity.key.tier - 1);
+        ++counts[slot];
+        // Specified FNV-1a over little-endian uint64 words, XOR across tiles:
+        // diagnostic fingerprints are independent of visitor/ledger ordering.
+        std::uint64_t hash = 14695981039346656037ULL;
+        const auto fold = [&](std::uint64_t word) {
+            for (unsigned byte = 0; byte < 8; ++byte) {
+                hash ^= word & 255U;
+                hash *= 1099511628211ULL;
+                word >>= 8;
+            }
+        };
+        fold(identity.key.tier);
+        fold(static_cast<std::uint64_t>(identity.key.tx));
+        fold(static_cast<std::uint64_t>(identity.key.tz));
+        fold(identity.content_hash);
+        content ^= hash;
+        fold(identity.world_epoch);
+        fold(identity.bake_generation);
+        fold(identity.span_generation);
+        fold(identity.cave_policy);
+        fold(static_cast<std::uint64_t>(snapshot.numeric));
+        fold(tile.intent.extra_span.has_value());
+        if (tile.intent.extra_span) {
+            fold(std::bit_cast<std::uint32_t>(tile.intent.extra_span->min_y));
+            fold(std::bit_cast<std::uint32_t>(tile.intent.extra_span->max_y));
+        }
+        result.target_cohort ^= hash;
+        const bool binding_matches =
+            identity.world_epoch == snapshot.world_epoch &&
+            identity.bake_generation == snapshot.bake_generation && identity.content_hash != 0 &&
+            snapshot.bound_cave_policy &&
+            identity.cave_policy == static_cast<std::uint8_t>(*snapshot.bound_cave_policy) &&
+            (snapshot.authority_kind == Rendering::FarWorldAuthorityKind::Fixture
+                 ? identity.content_hash == snapshot.content_identity
+                 : identity.content_hash == tile.accepted_content_identity);
+        result.accepted = result.accepted && binding_matches;
+        result.tiers[slot].current_coverage = result.tiers[slot].current_coverage &&
+                                              binding_matches && tile.has_pair &&
+                                              tile.built == identity && tile.water_complete &&
+                                              World::IsFarTileCovering(tile.coverage);
+    }
+    if (!result.content_identity)
+        result.content_identity = content;
+    result.accepted = result.accepted && result.content_identity != 0 && result.target_cohort != 0;
+    for (std::size_t i = 0; i < result.tiers.size(); ++i) {
+        auto& tier = result.tiers[i];
+        const auto& resident = tier.observation.resident;
+        result.accepted = result.accepted && counts[i] == tier.observation.resident.wanted;
+        tier.current_coverage =
+            tier.current_coverage && usable && counts[i] != 0 && counts[i] == resident.wanted &&
+            counts[i] == resident.covering && counts[i] == resident.settled && !resident.pending &&
+            !resident.building && !resident.ready && !resident.request_rejected &&
+            !resident.budget_evicted && !tier.observation.draw_refusals;
+    }
+    for (const auto& tier : result.tiers)
+        result.current_coverage = result.current_coverage && tier.current_coverage;
+    if (!result.accepted) {
+        result.current_coverage = false;
+        for (auto& tier : result.tiers)
+            tier.current_coverage = false;
+    }
+    return result;
+}
+} // namespace Luminumbra::Client::Measurement
