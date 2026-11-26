@@ -5,7 +5,6 @@
 #include "core/LogDispatcherSink.h"
 #include "luminumbra_client/rendering/FarWorldHandoffDiagnostics.h"
 #include "luminumbra_client/rendering/FarWorldSessionController.h"
-#include "luminumbra_client/rendering/RenderPipeline.h"
 #include "world/WorldStreamingState.h"
 #include <array>
 #include <cmath>
