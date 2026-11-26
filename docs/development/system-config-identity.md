@@ -33,8 +33,8 @@ parameter emits its `SysParam` id as u8, then a scalar type tag and little-endia
 After the registry slots, v4 appends these fixed-width little-endian values without
 padding: finite hydrology (u8, 0 or 1), rain scale (i32, modulo-2^32 representation), region
 work limit (u64), hold ticks (u32), reduced cadence shift (u8) and authority-rules
-revision (u32, currently 5). All six values are included even when their associated feature is disabled. No float conversion loses
-adjacent integer values. The current defaults append `0119000000ffffffffffffffff1e0000000105000000`.
+revision (u32: 9 with active regions enabled, 8 otherwise). All six values are included even when their associated feature is disabled. No float conversion loses
+adjacent integer values. The enabled defaults append `0119000000ffffffffffffffff1e0000000109000000`.
 The explicit historical revision-3 encoder starts with `system-config:v3:` and ends with
 `0119000000ffffffffffffffff1e00000001`, without an appended revision integer.
 Next comes ASCII `calendar-epoch:v1:`, followed by five little-endian u32 values:
@@ -53,7 +53,8 @@ and reproduction integers would lose adjacent values if converted to binary32. S
 zeros remain distinct. FNV-1a uses offset
 14695981039346656037 and prime 1099511628211, with unsigned 64-bit wraparound. The result
 is 16 lowercase hex digits emitted without locale formatting. Shipped defaults serialize
-to **339 bytes → `45664f7615d96904`** for revision 8.
+to **339 bytes → `bf48b15682a969bd`** for revision 9 with active regions enabled.
+The approved off profile retains revision 8 and **339 bytes → `bafe22eabc5fc385`**.
 The explicit legacy revision-3 encoder still yields **297 bytes → `60ab3c242d54ce89`**. The independent stdlib computation in
 `test/tools/test_system_config_identity.py` resolves JSON inputs through binary32 as
 SystemConfig does, applies effective fallback/clamping/count conversion, encodes with
@@ -123,7 +124,7 @@ Deliberate exclusions from the setter audit:
   locate content, and required-client-asset lists validate client files; neither is a
   simulation rule value. Worldgen content is bound separately by the preset identity below.
 
-The current encoder appends authority-rules revision 8 so admission can distinguish
+The current encoder selects authority-rules revision from the effective active-region gate so admission can distinguish
 compiled authority rules as well as configured values. It retains the resolved
 calendar that the admission identity already folds in. The shipping identity
 changed from `49f694fd70645bcc` to the revision-4 value `2f2a9405252345a8` when the revision
@@ -132,7 +133,13 @@ changed it to `35e233a89e8c87b1`. Revision 6 (region-gated irrigation, soil rege
 non-creature decomposition) changed it to `b439df88e7c3623a`. Revision 7 (durable authority
 restored on the first SHIELD update) changed it to `bf3da613768a50cb`. Revision 8
 (reproduction-born creatures die, decompose and leave the population) changes it again to
-`45664f7615d96904`. The revision-4 through revision-7 identities are no longer admitted. No world-state, terrain, water, save-format or replay checkpoint
+`45664f7615d96904`. The shared issue #136/#138 activation revision is 9, named
+`kRegionalActivationAuthorityRulesRevision`; issue #138 reuses this value.
+Enabled configurations select it, producing `bf48b15682a969bd` for shipping defaults.
+Off configurations keep revision 8 and their exact existing identity bytes.
+Replay boot capture uses the same effective revision selector. Enabled revision-8
+peers and replays are refused before advancement; off revision-8 recordings remain
+compatible. The revision-4 through revision-7 identities are no longer admitted. No world-state, terrain, water, save-format or replay checkpoint
 encoding changes in this identity step.
 
 The frozen current vectors in `SystemConfig_test.cpp` cover the complete 339-byte

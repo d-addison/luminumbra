@@ -1358,12 +1358,17 @@ class SimulationCollisionWiring(unittest.TestCase):
         source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
             encoding="utf-8")
         for name in ("bool PhysicsSystem::add_chunk_collision(",
+                     "bool PhysicsSystem::add_chunk_collision_impl(",
                      "void PhysicsSystem::remove_chunk_collision("):
             self.assertIn("if (simulation_collisions_enabled())", function(source, name))
+        self.assertIn("return add_chunk_collision_impl(chunk, restored_id, restored_heights, false);",
+                      function(source, "bool PhysicsSystem::add_chunk_collision(Chunk& chunk,"))
+        self.assertIn("return add_chunk_collision_impl(chunk, JPH::BodyID(), {}, true);",
+                      function(source, "bool PhysicsSystem::refresh_chunk_collision("))
         for name in ("void PhysicsSystem::update(", "void PhysicsSystem::update_avatars(",
                      "void PhysicsSystem::update_player("):
             self.assertIn("!simulation_collisions_ready()", function(source, name))
-        prepare = function(source, "bool PhysicsSystem::prepare_simulation_collisions(")
+        prepare = function(source, "bool PhysicsSystem::prepare_simulation_collisions_impl(")
         self.assertLess(prepare.index("sample_simulation_collision("),
                         prepare.index("m_body_interface->RemoveBody("))
         for whole_world_scan in ("snapshot_streamed_chunks", "m_chunk_bodies", "GetBodies(",
@@ -1715,7 +1720,7 @@ class SimulationCollisionWiring(unittest.TestCase):
     def test_overflow_horizons_keep_existing_sessions_running(self):
         source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
             encoding="utf-8")
-        prepare = function(source, "bool PhysicsSystem::prepare_simulation_collisions(")
+        prepare = function(source, "bool PhysicsSystem::prepare_simulation_collisions_impl(")
         existing = function(prepare, "const auto include_existing =")
         self.assertIn("!SimulationHorizon::valid(position)", existing)
         self.assertIn("(void)horizon.add(position);", existing)
