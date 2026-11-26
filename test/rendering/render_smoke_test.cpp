@@ -12608,14 +12608,21 @@ SolidScenarioColour(int width, int height, const std::array<unsigned char, 3>& c
 
 TEST(ScenarioGeometryMask, LodVoidBucketsAndSeamClustersUseCoverageForEveryColour) {
     using namespace Luminumbra::Client::ScenarioHarness;
-    constexpr int width = 128;
-    constexpr int height = 128;
+    // The cluster minimum is the 12-pixel budget scaled to the pinned capture
+    // (80 px at 3840 x 1600), so the frame must be large enough for a seam that
+    // exceeds it while staying below the ratio budgets.
+    constexpr int width = 256;
+    constexpr int height = 256;
+    const int min_cluster = static_cast<int>(kMinNearBlackClusterPx);
+    const int seam_px = min_cluster + 20;
+    ASSERT_LT(seam_px, height - height / 4);
+    const auto seam_count = static_cast<std::uint64_t>(seam_px);
     const auto geometry =
         BuildSkyPixelMask(std::vector<float>(width * height, 0.5f), width, height);
     std::vector<float> depth(width * height, 0.5f);
-    // One connected 64-pixel seam, below every area budget but above the
-    // unchanged 12-pixel cluster minimum. Upper sky and edge sky stay outside ROI.
-    for (int row = 0; row < 64; ++row) {
+    // One connected seam, below every area budget but above the unchanged
+    // cluster minimum. Upper sky and edge sky stay outside ROI.
+    for (int row = 0; row < seam_px; ++row) {
         depth[static_cast<std::size_t>(row) * width + width / 2] = 0.0f;
     }
     const auto seam = BuildSkyPixelMask(depth, width, height);
@@ -12640,11 +12647,11 @@ TEST(ScenarioGeometryMask, LodVoidBucketsAndSeamClustersUseCoverageForEveryColou
             AnalyzeFarLodBoundaryBand(rgb, seam, width, height, 4, height - 1).void_cluster_count,
             1);
         const auto cracked = AnalyzeLodHolePixels(rgb, seam, width, height);
-        EXPECT_EQ(cracked.dark_void_pixels, 64);
-        EXPECT_EQ(cracked.near_black_pixels, 64);
-        EXPECT_EQ(cracked.background_blue_pixels, 64);
+        EXPECT_EQ(cracked.dark_void_pixels, seam_count);
+        EXPECT_EQ(cracked.near_black_pixels, seam_count);
+        EXPECT_EQ(cracked.background_blue_pixels, seam_count);
         EXPECT_LT(cracked.near_black_ratio, 0.0065);
-        EXPECT_EQ(cracked.largest_near_black_cluster_px, 64);
+        EXPECT_EQ(cracked.largest_near_black_cluster_px, seam_count);
         EXPECT_EQ(cracked.near_black_cluster_count, 1);
         const auto absent = AnalyzeLodHolePixels(rgb, missing_ground, width, height);
         EXPECT_GT(absent.dark_void_ratio, 0.020);
@@ -12653,7 +12660,7 @@ TEST(ScenarioGeometryMask, LodVoidBucketsAndSeamClustersUseCoverageForEveryColou
     }
     // Preserve 8-connectivity and the cluster size boundary, including ROI clipping.
     std::fill(depth.begin(), depth.end(), 0.5f);
-    for (int row = 0; row < 12; ++row) {
+    for (int row = 0; row < min_cluster; ++row) {
         depth[static_cast<std::size_t>(row) * width + 32u + static_cast<std::size_t>(row)] = 0.0f;
     }
     depth[static_cast<std::size_t>(height - 1) * width + 32] = 0.0f;
@@ -12661,12 +12668,13 @@ TEST(ScenarioGeometryMask, LodVoidBucketsAndSeamClustersUseCoverageForEveryColou
     const auto rgb = SolidScenarioColour(width, height, {220, 160, 80});
     const auto diagonal =
         AnalyzeLodHolePixels(rgb, BuildSkyPixelMask(depth, width, height), width, height);
-    EXPECT_EQ(diagonal.dark_void_pixels, 12);
+    EXPECT_EQ(diagonal.dark_void_pixels, kMinNearBlackClusterPx);
     EXPECT_EQ(diagonal.near_black_cluster_count, 1);
-    depth[11 * width + 43] = 0.5f;
+    const int last = min_cluster - 1;
+    depth[static_cast<std::size_t>(last) * width + 32u + static_cast<std::size_t>(last)] = 0.5f;
     const auto speck =
         AnalyzeLodHolePixels(rgb, BuildSkyPixelMask(depth, width, height), width, height);
-    EXPECT_EQ(speck.largest_near_black_cluster_px, 11);
+    EXPECT_EQ(speck.largest_near_black_cluster_px, kMinNearBlackClusterPx - 1u);
     EXPECT_EQ(speck.near_black_cluster_count, 0);
 }
 
