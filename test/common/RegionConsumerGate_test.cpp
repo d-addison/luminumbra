@@ -4976,14 +4976,47 @@ TEST(Decomposition, RegionalElapsedMatchesSingleTicksAndReleasesExactlyOnce) {
         const RegionConsumerGate finish_gate(
             registry, finish_due, W::RegionElapsedTicks(finish_windows));
         admission.Capture(registry, finish_gate);
-        const auto finish =
+        // Recapture uses current ownership: the moved creature and the newborn are
+        // now frozen outside region 0, regardless of the size of its finish window.
+        EXPECT_FALSE(admission.Allows(creature));
+        EXPECT_FALSE(admission.Allows(entities.back()));
+        const auto frozen_finish =
             AI::RunDecompositionOnTick(registry, 65537, &admission, finish_gate, nullptr, true);
-        EXPECT_EQ(stats.finished + finish.finished, 7);
-        EXPECT_EQ(stats.released_total + finish.released_total,
-                  remaining_release +
-                      reference.get<C::DecayComponent>(entities.back()).nutrient_released_milli);
-        const auto after =
+        EXPECT_EQ(frozen_finish.visited,
+                  entities.size() - static_cast<std::size_t>(stats.finished));
+        const auto& moved_reference = reference.get<C::DecayComponent>(creature);
+        const auto& newborn_reference = reference.get<C::DecayComponent>(entities.back());
+        EXPECT_EQ(stats.finished + frozen_finish.finished,
+                  6 + static_cast<int>(moved_reference.fully_decomposed));
+        EXPECT_EQ(stats.released_total + frozen_finish.released_total,
+                  remaining_release - 1000u + moved_reference.nutrient_released_milli +
+                      newborn_reference.nutrient_released_milli);
+        for (std::size_t index = 6; index < entities.size(); ++index) {
+            const auto& actual = registry.get<C::DecayComponent>(entities[index]);
+            const auto& expected = reference.get<C::DecayComponent>(entities[index]);
+            EXPECT_EQ(actual.decay_ticks, expected.decay_ticks);
+            EXPECT_EQ(actual.nutrient_released_milli, expected.nutrient_released_milli);
+            EXPECT_EQ(actual.fully_decomposed, expected.fully_decomposed);
+        }
+        // Readmit only the moved creature so all seven original corpses can finish.
+        registry.get<C::TransformComponent>(creature).position.x = 4;
+        admission.Capture(registry, finish_gate);
+        EXPECT_TRUE(admission.Allows(creature));
+        EXPECT_EQ(admission.ElapsedTicks(creature), std::numeric_limits<std::uint32_t>::max());
+        const auto finish =
             AI::RunDecompositionOnTick(registry, 65538, &admission, finish_gate, nullptr, true);
+        EXPECT_EQ(finish.visited,
+                  entities.size() - static_cast<std::size_t>(stats.finished) -
+                      static_cast<std::size_t>(frozen_finish.finished));
+        EXPECT_EQ(stats.finished + frozen_finish.finished + finish.finished, 7);
+        EXPECT_EQ(stats.released_total + frozen_finish.released_total + finish.released_total,
+                  remaining_release + newborn_reference.nutrient_released_milli);
+        EXPECT_EQ(registry.get<C::DecayComponent>(creature).decay_ticks, 7u);
+        EXPECT_EQ(registry.get<C::DecayComponent>(creature).nutrient_released_milli, 1000u);
+        EXPECT_EQ(registry.get<C::DecayComponent>(creature).fully_decomposed, 1u);
+        const auto after =
+            AI::RunDecompositionOnTick(registry, 65539, &admission, finish_gate, nullptr, true);
+        EXPECT_EQ(after.visited, 4u);
         EXPECT_EQ(after.finished, 0);
         EXPECT_EQ(after.released_total, 0u);
     }
