@@ -1556,7 +1556,10 @@ bool RollbackEntries(const fs::path& save_dir,
     for (auto it = document.entries.rbegin(); it != document.entries.rend(); ++it)
         if (it->path != kSnapshotIndexRelativePath)
             order.push_back(&*it);
-    for (const auto* entry : order) {
+    for (auto* entry : order) {
+        if (document.modern && !SaveTransaction::recovery_versions(
+                                   save_dir / entry->path, control, entry->live_versions, errors))
+            return false;
         ArtifactIdentity current{};
         bool missing = false;
         bool previous_bytes = false;
@@ -2521,10 +2524,16 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
                                         std::vector<std::string>* errors) {
     const WorldSaveService::SaveOwnership ownership;
     const detail::SnapshotWriteOwnership snapshot;
+    const auto previous_errors = errors ? errors->size() : 0;
+    const auto fail = [&] {
+        if (errors && errors->size() == previous_errors)
+            AddError(errors, "snapshot recovery refused without completing recorded ownership");
+        return RecoveryOutcome::Failed;
+    };
     try {
         if (!RecoverReceiptCarriers(save_dir, errors)) {
             AddError(errors, "snapshot receipt recovery refused");
-            return RecoveryOutcome::Failed;
+            return fail();
         }
         const fs::path journal = journal_directory(save_dir);
         std::error_code ec;
@@ -2535,12 +2544,12 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
         if (journal_exists &&
             (!fs::is_directory(journal_status) || fs::is_symlink(journal_status))) {
             AddError(errors, "invalid snapshot journal directory");
-            return RecoveryOutcome::Failed;
+            return fail();
         }
         if (ec) {
             AddError(errors,
                      "cannot stat snapshot journal: " + Filesystem::GenericUtf8PathString(journal));
-            return RecoveryOutcome::Failed;
+            return fail();
         }
         if (!journal_exists) {
             // Unknown files in the strict inventory require refusal, never speculative cleanup.
@@ -2548,13 +2557,13 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
                 AddError(errors,
                          "unknown temporary artifact under " +
                              Filesystem::GenericUtf8PathString(save_dir));
-                return RecoveryOutcome::Failed;
+                return fail();
             }
             return RecoveryOutcome::NothingToDo;
         }
         if (!ValidateTemporaryInventory(save_dir)) {
             AddError(errors, "unknown temporary artifact in snapshot inventory");
-            return RecoveryOutcome::Failed;
+            return fail();
         }
         const fs::path txn_path = journal / "txn.json";
         std::string bytes;
@@ -2566,7 +2575,7 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
             if (!missing && (!transaction_input.identity(control) ||
                              !transaction_input.read(bytes, kMaxSnapshotIndexBytes))) {
                 AddError(errors, "unreadable or oversized snapshot journal");
-                return RecoveryOutcome::Failed;
+                return fail();
             }
         } // Close the handle and release its stripe before recovery publishes or removes files.
         if (missing) {
@@ -2584,7 +2593,7 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
                         !MatchesIdentity(
                             journal / "undo", retiring.undo_directory_identity, true)) {
                         AddError(errors, "invalid retiring snapshot journal");
-                        return RecoveryOutcome::Failed;
+                        return fail();
                     }
                     missing = false;
                 }
@@ -2592,12 +2601,12 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
             if (!missing) {
                 std::map<fs::path, ArtifactIdentity> inventory;
                 if (!JournalInventory(save_dir, retiring, control, inventory, errors))
-                    return RecoveryOutcome::Failed;
+                    return fail();
                 const auto slot =
                     CleanupStage(save_dir, retiring.undo_directory_identity, txn_path);
                 if (!WorldSaveService::publish_restoration(
                         slot.directory / slot.name, txn_path, {}, control, errors, &slot))
-                    return RecoveryOutcome::Failed;
+                    return fail();
             }
         }
         if (missing) {
@@ -2607,14 +2616,14 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
             bool absent = false;
             if (!WorldSaveService::artifact_identity(journal, journal_identity, absent, true) ||
                 absent)
-                return RecoveryOutcome::Failed;
+                return fail();
             const auto undo = journal / "undo";
             if (!WorldSaveService::artifact_identity(undo, undo_identity, absent, true))
-                return RecoveryOutcome::Failed;
+                return fail();
             for (const auto& child : fs::directory_iterator(journal)) {
                 if (child.path() != undo || absent || !fs::is_empty(undo)) {
                     AddError(errors, "unknown snapshot journal artifact without control record");
-                    return RecoveryOutcome::Failed;
+                    return fail();
                 }
             }
             const BoundPublicationStage undo_slot{.directory = journal,
@@ -2624,22 +2633,22 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
             if ((!absent && !WorldSaveService::remove_owned_entry(
                                 undo, undo_identity, errors, true, &undo_slot)) ||
                 !WorldSaveService::remove_owned_entry(journal, journal_identity, errors, true))
-                return RecoveryOutcome::Failed;
+                return fail();
             return RecoveryOutcome::DiscardedStale;
         }
         JournalDocument document;
         std::string error;
         if (!ParseJournal(bytes, document, error)) {
             AddError(errors, "corrupt snapshot journal: " + error);
-            return RecoveryOutcome::Failed;
+            return fail();
         }
         if (document.cleanup)
             return FinishJournal(save_dir, document, control, errors)
                        ? RecoveryOutcome::DiscardedStale
-                       : RecoveryOutcome::Failed;
+                       : fail();
         SnapshotIndex committed;
         if (!read_snapshot_index(save_dir, committed, errors)) {
-            return RecoveryOutcome::Failed;
+            return fail();
         }
         // Exclusive publication can be interrupted after retiring the old index and before
         // installing the new one. The journal's protected index is the undo authority then.
@@ -2649,39 +2658,39 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
                 return entry.path == kSnapshotIndexRelativePath && entry.action == "replace";
             });
         if (retired_index && !VerifyRetiredIndexUndo(save_dir, document, errors))
-            return RecoveryOutcome::Failed;
+            return fail();
         if (!retired_index && committed.generation != document.base_generation &&
             committed.generation != document.new_generation) {
             AddError(errors, "journal does not belong to committed snapshot generation");
-            return RecoveryOutcome::Failed;
+            return fail();
         }
         if (committed.generation == document.base_generation &&
             committed.txn_id != document.txn_id - 1) {
             AddError(errors, "journal does not follow committed transaction");
-            return RecoveryOutcome::Failed;
+            return fail();
         }
         if (committed.generation == document.new_generation &&
             committed.txn_id != document.txn_id) {
             AddError(errors, "journal does not belong to committed transaction");
-            return RecoveryOutcome::Failed;
+            return fail();
         }
         if (committed.generation != 0 && committed.generation == document.new_generation) {
             // The commit point was reached; only the cleanup is left.
             return FinishJournal(save_dir, document, control, errors)
                        ? RecoveryOutcome::DiscardedStale
-                       : RecoveryOutcome::Failed;
+                       : fail();
         }
         std::map<fs::path, ArtifactIdentity> inventory;
         if (!JournalInventory(save_dir, document, control, inventory, errors))
-            return RecoveryOutcome::Failed;
+            return fail();
         if (!RollbackEntries(save_dir, document, control, errors)) {
-            return RecoveryOutcome::Failed;
+            return fail();
         }
         return FinishJournal(save_dir, document, control, errors) ? RecoveryOutcome::RolledBack
-                                                                  : RecoveryOutcome::Failed;
+                                                                  : fail();
     } catch (const std::exception& ex) {
         AddError(errors, std::string("snapshot recovery failed: ") + ex.what());
-        return RecoveryOutcome::Failed;
+        return fail();
     }
 }
 
@@ -3092,6 +3101,29 @@ bool SaveTransaction::check_member_version(const Entry& entry,
         AddError(errors, "snapshot publication occupant changed: " + entry.path);
         return false;
     }
+    return true;
+}
+
+bool SaveTransaction::recovery_versions(const fs::path& destination,
+                                        const ArtifactIdentity& control,
+                                        std::array<SavedInputFile::Version, 3>& versions,
+                                        std::vector<std::string>* errors) {
+    const auto* transaction = ActiveTransaction();
+    if (!transaction || transaction->m_control_identity != control ||
+        (transaction->m_state != State::Open && transaction->m_state != State::Committing))
+        return true;
+    std::string relative;
+    if (!RelativePublicationPath(transaction->m_save_dir, destination, relative)) {
+        AddError(errors, "snapshot recovery path escapes transaction root");
+        return false;
+    }
+    const auto position = transaction->m_entry_indices.find(relative);
+    if (position == transaction->m_entry_indices.end()) {
+        AddError(errors, "snapshot recovery member is not protected: " + relative);
+        return false;
+    }
+    const auto& entry = transaction->m_entries[position->second];
+    versions = {entry.previous_version, entry.installed_version, entry.incoming_version};
     return true;
 }
 

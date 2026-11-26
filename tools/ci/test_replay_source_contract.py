@@ -1516,6 +1516,11 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn('SaveTransaction::complete_owned_removal(path, errors)', removal)
         self.assertIn('if (!completed.has_value() || !*completed)', removal)
         publication = self.function(source, "PublishProtectedMember", "")
+        self.assertLess(publication.index('const bool recorded_restoration = source_stage || retired_stage;'),
+                        publication.index('SaveTransaction::publication_stages('))
+        self.assertRegex(publication, r'const auto completed = recorded_restoration\s*'
+                         r'\? std::optional<bool>\{\}\s*'
+                         r': SaveTransaction::complete_owned_removal\(destination, errors\);')
         self.assertLess(publication.index('SaveTransaction::complete_owned_removal(destination, errors)'),
                         publication.index('source.publish_bound('))
         staging = self.function(source, "ReclaimAbandonedStaging", "")
@@ -1534,6 +1539,8 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
         self.assert_world_cleanup_consumers(source)
         for token in ('SaveTransaction::complete_owned_removal(path, errors)',
+                      'const bool recorded_restoration = source_stage || retired_stage;',
+                      'const auto completed = recorded_restoration',
                       'SaveTransaction::complete_owned_removal(destination, errors)',
                       'SaveTransaction::complete_owned_removal(entry.path(), nullptr, false)',
                       'return durable_remove(destination, errors);'):
@@ -1541,6 +1548,27 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                 self.assert_world_cleanup_consumers(source.replace(token, 'removed', 1))
         self.assertIn('TEST(WorldSaveService, RemovalCompletionFailureRemainsRetryable)',
                       read_source("test/persistence/world_save_service_test.cpp"))
+
+    def test_recovery_preflights_live_versions_and_always_diagnoses_failure(self):
+        source = read_source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        recovery = self.function(source, "recover_pending_journal", "")
+        self.assertEqual(recovery.count('RecoveryOutcome::Failed'), 1)
+        self.assertIn('if (errors && errors->size() == previous_errors)', recovery)
+        self.assertRegex(recovery, r'AddError\(errors, "snapshot recovery refused[^\n]*\);\s*'
+                         r'return RecoveryOutcome::Failed;')
+        rollback = self.function(source, "RollbackEntries", "")
+        self.assertLess(rollback.index('SaveTransaction::recovery_versions('),
+                        rollback.index('for (auto* entry : order)',
+                                       rollback.index('SaveTransaction::recovery_versions(')))
+        self.assertIn('save_dir / entry->path, control, entry->live_versions, errors)', rollback)
+        preflight = self.function(source, "recovery_versions", "bool SaveTransaction::")
+        self.assertIn('transaction->m_control_identity != control', preflight)
+        self.assertIn('versions = {entry.previous_version, entry.installed_version, entry.incoming_version};', preflight)
+        native = read_source("test/persistence/SaveTransaction_test.cpp")
+        for name in ('RecoveryFailureAlwaysAppendsDiagnostic',
+                     'RecoveryPreflightsLiveVersionsBeforeChangingAnyMember',
+                     'RecoveryVersionsRequireMatchingWriterAndProtectedPath'):
+            self.assertIn('TEST(SaveTransaction, ' + name + ')', native)
 
     def assert_creation_completion_order(self, source, registry):
         abort = self.function(source, "abort", "SaveTransaction::")
@@ -1619,7 +1647,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn("NearestExistingDirectory(destination.parent_path()), errors)", rollback)
         recovery = self.function(source, "recover_pending_journal", "")
         self.assertRegex(recovery, r'if \(!RollbackEntries\(save_dir, document, control, errors\)\)'
-                         r'\s*\{\s*return RecoveryOutcome::Failed;\s*\}')
+                         r'\s*\{\s*return fail\(\);\s*\}')
 
     def test_matching_restoration_completes_before_rollback_progresses(self):
         source = read_source("src/luminumbra_common/persistence/SaveTransaction.cpp")

@@ -2986,8 +2986,9 @@ TEST(WorldSaveService, RemovalCompletionFailureRemainsRetryable) {
     ASSERT_TRUE(WorldSaveService::create_file_durably(foreign, "foreign"));
     const auto refused = SaveTransaction::complete_owned_removal(foreign, nullptr, false);
     ASSERT_TRUE(refused.has_value());
-    if (refused.has_value())
+    if (refused.has_value()) {
         EXPECT_FALSE(*refused);
+    }
     EXPECT_EQ(ReadFileBytes(foreign), "foreign");
     const auto unrecorded = save.path() / "world_info.json.tmp.1.2";
     ASSERT_TRUE(WorldSaveService::create_file_durably(unrecorded, "unrecorded"));

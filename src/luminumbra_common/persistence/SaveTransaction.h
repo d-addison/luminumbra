@@ -193,6 +193,12 @@ public:
                                                       bool publication = true);
     static bool check_publication_target(const std::filesystem::path& destination,
                                          std::vector<std::string>* errors);
+    // Copy retained versions from a still-live matching writer for same-handle
+    // recovery checks. Without that writer, leave recorded recovery state unchanged.
+    static bool recovery_versions(const std::filesystem::path& destination,
+                                  const std::array<std::uint64_t, 3>& control,
+                                  std::array<std::array<std::uint64_t, 8>, 3>& versions,
+                                  std::vector<std::string>* errors);
     // A writer may supply a digest of its admitted output, bound to the installed native
     // version. Commit reuses it only for the standard member validator and an unchanged file.
     void remember_written_digest(const std::filesystem::path& destination,

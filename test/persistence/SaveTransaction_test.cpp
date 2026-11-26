@@ -2,6 +2,7 @@
 #include "luminumbra_common/persistence/CreatedWorldArtifacts.h"
 #include "luminumbra_common/persistence/RecoveryDurability.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
+#include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 
 #include "../support/PersistenceFileOps.h"
@@ -1546,7 +1547,9 @@ TEST(SaveTransaction, CreationRollbackCompletesFilesBeforeJournalAndRetriesEvery
     for (unsigned cut = 1; cut <= 256 && !finished; ++cut) {
         SCOPED_TRACE(cut);
         TempSave parent;
-        const auto root = parent.path() / "created";
+        const auto saves = parent.path() / "worlds/saves";
+        fs::create_directories(saves);
+        const auto root = saves / "created";
         CreatedWorldArtifacts artifacts;
         artifacts.create_root(root);
         artifacts.create_directory(root / "chunks");
@@ -1567,9 +1570,12 @@ TEST(SaveTransaction, CreationRollbackCompletesFilesBeforeJournalAndRetriesEvery
             EXPECT_TRUE(rollback_errors.empty());
             EXPECT_FALSE(fs::exists(root));
         }
-        if (journal_pending(root)) {
-            EXPECT_FALSE(WorldSaveService::inspect_save(root));
-        }
+        // Catalog inspection may accept an empty directory as a clean miss.
+        // The catalog must expose pending evidence without accepting payloads;
+        // neither that listing nor a clean miss authorizes opening a world.
+        const auto listed = InspectSavedWorld(parent.path(), "created");
+        EXPECT_TRUE(listed.pending_recovery || !listed.error.empty());
+        EXPECT_FALSE(listed.payloads_verified);
         EXPECT_FALSE(snapshot_index_exists(root));
         EXPECT_FALSE(WorldSaveService::has_world_save(root));
         WorldStreamingState state;
@@ -1994,6 +2000,120 @@ TEST(SaveTransaction, CompleteMalformedJournalRecordsAndForeignArtifactsRefuseBe
         EXPECT_FALSE(journal_pending(save.path()));
         EXPECT_EQ(Get(save.path() / "world_info.json"), "old");
     }
+}
+
+TEST(SaveTransaction, RecoveryFailureAlwaysAppendsDiagnostic) {
+    for (const int fault : {0, 1, 2}) {
+        SCOPED_TRACE(fault);
+        TempSave save;
+        const auto journal = journal_directory(save.path());
+        std::optional<SaveTransaction> transaction;
+        if (fault == 2) {
+            ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+            transaction.emplace(save.path(), 2, std::vector<std::array<float, 3>>{}, &RawDigest);
+            ASSERT_TRUE(transaction->begin(nullptr));
+            ASSERT_TRUE(transaction->protect({"world_info.json"}, nullptr));
+            ASSERT_TRUE(
+                WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+            auto records = JournalRecords(save.path());
+            auto prior = LastEntryRecord(records);
+            auto& entry = prior["entries"].at(0);
+            const auto identity = entry.at("previous_identity");
+            entry["rollback_retired_identity"] = identity;
+            records.push_back(prior);
+            // A prepared historical receipt is admitted, but cannot be reused
+            // for another identity. That refusal has no lower-level diagnostic.
+            auto receipt = records.front();
+            receipt["record"] = "receipt";
+            receipt["phase"] = 0u;
+            receipt["receipts"] =
+                nlohmann::json::array({{{"path", "journal/undo/rollback-retired.world_info.json"},
+                                        {"generation", 0u},
+                                        {"identity", identity},
+                                        {"directory", false},
+                                        {"absent_only", false}}});
+            records.push_back(receipt);
+            Put(journal / "txn.json", EncodeJournalRecords(records));
+        } else {
+            fs::create_directory(journal);
+            if (fault == 1)
+                Put(journal / "undo", "foreign file instead of directory");
+            else
+                Put(journal / "txn.json", "{partial}\n");
+        }
+        const auto evidence = Tree(save.path());
+        for (const bool prior_error : {false, true}) {
+            SCOPED_TRACE(prior_error);
+            std::vector<std::string> errors;
+            if (prior_error)
+                errors.emplace_back("prior diagnostic");
+            const auto count = errors.size();
+            EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
+            ASSERT_GT(errors.size(), count);
+            EXPECT_FALSE(errors.back().empty());
+            if (fault != 2) {
+                EXPECT_EQ(Tree(save.path()), evidence);
+            }
+            EXPECT_TRUE(journal_pending(save.path()));
+        }
+    }
+}
+
+TEST(SaveTransaction, RecoveryPreflightsLiveVersionsBeforeChangingAnyMember) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+    SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+    // Keep the admitted native identity but change its version. Recovery must
+    // refuse before appending restoration ownership or changing the index.
+    Put(save.path() / "world_info.json", "foreign changed bytes");
+    const auto evidence = Tree(save.path());
+    std::vector<std::string> errors;
+    EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(Tree(save.path()), evidence);
+    EXPECT_EQ(Get(save.path() / "world_info.json"), "foreign changed bytes");
+}
+
+TEST(SaveTransaction, RecoveryVersionsRequireMatchingWriterAndProtectedPath) {
+    TempSave save, elsewhere;
+    Put(save.path() / "world_info.json", "old");
+    SaveTransaction transaction(save.path(), 1, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+    WorldSaveService::ArtifactIdentity control{};
+    bool missing = false;
+    ASSERT_TRUE(WorldSaveService::artifact_identity(
+        journal_directory(save.path()) / "txn.json", control, missing));
+    ASSERT_FALSE(missing);
+    std::array<std::array<std::uint64_t, 8>, 3> versions{};
+    ASSERT_TRUE(SaveTransaction::recovery_versions(
+        save.path() / "world_info.json", control, versions, nullptr));
+    EXPECT_EQ(versions[1], (std::array<std::uint64_t, 8>{}));
+    EXPECT_EQ(versions[2], (std::array<std::uint64_t, 8>{}));
+    EXPECT_EQ(versions[0][0], control[0]);
+    EXPECT_NE(versions[0], (std::array<std::uint64_t, 8>{}));
+    const auto retained = versions;
+    const auto evidence = Tree(save.path());
+    for (const auto& invalid :
+         {fs::path{}, elsewhere.path() / "world_info.json", save.path() / "aether_state.efs"}) {
+        SCOPED_TRACE(invalid);
+        std::vector<std::string> errors;
+        EXPECT_FALSE(SaveTransaction::recovery_versions(invalid, control, versions, &errors));
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(versions, retained);
+        EXPECT_EQ(Tree(save.path()), evidence);
+    }
+    auto other_control = control;
+    other_control[0] ^= 1u;
+    EXPECT_TRUE(SaveTransaction::recovery_versions({}, other_control, versions, nullptr));
+    EXPECT_EQ(versions, retained);
+    transaction.abort(nullptr);
+    // Without the matching live writer, replay keeps its recorded version state.
+    EXPECT_TRUE(SaveTransaction::recovery_versions({}, control, versions, nullptr));
+    EXPECT_EQ(versions, retained);
 }
 
 TEST(SaveTransaction, TornStaleJournalTailKeepsTheCommittedGeneration) {
@@ -2917,8 +3037,9 @@ TEST(SaveTransaction, PendingReceiptCapacityIsReservedBeforeForwardCompletion) {
     EXPECT_EQ(Get(control), evidence);
     const auto completed = SaveTransaction::complete_owned_removal(member, nullptr);
     ASSERT_TRUE(completed.has_value());
-    if (completed.has_value())
+    if (completed.has_value()) {
         EXPECT_FALSE(*completed);
+    }
     EXPECT_EQ(Get(control), evidence);
     EXPECT_TRUE(journal_pending(save.path()));
     Put(control, history);

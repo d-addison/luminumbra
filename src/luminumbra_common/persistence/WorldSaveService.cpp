@@ -1754,8 +1754,11 @@ bool PublishProtectedMember(const std::filesystem::path& temp,
                             std::vector<std::string>* errors,
                             const BoundPublicationStage* source_stage = nullptr,
                             const BoundPublicationStage* retired_stage = nullptr) {
+    // Explicit stages belong to journal replay, whose recorded identities and
+    // rollback slots are authoritative even if a live writer remains registered.
+    const bool recorded_restoration = source_stage || retired_stage;
     BoundPublicationStage source_slot, retired_slot;
-    if (!source_stage &&
+    if (!recorded_restoration &&
         SaveTransaction::publication_stages(destination, source_slot, retired_slot)) {
         source_stage = &source_slot;
         retired_stage = &retired_slot;
@@ -1768,7 +1771,9 @@ bool PublishProtectedMember(const std::filesystem::path& temp,
         return false;
     }
     if (expected != std::array<std::uint64_t, 3>{}) {
-        const auto completed = SaveTransaction::complete_owned_removal(destination, errors);
+        const auto completed = recorded_restoration
+                                   ? std::optional<bool>{}
+                                   : SaveTransaction::complete_owned_removal(destination, errors);
         if (completed.has_value()) {
             if (!*completed)
                 return false;
@@ -3072,11 +3077,15 @@ bool WriteRegionFile(const std::filesystem::path& path,
     WrittenRegionDigest written;
     std::string admission_error;
     const auto root = path.parent_path().parent_path().parent_path();
-    const bool admitted = SaveTransaction::active_for(root) &&
-                          DigestRegionRecords(path, records, written.digest, admission_error);
+    const auto* active = SaveTransaction::active_for(root);
+    const bool admitted =
+        active && DigestRegionRecords(path, records, written.digest, admission_error);
     std::filesystem::path temp_path;
     const auto staging = WorldSaveService::region_staging_path(path);
-    ReclaimAbandonedStaging(staging, true);
+    if (active)
+        ReclaimAbandonedStaging(staging, true);
+    else
+        ReclaimAbandonedStaging(staging);
     if (admitted)
         written.observation_revision = snapshot_observation_revision();
     if (!WriteDurableRegionTemp(staging,
@@ -3878,7 +3887,7 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
         return PublishTransactionManifest(save_dir, bytes, errors);
     std::filesystem::path temp;
     const auto staging = WorldSaveService::region_staging_path(manifest_path);
-    ReclaimAbandonedStaging(staging, true);
+    ReclaimAbandonedStaging(staging);
     // An identical manifest is already durable, so it stays in place.
     const bool unchanged = FileBytesEqual(manifest_path, bytes);
     if (!unchanged && !WriteDurableRegionTemp(staging, bytes, temp, errors))
@@ -4875,8 +4884,10 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
     const auto destination = save_dir / "world_info.json";
     if (artifacts)
         artifacts->reserve_file(destination);
-    else
+    else if (scope.engaged())
         ReclaimAbandonedStaging(destination, true);
+    else
+        ReclaimAbandonedStaging(destination);
     if (!artifacts && FileBytesEqual(destination, output_bytes))
         return SaveTransaction::check_publication_target(destination, errors) &&
                scope.commit(errors);
@@ -5434,7 +5445,10 @@ bool WorldSaveService::PreparedPlantWrite::publish(const std::filesystem::path& 
     // Like ledger staging, abandoned plant copies must live outside the strict
     // region scan. Reclaim them even when the new roster is empty.
     const auto staging = save_dir / path.filename();
-    ReclaimAbandonedStaging(staging, true);
+    if (scope.engaged())
+        ReclaimAbandonedStaging(staging, true);
+    else
+        ReclaimAbandonedStaging(staging);
     const auto identity_path = plant_identities_path(save_dir);
     const detail::RegionFileWriteGuard identity_guard(identity_path);
     ReclaimAbandonedStaging(save_dir / identity_path.filename(), true);
@@ -8447,11 +8461,13 @@ bool WorldSaveService::write_file_durably(const std::filesystem::path& destinati
                                           std::vector<std::string>* errors,
                                           CreatedWorldArtifacts* artifacts) {
     const SaveGuard guard;
-    if (!artifacts)
-        ReclaimAbandonedStaging(destination, [&] {
-            ArtifactIdentity expected{}, incoming{};
-            return SaveTransaction::publication_identity(destination, expected, incoming);
-        }());
+    if (!artifacts) {
+        ArtifactIdentity expected{}, incoming{};
+        if (SaveTransaction::publication_identity(destination, expected, incoming))
+            ReclaimAbandonedStaging(destination, true);
+        else
+            ReclaimAbandonedStaging(destination);
+    }
     const auto staging = artifacts ? region_staging_path(destination) : destination;
     return WriteFileDurably(destination, bytes, staging, errors, nullptr, artifacts);
 }
@@ -8616,13 +8632,12 @@ void WorldSaveService::reclaim_file_staging(const std::filesystem::path& destina
 bool WorldSaveService::remove_file_and_staging(const std::filesystem::path& destination,
                                                std::vector<std::string>* errors) {
     const SaveGuard guard;
-    ReclaimAbandonedStaging(destination, [&] {
-        ArtifactIdentity expected{}, incoming{};
-        return SaveTransaction::publication_identity(destination, expected, incoming);
-    }());
     ArtifactIdentity expected{}, incoming{};
-    if (SaveTransaction::publication_identity(destination, expected, incoming))
+    if (SaveTransaction::publication_identity(destination, expected, incoming)) {
+        ReclaimAbandonedStaging(destination, true);
         return durable_remove(destination, errors);
+    }
+    ReclaimAbandonedStaging(destination);
     std::error_code error;
     std::filesystem::remove(destination, error);
     if (error) {
