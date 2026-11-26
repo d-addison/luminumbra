@@ -7204,8 +7204,12 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
                                              ArtifactIdentity& expected,
                                              std::vector<std::string>* errors,
                                              std::size_t rollback_reserve,
-                                             detail::NamespaceFlushObservation* observation) {
+                                             detail::NamespaceFlushObservation* observation,
+                                             std::array<std::uint64_t, 8>* version) {
     const SaveOwnership ownership;
+    const auto expected_version = version ? *version : SavedInputFile::Version{};
+    if (version)
+        *version = {};
     if (observation)
         *observation = {};
     if (record.empty() || record.back() != '\n' || rollback_reserve > kMaxSnapshotIndexBytes ||
@@ -7383,6 +7387,10 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
             throw;
         }
     };
+    if (ok && expected_version != SavedInputFile::Version{}) {
+        SavedInputFile::Version current{};
+        ok = SavedInputFile::native_version(file, current) && current == expected_version;
+    }
     ok = ok && size <= kMaxSnapshotIndexBytes;
     std::uint64_t published = 0;
     if (ok && size != 0) {
@@ -7454,7 +7462,29 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
         }
 #endif
     }
+    SavedInputFile::Version appended_version{};
+#if defined(_WIN32)
+    // Last-write times can settle at the last writer close. Bind a non-writing
+    // handle to the same object first, then query it after that close, never by path.
+    const HANDLE version_file =
+        ok && version ? ::ReOpenFile(file,
+                                     FILE_READ_ATTRIBUTES,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                     FILE_FLAG_OPEN_REPARSE_POINT)
+                      : INVALID_HANDLE_VALUE;
+#else
+    if (ok && version && !SavedInputFile::native_version(file, appended_version))
+        appended_version = {};
+#endif
     const bool closed = close();
+#if defined(_WIN32)
+    if (version_file != INVALID_HANDLE_VALUE) {
+        if (ok && closed && !SavedInputFile::native_version(version_file, appended_version))
+            appended_version = {};
+        if (!::CloseHandle(version_file))
+            appended_version = {};
+    }
+#endif
     if (!ok || !closed) {
         AddError(errors, "snapshot journal append failed or exceeded control byte limit");
         return false;
@@ -7462,6 +7492,8 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
     report_snapshot_step("crash-record-published", path);
     if (observation)
         *observation = completed_flush;
+    if (version)
+        *version = appended_version;
     return true;
 }
 

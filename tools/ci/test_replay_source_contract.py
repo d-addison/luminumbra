@@ -1411,7 +1411,9 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn('parsed.modern = schema->get<std::string>() == kJournalSchema;', parse)
         self.assertIn('root.size() != expected_fields', parse)
         self.assertIn('phase->get<std::uint64_t>() > 3', parse)
-        stream = self.function(source, "ParseJournal", "")
+        stream = self.function(source, "ApplyJournalRecords", "")
+        self.assertIn('ApplyJournalRecords(bytes, out, error, true)',
+                      self.function(source, "ParseJournal", ""))
         self.assertIn('record.modern != out.modern', stream)
         self.assertIn('journal receipt transition invalid', stream)
         completion = self.function(source, "CompleteReceipts", "")
@@ -1471,7 +1473,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn('generation ? generation->get<std::uint64_t>() : 0', parse)
         self.assertIn('generation && !generation->is_number_unsigned()', parse)
         self.assertIn('std::pair{receipt.path, receipt.generation}', parse)
-        stream = self.function(source, "ParseJournal", "")
+        stream = self.function(source, "ApplyJournalRecords", "")
         for token in ('receipt.generation != 0',
                       'receipt.generation != latest->second.generation + 1',
                       '!latest->second.retired', 'latest != found',
@@ -1484,7 +1486,8 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                         capacity.index('WorldSaveService::append_journal_record('))
         self.assertIn('!document.receipts.contains({name, generation})', capacity)
         reserve = self.function(source, 'ReservePendingReceipts', '')
-        self.assertIn('ReserveReceiptPhaseBytes(key.first, reserve)', reserve)
+        self.assertIn('document.pending_receipt_bytes > kMaxSnapshotIndexBytes - reserve', reserve)
+        self.assertNotIn('for (', reserve)
         writer = self.function(source, 'write_journal', 'SaveTransaction::')
         self.assertLess(writer.index('ReservePendingReceipts(document, append_reserve)'),
                         writer.index('record,\n', writer.index('ReservePendingReceipts(')))
@@ -1508,6 +1511,83 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                 self.assert_receipt_generation_contract(source.replace(token, 'removed', 1))
         self.assertIn('TEST(SaveTransaction, ReceiptGenerationsRetainEachRecordedPublicationIdentity)',
                       read_source("test/persistence/SaveTransaction_test.cpp"))
+
+    def assert_live_journal_work_is_incremental(self, source):
+        writer = self.function(source, 'write_journal', 'SaveTransaction::')
+        self.assertNotIn('ParseJournal(', writer)
+        self.assertNotIn('input.read(', writer)
+        self.assertIn('read_live_journal(errors)', writer)
+        self.assertIn('ApplyJournalRecords(record, document, error)', writer)
+        self.assertIn('&document.version', writer)
+        reader = self.function(source, 'read_live_journal', 'SaveTransaction::')
+        self.assertIn('state.valid && version == state.document.version', reader)
+        self.assertLess(reader.index('version == state.document.version'),
+                        reader.index('input.read('))
+        self.assertIn('after != version', reader)
+        completion = self.function(source, 'complete_owned_removal', 'SaveTransaction::')
+        self.assertNotIn('ParseJournal(', completion)
+        self.assertLess(completion.index('if (!publication)'),
+                        completion.index('JournalInventory('))
+        self.assertLess(completion.index('JournalInventory('),
+                        completion.index('const auto& entry ='))
+        self.assertEqual(completion.count('JournalInventory('), 2)
+        self.assertIn('member_document.entries.push_back(document.entries[recorded->second])',
+                      completion)
+        self.assertRegex(completion, r'&state\.inventory_entries,\s*false\)\)')
+        inventory = self.function(source, 'JournalInventory', '')
+        self.assertIn('if (!scan_directories)', inventory)
+        reserve = self.function(source, 'ReservePendingReceipts', '')
+        self.assertNotIn('for (', reserve)
+        self.assertIn('document.pending_receipt_bytes', reserve)
+        stream = self.function(source, 'ApplyJournalRecords', '')
+        self.assertIn('out.pending_receipt_bytes -= PendingReceiptBytes(previous->second)', stream)
+        self.assertIn('out.pending_receipt_bytes += PendingReceiptBytes(receipt)', stream)
+        phases = self.function(source, 'RecordReceipts', '')
+        self.assertIn('document.pending_receipt_bytes -= PendingReceiptBytes(*receipts[i])', phases)
+        self.assertIn('document.pending_receipt_bytes += PendingReceiptBytes(*receipts[i])', phases)
+        prepare = self.function(source, 'PrepareReceipts', '')
+        self.assertIn('document.pending_receipt_bytes += PendingReceiptBytes(*receipt)', prepare)
+        metadata = self.function(source, 'AppendMetadata', '')
+        self.assertIn('document.version == SavedInputFile::Version{} ? nullptr : &document.version',
+                      metadata)
+
+    def test_live_journal_work_is_incremental_and_revalidates_native_versions(self):
+        source = read_source('src/luminumbra_common/persistence/SaveTransaction.cpp')
+        self.assert_live_journal_work_is_incremental(source)
+        for token in ('state.valid && version == state.document.version',
+                      'ApplyJournalRecords(record, document, error)',
+                      '&document.version', 'after != version',
+                      'member_document.entries.push_back(document.entries[recorded->second])'):
+            with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):
+                self.assert_live_journal_work_is_incremental(source.replace(token, 'removed'))
+        service = read_source('src/luminumbra_common/persistence/WorldSaveService.cpp')
+        append = self.function(service, 'append_journal_record', 'WorldSaveService::')
+        self.assertIn('const auto expected_version = version ? *version : SavedInputFile::Version{}',
+                      append)
+        self.assertLess(append.index('current == expected_version'),
+                        append.index('truncate_tail(published)'))
+        self.assertLess(append.index('current == expected_version'),
+                        append.index('write_bytes(record.data()'))
+        self.assertLess(append.index('write_bytes("\\n", 1) && flush()'),
+                        append.index('SavedInputFile::native_version(file, appended_version)'))
+        self.assertLess(append.index('SavedInputFile::native_version(file, appended_version)'),
+                        append.index('const bool closed = close()'))
+        self.assertLess(append.index('::ReOpenFile(file,'),
+                        append.index('const bool closed = close()'))
+        self.assertLess(append.index('const bool closed = close()'),
+                        append.index('SavedInputFile::native_version(version_file, appended_version)'))
+        self.assertLess(append.index('::CloseHandle(version_file)'),
+                        append.index('report_snapshot_step("crash-record-published", path)'))
+        tests = read_source('test/persistence/SaveTransaction_test.cpp')
+        for name in ('ForwardJournalWorkScalesWithAppendedRecords',
+                     'LiveJournalReloadRefusesChangedControlWithoutPublishing',
+                     'LiveJournalReloadAcceptsCompletePrefixAndDiscardsUnpublishedTail',
+                     'LiveJournalCacheRechecksControlAndDirectoryIdentities',
+                     'LiveJournalCacheDoesNotAdoptChangesAfterAppendFlush',
+                     'JournalAppendRequiresUnchangedVersionBeforeMutatingPrefix',
+                     'ForwardRemovalRefusesForeignMemberSlotsBeforeMutation',
+                     'LiveJournalCacheRefusesMissingProtectedEntry'):
+            self.assertIn('TEST(SaveTransaction, ' + name + ')', tests)
 
     def assert_world_cleanup_consumers(self, source):
         removal = self.function(source, "durable_remove", "WorldSaveService::")

@@ -219,6 +219,10 @@ public:
         return m_rollback_reserve;
     }
 
+    // Const work diagnostic: journal records parsed and inventory entries visited
+    // by this live writer, including reloads. Recovery after the writer closes is excluded.
+    [[nodiscard]] std::array<std::size_t, 2> journal_work() const;
+
     [[nodiscard]] bool committed() const {
         return m_state == State::Committed;
     }
@@ -266,11 +270,14 @@ private:
         std::array<std::uint64_t, 8> incoming_version{};
     };
     bool check_member_version(const Entry& entry, std::vector<std::string>* errors) const;
+    bool read_live_journal(std::vector<std::string>* errors);
     bool write_journal(std::vector<std::string>* errors);
     // Hands the thread's active slot back once this transaction can no longer publish.
     void release_registration() noexcept;
 
     std::unique_ptr<TransactionOwnership> m_ownership;
+    struct JournalState;
+    std::unique_ptr<JournalState> m_journal_state;
     std::filesystem::path m_save_dir;
     std::uint64_t m_tick = 0;
     std::vector<std::array<float, 3>> m_anchors;

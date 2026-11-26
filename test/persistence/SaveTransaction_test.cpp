@@ -1138,6 +1138,323 @@ TEST(SaveTransaction, CollidingJournalStripeAllowsMemberUpdateAndRemoval) {
     }
 }
 
+TEST(SaveTransaction, ForwardJournalWorkScalesWithAppendedRecords) {
+    constexpr std::size_t kMembers = 24;
+    for (const bool existing : {false, true}) {
+        for (const bool commit : {false, true}) {
+            SCOPED_TRACE(existing);
+            SCOPED_TRACE(commit);
+            TempSave save;
+            std::vector<std::string> members;
+            for (std::size_t index = 0; index < kMembers; ++index) {
+                members.push_back("chunks/region/r." + std::to_string(index) + ".0.lmr");
+                if (existing)
+                    Put(save.path() / members.back(), "previous");
+            }
+            const auto baseline = Tree(save.path());
+            SaveTransaction transaction(save.path(), 1, {}, &RawDigest);
+            std::vector<std::string> errors;
+            ASSERT_TRUE(transaction.begin(&errors));
+            ASSERT_TRUE(transaction.protect(members, &errors));
+            // One header read, then one parse per appended member/index record.
+            EXPECT_EQ(transaction.journal_work(), (std::array<std::size_t, 2>{kMembers + 2, 0}));
+            for (const auto& member : members) {
+                ASSERT_TRUE(
+                    WorldSaveService::write_member_bytes(save.path(), member, "incoming", &errors));
+            }
+            EXPECT_EQ(transaction.journal_work(),
+                      (std::array<std::size_t, 2>{2 * kMembers + 2, existing ? kMembers : 0}));
+            if (commit) {
+                ASSERT_TRUE(transaction.commit(&errors));
+            } else {
+                transaction.abort(&errors);
+                EXPECT_EQ(Tree(save.path()), baseline);
+            }
+            EXPECT_TRUE(errors.empty());
+            EXPECT_FALSE(journal_pending(save.path()));
+        }
+    }
+}
+
+TEST(SaveTransaction, LiveJournalReloadRefusesChangedControlWithoutPublishing) {
+    for (const std::string_view fault : {"empty",
+                                         "partial header",
+                                         "malformed",
+                                         "unknown metadata",
+                                         "transaction",
+                                         "base generation",
+                                         "new generation",
+                                         "journal identity",
+                                         "undo identity",
+                                         "cleanup",
+                                         "oversized"}) {
+        SCOPED_TRACE(fault);
+        TempSave save;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        const auto control = journal_directory(save.path()) / "txn.json";
+        const auto original = Get(control);
+        auto records = JournalRecords(save.path());
+        if (fault == "empty") {
+            Put(control, "");
+        } else if (fault == "partial header") {
+            Put(control, original.substr(0, original.find('\n')));
+        } else if (fault == "malformed") {
+            Put(control, original + "{broken}\n");
+        } else if (fault == "oversized") {
+            Put(control, original + std::string(kMaxSnapshotIndexBytes, ' '));
+        } else {
+            if (fault == "cleanup") {
+                auto cleanup = records.front();
+                cleanup["record"] = "cleanup";
+                cleanup["root_identity"] = std::array<std::uint64_t, 3>{1, 2, 3};
+                cleanup["control_identity"] = std::array<std::uint64_t, 3>{1, 2, 3};
+                records.push_back(cleanup);
+            } else {
+                for (auto& record : records) {
+                    if (fault == "unknown metadata") {
+                        record["unknown"] = true;
+                    } else if (fault == "transaction") {
+                        record["txn_id"] = 9u; // Same encoded size still invalidates the cache.
+                    } else if (fault == "base generation") {
+                        record["base_generation"] = 5u;
+                        record["new_generation"] = 6u;
+                    } else if (fault == "new generation") {
+                        record["new_generation"] = 999u;
+                    } else if (fault == "journal identity") {
+                        record["journal_identity"] = std::array<std::uint64_t, 3>{1, 2, 3};
+                    } else if (fault == "undo identity") {
+                        record["undo_directory_identity"] = std::array<std::uint64_t, 3>{1, 2, 3};
+                    }
+                }
+            }
+            Put(control, EncodeJournalRecords(records));
+        }
+        const auto evidence = Tree(save.path());
+        std::vector<std::string> errors;
+        EXPECT_FALSE(
+            SaveTransaction::prepare_publication(save.path() / "world_info.json", {}, &errors));
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(Tree(save.path()), evidence);
+        Put(control, original);
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "next"));
+        transaction.abort(nullptr);
+        EXPECT_EQ(Get(save.path() / "world_info.json"), "old");
+        EXPECT_FALSE(journal_pending(save.path()));
+    }
+}
+
+TEST(SaveTransaction, LiveJournalReloadAcceptsCompletePrefixAndDiscardsUnpublishedTail) {
+    for (const bool partial : {false, true}) {
+        SCOPED_TRACE(partial);
+        TempSave save;
+        SaveTransaction transaction(save.path(), 1, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({}, nullptr));
+        EXPECT_EQ(transaction.journal_work(), (std::array<std::size_t, 2>{2, 0}));
+        const auto control = journal_directory(save.path()) / "txn.json";
+        const auto original = Get(control);
+        const auto records = JournalRecords(save.path());
+        Put(control, original + (partial ? "{unpublished" : records.back().dump() + "\n"));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        EXPECT_GT(transaction.journal_work()[0], 3u);
+        EXPECT_EQ(transaction.journal_work()[1], 1u);
+        EXPECT_EQ(Get(control).find("{unpublished"), std::string::npos);
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "next"));
+        transaction.abort(nullptr);
+        EXPECT_FALSE(fs::exists(save.path() / "world_info.json"));
+        EXPECT_FALSE(journal_pending(save.path()));
+    }
+}
+
+TEST(SaveTransaction, LiveJournalCacheRechecksControlAndDirectoryIdentities) {
+    for (const bool directory : {false, true}) {
+        SCOPED_TRACE(directory);
+        TempSave save, held;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        const auto original = journal_directory(save.path()) / (directory ? "undo" : "txn.json");
+        const auto retained = held.path() / "retained";
+        fs::rename(original, retained);
+        for (const bool occupied : {false, true}) {
+            SCOPED_TRACE(occupied);
+            if (occupied) {
+                if (directory) {
+                    ASSERT_TRUE(fs::create_directory(original));
+                } else {
+                    Put(original, Get(retained));
+                }
+            }
+            const auto evidence = Tree(save.path());
+            const auto completed =
+                SaveTransaction::complete_owned_removal(save.path() / "world_info.json", nullptr);
+            ASSERT_TRUE(completed.has_value());
+            if (completed.has_value()) {
+                EXPECT_FALSE(*completed);
+            }
+            EXPECT_EQ(Tree(save.path()), evidence);
+            EXPECT_EQ(Get(save.path() / "world_info.json"), "old");
+            if (occupied) {
+                ASSERT_TRUE(fs::remove(original));
+            }
+        }
+        fs::rename(retained, original);
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "next"));
+        transaction.abort(nullptr);
+        EXPECT_EQ(Get(save.path() / "world_info.json"), "old");
+        EXPECT_FALSE(journal_pending(save.path()));
+    }
+}
+
+TEST(SaveTransaction, LiveJournalCacheDoesNotAdoptChangesAfterAppendFlush) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+    SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+    {
+        const HookGuard hook(+[](const char* step, const fs::path& path) {
+            if (std::string_view(step) == "crash-record-published") {
+                Put(path, Get(path) + "{invalid}\n");
+            }
+        });
+        EXPECT_FALSE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "next"));
+    }
+    EXPECT_EQ(Get(save.path() / "world_info.json"), "old");
+    const auto control = journal_directory(save.path()) / "txn.json";
+    auto bytes = Get(control);
+    const auto invalid = bytes.find("{invalid}\n");
+    ASSERT_NE(invalid, std::string::npos);
+    bytes.resize(invalid);
+    Put(control, bytes);
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "next"));
+    transaction.abort(nullptr);
+    EXPECT_EQ(Get(save.path() / "world_info.json"), "old");
+    EXPECT_FALSE(journal_pending(save.path()));
+}
+
+TEST(SaveTransaction, JournalAppendRequiresUnchangedVersionBeforeMutatingPrefix) {
+    for (const std::string_view fault :
+         {"same length", "partial tail", "empty", "published hook"}) {
+        SCOPED_TRACE(fault);
+        TempSave save;
+        const auto control = save.path() / "control";
+        Put(control, "first\n");
+        WorldSaveService::ArtifactIdentity identity{};
+        std::array<std::uint64_t, 8> version{};
+        bool missing = false;
+        ASSERT_TRUE(WorldSaveService::artifact_identity(control, identity, missing));
+        ASSERT_FALSE(missing);
+        ASSERT_TRUE(WorldSaveService::artifact_version(control, version, missing));
+        ASSERT_FALSE(missing);
+        if (fault == "published hook") {
+            const HookGuard hook(+[](const char* step, const fs::path& path) {
+                if (std::string_view(step) == "crash-record-published") {
+                    Put(path, Get(path) + "foreign\n");
+                }
+            });
+            ASSERT_TRUE(WorldSaveService::append_journal_record(
+                control, "next\n", identity, nullptr, 0, nullptr, &version));
+        } else {
+            Put(control,
+                fault == "empty"          ? ""
+                : fault == "partial tail" ? "first\n{tail"
+                                          : "other\n");
+        }
+        const auto evidence = Tree(save.path());
+        EXPECT_FALSE(WorldSaveService::append_journal_record(
+            control, "next\n", identity, nullptr, 0, nullptr, &version));
+        EXPECT_EQ(version, (std::array<std::uint64_t, 8>{}));
+        EXPECT_EQ(Tree(save.path()), evidence);
+        Put(control, "first\n");
+        // Unknown stamps use the existing append path and return a new stamp.
+        ASSERT_TRUE(WorldSaveService::append_journal_record(
+            control, "next\n", identity, nullptr, 0, nullptr, &version));
+        EXPECT_NE(version, (std::array<std::uint64_t, 8>{}));
+        EXPECT_EQ(Get(control), "first\nnext\n");
+        ASSERT_TRUE(WorldSaveService::artifact_version(control, version, missing));
+        ASSERT_FALSE(missing);
+        ASSERT_TRUE(WorldSaveService::append_journal_record(
+            control, "last\n", identity, nullptr, 0, nullptr, &version));
+        EXPECT_EQ(Get(control), "first\nnext\nlast\n");
+        const auto completed = Tree(save.path());
+        EXPECT_FALSE(WorldSaveService::append_journal_record(
+            control, "partial", identity, nullptr, 0, nullptr, &version));
+        EXPECT_EQ(version, (std::array<std::uint64_t, 8>{}));
+        EXPECT_EQ(Tree(save.path()), completed);
+    }
+}
+
+TEST(SaveTransaction, ForwardRemovalRefusesForeignMemberSlotsBeforeMutation) {
+    for (const std::string_view slot :
+         {"undo", "incoming", "retired", "restored", "rollback-retired"}) {
+        SCOPED_TRACE(slot);
+        TempSave save, held;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        const auto member = save.path() / "world_info.json";
+        ASSERT_TRUE(SaveTransaction::prepare_publication(member, {}, nullptr));
+        const auto record = JournalRecords(save.path()).back().at("entries").at(0);
+        ASSERT_EQ(record.at("path"), "world_info.json");
+        const auto target =
+            slot == "undo" ? journal_directory(save.path()) / record.at("undo").get<std::string>()
+                           : journal_directory(save.path()) / "undo" /
+                                 (std::string(slot) + ".world_info.json");
+        if (slot == "undo") {
+            fs::rename(target, held.path() / "undo");
+        }
+        Put(target, "foreign");
+        const auto evidence = Tree(save.path());
+        const auto completed = SaveTransaction::complete_owned_removal(member, nullptr);
+        ASSERT_TRUE(completed.has_value());
+        if (completed.has_value()) {
+            EXPECT_FALSE(*completed);
+        }
+        EXPECT_EQ(Tree(save.path()), evidence);
+        EXPECT_EQ(Get(member), "old");
+        ASSERT_TRUE(fs::remove(target));
+        if (slot == "undo") {
+            fs::rename(held.path() / "undo", target);
+        }
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "next"));
+        transaction.abort(nullptr);
+        EXPECT_EQ(Get(member), "old");
+        EXPECT_FALSE(journal_pending(save.path()));
+    }
+}
+
+TEST(SaveTransaction, LiveJournalCacheRefusesMissingProtectedEntry) {
+    TempSave save;
+    SaveTransaction transaction(save.path(), 1, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+    const auto control = journal_directory(save.path()) / "txn.json";
+    const auto original = Get(control);
+    auto records = JournalRecords(save.path());
+    std::erase_if(records, [](const auto& record) {
+        return !record.at("entries").empty() &&
+               record.at("entries").at(0).at("path") == "world_info.json";
+    });
+    Put(control, EncodeJournalRecords(records));
+    const auto evidence = Tree(save.path());
+    const auto completed =
+        SaveTransaction::complete_owned_removal(save.path() / "world_info.json", nullptr);
+    ASSERT_TRUE(completed.has_value());
+    if (completed.has_value()) {
+        EXPECT_FALSE(*completed);
+    }
+    EXPECT_EQ(Tree(save.path()), evidence);
+    Put(control, original);
+    transaction.abort(nullptr);
+    EXPECT_FALSE(journal_pending(save.path()));
+}
+
 #if defined(__linux__)
 TEST(SaveTransaction, ManyMembersKeepDescriptorsBoundedThroughPublicationAndRollback) {
     constexpr std::size_t kMembers = 1200;
