@@ -10376,6 +10376,333 @@ TEST(GameSessionHeadlessWorldTest, FreshDueRegionCreatesAmbientAuthority) {
     }
 }
 
+TEST(GameSessionHeadlessWorldTest, FirstActivationRetainsSavedStormIdentity) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    constexpr std::uint64_t saved_tick = 468;
+    Luminumbra::Systems::WindFieldSystem wind(1337);
+    Luminumbra::Systems::WeatherSystem weather(1337);
+    weather.RestoreAtTick(saved_tick, {8, 0, 8}, wind);
+    const auto storms = weather.StormCells();
+    ASSERT_FALSE(storms.empty());
+    const auto frozen = ActiveRegionLedger::region_at(
+        {storms.front().center_world.x, 0, storms.front().center_world.y});
+    const RegionKey due{10, 10};
+    const auto ledger = ScheduledFieldLedger(
+        saved_tick, {{due, RegionState::Active}, {frozen, RegionState::Frozen}});
+    GameSession source, loaded, state_loaded;
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(source, root, jobs, ledger, {}));
+    // Keep the procedural reconstruction anchored independently of terrain height.
+    // The XZ anchor is the same as the reference reconstruction above.
+    const auto original_storms = source.GetWeatherSystem()->StormCells();
+    ASSERT_FALSE(original_storms.empty());
+    ASSERT_FALSE(source.GetWeatherSystem()->StrikeSchedule().empty());
+    ASSERT_TRUE(source.SaveWorld());
+    const auto save = source.GetWorldSaveDir();
+    EXPECT_FALSE(fs::exists(P::WorldSaveService::field_pages_path(save)));
+    for (auto* target : {&loaded, &state_loaded}) {
+        EnableSnapshotSession(*target, root, jobs);
+        if (target == &loaded) {
+            ASSERT_TRUE(target->LoadWorld(source.GetMetadata().worldId))
+                << target->GetWorldOpenError();
+        } else {
+            ASSERT_TRUE(target->CreateTransientWorld("Procedural storm state", "1337", "default"));
+            ASSERT_TRUE(target->LoadWorldStateFrom(save)) << target->GetWorldOpenError();
+        }
+        EXPECT_FALSE(target->GetFieldPages().has_ambient());
+        const auto before = target->GetActiveRegionLedger().canonical_bytes();
+        const auto export_path =
+            root.path() / (target == &loaded ? "immediate-load" : "immediate-state");
+        ASSERT_TRUE(target->SaveWorldStateTo(export_path));
+        EXPECT_FALSE(fs::exists(P::WorldSaveService::field_pages_path(export_path)));
+        EXPECT_EQ(target->GetActiveRegionLedger().canonical_bytes(), before);
+        target->SetReplicatedSimulationAnchors({});
+    }
+    for (auto* session : {&source, &loaded, &state_loaded}) {
+        ASSERT_NO_FATAL_FAILURE(TickOnce(*session));
+        ASSERT_FALSE(session->GetRegionSchedulerFault());
+        EXPECT_EQ(session->GetRegionSchedule().due, (std::vector<RegionKey>{due}));
+        EXPECT_EQ(session->GetFieldPages().storm_count(), original_storms.size());
+        EXPECT_LE(session->GetRegionalWeatherScanCount(), 8 * (original_storms.size() + 1));
+        for (const auto& original : original_storms) {
+            const auto& adopted = session->GetFieldPages().storms();
+            const auto found = std::find_if(adopted.begin(), adopted.end(), [&](const auto& storm) {
+                return storm.spawn_tick == original.spawn_tick &&
+                       storm.seed_salt == original.seed_salt;
+            });
+            ASSERT_NE(found, adopted.end());
+            EXPECT_EQ(found->active_age, saved_tick - original.spawn_tick);
+            EXPECT_EQ(found->center_x, std::bit_cast<std::uint32_t>(original.center_world.x));
+            EXPECT_EQ(found->center_z, std::bit_cast<std::uint32_t>(original.center_world.y));
+            EXPECT_EQ(found->velocity_x, std::bit_cast<std::uint32_t>(original.velocity.x));
+            EXPECT_EQ(found->velocity_z, std::bit_cast<std::uint32_t>(original.velocity.y));
+            EXPECT_EQ(found->intensity, std::bit_cast<std::uint32_t>(original.intensity));
+            EXPECT_EQ(found->lifetime_ticks, original.lifetime_ticks);
+            const auto& record = session->GetActiveRegionLedger().records().at(found->owner);
+            EXPECT_FALSE(record.wake_pending);
+            if (found->owner == frozen) {
+                EXPECT_EQ(record.state, RegionState::Frozen);
+                EXPECT_EQ(record.frozen_at, saved_tick);
+            } else {
+                EXPECT_EQ(record.first_active, saved_tick + 1);
+                EXPECT_EQ(record.last_ticked, saved_tick + 1);
+                EXPECT_EQ(record.frozen_at, 0u);
+            }
+        }
+        EXPECT_TRUE(session->GetWeatherSystem()->StrikesThisTick().empty());
+    }
+    EXPECT_EQ(loaded.GetFieldPages().serialize(), source.GetFieldPages().serialize());
+    EXPECT_EQ(state_loaded.GetFieldPages().serialize(), source.GetFieldPages().serialize());
+    const auto frozen_bytes = source.GetFieldPages().region_bytes(frozen);
+    ASSERT_TRUE(source.SaveWorld());
+    ASSERT_TRUE(loaded.LoadWorld(source.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    ASSERT_TRUE(state_loaded.LoadWorldStateFrom(source.GetWorldSaveDir()));
+    for (auto* session : {&source, &loaded, &state_loaded}) {
+        session->SetReplicatedSimulationAnchors({});
+        ASSERT_NO_FATAL_FAILURE(TickOnce(*session));
+        ASSERT_FALSE(session->GetRegionSchedulerFault());
+        EXPECT_EQ(session->GetFieldPages().region_bytes(frozen), frozen_bytes);
+        EXPECT_EQ(session->GetActiveRegionLedger().records().at(frozen).state, RegionState::Frozen);
+    }
+    EXPECT_EQ(loaded.GetFieldPages().serialize(), source.GetFieldPages().serialize());
+    EXPECT_EQ(state_loaded.GetFieldPages().serialize(), source.GetFieldPages().serialize());
+}
+
+TEST(GameSessionHeadlessWorldTest, ActivatedPagesReopenWithoutCatchup) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession source, loaded, state_loaded;
+    const auto ledger = ScheduledFieldLedger(468, {{kFieldOwner, RegionState::Active}});
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(source, root, jobs, ledger, {}));
+    const auto procedural_count = source.GetWeatherSystem()->StormCells().size();
+    ASSERT_NE(procedural_count, 0u);
+    ASSERT_NO_FATAL_FAILURE(TickOnce(source));
+    ASSERT_FALSE(source.GetRegionSchedulerFault());
+    ASSERT_EQ(source.GetFieldPages().storm_count(), procedural_count);
+    ASSERT_TRUE(source.SaveWorld());
+    const auto fields = source.GetFieldPages().serialize();
+    const auto registers = source.GetActiveRegionLedger().canonical_bytes();
+    for (auto* target : {&loaded, &state_loaded}) {
+        EnableSnapshotSession(*target, root, jobs);
+        if (target == &loaded) {
+            ASSERT_TRUE(target->LoadWorld(source.GetMetadata().worldId))
+                << target->GetWorldOpenError();
+        } else {
+            ASSERT_TRUE(target->CreateTransientWorld("Activated state", "1337", "default"));
+            ASSERT_TRUE(target->LoadWorldStateFrom(source.GetWorldSaveDir()))
+                << target->GetWorldOpenError();
+            // Repeated adoption cannot rearm the procedural handover.
+            ASSERT_TRUE(target->LoadWorldStateFrom(source.GetWorldSaveDir()));
+        }
+        EXPECT_EQ(target->GetSimulationTickCount(), 469u);
+        EXPECT_EQ(target->GetFieldPages().serialize(), fields);
+        EXPECT_EQ(target->GetActiveRegionLedger().canonical_bytes(), registers);
+        EXPECT_TRUE(target->GetWeatherSystem()->StrikesThisTick().empty());
+        const auto export_path =
+            root.path() / (target == &loaded ? "activated-load" : "activated-state");
+        ASSERT_TRUE(target->SaveWorldStateTo(export_path));
+        EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::field_pages_path(export_path)), fields);
+        target->SetReplicatedSimulationAnchors({});
+    }
+    // Enough active ticks to cross strike cadence; frozen owners and absolute storm
+    // identities must survive both load paths without replaying elapsed wall time.
+    for (int step = 0; step < 20; ++step) {
+        for (auto* session : {&source, &loaded, &state_loaded}) {
+            ASSERT_NO_FATAL_FAILURE(TickOnce(*session));
+            ASSERT_FALSE(session->GetRegionSchedulerFault());
+        }
+        for (const auto* target : {&loaded, &state_loaded}) {
+            EXPECT_EQ(target->GetFieldPages().serialize(), source.GetFieldPages().serialize());
+            EXPECT_EQ(target->GetActiveRegionLedger().canonical_bytes(),
+                      source.GetActiveRegionLedger().canonical_bytes());
+            EXPECT_EQ(target->GetWeatherSystem()->ComputeWeatherSubHash(),
+                      source.GetWeatherSystem()->ComputeWeatherSubHash());
+            EXPECT_EQ(target->GetWeatherSystem()->StrikesThisTick().size(),
+                      source.GetWeatherSystem()->StrikesThisTick().size());
+        }
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, FirstActivationAdvancesDueStormOwnersOnce) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    Luminumbra::Systems::WindFieldSystem wind(1337);
+    Luminumbra::Systems::WeatherSystem weather(1337);
+    weather.RestoreAtTick(468, {8, 0, 8}, wind);
+    const auto storms = weather.StormCells();
+    ASSERT_FALSE(storms.empty());
+    std::map<RegionKey, RegionState> owners;
+    for (const auto& storm : storms)
+        owners.emplace(
+            ActiveRegionLedger::region_at({storm.center_world.x, 0, storm.center_world.y}),
+            RegionState::Active);
+    GameSession session;
+    const auto ledger = ScheduledFieldLedger(468, owners);
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
+    ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetFieldPages().storm_count(), storms.size());
+    for (const auto& original : storms) {
+        const auto& adopted = session.GetFieldPages().storms();
+        const auto found = std::find_if(adopted.begin(), adopted.end(), [&](const auto& storm) {
+            return storm.spawn_tick == original.spawn_tick && storm.seed_salt == original.seed_salt;
+        });
+        ASSERT_NE(found, adopted.end());
+        EXPECT_EQ(found->active_age, 469 - original.spawn_tick);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, ProceduralStormAdoptionRollsBackWithRefusedActivation) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const RegionKey due{10, 10};
+    const auto ledger = ScheduledFieldLedger(468, {{due, RegionState::Active}});
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
+    ASSERT_FALSE(session.GetWeatherSystem()->StormCells().empty());
+    session.GetSimulationEventBus().subscribe([&](const auto&) {
+        EXPECT_EQ(session.GetActiveRegionLedger().records().size(), 1u);
+        EXPECT_FALSE(session.GetFieldPages().has_ambient());
+        throw std::runtime_error("refused procedural weather consumer");
+    });
+    session.GetSimulationEventBus().publish(469, "weather-adoption-refusal", "");
+    ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+    ASSERT_TRUE(session.GetRegionSchedulerFault());
+    EXPECT_FALSE(session.GetFieldPages().has_ambient());
+    EXPECT_EQ(session.GetActiveRegionLedger().records().size(), 1u);
+    EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+    const auto save = root.path() / "refused-storm-adoption";
+    ASSERT_TRUE(session.SaveWorldStateTo(save));
+    EXPECT_FALSE(fs::exists(P::WorldSaveService::field_pages_path(save)));
+}
+
+TEST(GameSessionHeadlessWorldTest, WeatherOwnerAdoptionIsBoundedAndPreservesExistingRecords) {
+    const RegionKey existing{0, 0}, reduced{-1, 0}, added{1, 0};
+    auto ledger = ScheduledFieldLedger(
+        180, {{existing, RegionState::Frozen}, {reduced, RegionState::Reduced}});
+    const auto original = ledger.encode();
+    const auto frozen_record = ledger.records().at(existing);
+    const auto reduced_record = ledger.records().at(reduced);
+    const std::array owners{reduced, existing, added};
+    ASSERT_TRUE(ledger.prepare_owner_adoption(owners));
+    EXPECT_EQ(ledger.encode(), original);
+    for (const auto& invalid : {std::vector<RegionKey>{added, existing},
+                                std::vector<RegionKey>{added, added},
+                                std::vector<RegionKey>{{32768, 0}}}) {
+        EXPECT_FALSE(ledger.prepare_owner_adoption(invalid));
+        EXPECT_EQ(ledger.encode(), original);
+    }
+    const std::vector<RegionKey> oversized(ActiveRegionLedger::kMaxRegions + 1);
+    EXPECT_FALSE(ledger.prepare_owner_adoption(oversized));
+    ASSERT_TRUE(ledger.prepare_energy_work({}, {}));
+    ledger.commit_energy_work();
+    ledger.commit_owner_adoption();
+    EXPECT_EQ(ledger.records().at(existing), frozen_record);
+    EXPECT_EQ(ledger.records().at(reduced), reduced_record);
+    EXPECT_EQ(ledger.records().at(added).first_active, 180u);
+    EXPECT_EQ(ledger.records().at(added).last_ticked, 180u);
+    EXPECT_FALSE(ledger.records().at(added).wake_pending);
+    ActiveRegionLedger reopened;
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), reopened, error)) << error;
+    EXPECT_EQ(reopened.canonical_bytes(), ledger.canonical_bytes());
+    const std::array next_owner{RegionKey{2, 0}};
+    ASSERT_TRUE(ledger.prepare_owner_adoption(next_owner));
+    ASSERT_TRUE(ledger.prepare_owner_adoption({}));
+    ASSERT_TRUE(ledger.prepare_energy_work({}, {}));
+    ledger.commit_energy_work();
+    ledger.commit_owner_adoption();
+    EXPECT_FALSE(ledger.records().contains(next_owner.front()));
+    // A callback can independently admit the same owner before final publication.
+    ASSERT_TRUE(ledger.prepare_owner_adoption(next_owner));
+    ledger.pin(next_owner.front(), true, WorldClock(180));
+    const auto admitted = ledger.records().at(next_owner.front());
+    ASSERT_TRUE(ledger.prepare_energy_work({}, {}));
+    ledger.commit_energy_work();
+    ledger.commit_owner_adoption();
+    EXPECT_EQ(ledger.records().at(next_owner.front()), admitted);
+}
+
+TEST(GameSessionHeadlessWorldTest, ProceduralStormAdoptionRejectsInvalidState) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    for (int invalid = 0; invalid < 6; ++invalid) {
+        SCOPED_TRACE(invalid);
+        GameSession session;
+        const auto ledger = ScheduledFieldLedger(1, {{kFieldOwner, RegionState::Active}});
+        ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
+        Luminumbra::Systems::StormCell storm{.center_world = {108, 108},
+                                             .velocity = {0, 0},
+                                             .intensity = 0.5f,
+                                             .spawn_tick = 0,
+                                             .lifetime_ticks = 240,
+                                             .seed_salt = 7};
+        if (invalid == 0)
+            storm.spawn_tick = 2;
+        if (invalid == 1)
+            storm.lifetime_ticks = 1;
+        if (invalid == 2)
+            storm.center_world.x = std::numeric_limits<float>::infinity();
+        if (invalid == 3)
+            storm.velocity.x = 33;
+        const auto count = invalid == 4 ? 2u : invalid == 5 ? 17u : 1u;
+        session.GetWeatherSystem()->AdoptRegionalWeather(
+            1,
+            session.GetMetadata().spawnPoint,
+            std::vector<Luminumbra::Systems::StormCell>(count, storm),
+            {},
+            false);
+        ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+        ASSERT_TRUE(session.GetRegionSchedulerFault());
+        EXPECT_FALSE(session.GetFieldPages().has_ambient());
+        EXPECT_EQ(session.GetActiveRegionLedger().records().size(), 1u);
+        EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, DisabledActivationKeepsExactSaveTree) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession source, loaded;
+    for (auto* session : {&source, &loaded}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(false);
+    }
+    ASSERT_TRUE(source.CreateWorld("Disabled activation", "1337", "default"));
+    ASSERT_TRUE(source.SaveWorld());
+    const auto save = source.GetWorldSaveDir();
+    const auto original = SavedPresetTestDiskBytes(save);
+    ASSERT_TRUE(loaded.LoadWorld(source.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    ASSERT_TRUE(loaded.SaveWorld());
+    EXPECT_EQ(SavedPresetTestDiskBytes(save), original);
+    ASSERT_TRUE(loaded.LoadWorldStateFrom(save));
+    const auto state_save = root.path() / "disabled-state";
+    ASSERT_TRUE(source.SaveWorldStateTo(state_save));
+    const auto state_original = SavedPresetTestDiskBytes(state_save);
+    ASSERT_TRUE(loaded.SaveWorldStateTo(state_save));
+    EXPECT_EQ(SavedPresetTestDiskBytes(state_save), state_original);
+    for (int step = 0; step < 3; ++step) {
+        ASSERT_NO_FATAL_FAILURE(TickOnce(source));
+        ASSERT_NO_FATAL_FAILURE(TickOnce(loaded));
+    }
+    const auto continued = root.path() / "disabled-continued";
+    ASSERT_TRUE(source.SaveWorldStateTo(state_save));
+    ASSERT_TRUE(loaded.SaveWorldStateTo(continued));
+    EXPECT_EQ(SavedPresetTestDiskBytes(continued), SavedPresetTestDiskBytes(state_save));
+    for (const auto& directory : {save, state_save, continued}) {
+        EXPECT_FALSE(fs::exists(P::WorldSaveService::field_pages_path(directory)));
+        EXPECT_FALSE(fs::exists(directory / "chunks/region/active-regions.arl"));
+        EXPECT_FALSE(P::snapshot_index_exists(directory));
+    }
+}
+
 TEST(GameSessionHeadlessWorldTest, EnteringRegionSeedsAtAbsoluteEpoch) {
     const HeadlessRoot root;
     JobSystem jobs;

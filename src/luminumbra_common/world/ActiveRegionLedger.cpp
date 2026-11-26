@@ -234,6 +234,7 @@ void ActiveRegionLedger::mark_saved(const WorldClock& clock) {
 struct ActiveRegionLedger::EnergyPublication {
     using Registers = std::map<RegionKey, std::uint64_t>;
     Registers completed, new_ages;
+    std::map<RegionKey, ActiveRegionRecord> adopted_owners;
     std::vector<Registers::node_type> spare;
     std::vector<std::pair<RegionKey, std::uint64_t>> ages;
     std::size_t growths = 0;
@@ -260,6 +261,45 @@ struct ActiveRegionLedger::EnergyPublication {
         return completed.insert(std::move(node)).position->second;
     }
 };
+
+bool ActiveRegionLedger::prepare_owner_adoption(std::span<const RegionKey> owners) {
+    if (owners.size() > kMaxRegions)
+        return false;
+    std::size_t additions = 0;
+    for (std::size_t index = 0; index < owners.size(); ++index) {
+        const auto key = owners[index];
+        if (!ValidKey(key) || (index != 0 && owners[index - 1] >= key))
+            return false;
+        additions += m_records.contains(key) ? 0u : 1u;
+    }
+    if (additions > kMaxRegions - m_records.size() ||
+        !encodable_with_counts(m_energyAges.size(),
+                               m_waterDebts.size(),
+                               std::nullopt,
+                               false,
+                               m_records.size() + additions))
+        return false;
+    // At most kMaxRegions nodes, checked against the combined envelope before allocation.
+    std::map<RegionKey, ActiveRegionRecord> staged;
+    for (const auto key : owners) {
+        if (!m_records.contains(key)) {
+            auto& record = staged[key];
+            record.first_active = m_tick;
+            record.last_ticked = m_tick;
+        }
+    }
+    if (!m_energyPublication)
+        m_energyPublication = std::make_shared<EnergyPublication>();
+    m_energyPublication->adopted_owners.swap(staged);
+    return true;
+}
+
+void ActiveRegionLedger::commit_owner_adoption() noexcept {
+    if (m_energyPublication) {
+        m_records.merge(m_energyPublication->adopted_owners);
+        m_energyPublication->adopted_owners.clear();
+    }
+}
 
 bool ActiveRegionLedger::prepare_energy_work(
     std::span<const std::pair<RegionKey, std::uint64_t>> ages,
@@ -302,10 +342,18 @@ bool ActiveRegionLedger::prepare_energy_work(
             count = Sum(count, total);
         }
     }
-    return encodable_with_counts(m_energyAges.size() + prepared.new_ages.size(),
+    // Callbacks can admit an owner between preparation and final publication.
+    std::size_t additions = 0;
+    for (const auto& [key, record] : prepared.adopted_owners) {
+        (void)record;
+        additions += m_records.contains(key) ? 0u : 1u;
+    }
+    return additions <= kMaxRegions - m_records.size() &&
+           encodable_with_counts(m_energyAges.size() + prepared.new_ages.size(),
                                  m_waterDebts.size(),
                                  prepared.completed.size(),
-                                 candidate_id != 1);
+                                 candidate_id != 1,
+                                 m_records.size() + additions);
 }
 void ActiveRegionLedger::commit_energy_work() noexcept {
     auto& prepared = *m_energyPublication;
