@@ -2047,7 +2047,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertRegex(guard, r'm_sync = nullptr;\s*return;')
         self.assertLess(guard.index('m_sync = nullptr;'),
                         guard.index('m_sync->publication.lock_shared();'))
-        self.assertRegex(release, r'if \(m_sync\)\s*m_sync->publication.unlock_shared\(\);')
+        self.assertRegex(release, r'if \(m_sync\)\s*\{\s*m_sync->publication\.unlock_shared\(\);\s*\}')
 
     def test_publication_reader_borrows_its_threads_exclusive_stripe(self):
         source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
