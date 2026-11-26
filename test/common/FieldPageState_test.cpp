@@ -552,9 +552,9 @@ TEST(FieldPageStateTest, ActivationCapacityCountsLiveAndStagedPages) {
     EXPECT_EQ(live.owned_initialized_cells(first), 441u);
     EXPECT_EQ(live.owned_initialized_cells(second), 22u * 21u);
     EXPECT_EQ(live.owned_initialized_cells(refused), 0u);
-    candidate.clear();
+    candidate = FieldPageState{};
     ASSERT_TRUE(candidate.activate_region(refused, kSeed, 32));
-    EXPECT_EQ(candidate.page_count(), 4u); // Clearing detaches activation bookkeeping too.
+    EXPECT_EQ(candidate.page_count(), 4u); // A fresh staging store keeps no activation bookkeeping.
 }
 
 TEST(FieldPageStateTest, OwnershipCountsOnlyRegionalMaskIntersectionsWithoutChangingBytes) {
