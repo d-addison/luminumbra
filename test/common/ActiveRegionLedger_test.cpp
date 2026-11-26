@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "../support/ScopedAllocationObserver.h"
 #include "../support/UniqueTempPath.h"
 
 #include "luminumbra/core/Types.h"
@@ -47,6 +48,7 @@ public:
 } // namespace
 
 void* operator new(std::size_t bytes) {
+    Luminumbra::Test::ObserveAllocation();
     if (auto* remaining = AllocationFailureCountdown()) {
         if (*remaining == 0) {
             throw std::bad_alloc();
@@ -67,6 +69,7 @@ void operator delete(void* storage, std::size_t) noexcept {
     std::free(storage);
 }
 void* operator new(std::size_t bytes, const std::nothrow_t&) noexcept {
+    Luminumbra::Test::ObserveAllocation();
     if (auto* remaining = AllocationFailureCountdown()) {
         if (*remaining == 0) {
             return nullptr;
