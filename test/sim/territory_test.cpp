@@ -6,7 +6,10 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <limits>
+#include <map>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -275,6 +278,58 @@ TEST(Territory, OrderIndependent) {
     RunTerritoryOnTick(r2, 1);
     (void)a;
     EXPECT_FLOAT_EQ(biasOf(r2, b).wish_x, ref_x);
+}
+
+TEST(Territory, RegionalElapsedPreservesClaimAndFrozenState) {
+    namespace W = Luminumbra::world;
+    for (const auto ticks : {1u, 8u, 36001u, 65536u}) {
+        SCOPED_TRACE(ticks);
+        entt::registry r;
+        const auto active = spawnTerritorial(r, 4, 4);
+        const auto frozen = spawnTerritorial(r, 513, 4);
+        const auto zero = spawnTerritorial(r, 1025, 4);
+        const auto unclaimed = spawnTerritorial(r, 513, 8);
+        r.emplace<Comp::CreatureComponent>(active);
+        r.emplace<Comp::CreatureComponent>(frozen);
+        // Non-creature opt-ins must use their gate, even with a creature cache installed.
+        r.emplace<Comp::TerritoryBiasComponent>(zero, 0.75f, -0.25f);
+        r.emplace<Comp::TerritoryBiasComponent>(frozen, -0.5f, 0.25f);
+        const std::array<W::RegionKey, 2> due{{{0, 0}, {2, 0}}};
+        const std::map<W::RegionKey, std::uint32_t> windows{{{0, 0}, ticks}, {{2, 0}, 0}};
+        const W::RegionConsumerGate gate(r, due, W::RegionElapsedTicks(windows));
+        luminumbra::ai::CreatureTickAdmission admission;
+        admission.Capture(r, gate);
+        moveTo(r, active, 520, 4);
+        moveTo(r, frozen, 4, 4);
+        const auto claimed = RunTerritoryOnTick(r, 65536, &admission, &gate);
+        EXPECT_EQ(claimed.participants, 1);
+        EXPECT_EQ(claimed.claimed, 1);
+        EXPECT_EQ(claimed.homing, 0);
+        EXPECT_EQ(terrOf(r, active).home_x, 520);
+        EXPECT_EQ(biasOf(r, active).wish_x, 0);
+        moveTo(r, active, 570, 4);
+        const auto homing = RunTerritoryOnTick(r, 65537, &admission, &gate);
+        EXPECT_EQ(homing.claimed, 0);
+        EXPECT_EQ(homing.homing, 1);
+        EXPECT_EQ(terrOf(r, active).home_x, 520);
+        EXPECT_EQ(biasOf(r, active).wish_x, -kTerritoryMaxBias);
+        EXPECT_EQ(biasOf(r, active).wish_z, 0);
+        for (const auto entity : {frozen, zero, unclaimed}) {
+            EXPECT_EQ(terrOf(r, entity).established, 0);
+            EXPECT_EQ(terrOf(r, entity).home_x, 0);
+            EXPECT_EQ(terrOf(r, entity).home_z, 0);
+        }
+        EXPECT_EQ(biasOf(r, frozen).wish_x, -0.5f);
+        EXPECT_EQ(biasOf(r, frozen).wish_z, 0.25f);
+        EXPECT_EQ(biasOf(r, zero).wish_x, 0.75f);
+        EXPECT_EQ(biasOf(r, zero).wish_z, -0.25f);
+        EXPECT_FALSE(r.all_of<Comp::TerritoryBiasComponent>(unclaimed));
+        const auto resumed = spawnTerritorial(r, 4, 8); // non-creature, positive owner
+        EXPECT_EQ(RunTerritoryOnTick(r, 65538, &admission, &gate).claimed, 1);
+        EXPECT_EQ(terrOf(r, resumed).home_x, 4);
+        const W::RegionConsumerGate empty(r, std::span<const W::RegionKey>{});
+        EXPECT_EQ(RunTerritoryOnTick(r, 65539, nullptr, &empty).participants, 0);
+    }
 }
 
 } // namespace
