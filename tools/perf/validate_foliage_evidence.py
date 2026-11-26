@@ -12,6 +12,10 @@ import struct
 from fixture_paths import read_bytes, resolve_reference
 
 
+# Recorded foliage byte hashes retain the historical FNV-1a seed.
+FNV1A64_HISTORICAL_BASIS = 1469598103934665603
+
+
 class Refusal(ValueError):
     pass
 
@@ -32,7 +36,7 @@ def integer(value):
 
 
 def fnv(data):
-    value = 1469598103934665603
+    value = FNV1A64_HISTORICAL_BASIS
     for byte in data:
         value = ((value ^ byte) * 1099511628211) & ((1 << 64) - 1)
     return value

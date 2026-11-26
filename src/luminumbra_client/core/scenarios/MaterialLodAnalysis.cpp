@@ -74,8 +74,8 @@ bool IsGreyFallbackPixel(unsigned char r, unsigned char g, unsigned char b) {
 // Calibrated against noon captures at the composite beach+highland vantage:
 // rendered grass averages RGB(16,24,11) - green leads both other channels by
 // a small but consistent margin (g-r p5..p95 = 3..12, g-b p5..p95 = 7..20) and
-// stays dim (g p95 = 33), so the brightness ceiling excludes sky/haze (r 155+)
-// while the floor excludes the near-black void. Classification keeps grey
+// stays dim (g p95 = 33). These appearance bounds are unchanged; depth
+// now excludes sky/haze before classification. Classification keeps grey
 // fallback primacy: AnalyzeMaterialPixels tests IsGreyFallbackPixel before
 // this predicate so a flat-grey fallback can never be absorbed into the grass
 // bucket (measured collision on real grass: 385 of 188034 ROI pixels, 0.2%).
@@ -136,15 +136,14 @@ void MaterialRimRoiBounds(
     max_top_y = height / 4;
 }
 
-MaterialPixelStats
-AnalyzeMaterialPixels(const std::vector<unsigned char>& pixels, int width, int height) {
+MaterialPixelStats AnalyzeMaterialPixels(const std::vector<unsigned char>& pixels,
+                                         const SkyPixelMask& sky_mask,
+                                         int width,
+                                         int height) {
+    ValidateScenarioPixelBuffers(pixels, sky_mask, width, height);
     MaterialPixelStats stats;
     stats.width = width;
     stats.height = height;
-    if (width <= 0 || height <= 0 ||
-        pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u) {
-        return stats;
-    }
 
     int min_x = 0;
     int max_x = 0;
@@ -171,9 +170,12 @@ AnalyzeMaterialPixels(const std::vector<unsigned char>& pixels, int width, int h
             const unsigned char r = pixels[offset + 0u];
             const unsigned char g = pixels[offset + 1u];
             const unsigned char b = pixels[offset + 2u];
+            const bool eligible = sky_mask.pixels[offset / 3u] == 0;
             if (in_main_band) {
                 ++stats.roi_pixels;
-                if (IsSandLikePixel(r, g, b)) {
+                if (!eligible) {
+                    ++stats.other_pixels;
+                } else if (IsSandLikePixel(r, g, b)) {
                     ++stats.sand_pixels;
                 } else if (IsWaterLikePixel(r, g, b)) {
                     ++stats.water_like_pixels;
@@ -186,9 +188,9 @@ AnalyzeMaterialPixels(const std::vector<unsigned char>& pixels, int width, int h
                 }
             } else {
                 ++stats.rim_roi_pixels;
-                if (IsStoneLikePixel(r, g, b)) {
+                if (eligible && IsStoneLikePixel(r, g, b)) {
                     ++stats.stone_pixels;
-                } else if (IsSoilLikePixel(r, g, b)) {
+                } else if (eligible && IsSoilLikePixel(r, g, b)) {
                     ++stats.soil_pixels;
                 }
             }
@@ -219,8 +221,11 @@ AnalyzeMaterialPixels(const std::vector<unsigned char>& pixels, int width, int h
 // failure being gated must be unmissable), water -> blue, stone (rim sub-ROI
 // only) -> slate, soil (rim sub-ROI only) -> brown, other ROI -> dimmed
 // luminance, outside ROI -> heavily dimmed luminance.
-std::vector<unsigned char>
-BuildMaterialHeatmap(const std::vector<unsigned char>& pixels, int width, int height) {
+std::vector<unsigned char> BuildMaterialHeatmap(const std::vector<unsigned char>& pixels,
+                                                const SkyPixelMask& sky_mask,
+                                                int width,
+                                                int height) {
+    ValidateScenarioPixelBuffers(pixels, sky_mask, width, height);
     std::vector<unsigned char> heatmap(pixels.size());
     int min_x = 0;
     int max_x = 0;
@@ -246,8 +251,10 @@ BuildMaterialHeatmap(const std::vector<unsigned char>& pixels, int width, int he
             const unsigned char b = pixels[offset + 2u];
             const unsigned char luminance =
                 static_cast<unsigned char>((static_cast<int>(r) + g + b) / 3);
-            const bool in_roi = row_in_roi && x >= min_x && x < max_x;
-            const bool in_rim = row_in_rim && x >= rim_min_x && x < rim_max_x;
+            const bool in_roi =
+                sky_mask.pixels[offset / 3u] == 0 && row_in_roi && x >= min_x && x < max_x;
+            const bool in_rim =
+                sky_mask.pixels[offset / 3u] == 0 && row_in_rim && x >= rim_min_x && x < rim_max_x;
 
             unsigned char out_r = static_cast<unsigned char>(luminance / 4);
             unsigned char out_g = out_r;
@@ -342,6 +349,7 @@ void WriteMaterialVisualAnalysis(
 
     nlohmann::json artifact = {
         {"schema", "luminumbra.material_visual_analysis.v1"},
+        {"sky_classifier", "reversed_z_depth_water"},
         {"timestamp_utc", TimestampUtc()},
         {"passed", passed},
         {"screenshot", screenshot},
@@ -485,6 +493,7 @@ void WriteLodGroundVisualAnalysis(const std::filesystem::path& artifact_dir,
     }
 
     nlohmann::json artifact = {{"schema", "luminumbra.lod_ground_visual_analysis.v1"},
+                               {"sky_classifier", "reversed_z_depth_water"},
                                {"timestamp_utc", TimestampUtc()},
                                {"passed", passed},
                                {"thresholds",

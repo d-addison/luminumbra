@@ -94,10 +94,14 @@ CircadianActivity(float time_of_day01, bool nocturnal, float amplitude = 1.0f) {
 // RunCircadianOnTick: write every participating creature's activity from the day clock.
 // id-ordered. `time_of_day01` is the caller-supplied solar phase in [0,1] (0/1 =
 // midnight, 0.5 = noon). Returns participation stats. Empty roster -> pure no-op.
-inline CircadianStats RunCircadianOnTick(entt::registry& reg,
-                                         float time_of_day01,
-                                         float amplitude = 1.0f,
-                                         const CreatureTickAdmission* admission = nullptr) {
+// Elapsed opt-in: activity is an absolute assignment from the due-time solar phase,
+// independent of the positive window length. Zero/frozen windows retain activity.
+inline CircadianStats
+RunCircadianOnTick(entt::registry& reg,
+                   float time_of_day01,
+                   float amplitude = 1.0f,
+                   const CreatureTickAdmission* admission = nullptr,
+                   const ::Luminumbra::world::RegionConsumerGate* elapsed_gate = nullptr) {
     CircadianStats stats;
 
     auto view = reg.view<Comp::CircadianComponent>();
@@ -113,7 +117,7 @@ inline CircadianStats RunCircadianOnTick(entt::registry& reg,
         return stats; // empty roster -> pure no-op.
 
     for (auto e : ents) {
-        if (admission && !admission->Allows(e)) {
+        if (!AllowsElapsedParticipant(reg, e, admission, elapsed_gate)) {
             continue;
         }
         auto& cc = view.get<Comp::CircadianComponent>(e);

@@ -30,6 +30,7 @@
 #include "../components/PlantComponents.h"
 #include "../core/DeterministicRng.h"
 #include "../core/FilesystemPath.h"
+#include "../core/IntegerPrimitives.h"
 #include "../world/WorldgenDependencySnapshot.h"
 
 namespace luminumbra::foliage {
@@ -77,7 +78,7 @@ inline float SpeciesClamp01(float v) {
 // (CropLifecycleComponent.species_id / PlantGrowthComponent.species_id) and the plant sub-hash. 0
 // is reserved for "unspecified", so a real species never collides with it.
 [[nodiscard]] inline std::uint16_t SpeciesId16(const std::string& id) {
-    std::uint64_t h = 1469598103934665603ull; // FNV offset basis
+    std::uint64_t h = Luminumbra::Core::kFnv1a64HistoricalBasis;
     for (const char ch : id) {
         h ^= static_cast<unsigned char>(ch);
         h *= 1099511628211ull;

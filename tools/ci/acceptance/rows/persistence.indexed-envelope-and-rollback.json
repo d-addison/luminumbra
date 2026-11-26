@@ -31,6 +31,15 @@
   "evidence": [
     {
       "kind": "ctest",
+      "ref": "RecoveryDurabilityEvidenceContract"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/recovery-durability-qualification.md",
+      "planned": "Collect final-candidate recovery receipts on Windows MSVC, Windows UCRT64 and POSIX with abrupt VM reset scoped to the recorded virtual storage stacks; owner: maintainers"
+    },
+    {
+      "kind": "ctest",
       "ref": "SaveTransaction.*"
     },
     {
