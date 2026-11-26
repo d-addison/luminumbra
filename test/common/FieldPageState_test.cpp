@@ -9,6 +9,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -398,6 +399,162 @@ TEST(FieldPageStateTest, ActivatingANeighbourAddsOnlyItsMissingPages) {
     // Region {1,0} spans page columns 1 and 2, rows 0 and 1; columns 1 already exist.
     EXPECT_EQ(store.page_count(), 6u);
     EXPECT_EQ(store.owned_initialized_cells(RegionKey{1, 0}), 22u * 21u);
+}
+
+TEST(FieldPageStateTest, ActivationCandidatePublishesNewPagesAtomically) {
+    FieldPageState fresh;
+    fresh.adopt_scheduled_pages(FieldPageState{});
+    EXPECT_TRUE(fresh.empty());
+    auto initial = fresh.scheduled_snapshot(std::span<const RegionKey>{});
+    ASSERT_TRUE(initial.activate_region({0, 0}, kSeed, 0));
+    EXPECT_TRUE(fresh.empty());
+    fresh.adopt_scheduled_pages(std::move(initial));
+    EXPECT_EQ(fresh.serialize(), FourPageFile());
+
+    FieldPageState live = ActivatedStore();
+    // Unrelated resident pages must not enlarge the activation working set.
+    for (std::int32_t x = 20; x < 36; ++x) {
+        ASSERT_TRUE(live.activate_region({x, 20}, kSeed, 0));
+    }
+    ASSERT_TRUE(live.set_weather_age({0, 0}, 19));
+    ASSERT_TRUE(live.set_scent({0, 0}, {std::bit_cast<std::uint64_t>(1.0), 0, 0, 0}));
+    const RegionKey existing{0, 0}, entering{1, 0};
+    const std::array participants{existing, entering};
+    const std::map<RegionKey, ActiveRegionRecord> records{{existing, {}}, {entering, {}}};
+    constexpr std::uint64_t tick = 24;
+    const auto before = live.serialize();
+    const auto previous = live.scheduled_snapshot(participants);
+    const auto sealed = previous.serialize();
+    ASSERT_EQ(previous.page_count(), 4u);
+    {
+        auto discarded = previous;
+        ASSERT_TRUE(discarded.activate_region(entering, kSeed, tick));
+        EXPECT_EQ(discarded.page_count(), 6u);
+    }
+    EXPECT_EQ(live.serialize(), before);
+
+    auto candidate = previous;
+    ASSERT_TRUE(candidate.activate_region(entering, kSeed, tick));
+    ASSERT_EQ(candidate.page_count(), 6u); // Four shared/existing nodes and two new nodes.
+    EXPECT_LT(candidate.page_count(), live.page_count());
+    const auto seeded = candidate.region_bytes(entering);
+    const auto work = candidate.step_scheduled(records, participants, kSeed, tick, &previous);
+    ASSERT_TRUE(work.contains(existing));
+    EXPECT_FALSE(work.contains(entering));
+    EXPECT_EQ(candidate.region_bytes(entering), seeded);
+    EXPECT_EQ(previous.serialize(), sealed);
+    EXPECT_EQ(live.serialize(), before);
+
+    auto reference = live;
+    ASSERT_TRUE(reference.activate_region(entering, kSeed, tick));
+    ASSERT_EQ(reference.step_scheduled(records, participants, kSeed, tick, &previous), work);
+    // New nodes retain their addresses, proving publication transfers prepared storage.
+    std::map<FieldPageKey, const FieldPage*> nodes;
+    for (const auto& [key, page] : candidate.pages()) {
+        if (!live.pages().contains(key)) {
+            nodes.emplace(key, &page);
+        }
+    }
+    ASSERT_EQ(nodes.size(), 2u);
+    static_assert(noexcept(live.adopt_scheduled_pages(std::move(candidate))));
+    live.adopt_scheduled_pages(std::move(candidate));
+    EXPECT_EQ(live.serialize(), reference.serialize());
+    for (const auto& [key, address] : nodes) {
+        EXPECT_EQ(&live.pages().at(key), address);
+    }
+}
+
+TEST(FieldPageStateTest, ActivationPreservesSharedFrozenMasks) {
+    for (const RegionKey frozen : {RegionKey{0, 0}, RegionKey{-2, -2}}) {
+        SCOPED_TRACE(::testing::Message() << frozen.x << ',' << frozen.z);
+        const RegionKey entering{frozen.x + 1, frozen.z};
+        FieldPageState live;
+        ASSERT_TRUE(live.activate_region(frozen, kSeed, 0));
+        const auto frozen_bytes = live.region_bytes(frozen);
+        const auto before = live.serialize();
+        const std::array participants{entering};
+        // Empty capture exercises loading shared source pages omitted by the snapshot.
+        const auto previous = live.scheduled_snapshot(std::span<const RegionKey>{});
+        auto candidate = previous;
+        ASSERT_TRUE(candidate.activate_region(entering, kSeed, 32));
+        const auto seeded = candidate.region_bytes(entering);
+        const std::map<RegionKey, ActiveRegionRecord> records{
+            {frozen, {.state = RegionState::Frozen}}, {entering, {}}};
+        EXPECT_TRUE(candidate.step_scheduled(records, participants, kSeed, 32, &previous).empty());
+        EXPECT_EQ(candidate.region_bytes(entering), seeded);
+        EXPECT_TRUE(previous.empty());
+        EXPECT_EQ(live.serialize(), before);
+        auto reference = live;
+        ASSERT_TRUE(reference.activate_region(entering, kSeed, 32));
+        live.adopt_scheduled_pages(std::move(candidate));
+        EXPECT_EQ(live.pages(), reference.pages());
+        EXPECT_EQ(live.region_bytes(frozen), frozen_bytes);
+        EXPECT_EQ(live.region_bytes(entering), seeded);
+        auto thaw = live.scheduled_snapshot(std::span<const RegionKey>{});
+        ASSERT_TRUE(thaw.activate_region(entering, kSeed + 1, 48));
+        EXPECT_EQ(thaw.region_bytes(entering), seeded); // Omitted live cells keep their epoch.
+
+        // Sparse prepared masks must also preserve live bits absent from the candidate.
+        FieldPageState sparse;
+        ASSERT_TRUE(sparse.activate_region(entering, kSeed, 40));
+        const auto replacement = sparse.region_bytes(entering);
+        live.adopt_scheduled_pages(std::move(sparse));
+        EXPECT_EQ(live.region_bytes(frozen), frozen_bytes);
+        EXPECT_EQ(live.region_bytes(entering), replacement);
+    }
+}
+
+TEST(FieldPageStateTest, ActivationCapacityCountsLiveAndStagedPages) {
+    FieldPageState live;
+    {
+        // One initialized zero cell per page builds a fast, bounded capacity fixture.
+        constexpr auto count = FieldPageState::kMaxPages - 10;
+        std::string bytes(kPage0 + count * kPageBytes + 8, '\0');
+        bytes.replace(0, kPage0, FourPageFile(), 0, kPage0);
+        WriteU(bytes, 14, 4 + count * kPageBytes, 4);
+        WriteU(bytes, 18, count, 4);
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto offset = kPage0 + index * kPageBytes;
+            WriteU(bytes, offset, 100 + index, 4);
+            WriteU(bytes, offset + 4, 100, 4);
+            WriteU(bytes, offset + kMaskOffset, 1, 8);
+        }
+        Reseal(bytes);
+        std::string error;
+        ASSERT_TRUE(FieldPageState::parse(bytes, live, error)) << error;
+    }
+    const RegionKey retained{30, 30}, first{0, 0}, second{1, 0}, refused{2, 0};
+    ASSERT_TRUE(live.activate_region(retained, kSeed, 0));
+    ASSERT_EQ(live.page_count(), FieldPageState::kMaxPages - 6);
+    const auto retained_bytes = live.region_bytes(retained);
+    const std::array participants{retained};
+    auto candidate = live.scheduled_snapshot(participants);
+    ASSERT_EQ(candidate.page_count(), 4u);
+    ASSERT_TRUE(candidate.activate_region(first, kSeed, 24));  // Four new pages.
+    ASSERT_TRUE(candidate.activate_region(second, kSeed, 24)); // Two more; two overlap.
+    EXPECT_EQ(candidate.page_count(), 10u);
+    ASSERT_TRUE(candidate.activate_region(retained, kSeed + 1, 32)); // Live pages count once.
+    ASSERT_TRUE(candidate.activate_region(first, kSeed + 1, 32));    // Staged pages count once.
+    const auto before_refusal = candidate.serialize();
+    EXPECT_FALSE(candidate.activate_region(refused, kSeed, 32));
+    EXPECT_EQ(candidate.serialize(), before_refusal);
+    EXPECT_EQ(candidate.owned_initialized_cells(refused), 0u);
+    EXPECT_EQ(live.page_count(), FieldPageState::kMaxPages - 6);
+    EXPECT_EQ(live.owned_initialized_cells(first), 0u);
+    EXPECT_EQ(live.region_bytes(retained), retained_bytes);
+    // Empty/out-of-domain owners remain harmless even at the combined cap.
+    EXPECT_TRUE(
+        candidate.activate_region({std::numeric_limits<std::int32_t>::max(), 0}, kSeed, 32));
+    EXPECT_EQ(candidate.serialize(), before_refusal);
+    live.adopt_scheduled_pages(std::move(candidate));
+    EXPECT_EQ(live.page_count(), FieldPageState::kMaxPages);
+    EXPECT_EQ(live.region_bytes(retained), retained_bytes);
+    EXPECT_EQ(live.owned_initialized_cells(first), 441u);
+    EXPECT_EQ(live.owned_initialized_cells(second), 22u * 21u);
+    EXPECT_EQ(live.owned_initialized_cells(refused), 0u);
+    candidate.clear();
+    ASSERT_TRUE(candidate.activate_region(refused, kSeed, 32));
+    EXPECT_EQ(candidate.page_count(), 4u); // Clearing detaches activation bookkeeping too.
 }
 
 TEST(FieldPageStateTest, OwnershipCountsOnlyRegionalMaskIntersectionsWithoutChangingBytes) {
