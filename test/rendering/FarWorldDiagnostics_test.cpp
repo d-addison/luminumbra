@@ -876,6 +876,10 @@ TEST(FarBudgetMeasurement, SessionNeedsCurrentServingTargetAndKnownIdentity) {
     EXPECT_NE(waiting.content_identity, 0u);
     EXPECT_FALSE(waiting.current_coverage);
     snapshot.serving_serial = snapshot.target_serial;
+    // Session coverage also needs the served committed generation to be current.
+    snapshot.serving_committed_generation = snapshot.bake_generation + 1;
+    EXPECT_FALSE(ProjectFarBudget(snapshot).current_coverage);
+    snapshot.serving_committed_generation = snapshot.bake_generation;
     EXPECT_TRUE(ProjectFarBudget(snapshot).current_coverage);
     EXPECT_FALSE(ProjectFarBudget(snapshot, false).current_coverage);
     snapshot.tiles[0].accepted_content_identity = 0;
