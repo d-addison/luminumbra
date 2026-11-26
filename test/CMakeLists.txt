@@ -313,6 +313,8 @@ add_executable(common_tests
     rendering/FarVolumeResidency_test.cpp
     rendering/FarWorldReplay_test.cpp
     rendering/FarWorldDiagnostics_test.cpp
+    rendering/FarWorldSessionController_test.cpp
+    ../src/luminumbra_client/rendering/FarWorldSessionController.cpp
     rendering/FarWorldRenderer_test.cpp
     rendering/FarWorldOwnership_test.cpp
     rendering/FarWorldDepthBias_test.cpp

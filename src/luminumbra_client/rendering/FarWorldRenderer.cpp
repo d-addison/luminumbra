@@ -375,6 +375,28 @@ FarHandoffAdmissionStatus FarWorldRenderer::StartSessionTarget(
                    : FarWorldRefusal::ImmutableAuthorityUnavailable;
     return result;
 }
+std::shared_ptr<FarVolumeMemoryPool> FarWorldRenderer::SessionMemoryPool(std::size_t tier) const {
+    CheckOwner();
+    return session_ ? session_->MemoryPool(tier) : nullptr;
+}
+FarWorldAuthorityProducer::FrozenResult FarWorldRenderer::SessionCaptureFailure() const {
+    CheckOwner();
+    return session_ ? session_->SessionCaptureFailure() : FarWorldAuthorityProducer::FrozenResult{};
+}
+FarWorldRefusal FarWorldRenderer::SessionAdmissionRefusal() const {
+    CheckOwner();
+    return session_ ? session_->AdmissionRefusal() : FarWorldRefusal::ImmutableAuthorityUnavailable;
+}
+void FarWorldRenderer::SetSessionRefresh(FarWorldRefusal refusal,
+                                         const FarWorldAuthorityProducer::FrozenResult& failure,
+                                         const FarWorldRefreshWork& work) {
+    CheckOwner();
+    if (session_) {
+        refresh_refusal_ = refusal;
+        refresh_failure_ = failure;
+        refresh_work_ = work;
+    }
+}
 FarHandoffAdmissionPump FarWorldRenderer::PumpAdmission(std::uint64_t budget) {
     CheckOwner();
     if (requested_ != FarWorldMode::Ladder || !session_ || stopping_)
@@ -433,6 +455,10 @@ const FarWorldOwnership& FarWorldRenderer::LiveOwnership() const noexcept {
 FarWorldSelection FarWorldRenderer::Selection(FarWorldPurpose purpose,
                                               bool enabled) const noexcept {
     auto prerequisite = refusal_;
+    if (refresh_refusal_ != FarWorldRefusal::None &&
+        (prerequisite == FarWorldRefusal::None ||
+         prerequisite == FarWorldRefusal::ImmutableAuthorityUnavailable))
+        prerequisite = refresh_refusal_;
     if (requested_ == FarWorldMode::Ladder && !requested_caves_)
         prerequisite = FarWorldRefusal::InvalidCavePolicy;
     if (prerequisite == FarWorldRefusal::None &&
@@ -928,7 +954,10 @@ void FarWorldRenderer::CaptureDiagnostic(FarWorldSelection selection,
         diagnostic_.upload = last_frame_;
     if (session_) {
         ProjectFarWorldSessionDiagnostic(session_->Diagnostic(), session_numeric_, diagnostic_);
-        diagnostic_.source_failure = session_->SessionCaptureFailure();
+        diagnostic_.source_failure = refresh_work_ && !refresh_failure_.ok()
+                                         ? refresh_failure_
+                                         : session_->SessionCaptureFailure();
+        diagnostic_.refresh_work = refresh_work_;
         return;
     }
     if (fixture_) {
@@ -988,6 +1017,9 @@ const FarWorldTerrainCoverage& FarWorldRenderer::TerrainCoverage() const {
 }
 
 void FarWorldRenderer::Drain() {
+    refresh_refusal_ = FarWorldRefusal::None;
+    refresh_failure_ = {};
+    refresh_work_.reset();
     terrain_coverage_.Clear();
     stopping_ = true;
     // Stop submission and unbind before any queue mutation or GPU retirement.
