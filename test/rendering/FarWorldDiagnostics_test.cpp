@@ -6,6 +6,7 @@
 #include "luminumbra_client/app/RenderMeasurement.h"
 #include "luminumbra_client/core/IsolationConfig.h"
 #include "luminumbra_client/rendering/FarVolumeResidency.h"
+#include "luminumbra_client/rendering/FarWorldBudgetDisplay.h"
 #include "luminumbra_client/rendering/FarWorldDiagnostics.h"
 #include "luminumbra_client/rendering/FarWorldHandoffDiagnostics.h"
 #include "luminumbra_client/rendering/FarWorldSelection.h"
@@ -36,6 +37,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <tuple>
 #include <type_traits>
 #include <vector>
 
@@ -43,6 +45,150 @@ namespace {
 using namespace Luminumbra::Rendering;
 using namespace Luminumbra::World;
 static_assert(std::is_trivially_copyable_v<FarWorldDiagnosticSnapshot>);
+static_assert(std::is_trivially_copyable_v<FarWorldBudgetDisplay>);
+
+TEST(FarWorldBudgetDisplay, ProjectsEveryTierWithoutChangingCounters) {
+    auto snapshot = std::make_unique<FarWorldDiagnosticSnapshot>();
+    snapshot->captured = snapshot->advanced = true;
+    snapshot->selection.effective = FarWorldMode::Ladder;
+    for (std::size_t i = 0; i < snapshot->tiers.size(); ++i) {
+        const auto count = i * 100;
+        const auto bytes = static_cast<std::uint64_t>(i) * 1000;
+        snapshot->tiers[i] = {.resident = {.wanted = count + 1,
+                                           .pending = count + 2,
+                                           .building = count + 3,
+                                           .ready = count + 4,
+                                           .settled = count + 5,
+                                           .request_rejected = count + 6,
+                                           .budget_evicted = count + 7,
+                                           .uploaded_pairs = count + 8,
+                                           .empty_pairs = count + 9,
+                                           .covering = count + 10,
+                                           .ready_cpu_bytes = bytes + 11,
+                                           .retained_gpu_bytes = bytes + 12,
+                                           // Deliberate sample skew: total must not be recomputed.
+                                           .memory = {.limit = bytes + 1000,
+                                                      .bytes_cpu = bytes + 20,
+                                                      .bytes_gpu = bytes + 30,
+                                                      .bytes_total = bytes + 99,
+                                                      .peak_total = bytes + 120,
+                                                      .admission_refusals = bytes + 4},
+                                           .water_known_dry_tiles = count + 13,
+                                           .water_wet_tiles = count + 14,
+                                           .retained_water_indices = bytes + 15,
+                                           .submitted_water_indices = bytes + 16},
+                              .evicted_range = bytes + 17,
+                              .evicted_budget = bytes + 18,
+                              .stale_rebuilds = bytes + 19,
+                              .draws = count + 20,
+                              .indices = count + 21,
+                              .draw_refusals = count + 22};
+        snapshot->upload.tiers[i] = {.dispatched = count + 7,
+                                     .completed = count + 5,
+                                     .uploaded = count + 2,
+                                     .rejected = count + 3,
+                                     .evicted = count + 1,
+                                     .build_attempts = count + 11,
+                                     .upload_attempts = count + 4,
+                                     .upload_bytes = bytes + 900,
+                                     .successful_upload_bytes = bytes + 800};
+    }
+    // Values near the integer limit must also survive without summing samples.
+    auto& memory = snapshot->tiers.back().resident.memory;
+    memory.limit = memory.peak_total = std::numeric_limits<std::uint64_t>::max();
+    memory.bytes_cpu = memory.limit - 1;
+    memory.bytes_gpu = memory.limit - 2;
+    memory.bytes_total = memory.limit - 3;
+    const auto expected_work = snapshot->upload.tiers;
+    const auto work_counters = [](const FarVolumeTierWork& work) {
+        return std::tie(work.dispatched,
+                        work.completed,
+                        work.uploaded,
+                        work.rejected,
+                        work.evicted,
+                        work.build_attempts,
+                        work.upload_attempts,
+                        work.upload_bytes,
+                        work.successful_upload_bytes);
+    };
+    auto projected = std::make_unique<FarWorldDiagnosticSnapshot>();
+    for (const auto authority : {FarWorldAuthorityKind::Fixture, FarWorldAuthorityKind::Session}) {
+        snapshot->authority_kind = authority;
+        for (const bool complete : {false, true}) {
+            snapshot->complete = complete;
+            const auto before = FarWorldDiagnosticJson(*snapshot);
+            for (int observation = 0; observation < 2; ++observation) {
+                const auto display = ProjectFarWorldBudgetDisplay(*snapshot);
+                EXPECT_EQ(display.size(), kFarTierCount);
+                for (std::size_t i = 0; i < display.size(); ++i) {
+                    SCOPED_TRACE(i);
+                    ASSERT_TRUE(display[i].diagnostic);
+                    ASSERT_TRUE(display[i].work);
+                    projected->tiers[i] = *display[i].diagnostic;
+                    EXPECT_EQ(work_counters(*display[i].work), work_counters(expected_work[i]));
+                    EXPECT_EQ(work_counters(snapshot->upload.tiers[i]),
+                              work_counters(expected_work[i]));
+                }
+                EXPECT_EQ(FarWorldDiagnosticJson(*projected)["tiers"], before["tiers"]);
+                EXPECT_EQ(FarWorldDiagnosticJson(*snapshot), before);
+            }
+        }
+    }
+}
+
+TEST(FarWorldBudgetDisplay, UnavailableSnapshotDoesNotDisplayMeasuredZero) {
+    auto snapshot = std::make_unique<FarWorldDiagnosticSnapshot>();
+    for (const bool captured : {false, true}) {
+        snapshot->captured = captured;
+        for (const auto& row : ProjectFarWorldBudgetDisplay(*snapshot)) {
+            EXPECT_FALSE(row.diagnostic);
+            EXPECT_FALSE(row.work);
+        }
+    }
+    // Nonzero stale values cannot turn an uncaptured snapshot into a sample.
+    snapshot->captured = false;
+    snapshot->advanced = true;
+    snapshot->selection.effective = FarWorldMode::Ladder;
+    for (auto& tier : snapshot->tiers) {
+        tier.resident.memory.limit = 128;
+        tier.resident.memory.bytes_total = 64;
+    }
+    snapshot->upload.tiers.back().build_attempts = 42;
+    for (const auto& row : ProjectFarWorldBudgetDisplay(*snapshot)) {
+        EXPECT_FALSE(row.diagnostic);
+        EXPECT_FALSE(row.work);
+    }
+    snapshot->captured = true;
+    // A valid empty pool, including an unlimited one, really measures zero.
+    snapshot->tiers.front().resident.memory.bytes_total = 0;
+    snapshot->tiers.front().resident.memory.limit = std::numeric_limits<std::uint64_t>::max();
+    for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+        snapshot->selection.effective = mode;
+        for (const bool advanced : {false, true}) {
+            snapshot->advanced = advanced;
+            const auto display = ProjectFarWorldBudgetDisplay(*snapshot);
+            for (const auto& row : display) {
+                ASSERT_TRUE(row.diagnostic);
+                EXPECT_EQ(row.work.has_value(), advanced && mode == FarWorldMode::Ladder);
+            }
+            ASSERT_TRUE(display.front().diagnostic);
+            EXPECT_EQ(display.front().diagnostic->resident.memory.bytes_total, 0u);
+            if (advanced && mode == FarWorldMode::Ladder) {
+                ASSERT_TRUE(display.front().work);
+                EXPECT_EQ(display.front().work->build_attempts, 0u);
+                ASSERT_TRUE(display.back().work);
+                EXPECT_EQ(display.back().work->build_attempts, 42u);
+            }
+        }
+    }
+    // One unavailable tier must not hide other measured tiers or expose stale work.
+    snapshot->tiers.back().resident.memory.limit = 0;
+    const auto partial = ProjectFarWorldBudgetDisplay(*snapshot);
+    EXPECT_FALSE(partial.back().diagnostic);
+    EXPECT_FALSE(partial.back().work);
+    ASSERT_TRUE(partial.front().diagnostic);
+    ASSERT_TRUE(partial.front().work);
+}
 
 TEST(RenderBenchmarkOverrides, WorkloadAssignmentsDoNotConsumeSuccessorsOrHideOverrides) {
     for (const char* option : {"--render-benchmark",
