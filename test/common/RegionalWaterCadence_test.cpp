@@ -243,7 +243,7 @@ auto Snapshot(const Chunk& chunk) {
 
 TEST(RegionalWaterCadence, SealedOwnersConserveVolumeAndRegisters) {
     Systems::SHIELD_WorldSystem shield(nullptr, nullptr, Systems::TerrainGenParams{}, 1337);
-    // Three sealing reasons, three resolutions, four chunks per transaction.
+    // Three sealing reasons, three saved resolutions, four chunks per transaction.
     for (const int resolution : {8, 16, 32}) {
         for (const int reason : {0, 1, 2}) {
             SCOPED_TRACE(resolution);
@@ -260,27 +260,34 @@ TEST(RegionalWaterCadence, SealedOwnersConserveVolumeAndRegisters) {
             if (reason != 0) {
                 schedule.due.push_back({1, 0});
             }
+            Systems::WaterSystem water(nullptr, &shield);
+            water.SetRegionalScheduling(true);
+            // Sessions reject 32 on 16-metre chunks. Retain saved 32-cell grids
+            // for due migration and sealing, but keep the sleeping control at
+            // the session resolution so it needs no funded preparation.
+            const int session_resolution = std::min(resolution, CHUNK_SIZE_X);
+            water.SetSimResolution(session_resolution);
+            ASSERT_EQ(water.sim_resolution(), session_resolution);
             std::vector chunks{WaterChunk(30, resolution, 1500),
                                WaterChunk(31, resolution, 500),
                                WaterChunk(32, resolution, 2000),
-                               WaterChunk(64, resolution, 1000)};
+                               WaterChunk(64, session_resolution, 1000)};
             chunks[3]->is_water_sleeping.store(true);
             const auto sealed_before = Snapshot(*chunks[2]);
             const auto sleeping_before = Snapshot(*chunks[3]);
             const auto records_before = ledger.records();
             const auto volume_before = Volume(*chunks[0]) + Volume(*chunks[1]);
-            Systems::WaterSystem water(nullptr, &shield);
-            water.SetRegionalScheduling(true);
-            water.SetSimResolution(resolution);
             entt::registry registry;
             std::vector<world::RegionWork> completed;
-            const auto budget =
-                static_cast<std::uint64_t>(2 * (2 * resolution * resolution + 4 * resolution));
+            const auto width = static_cast<std::uint64_t>(session_resolution);
+            const auto cells = width * width;
+            const auto budget = 2 * (2 * cells + 4 * width);
             water.UpdateRegional(registry, chunks, ledger, schedule, completed, budget);
             EXPECT_EQ(Volume(*chunks[0]) + Volume(*chunks[1]), volume_before);
             EXPECT_NE(chunks[0]->water_edge_flux,
-                      std::vector<std::int32_t>(
-                          static_cast<std::size_t>(2 * resolution * resolution), 0));
+                      std::vector<std::int32_t>(static_cast<std::size_t>(2 * cells), 0));
+            EXPECT_EQ(chunks[0]->current_water_resolution.load(), session_resolution);
+            EXPECT_EQ(chunks[1]->current_water_resolution.load(), session_resolution);
             EXPECT_EQ(Snapshot(*chunks[2]), sealed_before);
             EXPECT_EQ(Snapshot(*chunks[3]), sleeping_before);
             for (const RegionKey owner : {RegionKey{1, 0}, RegionKey{2, 0}}) {
@@ -290,8 +297,11 @@ TEST(RegionalWaterCadence, SealedOwnersConserveVolumeAndRegisters) {
             EXPECT_EQ(ledger.water_debts().at({2, 0}), 29u);
             ASSERT_EQ(completed.size(), 1u);
             EXPECT_EQ(completed.front().key, (RegionKey{0, 0}));
-            EXPECT_EQ(completed.front().water_cells,
-                      static_cast<std::uint64_t>(2 * resolution * resolution + 2 * resolution));
+            EXPECT_EQ(completed.front().water_cells, 2 * cells + 2 * width);
+            EXPECT_EQ(water.regional_work().preparation_cells,
+                      resolution == session_resolution ? 0u : 2 * cells);
+            EXPECT_EQ(water.regional_work().visits,
+                      (std::vector<ChunkID>{chunks[0]->get_id(), chunks[1]->get_id()}));
             EXPECT_EQ(water.regional_work().border_windows, 0u);
             EXPECT_EQ(water.regional_work().source_mm, 0);
             EXPECT_EQ(water.regional_work().sink_mm, 0);
