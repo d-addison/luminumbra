@@ -169,7 +169,10 @@ TEST(FarWorldDiagnostics, SessionManifestIdentityIsOrderIndependent) {
         FillSessionManifest(*input);
         auto& value = input->tiles[0].observation;
         ASSERT_TRUE(value.target);
-        auto& target = value.target.value();
+        if (!value.target) {
+            return;
+        }
+        auto& target = *value.target;
         switch (control) {
             case 0:
                 ++target.identity.content_hash;
@@ -221,12 +224,16 @@ TEST(FarWorldDiagnostics, SessionManifestIdentityIsOrderIndependent) {
     ProjectSessionManifest(*input, *output, FarVolumeNumericProfile::LegacySigned16);
     EXPECT_NE(output->manifest_fingerprint, fingerprint);
     FillSessionManifest(*input);
-    ASSERT_TRUE(input->tiles[0].observation.target);
-    input->tiles[0].observation.target.value().intent.extra_span = FarVolumeCoverageSpan{0.0f, 128};
+    auto& signed_zero = input->tiles[0].observation.target;
+    ASSERT_TRUE(signed_zero);
+    if (!signed_zero) {
+        return;
+    }
+    auto& signed_zero_intent = signed_zero->intent;
+    signed_zero_intent.extra_span = FarVolumeCoverageSpan{0.0f, 128};
     ProjectSessionManifest(*input, *output);
     const auto zero_fingerprint = output->manifest_fingerprint;
-    input->tiles[0].observation.target.value().intent.extra_span =
-        FarVolumeCoverageSpan{-0.0f, 128};
+    signed_zero_intent.extra_span = FarVolumeCoverageSpan{-0.0f, 128};
     ProjectSessionManifest(*input, *output);
     EXPECT_EQ(output->manifest_fingerprint, zero_fingerprint);
 }
@@ -269,15 +276,25 @@ TEST(FarWorldDiagnostics, SessionManifestRefusesUnavailableAndIncompleteEvidence
             case 9:
                 input->draw_count = input->draws.size() + 1;
                 break;
-            case 10:
-                ASSERT_TRUE(input->tiles[0].observation.target);
-                input->tiles[0].observation.target.value().identity.content_hash = 0;
+            case 10: {
+                auto& target = input->tiles[0].observation.target;
+                ASSERT_TRUE(target);
+                if (!target) {
+                    return;
+                }
+                target->identity.content_hash = 0;
                 break;
-            case 11:
-                ASSERT_TRUE(input->tiles[0].observation.target);
-                input->tiles[0].observation.target.value().intent.extra_span =
+            }
+            case 11: {
+                auto& target = input->tiles[0].observation.target;
+                ASSERT_TRUE(target);
+                if (!target) {
+                    return;
+                }
+                target->intent.extra_span =
                     FarVolumeCoverageSpan{std::numeric_limits<float>::quiet_NaN(), 128};
                 break;
+            }
             case 12:
                 input->tiles[0].observation.target_coverage.span_ok = false;
                 break;
