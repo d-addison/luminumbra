@@ -48,10 +48,17 @@ void ReplayInputs(unsigned workers, bool reopen, std::vector<AcceptanceFrame>& f
     // and pinned region adds the tenth record. No procedural jobs.
     for (std::uint64_t tick = 1; tick <= 12; ++tick) {
         SCOPED_TRACE(tick);
+        // Isolate the scripted hysteresis pressure from automatic ambient work.
+        // Reset only the public completed-work register, retaining fields and
+        // all scheduler state; the same fixture operation runs after reopening.
+        auto& scripted_ledger =
+            const_cast<Luminumbra::world::ActiveRegionLedger&>(session->GetActiveRegionLedger());
+        scripted_ledger.clear_completed_work();
         // Equality after tick 7 deliberately selects the under-hold path.
         session->RecordActiveRegionWork({kRemote, tick <= 7 ? 11u : 10u, 0, 0, 0});
         ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
         ASSERT_FALSE(session->GetRegionSchedulerFault().has_value());
+        EXPECT_EQ(session->GetRegionSchedule().work, tick <= 7 ? 11u : 10u);
         const auto& ledger = session->GetActiveRegionLedger();
         ASSERT_EQ(ledger.records().size(), 10u);
         for (int x = -1; x <= 1; ++x)
@@ -258,8 +265,9 @@ TEST(ActiveRegionAcceptance, DisabledInputsLeaveHashesAndSaveMembersUnchanged) {
         inputs.PinActiveRegion(kRemote, true);
         inputs.PinActiveRegion({32768, 0}, false);
         inputs.RecordActiveRegionWork({kRemote, UINT64_MAX, 0, 0, 0});
-        for (auto* session : {&control, &inputs})
+        for (auto* session : {&control, &inputs}) {
             ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
+        }
         EXPECT_EQ(SessionWorldHash(inputs), SessionWorldHash(control));
         EXPECT_EQ(inputs.GetActiveRegionLedger().canonical_bytes(),
                   control.GetActiveRegionLedger().canonical_bytes());
