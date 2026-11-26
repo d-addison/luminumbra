@@ -48,6 +48,10 @@
 
 namespace fs = std::filesystem;
 
+namespace Luminumbra::Persistence::detail {
+std::size_t file_publication_stripe_for_testing(const fs::path& path);
+}
+
 namespace Luminumbra::Persistence {
 
 TEST(SaveTransaction, IndexedEnergyValidationRejectsCanonicalFingerprintOfMalformedContents) {
@@ -1094,6 +1098,44 @@ TEST(SaveTransaction, UnprotectedMemberAndEscapingPublicationRefuseWithoutMutati
         SaveTransaction::prepare_publication(outside.path() / "world_info.json", {}, &errors));
     EXPECT_FALSE(errors.empty());
     EXPECT_EQ(Tree(save.path()), before);
+}
+
+TEST(SaveTransaction, CollidingJournalStripeAllowsMemberUpdateAndRemoval) {
+    for (const bool commit : {false, true}) {
+        SCOPED_TRACE(commit);
+        TempSave save;
+        const std::string member = "chunks/region/r.25.8.lmr";
+        const auto path = save.path() / member;
+        const auto journal = journal_directory(save.path()) / "txn.json";
+        ASSERT_EQ(detail::file_publication_stripe_for_testing(path), 236u);
+        ASSERT_EQ(detail::file_publication_stripe_for_testing(path),
+                  detail::file_publication_stripe_for_testing(journal));
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{member, "previous"}}));
+        const auto baseline = Tree(save.path());
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(transaction.begin(&errors));
+        ASSERT_TRUE(transaction.protect({member}, &errors));
+        // Both operations read txn.json while holding the member's exclusive
+        // stripe. The reader must borrow ownership without unlocking that gate.
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), member, "updated", &errors));
+        EXPECT_EQ(Get(path), "updated");
+        ASSERT_TRUE(WorldSaveService::remove_member(save.path(), member, &errors));
+        EXPECT_FALSE(fs::exists(path));
+        if (commit) {
+            ASSERT_TRUE(transaction.commit(&errors));
+            SnapshotIndex index;
+            ASSERT_TRUE(read_snapshot_index(save.path(), index, &errors));
+            const auto* removed = FindMember(index, member);
+            ASSERT_NE(removed, nullptr);
+            EXPECT_FALSE(removed->present);
+        } else {
+            transaction.abort(&errors);
+            EXPECT_EQ(Tree(save.path()), baseline);
+        }
+        EXPECT_TRUE(errors.empty());
+        EXPECT_FALSE(journal_pending(save.path()));
+    }
 }
 
 #if defined(__linux__)

@@ -2039,6 +2039,42 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertLess(world.index("retain_chunks->contains(record.id)"), skip)
         self.assertLess(skip, world.index("AdmitChunkRecord(record,"))
 
+    def assert_publication_reader_borrows_exclusive_ownership(self, source):
+        guard = self.function(source, "FilePublicationReadGuard", "FilePublicationReadGuard::")
+        release = self.function(source, "~FilePublicationReadGuard", "FilePublicationReadGuard::")
+        self.assertIn('const auto& held = HeldPublicationMutexes();', guard)
+        self.assertIn('std::find(held.begin(), held.end(), &m_sync->publication)', guard)
+        self.assertRegex(guard, r'm_sync = nullptr;\s*return;')
+        self.assertLess(guard.index('m_sync = nullptr;'),
+                        guard.index('m_sync->publication.lock_shared();'))
+        self.assertRegex(release, r'if \(m_sync\)\s*m_sync->publication.unlock_shared\(\);')
+
+    def test_publication_reader_borrows_its_threads_exclusive_stripe(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        self.assert_publication_reader_borrows_exclusive_ownership(source)
+        for token in ('const auto& held = HeldPublicationMutexes();',
+                      'std::find(held.begin(), held.end(), &m_sync->publication)',
+                      'm_sync = nullptr;', 'if (m_sync)'):
+            with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):
+                self.assert_publication_reader_borrows_exclusive_ownership(
+                    source.replace(token, 'removed', 1))
+        tests = read_source("test/persistence/SaveTransaction_test.cpp")
+        self.assertIn('CollidingJournalStripeAllowsMemberUpdateAndRemoval', tests)
+        self.assertIn('detail::file_publication_stripe_for_testing(journal)', tests)
+        self.assertIn('ManyMembersKeepDescriptorsBoundedThroughPublicationAndRollback', tests)
+
+    def test_absent_world_member_completion_flushes_existing_ancestor(self):
+        source = read_source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        completion = self.function(source, "complete_owned_removal", "SaveTransaction::")
+        absent = completion.split('if (identity == ArtifactIdentity{}) {', 1)[1]
+        absent = absent.split('#endif', 1)[0]
+        self.assertRegex(absent, r'#else\s*(?://[^\n]*\n\s*)*'
+                         r'return WorldSaveService::durable_flush_directory\(\s*'
+                         r'NearestExistingDirectory\(owned_path.parent_path\(\)\), errors\);')
+        tests = read_source("test/persistence/world_save_service_test.cpp")
+        self.assertIn('FreshPlantSaveCompletesAbsentRegionMembers', tests)
+        self.assertIn('AbsentRegionRemovalRefusesNonDirectoryAncestors', tests)
+
     def test_native_saved_input_holds_publication_until_after_close(self):
         source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
         header = read_source("src/luminumbra_common/persistence/SavedInputFile.h")

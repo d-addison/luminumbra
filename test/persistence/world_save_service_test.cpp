@@ -3014,6 +3014,63 @@ TEST(WorldSaveService, RemovalCompletionFailureRemainsRetryable) {
     EXPECT_FALSE(journal_pending(save.path()));
 }
 
+TEST(WorldSaveService, FreshPlantSaveCompletesAbsentRegionMembers) {
+    using namespace Luminumbra::Persistence;
+    for (const unsigned directory_depth : {0u, 1u, 2u}) {
+        SCOPED_TRACE(directory_depth);
+        const TempSaveDir save("absent_region_members");
+        const auto chunks = save.path() / "chunks";
+        const auto region = chunks / "region";
+        if (directory_depth != 0) {
+            ASSERT_TRUE(std::filesystem::create_directory(chunks));
+        }
+        if (directory_depth == 2) {
+            ASSERT_TRUE(std::filesystem::create_directory(region));
+        }
+        SaveTransaction transaction(save.path(), 1, {}, &WorldSaveService::member_digest);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(transaction.begin(&errors)) << ::testing::PrintToString(errors);
+        const Luminumbra::Ecs::EntityRegistrySnapshot empty_plants;
+        // No plant file has been installed. Saving and retrying its absence
+        // must complete without requiring payload directories to be created.
+        for (unsigned attempt = 0; attempt < 2; ++attempt) {
+            ASSERT_TRUE(WorldSaveService::save_plant_entities(empty_plants, save.path(), &errors))
+                << ::testing::PrintToString(errors);
+            EXPECT_EQ(std::filesystem::exists(chunks), directory_depth != 0);
+            EXPECT_EQ(std::filesystem::exists(region), directory_depth == 2);
+        }
+        transaction.abort(&errors);
+        EXPECT_TRUE(errors.empty()) << ::testing::PrintToString(errors);
+        EXPECT_FALSE(journal_pending(save.path()));
+        EXPECT_EQ(std::filesystem::exists(chunks), directory_depth != 0);
+        EXPECT_EQ(std::filesystem::exists(region), directory_depth == 2);
+    }
+}
+
+TEST(WorldSaveService, AbsentRegionRemovalRefusesNonDirectoryAncestors) {
+    using namespace Luminumbra::Persistence;
+    for (const bool chunks_directory : {false, true}) {
+        SCOPED_TRACE(chunks_directory);
+        const TempSaveDir save("invalid_region_parent");
+        const auto chunks = save.path() / "chunks";
+        if (chunks_directory) {
+            ASSERT_TRUE(std::filesystem::create_directory(chunks));
+        }
+        const auto obstruction = chunks_directory ? chunks / "region" : chunks;
+        ASSERT_TRUE(WorldSaveService::create_file_durably(obstruction, "foreign"));
+        SaveTransaction transaction(save.path(), 1, {}, &WorldSaveService::member_digest);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(transaction.begin(&errors));
+        EXPECT_FALSE(WorldSaveService::remove_member(
+            save.path(), "chunks/region/plant-identities.json", &errors));
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(ReadFileBytes(obstruction), "foreign");
+        transaction.abort(nullptr);
+        EXPECT_EQ(ReadFileBytes(obstruction), "foreign");
+        EXPECT_FALSE(journal_pending(save.path()));
+    }
+}
+
 TEST(WorldSaveService, DurableRemovalRefusesSubstitutedOccupant) {
     const TempSaveDir save("remove_substitution");
     const auto path = save.path() / "world_info.json";

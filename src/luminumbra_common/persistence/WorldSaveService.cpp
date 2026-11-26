@@ -129,6 +129,13 @@ bool HasValidWaterColumnState(const Chunk& chunk) {
     return true;
 }
 
+namespace {
+std::vector<const std::shared_mutex*>& HeldPublicationMutexes() {
+    thread_local std::vector<const std::shared_mutex*> held;
+    return held;
+}
+} // namespace
+
 namespace detail {
 
 struct RegionFileSync {
@@ -137,12 +144,11 @@ struct RegionFileSync {
 };
 
 namespace {
-RegionFileSync& RegionFileSyncFor(const std::filesystem::path& path) {
+std::size_t RegionFileStripeFor(const std::filesystem::path& path) {
     // Fixed storage bounds synchronization overhead regardless of world size.
     // Hash the generated filename so relative/absolute world paths and Windows
     // case differences select the same stripe. Collisions may delay publication;
     // readers never acquire the writer mutex that covers compression or fsync.
-    static std::array<RegionFileSync, 256> stripes;
     std::size_t hash = 0;
     const auto filename = path.filename().native();
     for (const auto character : filename) {
@@ -150,17 +156,37 @@ RegionFileSync& RegionFileSyncFor(const std::filesystem::path& path) {
             character >= 'A' && character <= 'Z' ? character + ('a' - 'A') : character;
         hash = hash * 31u + static_cast<std::size_t>(folded);
     }
-    return stripes[hash % stripes.size()];
+    return hash % 256u;
+}
+
+RegionFileSync& RegionFileSyncFor(const std::filesystem::path& path) {
+    static std::array<RegionFileSync, 256> stripes;
+    return stripes[RegionFileStripeFor(path)];
 }
 } // namespace
 
+// Const diagnostic of the actual publication stripe; does not acquire a gate.
+std::size_t file_publication_stripe_for_testing(const std::filesystem::path& path) {
+    return RegionFileStripeFor(path);
+}
+
 FilePublicationReadGuard::FilePublicationReadGuard(const std::filesystem::path& path)
     : m_sync(&RegionFileSyncFor(path)) {
+    // Completion can read a journal whose filename collides with the member
+    // currently being published. Its owning thread already excludes writers
+    // and readers on this stripe; do not recursively acquire a shared lock.
+    const auto& held = HeldPublicationMutexes();
+    if (std::find(held.begin(), held.end(), &m_sync->publication) != held.end()) {
+        m_sync = nullptr;
+        return;
+    }
     m_sync->publication.lock_shared();
 }
 
 FilePublicationReadGuard::~FilePublicationReadGuard() {
-    m_sync->publication.unlock_shared();
+    if (m_sync) {
+        m_sync->publication.unlock_shared();
+    }
 }
 
 RegionFileWriteGuard::RegionFileWriteGuard(const std::filesystem::path&) {}
@@ -332,16 +358,11 @@ void AcquirePublicationLock(std::unique_lock<std::shared_mutex>& lock,
     }
 }
 
-std::vector<const std::shared_mutex*>& HeldPublicationMutexes() {
-    thread_local std::vector<const std::shared_mutex*> held;
-    return held;
-}
-
 // Exclusive publication gate that its owning thread may re-enter. Recorded
 // removal completion retires a world member through remove_owned_entry while
 // the publisher (PublishProtectedMember, durable_remove) already holds that
 // member's gate; locking a std::shared_mutex twice from one thread is undefined
-// and fails with EDEADLK on glibc. Shared readers are unaffected.
+// and fails with EDEADLK on glibc. Readers on this thread borrow that ownership.
 class PublicationLock {
 public:
     PublicationLock() = default;

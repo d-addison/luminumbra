@@ -3035,7 +3035,11 @@ std::optional<bool> SaveTransaction::complete_owned_removal(const fs::path& path
                                nullptr,
                                errors) != detail::NamespaceRetirementOutcome::Failed;
 #else
-        return WorldSaveService::durable_flush_directory(owned_path.parent_path(), errors);
+        // A protected create can still be absent beneath never-created chunk
+        // directories. Persist the nearest existing ancestor, as rollback and
+        // receipt completion do, without creating empty payload directories.
+        return WorldSaveService::durable_flush_directory(
+            NearestExistingDirectory(owned_path.parent_path()), errors);
 #endif
     }
     // Publication reuses a private slot, never the destination's receipt name:
