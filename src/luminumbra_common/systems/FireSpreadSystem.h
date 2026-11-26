@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <span>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -108,22 +109,43 @@ inline float FireHeatContribution(
 // the other sim ticks and for an optional stochastic variant; the deterministic
 // threshold path does not consume it.
 // StableIdentity is selected by session wiring only at authority activation.
-template<bool StableIdentity = false>
+// Elapsed opt-in uses right-aligned windows ending at tick, at most 65,536
+// deterministic snapshot/apply steps. Wind and persistent ignition sources are
+// sampled at due time. Transient external strikes fire ONCE, on the due step.
+// Both endpoints must participate in a substep; newly lit fuel spreads next step.
+template<bool StableIdentity = false, bool Elapsed = false, typename AdmissionFor = std::nullptr_t>
 inline FireSpreadStats
 RunFireSpreadOnTick(entt::registry& reg,
                     std::uint64_t tick,
                     glm::vec2 wind_xz = glm::vec2(0.0f),
                     std::span<const FireIgnitionSource> external_sources = {},
-                    const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
+                    const ::Luminumbra::world::RegionConsumerGate& gate = {},
+                    const AdmissionFor& admission_for = nullptr) {
     (void)tick;
     FireSpreadStats stats;
+    // A typed lookup can retain captured creature ownership without coupling this
+    // system to game AI. It returns RegionConsumerGate::Admission for each entity,
+    // using the gate for other opt-ins. Calls inline; there is no type erasure.
+    const auto admitted = [&](entt::entity entity) {
+        if constexpr (std::is_same_v<AdmissionFor, std::nullptr_t>) {
+            return gate.AdmissionFor(entity);
+        } else {
+            return admission_for(entity);
+        }
+    };
+    const auto allows = [&](entt::entity entity) {
+        return admitted(entity).allowed;
+    };
+    const auto elapsed_ticks = [&](entt::entity entity) {
+        return admitted(entity).elapsed_ticks;
+    };
 
     auto view = reg.view<Comp::CombustibleComponent, Comp::TransformComponent>();
 
     // id-ordered entity list so snapshot + apply are order-independent + deterministic.
     std::vector<entt::entity> ents;
     for (auto e : view) {
-        if (gate.Allows(e)) {
+        if (allows(e) && (!Elapsed || elapsed_ticks(e) != 0)) {
             ents.push_back(e);
         }
     }
@@ -135,26 +157,32 @@ RunFireSpreadOnTick(entt::registry& reg,
         });
     }
 
-    // --- : snapshot heat SOURCES (this tick's Burning cells) ---
-    struct Source {
-        glm::vec2 pos; // xz position
-        float radius;  // ignition radius (m)
-        float scale;   // heat scale (1.0 for a burning cell)
-    };
-    std::vector<Source> sources;
-    for (auto e : ents) {
-        const auto& cb = view.get<Comp::CombustibleComponent>(e);
-        if (cb.state() != Comp::BurnState::Burning)
-            continue;
-        const auto& tf = view.get<Comp::TransformComponent>(e);
-        sources.push_back({glm::vec2(tf.position.x, tf.position.z), cb.ignition_radius, 1.0f});
+    std::vector<std::uint32_t> windows;
+    windows.reserve(ents.size());
+    std::uint32_t max_steps = 0;
+    for (auto entity : ents) {
+        const std::uint32_t steps = Elapsed ? elapsed_ticks(entity) : 1;
+        if (steps > 65536)
+            throw std::invalid_argument("Invalid fire elapsed window");
+        windows.push_back(steps);
+        max_steps = std::max(max_steps, steps);
     }
+    stats.considered = static_cast<int>(ents.size());
+
+    struct Source {
+        glm::vec2 pos;
+        float radius;
+        float scale;
+        std::uint32_t steps;
+    };
+    // Scratch contains participating sources only, reused across bounded substeps.
+    std::vector<Source> ignitions;
     // Explicit ignition sources (e.g. a torch/lightning) act as extra heat emitters.
     {
         auto ig = reg.view<Comp::IgnitionSourceComponent, Comp::TransformComponent>();
         std::vector<entt::entity> igs;
         for (auto e : ig) {
-            if (gate.Allows(e)) {
+            if (allows(e) && (!Elapsed || elapsed_ticks(e) != 0)) {
                 igs.push_back(e);
             }
         }
@@ -185,16 +213,23 @@ RunFireSpreadOnTick(entt::registry& reg,
         for (auto e : igs) {
             const auto& src = ig.get<Comp::IgnitionSourceComponent>(e);
             const auto& tf = ig.get<Comp::TransformComponent>(e);
-            sources.push_back({glm::vec2(tf.position.x, tf.position.z),
-                               src.radius,
-                               src.intensity > 0.0f ? src.intensity : 0.0f});
+            const std::uint32_t steps = Elapsed ? elapsed_ticks(e) : 1;
+            if (steps > 65536)
+                throw std::invalid_argument("Invalid fire ignition window");
+            ignitions.push_back({glm::vec2(tf.position.x, tf.position.z),
+                                 src.radius,
+                                 src.intensity > 0.0f ? src.intensity : 0.0f,
+                                 steps});
         }
     }
     for (const FireIgnitionSource& source : external_sources) {
-        if (gate.AllowsPosition({source.position.x, 0.0f, source.position.y})) {
-            sources.push_back({source.position,
-                               source.radius,
-                               source.intensity > 0.0f ? source.intensity : 0.0f});
+        const ::Luminumbra::Vec3 position{source.position.x, 0.0f, source.position.y};
+        if (gate.AllowsPosition(position) &&
+            (!Elapsed || gate.ElapsedTicksAtPosition(position) != 0)) {
+            ignitions.push_back({source.position,
+                                 source.radius,
+                                 source.intensity > 0.0f ? source.intensity : 0.0f,
+                                 1});
         }
     }
 
@@ -207,66 +242,97 @@ RunFireSpreadOnTick(entt::registry& reg,
         bool burn_down; // Burning: decrement / transition
     };
     std::vector<Apply> applies;
-
-    for (auto e : ents) {
-        ++stats.considered;
-        const auto& cb = view.get<Comp::CombustibleComponent>(e);
-        const Comp::BurnState st = cb.state();
-
-        if (st == Comp::BurnState::Burnt)
-            continue; // inert
-
-        if (st == Comp::BurnState::Burning) {
-            applies.push_back({e, /*ignite*/ false, /*burn_down*/ true});
-            continue;
+    std::vector<Source> sources;
+    // At most one heat source and one apply per participating combustible, plus
+    // the staged ignition list. Validate the sum before reserving; no allocation
+    // occurs during snapshot/apply substeps, even as the burning set grows.
+    if (ents.size() > sources.max_size() - ignitions.size())
+        throw std::length_error("Fire source capacity exceeded");
+    sources.reserve(ents.size() + ignitions.size());
+    applies.reserve(ents.size());
+    for (std::uint32_t remaining = max_steps; remaining > 0; --remaining) {
+        sources.clear();
+        applies.clear();
+        // Snapshot before any mutation: a source exhausting its final burn tick
+        // still delivers heat, and an ignition cannot chain within this substep.
+        for (std::size_t index = 0; index < ents.size(); ++index) {
+            if (windows[index] < remaining)
+                continue;
+            const auto entity = ents[index];
+            const auto& cb = view.get<Comp::CombustibleComponent>(entity);
+            if (cb.state() != Comp::BurnState::Burning)
+                continue;
+            const auto& tf = view.get<Comp::TransformComponent>(entity);
+            sources.push_back({{tf.position.x, tf.position.z}, cb.ignition_radius, 1.0f, 1});
+        }
+        for (const auto& source : ignitions) {
+            if (source.steps >= remaining)
+                sources.push_back(source);
         }
 
-        // Unburnt candidate: sum delivered heat from every source.
-        const auto& tf = view.get<Comp::TransformComponent>(e);
-        const glm::vec2 cpos(tf.position.x, tf.position.z);
+        for (std::size_t index = 0; index < ents.size(); ++index) {
+            if (windows[index] < remaining)
+                continue;
+            const auto e = ents[index];
+            const auto& cb = view.get<Comp::CombustibleComponent>(e);
+            const Comp::BurnState st = cb.state();
 
-        float heat = 0.0f;
-        for (const Source& s : sources) {
-            const glm::vec2 delta = cpos - s.pos;
-            const float dx = delta.x, dz = delta.y;
-            const float d = ::Luminumbra::DeterministicMath::Sqrt(dx * dx + dz * dz);
-            // Unit direction source->candidate (zero if coincident -> no wind bias,
-            // pure base heat at d==0).
-            glm::vec2 dir(0.0f);
-            if (d > 0.0f) {
-                const float inv = 1.0f / d;
-                dir = glm::vec2(dx * inv, dz * inv);
+            if (st == Comp::BurnState::Burnt)
+                continue; // inert
+
+            if (st == Comp::BurnState::Burning) {
+                applies.push_back({e, /*ignite*/ false, /*burn_down*/ true});
+                continue;
             }
-            heat += FireHeatContribution(d, s.radius, dir, wind_xz, s.scale);
+
+            // Unburnt candidate: sum delivered heat from every source.
+            const auto& tf = view.get<Comp::TransformComponent>(e);
+            const glm::vec2 cpos(tf.position.x, tf.position.z);
+
+            float heat = 0.0f;
+            for (const Source& s : sources) {
+                const glm::vec2 delta = cpos - s.pos;
+                const float dx = delta.x, dz = delta.y;
+                const float d = ::Luminumbra::DeterministicMath::Sqrt(dx * dx + dz * dz);
+                // Unit direction source->candidate (zero if coincident -> no wind bias,
+                // pure base heat at d==0).
+                glm::vec2 dir(0.0f);
+                if (d > 0.0f) {
+                    const float inv = 1.0f / d;
+                    dir = glm::vec2(dx * inv, dz * inv);
+                }
+                heat += FireHeatContribution(d, s.radius, dir, wind_xz, s.scale);
+            }
+
+            // Ignition resistance: rises with moisture, falls with fuel. Floor at 0.
+            float resistance =
+                kFireIgnitionBase + cb.moisture() * kFireMoistureResist - cb.fuel() * kFireFuelEase;
+            if (resistance < 0.0f)
+                resistance = 0.0f;
+
+            // Need some fuel to actually catch (fuel-exhausted cells can't ignite).
+            const bool has_fuel = cb.fuel_milli > 0;
+            const bool ignite =
+                has_fuel && (heat >= resistance) && (resistance > 0.0f || heat > 0.0f);
+            if (ignite)
+                applies.push_back({e, /*ignite*/ true, /*burn_down*/ false});
         }
 
-        // Ignition resistance: rises with moisture, falls with fuel. Floor at 0.
-        float resistance =
-            kFireIgnitionBase + cb.moisture() * kFireMoistureResist - cb.fuel() * kFireFuelEase;
-        if (resistance < 0.0f)
-            resistance = 0.0f;
-
-        // Need some fuel to actually catch (fuel-exhausted cells can't ignite).
-        const bool has_fuel = cb.fuel_milli > 0;
-        const bool ignite = has_fuel && (heat >= resistance) && (resistance > 0.0f || heat > 0.0f);
-        if (ignite)
-            applies.push_back({e, /*ignite*/ true, /*burn_down*/ false});
-    }
-
-    // Apply in id order (applies is already in id order since ents is).
-    for (const Apply& a : applies) {
-        auto& cb = reg.get<Comp::CombustibleComponent>(a.e);
-        if (a.ignite) {
-            cb.set_state(Comp::BurnState::Burning);
-            cb.burn_ticks_remaining = kFireBurnTicks;
-            ++stats.ignited;
-        } else if (a.burn_down) {
-            if (cb.burn_ticks_remaining > 0)
-                --cb.burn_ticks_remaining;
-            if (cb.burn_ticks_remaining == 0) {
-                cb.set_state(Comp::BurnState::Burnt);
-                cb.fuel_milli = 0; // consumed
-                ++stats.burnt_out;
+        // Apply in id order (applies is already in id order since ents is).
+        for (const Apply& a : applies) {
+            auto& cb = reg.get<Comp::CombustibleComponent>(a.e);
+            if (a.ignite) {
+                cb.set_state(Comp::BurnState::Burning);
+                cb.burn_ticks_remaining = kFireBurnTicks;
+                ++stats.ignited;
+            } else if (a.burn_down) {
+                if (cb.burn_ticks_remaining > 0)
+                    --cb.burn_ticks_remaining;
+                if (cb.burn_ticks_remaining == 0) {
+                    cb.set_state(Comp::BurnState::Burnt);
+                    cb.fuel_milli = 0; // consumed
+                    ++stats.burnt_out;
+                }
             }
         }
     }

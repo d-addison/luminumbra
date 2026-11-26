@@ -36,8 +36,11 @@ share tag numbers. There are no assigned due dates or invented completion percen
   are implemented, with native qualification pending for v0.3.2 (in preparation).
   Strict distant policy and distant creatures (S8, issue #251), remaining S9 closure, and the
   committed-generation edited-SDF producer and FW S8 consumer (issue #249) are planned
-  for v0.3.2 (Performance overhaul). Their umbrella issues #135, #136 and #139 stay
-  listed under v0.3.1 until the v0.3.2 carriers land. The render qualification tooling
+  for v0.3.2 (Performance overhaul, in preparation). Issue #136 already has typed
+  page storage, regional scheduling and durable storm continuation foundations;
+  automatic activation and full field qualification remain pending. Issues #135
+  and #139 stay listed under v0.3.1 until their v0.3.2 carriers land. The render
+  qualification tooling
   stack, the acceptance evidence matrix and checker, the developer console, asymmetric
   day/night and the calendar-relative lunar cycle, GNS/Steam admission identity, and
   the MG2 E4 candidate directory landed on `devel` for v0.3.1.
@@ -243,7 +246,6 @@ Performance work to ship regional continuation on by default is planned for v0.4
 - [issue #129 — Capture representative budgets using landed simulation telemetry](https://github.com/d-addison/luminumbra/issues/129) — Budget collector and pinned complete budgets for the default, mountains and archipelago worlds landed; closure is a maintainer decision.
 - [issue #130 — Qualify integrated depth ordering and visual parity](https://github.com/d-addison/luminumbra/issues/130) — Closed — reversed-Z float depth adopted as the far-plane precision prerequisite.
 - [issue #135 — Track persistent active regions with ranked cadence, freeze and save-on-evict](https://github.com/d-addison/luminumbra/issues/135) — Ledger, ranked cadence, freeze, dirty-chunk parking until successful save, tick-based autosave and indexed durability are implemented. Qualification is carried by v0.3.2 (in preparation), with shipped scheduler limits unlimited.
-- [issue #136 — Host wind, weather and aether ambience as stateful world-anchored pages](https://github.com/d-addison/luminumbra/issues/136) — Durable regional fields/weather/scent/energy and complete field qualification are carried by v0.3.2 work.
 - [issue #139 — Add a minimal persisted ground-object entity](https://github.com/d-addison/luminumbra/issues/139) — Durable completed work and ground-object continuation are carried by v0.3.2 work.
 - [issue #241 — Render qualification tooling stack](https://github.com/d-addison/luminumbra/issues/241) — The stack is merged; native 36-cell runs are tracked by the native checklist.
 - [issue #362 — Distant-policy adoption: config NUL refusal, peer content-identity admission, fixture-hash marker exclusion](https://github.com/d-addison/luminumbra/issues/362) — Config NUL refusal landed; peer content-identity admission and the fixture marker guard ride the v0.3.2 carrier.
@@ -252,6 +254,8 @@ Performance work to ship regional continuation on by default is planned for v0.4
 - [issue #396 — CI: deterministic performance work budgets](https://github.com/d-addison/luminumbra/issues/396) — Performance bundle; native execution pending.
 
 ### v0.3.2 — Performance overhaul
+
+In preparation; implementation and merge status do not establish a release.
 
 The first release gated on frame-rate bars ([issue #404](https://github.com/d-addison/luminumbra/issues/404)):
 120 fps (p99 ≤ 8.33 ms) on High and Ultra on the reference PC, 60 fps (p99 ≤ 16.67 ms)
@@ -273,6 +277,7 @@ scheduler budget activation remains a separate measured decision.
 - [issue #132 — Bake terrain edits into every far tier and persist the far authority overlay](https://github.com/d-addison/luminumbra/issues/132) — Overlay codec/writer and bake derivation implemented; committed-generation edited-SDF producer and FW S8 consumer planned for v0.3.2 (issue #249).
 - [issue #133 — Measure, propose and enforce far-tier residency and streaming budgets](https://github.com/d-addison/luminumbra/issues/133) — Implemented accounting and bounded runtime infrastructure; calibrated native budgets deferred to v0.3.2.
 - [issue #134 — Qualify persisted-clock continuation across simulation consumers](https://github.com/d-addison/luminumbra/issues/134) — Persisted clock implemented; durable continuation and complete consumer qualification planned for v0.3.2.
+- [issue #136 — Host wind, weather and aether ambience as stateful world-anchored pages](https://github.com/d-addison/luminumbra/issues/136) — Implemented: typed pages, scheduled evolution, durable storms and canonical FPG v2/v3 persistence. Verified: source and regression registration reviewed; paired flag-state oracle artifacts and the 20 km activation/freezing run log remain required. Merged: predecessor field implementations are on `devel`; automatic ambient activation remains pending. Released: full issue qualification is pending for v0.3.2 (in preparation). See the field-page save format (FPG1) in the [engine guide](engine-guide.md).
 - [issue #137 — Persist creatures and simulate distant wildlife coarsely with promotion](https://github.com/d-addison/luminumbra/issues/137) — Strict distant policy and distant creatures (S8, issue #251), promotion and native qualification planned for v0.3.2.
 - [issue #138 — Run plants and water in distant active regions under bounded cadence and budget](https://github.com/d-addison/luminumbra/issues/138) — Regional foliage/water continuation with host persistence (issue #242) implemented, with native qualification planned for v0.3.2; performance/default enablement planned for v0.4.0 as issue #320.
 - [issue #140 — Fold distant-simulation state into world hashes and expose a region diagnostic panel](https://github.com/d-addison/luminumbra/issues/140) — Clock, ledger, edited-content digest and scheduler-fault foundations implemented; remaining S8/S9 hash/diagnostic closure and qualification planned for v0.3.2.

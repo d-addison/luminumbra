@@ -38,6 +38,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 #include <entt/entity/registry.hpp>
@@ -88,7 +89,8 @@ inline float clampBiomass(float v) {
     return v;
 }
 
-// Telemetry / sub-hash for the wildlife-foliage tick.
+// Telemetry / sub-hash for the wildlife-foliage tick. Elapsed roster counts are
+// unique participants; biomass totals accumulate the ordered substeps.
 struct WildlifeFoliageStats {
     int grazers = 0;              // non-predator creatures considered this tick
     int plants = 0;               // grazeable plants considered this tick
@@ -100,6 +102,10 @@ struct WildlifeFoliageStats {
 // Advance the wildlife-foliage coupling by ONE fixed tick. Pure function of registry
 // state. id-ordered; graze pressure is summed per plant (order-independent) and feed is
 // summed per creature, then both are applied in id-ordered passes.
+// Elapsed opt-in: right-aligned windows end at tick. Positions and tuning are
+// sampled at due time; only overlapping admitted steps can graze/feed. Repeating
+// float operations preserves the one-step rounding, depletion and hunger clamps.
+template<bool Elapsed = false>
 inline WildlifeFoliageStats
 RunWildlifeFoliageOnTick(entt::registry& reg,
                          std::uint64_t tick,
@@ -113,6 +119,7 @@ RunWildlifeFoliageOnTick(entt::registry& reg,
     struct Grazer {
         entt::entity e;
         float x, z;
+        std::uint32_t steps;
     };
     std::vector<Grazer> grazers;
     {
@@ -132,7 +139,13 @@ RunWildlifeFoliageOnTick(entt::registry& reg,
             if (cr.is_predator || cr.eaten)
                 continue; // only live herbivores graze
             const auto& tf = cview.get<const Comp::TransformComponent>(e);
-            grazers.push_back({e, tf.position.x, tf.position.z});
+            const std::uint32_t steps =
+                Elapsed ? (admission ? admission->ElapsedTicks(e) : gate.ElapsedTicks(e)) : 1;
+            if (steps == 0)
+                continue;
+            if (steps > 65536)
+                throw std::invalid_argument("Invalid grazing elapsed window");
+            grazers.push_back({e, tf.position.x, tf.position.z, steps});
             ++stats.grazers;
         }
     }
@@ -149,64 +162,88 @@ RunWildlifeFoliageOnTick(entt::registry& reg,
         return entt::to_integral(a) < entt::to_integral(b);
     });
 
-    // Per-creature feed accumulator, indexed parallel to `grazers` (summed so applying it
-    // afterward is order-independent).
+    // Validate all windows before mutation. Scratch is bounded by participating
+    // plants/grazers and reused for at most 65,536 substeps; no world-sized copies.
+    std::vector<std::uint32_t> plant_steps;
+    plant_steps.reserve(pents.size());
+    std::uint32_t max_steps = 0;
+    for (auto entity : pents) {
+        const std::uint32_t steps = Elapsed ? gate.ElapsedTicks(entity) : 1;
+        if (steps > 65536)
+            throw std::invalid_argument("Invalid grazing elapsed window");
+        plant_steps.push_back(steps);
+        max_steps = std::max(max_steps, steps);
+    }
+    stats.plants = static_cast<int>(std::count_if(
+        plant_steps.begin(), plant_steps.end(), [](auto steps) { return steps != 0; }));
     std::vector<float> feed(grazers.size(), 0.0f);
+    std::vector<bool> grazed(pents.size(), false);
+    for (std::uint32_t remaining = max_steps; remaining > 0; --remaining) {
+        std::fill(feed.begin(), feed.end(), 0.0f);
+        // --- 3. id-ordered pass over plants: count grazers in range, graze or regrow. ---
+        for (std::size_t pi = 0; pi < pents.size(); ++pi) {
+            if (plant_steps[pi] < remaining)
+                continue;
+            const auto pe = pents[pi];
+            auto& gz = pview.get<Comp::GrazeableComponent>(pe);
+            const auto& ptf = pview.get<const Comp::TransformComponent>(pe);
 
-    // --- 3. id-ordered pass over plants: count grazers in range, graze or regrow. ---
-    for (auto pe : pents) {
-        ++stats.plants;
-        auto& gz = pview.get<Comp::GrazeableComponent>(pe);
-        const auto& ptf = pview.get<const Comp::TransformComponent>(pe);
+            // Count how many grazers are within range (trampling pressure) and remember which
+            // (to feed them). Summing the count first keeps the bite order-independent.
+            // A depleted plant (no biomass) still gets trampled but feeds NO ONE -- gate the
+            // feed accrual on having biomass to give, so creatures can't eat from bare ground.
+            const bool has_biomass = clampBiomass(gz.biomass) > 0.0f;
+            int n_in_range = 0;
+            for (std::size_t gi = 0; gi < grazers.size(); ++gi) {
+                if (grazers[gi].steps < remaining)
+                    continue;
+                const float dx = grazers[gi].x - ptf.position.x;
+                const float dz = grazers[gi].z - ptf.position.z;
+                const float d2 = dx * dx + dz * dz;
+                if (d2 <= graze_radius_sq) {
+                    ++n_in_range;
+                    if (has_biomass)
+                        feed[gi] += tuning.feed_per_graze; // only a living plant feeds
+                }
+            }
 
-        // Count how many grazers are within range (trampling pressure) and remember which
-        // (to feed them). Summing the count first keeps the bite order-independent.
-        // A depleted plant (no biomass) still gets trampled but feeds NO ONE -- gate the
-        // feed accrual on having biomass to give, so creatures can't eat from bare ground.
-        const bool has_biomass = clampBiomass(gz.biomass) > 0.0f;
-        int n_in_range = 0;
-        for (std::size_t gi = 0; gi < grazers.size(); ++gi) {
-            const float dx = grazers[gi].x - ptf.position.x;
-            const float dz = grazers[gi].z - ptf.position.z;
-            const float d2 = dx * dx + dz * dz;
-            if (d2 <= graze_radius_sq) {
-                ++n_in_range;
-                if (has_biomass)
-                    feed[gi] += tuning.feed_per_graze; // only a living plant feeds
+            if (n_in_range > 0) {
+                // Graze/trample: biomass drops proportional to the number of grazers (so a
+                // herd flattens a patch faster). Constant-step float arithmetic.
+                const float removed_req =
+                    tuning.graze_per_creature * static_cast<float>(n_in_range);
+                const float before = clampBiomass(gz.biomass);
+                const float after = clampBiomass(before - removed_req);
+                gz.biomass = after;
+                // Unsigned tick arithmetic preserves the existing 32-bit stamp wrap.
+                gz.last_grazed_tick = static_cast<std::uint32_t>(tick - (remaining - 1));
+                stats.biomass_removed += (before - after);
+                if (!grazed[pi]) {
+                    grazed[pi] = true;
+                    ++stats.grazed_plants;
+                }
+            } else {
+                // Ungrazed: regrow slowly toward the cap.
+                const float before = clampBiomass(gz.biomass);
+                const float after = clampBiomass(before + tuning.regrow_per_tick);
+                gz.biomass = after;
+                stats.biomass_regrown += (after - before);
             }
         }
 
-        if (n_in_range > 0) {
-            // Graze/trample: biomass drops proportional to the number of grazers (so a
-            // herd flattens a patch faster). Constant-step float arithmetic.
-            const float removed_req = tuning.graze_per_creature * static_cast<float>(n_in_range);
-            const float before = clampBiomass(gz.biomass);
-            const float after = clampBiomass(before - removed_req);
-            gz.biomass = after;
-            gz.last_grazed_tick = static_cast<std::uint32_t>(tick);
-            stats.biomass_removed += (before - after);
-            ++stats.grazed_plants;
-        } else {
-            // Ungrazed: regrow slowly toward the cap.
-            const float before = clampBiomass(gz.biomass);
-            const float after = clampBiomass(before + tuning.regrow_per_tick);
-            gz.biomass = after;
-            stats.biomass_regrown += (after - before);
+        // --- 4. Apply accumulated feed to creatures, id-ordered (lower hunger). ---
+        // `grazers` is already id-ordered, so this pass is deterministic. Hunger clamps to
+        // [0,1] (0 = sated). This only RUNS when grazeable plants exist (feed is otherwise
+        // all-zero), preserving the no-op-when-no-plants gate.
+        for (std::size_t gi = 0; gi < grazers.size(); ++gi) {
+            if (feed[gi] <= 0.0f)
+                continue;
+            auto& cr = reg.get<Comp::CreatureComponent>(grazers[gi].e);
+            float h = cr.hunger - feed[gi];
+            if (h < 0.0f)
+                h = 0.0f;
+            cr.hunger = h;
         }
-    }
-
-    // --- 4. Apply accumulated feed to creatures, id-ordered (lower hunger). ---
-    // `grazers` is already id-ordered, so this pass is deterministic. Hunger clamps to
-    // [0,1] (0 = sated). This only RUNS when grazeable plants exist (feed is otherwise
-    // all-zero), preserving the no-op-when-no-plants gate.
-    for (std::size_t gi = 0; gi < grazers.size(); ++gi) {
-        if (feed[gi] <= 0.0f)
-            continue;
-        auto& cr = reg.get<Comp::CreatureComponent>(grazers[gi].e);
-        float h = cr.hunger - feed[gi];
-        if (h < 0.0f)
-            h = 0.0f;
-        cr.hunger = h;
     }
 
     return stats;

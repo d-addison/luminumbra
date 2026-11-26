@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Distribution-aware render measurement validity; contains no performance budgets."""
+import copy
 import functools
 import json
 import math
@@ -303,10 +304,189 @@ def validate_window_visibility(data):
         raise ValueError('qualification requires boolean effective_render.window_visible=true to prove window visibility')
 
 
+def validate_far_budget(data, required=False):
+    """Validate the optional v1 block independently of settled timing windows."""
+    block = data.get('far_budget')
+    if block is None:
+        if required:
+            raise ValueError('far budget evidence is missing')
+        return
+    if not isinstance(block, dict):
+        raise ValueError('far budget block must be an object')
+    if (block.get('schema') != 'luminumbra.far_budget.v1' or
+            block.get('origin') != 'before_first_advancement' or
+            type(block.get('origin_ms')) not in (int, float) or block['origin_ms'] != 0 or
+            type(block.get('deadline_ms')) not in (int, float) or block['deadline_ms'] != 90000 or
+            block.get('storage_complete') is not True):
+        raise ValueError('invalid or incomplete far budget recording contract')
+    rows, fills = block.get('frames'), block.get('fills')
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 2 * MAX_FRAMES:
+        raise ValueError('missing or oversized far budget frames')
+    if not isinstance(fills, list) or not 1 <= len(fills) <= len(rows):
+        raise ValueError('missing far budget fill events')
+    far_world = data.get('far_world')
+    expected_rows = (data.get('frame_samples') if 'frame_samples' in data else
+                     far_world.get('frames') if isinstance(far_world, dict) else None)
+    if not isinstance(expected_rows, list) or not 1 <= len(expected_rows) <= MAX_FRAMES:
+        raise ValueError('missing far budget timing samples')
+    sample_ids, expected_ids = set(), set()
+    pass_inventories = (frozenset(PASSES), frozenset(PASSES + GPU_STAGES))
+    for sample in expected_rows:
+        if not isinstance(sample, dict):
+            raise ValueError('invalid far budget timing sample')
+        timing_id = integer(sample.get('frame'), 'budget sample frame', 0, 2**64 - 1)
+        sample_ids.add(timing_id)
+        if 'frame_samples' in data:
+            # A complete set of unissued scene timers identifies a measured
+            # frame without a world render (menus/loading). Missing timer data
+            # cannot excuse a missing join. Work is bounded by MAX_FRAMES and
+            # the fixed pass inventory, including optional stage attribution.
+            passes = sample.get('passes')
+            if (not isinstance(passes, dict) or len(passes) not in (len(PASSES), len(PASSES + GPU_STAGES)) or
+                    passes.keys() not in pass_inventories):
+                raise ValueError('incomplete far budget scene timer coverage')
+            for timer in passes.values():
+                if (not isinstance(timer, dict) or 'ms' not in timer or
+                        type(timer.get('issued')) is not bool or
+                        (not timer['issued'] and timer.get('ms') is not None)):
+                    raise ValueError('invalid far budget scene timer status')
+            if not any(timer['issued'] for timer in passes.values()):
+                continue
+        expected_ids.add(timing_id)
+    if len(sample_ids) != len(expected_rows):
+        raise ValueError('duplicate far budget timing samples')
+    for fill in fills:
+        if not isinstance(fill, dict):
+            raise ValueError('invalid far budget fill')
+        integer(fill.get('event'), 'budget fill event', 0, len(rows) - 1)
+        number(fill.get('origin_ms'), 'budget fill origin')
+        for key in ('accepted_ms', 'completed_ms'):
+            if fill.get(key) is not None:
+                number(fill[key], 'budget fill ' + key)
+        completed = fill.get('tier_completed_ms')
+        if not isinstance(completed, list) or len(completed) != 5:
+            raise ValueError('invalid far budget tier completion')
+        for value in completed:
+            if value is not None:
+                number(value, 'budget tier completion')
+    joined = set()
+    previous_frame, previous_elapsed, previous_timing = 0, 0, -1
+    binding = None
+    last_epoch, last_generation = 0, 0
+    state = dict(event=0, kind='cold', origin_ms=0, accepted_ms=None,
+                 completed_ms=None, status='incomplete', tier_completed_ms=[None] * 5)
+    expected_fills = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError('invalid far budget frame')
+        render_frame = integer(row.get('render_frame'), 'budget render frame', 1, 2**64 - 1)
+        if render_frame != previous_frame + 1:
+            raise ValueError('missing or unordered far budget frame')
+        elapsed = number(row.get('elapsed_ms'), 'budget elapsed')
+        duration = number(row.get('render_wall_ms'), 'budget render duration')
+        if elapsed < previous_elapsed or duration > elapsed - previous_elapsed + 1e-6:
+            raise ValueError('invalid far budget frame interval')
+        if previous_frame == 0:
+            equal_number(duration, elapsed, 'budget origin interval')
+        previous_frame, previous_elapsed = render_frame, elapsed
+        timing = row.get('timing_frame')
+        if timing is not None:
+            integer(timing, 'budget timing frame', 0, 2**64 - 1)
+            if timing not in expected_ids or timing < previous_timing:
+                raise ValueError('far budget timing frame has no originating sample')
+            previous_timing = timing
+            joined.add(timing)
+        if row.get('phase') != ('measured' if timing is not None else 'cold_or_settling'):
+            raise ValueError('invalid far budget phase')
+        for flag in ('accepted', 'current_coverage'):
+            if type(row.get(flag)) is not bool:
+                raise ValueError('invalid far budget coverage flag')
+        epoch = integer(row.get('world_epoch'), 'budget epoch', 0, 2**64 - 1)
+        serial = integer(row.get('target_serial'), 'budget target serial', 0, 2**64 - 1)
+        generation = integer(row.get('bake_generation'), 'budget bake generation', 0, 2**64 - 1)
+        for key in ('target_cohort', 'content_identity'):
+            value = row.get(key)
+            if (not isinstance(value, str) or not re.fullmatch(r'0|[1-9][0-9]{0,19}', value) or
+                    int(value) > 2**64 - 1):
+                raise ValueError('invalid far budget identity')
+        current_binding = (epoch, generation, serial, row['target_cohort'], row['content_identity'])
+        if row['accepted'] and (not epoch or row['target_cohort'] == '0' or row['content_identity'] == '0'):
+            raise ValueError('far budget cohort acceptance lacks identity')
+        tiers = row.get('tiers')
+        if not isinstance(tiers, list) or len(tiers) != 5:
+            raise ValueError('far budget frame requires all five tiers')
+        for index, tier in enumerate(tiers, 1):
+            if not isinstance(tier, dict) or type(tier.get('tier')) is not int or tier['tier'] != index:
+                raise ValueError('invalid far budget tier order')
+            if type(tier.get('current_coverage')) is not bool:
+                raise ValueError('invalid far budget tier coverage')
+            for key in ('wanted', 'covering', 'settled', 'pending', 'building', 'ready',
+                        'draws', 'indices', 'draw_refusals'):
+                integer(tier.get(key), 'budget ' + key, 0, 2**64 - 1)
+            if tier['current_coverage'] and (not row['accepted'] or not tier['wanted'] or
+                    tier['wanted'] != tier['covering'] or tier['wanted'] != tier['settled'] or
+                    any(tier[key] for key in ('pending', 'building', 'ready', 'draw_refusals'))):
+                raise ValueError('far budget tier claims stale coverage')
+            memory, work = tier.get('memory'), tier.get('work')
+            if not isinstance(memory, dict) or not isinstance(work, dict):
+                raise ValueError('missing far budget memory or work')
+            for key in ('limit', 'cpu_bytes', 'gpu_bytes', 'total_bytes', 'peak_bytes', 'admission_refusals'):
+                integer(memory.get(key), 'budget memory ' + key, 0, 2**64 - 1)
+            for key in ('build_attempts', 'dispatched', 'completed', 'upload_attempts', 'uploaded',
+                        'upload_bytes', 'successful_upload_bytes', 'rejected', 'evicted'):
+                integer(work.get(key), 'budget work ' + key, 0, 2**64 - 1)
+            if (work['dispatched'] > work['build_attempts'] or work['uploaded'] > work['upload_attempts'] or
+                    work['successful_upload_bytes'] > work['upload_bytes']):
+                raise ValueError('far budget work successes exceed attempts')
+        covered = row['accepted'] and row['current_coverage'] and all(t['current_coverage'] for t in tiers)
+        if row['current_coverage'] and not covered:
+            raise ValueError('far budget claims incomplete all-tier coverage')
+        epoch_changed = last_epoch != 0 and epoch != 0 and epoch != last_epoch
+        bake_changed = last_epoch != 0 and epoch == last_epoch and generation != last_generation
+        changed = (epoch_changed or bake_changed or
+                   (binding is not None and row['accepted'] and current_binding != binding))
+        if changed or (state['completed_ms'] is not None and not covered):
+            kind = ('refill' if not changed else 'epoch' if epoch_changed else
+                    'edit_bake' if bake_changed else 'cohort')
+            state = dict(event=state['event'] + 1, kind=kind, origin_ms=elapsed - duration,
+                         accepted_ms=None, completed_ms=None, status='incomplete',
+                         tier_completed_ms=[None] * 5)
+            binding = None
+        if row['accepted'] and binding is None:
+            binding = current_binding
+            state['accepted_ms'] = elapsed
+        if epoch != 0:
+            last_epoch, last_generation = epoch, generation
+        if state['status'] == 'incomplete' and elapsed - state['origin_ms'] > 90000:
+            state['status'] = 'timeout'
+        if state['status'] != 'timeout' and row['accepted']:
+            for index, tier in enumerate(tiers):
+                if not tier['current_coverage']:
+                    state['tier_completed_ms'][index] = None
+                elif state['tier_completed_ms'][index] is None:
+                    state['tier_completed_ms'][index] = elapsed
+            if covered and state['completed_ms'] is None:
+                state['completed_ms'] = elapsed
+                state['status'] = 'complete'
+        if type(row.get('event')) is not int or row['event'] != state['event']:
+            raise ValueError('invalid far budget event association')
+        if len(expected_fills) == state['event']:
+            expected_fills.append(copy.deepcopy(state))
+        else:
+            expected_fills[-1] = copy.deepcopy(state)
+    if joined != expected_ids:
+        raise ValueError('missing far budget timing frames')
+    if fills != expected_fills:
+        raise ValueError('far budget fill summary disagrees with frame evidence')
+    if required and fills[0]['status'] != 'complete':
+        raise ValueError('cold far budget fill is incomplete or timed out')
+
+
 def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=None, workload=None,
-             ladder_baseline=False):
+             ladder_baseline=False, far_budget=False):
     if data.get('schema') not in SCHEMAS:
         raise ValueError('unsupported render measurement schema')
+    validate_far_budget(data, required=far_budget)
     validate_window_visibility(data)
     if data['schema'] == WORKLOAD_SCHEMA:
         validate_workload(data, traversal_manifest(data['workload']['script']))
