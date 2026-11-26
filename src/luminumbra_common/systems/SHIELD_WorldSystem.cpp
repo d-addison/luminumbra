@@ -759,6 +759,20 @@ SHIELD_WorldSystem::~SHIELD_WorldSystem() {
     }
 }
 
+void SHIELD_WorldSystem::release_session_services() {
+    quiesce_streaming_jobs_for_save();
+    m_job_system = nullptr;
+    m_water_system = nullptr;
+    m_voxelEditObserver = {};
+    m_waterAuthorityObserver = {};
+    m_durable_chunk_loader = {};
+    m_durable_chunk_fault = {};
+}
+bool SHIELD_WorldSystem::session_services_released() const {
+    return !m_job_system && !m_water_system && !m_voxelEditObserver && !m_waterAuthorityObserver &&
+           !m_durable_chunk_loader && !m_durable_chunk_fault;
+}
+
 void SHIELD_WorldSystem::wait_for_generation_jobs() {
     if (m_job_system) {
         for (auto& batch : m_streaming_state.generation_batches) {

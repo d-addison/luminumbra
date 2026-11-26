@@ -432,6 +432,12 @@ public:
                        const TerrainGenParams& params,
                        int seed);
     ~SHIELD_WorldSystem();
+    // Final owner-thread teardown after capture retirement and registry cleanup.
+    // Drain without publication, then detach borrowed services so retained const
+    // capture owners may be destroyed after the session and its job system.
+    void release_session_services();
+    // Const teardown diagnostic: no borrowed services or session callbacks remain.
+    bool session_services_released() const;
 
     // Generates voxel data for a chunk. target_step is the meshing step this
     // generation must support: step <= 1 (default) generates the full 17^3
