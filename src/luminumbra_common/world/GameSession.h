@@ -131,6 +131,8 @@ public:
         // Dormant until negotiated authority enables fixed-tick water ownership.
         bool regional_water = false;
         bool simulation_host_integration = false;
+        // Dormant elapsed foliage integration; activation binds negotiated authority later.
+        bool elapsed_consumers = false;
     };
 
     // Selects the test-only opt-in constructor below.

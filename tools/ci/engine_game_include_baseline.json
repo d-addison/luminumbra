@@ -124,6 +124,11 @@
     [
       "headers",
       "src/luminumbra_common/systems/FoliageRegistryStage.h",
+      "src/luminumbra_common/components/CircadianComponents.h"
+    ],
+    [
+      "headers",
+      "src/luminumbra_common/systems/FoliageRegistryStage.h",
       "src/luminumbra_common/components/CreatureComponents.h"
     ],
     [
@@ -154,6 +159,11 @@
     [
       "headers",
       "src/luminumbra_common/systems/FoliageRegistryStage.h",
+      "src/luminumbra_common/components/MigratoryComponents.h"
+    ],
+    [
+      "headers",
+      "src/luminumbra_common/systems/FoliageRegistryStage.h",
       "src/luminumbra_common/components/MortalComponents.h"
     ],
     [
@@ -175,6 +185,11 @@
       "headers",
       "src/luminumbra_common/systems/FoliageRegistryStage.h",
       "src/luminumbra_common/components/SoilComponents.h"
+    ],
+    [
+      "headers",
+      "src/luminumbra_common/systems/FoliageRegistryStage.h",
+      "src/luminumbra_common/components/TerritoryComponents.h"
     ],
     [
       "headers",
@@ -1269,6 +1284,11 @@
     [
       "luminumbra_common",
       "src/luminumbra_common/systems/FoliageRegistryStage.h",
+      "src/luminumbra_common/components/CircadianComponents.h"
+    ],
+    [
+      "luminumbra_common",
+      "src/luminumbra_common/systems/FoliageRegistryStage.h",
       "src/luminumbra_common/components/CreatureComponents.h"
     ],
     [
@@ -1299,6 +1319,11 @@
     [
       "luminumbra_common",
       "src/luminumbra_common/systems/FoliageRegistryStage.h",
+      "src/luminumbra_common/components/MigratoryComponents.h"
+    ],
+    [
+      "luminumbra_common",
+      "src/luminumbra_common/systems/FoliageRegistryStage.h",
       "src/luminumbra_common/components/MortalComponents.h"
     ],
     [
@@ -1320,6 +1345,11 @@
       "luminumbra_common",
       "src/luminumbra_common/systems/FoliageRegistryStage.h",
       "src/luminumbra_common/components/SoilComponents.h"
+    ],
+    [
+      "luminumbra_common",
+      "src/luminumbra_common/systems/FoliageRegistryStage.h",
+      "src/luminumbra_common/components/TerritoryComponents.h"
     ],
     [
       "luminumbra_common",
@@ -1575,6 +1605,11 @@
       "luminumbra_common",
       "src/luminumbra_common/world/GameSession.cpp",
       "src/luminumbra_common/systems/IrrigationSystem.h"
+    ],
+    [
+      "luminumbra_common",
+      "src/luminumbra_common/world/GameSession.cpp",
+      "src/luminumbra_common/systems/PlantCoarse.h"
     ],
     [
       "luminumbra_common",

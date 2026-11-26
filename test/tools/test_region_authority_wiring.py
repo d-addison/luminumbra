@@ -635,6 +635,37 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertLess(dirty_save.index("!prepared.publish("),
                         dirty_save.index("transaction->defer_until_commit(std::move(acknowledge))"))
 
+    def test_elapsed_consumers_keep_dormant_windows_and_candidate_assignments(self):
+        session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
+            encoding="utf-8")
+        tick = function(session, "std::uint32_t GameSession::TickSimulation(")
+        self.assertIn("m_activeRegionsEnabled && m_authorityProfile.elapsed_consumers", tick)
+        self.assertLess(tick.index("m_foliageStep->CaptureWindows(*this);"),
+                        tick.index("CaptureCreatureTickAdmission("))
+        dispatch = function(session, "struct GameSession::EcologySchedule {")
+        self.assertIn("m_ecologySchedule->RunPlantEcology(", tick)
+        self.assertIn("EcologySchedule::SpreadFire(", tick)
+        self.assertLess(tick.index("m_ecologySchedule->RunPlantEcology("),
+                        tick.index("RunCropLifecycleRegional("))
+        self.assertLess(tick.index("EcologySchedule::SpreadFire("),
+                        tick.index("RunWildlifeFoliageOnTick<true>("))
+        for consumer in ("RunRegionalPlantGrowthOnTick", "RunPollinationRegional",
+                         "RunPlantDiseaseRegional", "RunCropLifecycleRegional",
+                         "RunFireSpreadOnTick<false, true>", "RunWildlifeFoliageOnTick<true>",
+                         "RunLifespanOnTick<true>", "RunHerdAlarmOnTick",
+                         "RunDecompositionStage", "RunCircadianOnTick", "RunTerritoryOnTick",
+                         "RunPredatorPackOnTick", "RunMigrationOnTick"):
+            self.assertIn(consumer, tick + dispatch)
+        for consumer in ("RunHerdAlarmOnTick", "RunDecompositionStage"):
+            self.assertRegex(tick, rf"(?s){consumer}\([^;]*,\s*elapsed_consumers\);")
+        for consumer in ("RunCircadianOnTick", "RunTerritoryOnTick",
+                         "RunPredatorPackOnTick", "RunMigrationOnTick"):
+            self.assertRegex(tick, rf"(?s){consumer}\([^;]*,\s*elapsed_gate\);")
+        self.assertIn("auto& assignment_registry = elapsed_consumers ? living_registry : m_registry;", tick)
+        self.assertIn("const auto* elapsed_gate = elapsed_consumers ? &foliage_gate : nullptr;", tick)
+        self.assertLess(tick.index("foliage_step->Commit(*this);"),
+                        tick.index("deliver_events();", tick.index("foliage_step->Commit(*this);")))
+
     def test_default_eviction_preserves_legacy_residency_probe(self):
         session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
             encoding="utf-8")
@@ -648,13 +679,13 @@ class RegionAuthorityWiring(unittest.TestCase):
         header = (ROOT / "src/luminumbra_common/world/GameSession.h").read_text(
             encoding="utf-8")
         self.assertEqual(function(header, "struct AuthorityProfileOptions"),
-                         "bool residency_free_eviction = false; bool regional_water = false; bool simulation_host_integration = false;")
+                         "bool residency_free_eviction = false; bool regional_water = false; bool simulation_host_integration = false; bool elapsed_consumers = false;")
         self.assertIn("const AuthorityProfileOptions m_authorityProfile;", header)
         self.assertIn(": GameSession(AuthorityProfileOptions{}, AuthorityProfileTag{}) {}", session)
         self.assertIn(": m_authorityProfile(authority_profile)", session)
-        # Construction, eviction and eleven water load/execution/publication gates are the only uses.
+        # Uses are confined to construction, eviction, water and elapsed-consumer gates.
         # Config, hashes and save writers cannot read this dormant profile.
-        self.assertEqual(session.count("m_authorityProfile"), 13)
+        self.assertEqual(session.count("m_authorityProfile"), 21)
         self.assertEqual(session.count("m_authorityProfile.regional_water"), 11)
         self.assertEqual(session.count("residency_free_eviction"), 1)
         native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(
