@@ -5389,6 +5389,122 @@ void SHIELD_WorldSystem::SetWaterBootSettleMode(bool on) {
         m_water_system->SetBootSettleMode(on);
 }
 
+bool SHIELD_WorldSystem::TryCompleteBootWaterSettle(entt::registry& registry,
+                                                    const std::vector<Vec3>& anchors,
+                                                    PhysicsSystem* physics_system,
+                                                    std::uint64_t skipped) {
+    // Test-only control, deliberately absent from configuration/session identity.
+    // Only the complete value "1" forces the reference path (including a safe "0").
+    const char* force_full = std::getenv("LUMINUMBRA_TEST_FORCE_FULL_BOOT_WATER_SETTLE");
+    if ((force_full && std::strcmp(force_full, "1") == 0) || skipped == 0 || skipped > 240 ||
+        !m_water_system || m_durable_read_failed || anchors != m_last_anchor_positions ||
+        m_dirty_generation != m_last_serviced_generation || !m_last_pass_drained ||
+        m_streaming_state.chunks.size() != m_last_chunk_count ||
+        (physics_system && m_collision_pass_dirty) || generation_batch_outstanding() ||
+        meshing_batch_outstanding() || promotion_pipeline_pending() || deferred_meshing_pending() ||
+        m_deferred_generation_candidates != 0 || m_unadmitted_meshing_candidates != 0 ||
+        !m_water_system->mesh_invalidations().empty())
+        return false;
+    {
+        const std::lock_guard<std::mutex> dispatch_lock(m_hydro_prefetch_dispatch_mutex);
+        const std::lock_guard<std::mutex> prefetch_lock(m_hydro_prefetch_mutex);
+        if (has_active_job(m_hydro_prefetch_handle) || !m_hydro_prefetch_inflight.empty())
+            return false;
+        if (m_params.hydro_enabled && m_job_system && !anchors.empty()) {
+            const float cell_size = m_params.hydro_cell_size_m;
+            if (!std::isfinite(cell_size))
+                return false;
+            if (cell_size > 0.0f) {
+                const float region_size = static_cast<float>(kHydroRegionCells) * cell_size;
+                if (!std::isfinite(region_size) || region_size <= 0.0f)
+                    return false;
+                const float reach_value = std::ceil(768.0f / region_size) + 1.0f;
+                // At most 45*45 = 2025 lookups per fixed boot anchor, below the
+                // 2048-region cache bound. Larger footprints conservatively run in full.
+                if (!std::isfinite(reach_value) || reach_value > 22.0f)
+                    return false;
+                const auto reach = static_cast<std::int64_t>(reach_value);
+                const std::shared_lock<std::shared_mutex> cache_lock(m_hydro_mutex);
+                for (const auto& anchor : anchors) {
+                    if (!world::ActiveRegionLedger::valid_anchor(anchor))
+                        return false;
+                    const auto center_x =
+                        HydroFloorDiv(static_cast<std::int64_t>(std::floor(anchor.x / cell_size)),
+                                      kHydroRegionCells);
+                    const auto center_z =
+                        HydroFloorDiv(static_cast<std::int64_t>(std::floor(anchor.z / cell_size)),
+                                      kHydroRegionCells);
+                    for (std::int64_t offset_z = -reach; offset_z <= reach; ++offset_z) {
+                        for (std::int64_t offset_x = -reach; offset_x <= reach; ++offset_x) {
+                            if (!m_hydro_cache.contains({center_x + offset_x, center_z + offset_z}))
+                                return false;
+                        }
+                    }
+                }
+                // Every future prefetch is a cache hit: no new jobs or eviction can occur.
+            }
+        }
+    }
+    if (!anchors.empty()) {
+        if (!m_activation_has_run || m_last_activation_pending != 0 ||
+            m_dirty_generation != m_last_activation_dirty_generation ||
+            anchors.size() != m_last_activation_camera_chunks.size())
+            return false;
+        // At most the caller's fixed boot anchor vector; no allocation or snapshot observation.
+        for (std::size_t index = 0; index < anchors.size(); ++index) {
+            if (!world::ActiveRegionLedger::valid_anchor(anchors[index]) ||
+                anchors[index].y < static_cast<float>(Chunk::kPackedMinY) * CHUNK_SIZE_Y ||
+                anchors[index].y >= (static_cast<float>(Chunk::kPackedMaxY) + 1.0f) * CHUNK_SIZE_Y)
+                return false;
+            if (world_to_chunk_coords(anchors[index]) != m_last_activation_camera_chunks[index])
+                return false;
+        }
+    }
+    const auto& latest = m_last_streaming_budget_stats;
+    // A barrier can publish after update's census. Require a pass with no dispatched
+    // or retained work so that census, lifecycle notifications and candidates are drained.
+    if (latest.generation_job_active || latest.meshing_job_active || latest.scheduled_generation ||
+        latest.deferred_generation || latest.meshing_candidates || latest.scheduled_meshing ||
+        latest.submitted_meshing || latest.deferred_meshing || latest.unloaded_chunks ||
+        !m_streaming_telemetry_stats.quiescent())
+        return false;
+    // All checks precede the first write, including signed source-counter representability.
+    if (!m_water_system->TryContinueSleepingBootPasses(registry, m_streaming_state.chunks, skipped))
+        return false;
+
+    const auto& counts = m_activation_index.continue_quiescent_observations(skipped);
+    m_last_streaming_budget_stats = {};
+    m_last_streaming_budget_stats.update_interval_frames = STREAMING_ACTIVATION_INTERVAL_FRAMES;
+    m_last_streaming_budget_stats.requested_render_radius = RENDER_DISTANCE;
+    m_last_streaming_budget_stats.max_active_chunks_budget = STREAMING_MAX_ACTIVE_CHUNKS_BUDGET;
+    m_last_streaming_budget_stats.active_chunks_before = m_streaming_state.chunks.size();
+    m_last_streaming_budget_stats.active_chunks_after = m_streaming_state.chunks.size();
+    copy_streaming_state_counts(m_last_streaming_budget_stats, counts);
+    m_last_meshing_snapshot_bytes = 0;
+    m_streaming_telemetry_stats.frames_observed += skipped;
+    m_streaming_telemetry_stats.last_queue_depth = 0;
+    m_streaming_telemetry_stats.settled_queue_depth = 0;
+    m_deferred_backlog_age_frames = 0;
+    // The ring has exactly eight entries. At most eight writes reproduce any suffix
+    // of zero-depth observations, including partial rings and cursor wraparound.
+    const auto writes = std::min<std::uint64_t>(skipped, m_recent_queue_depths.size());
+    for (std::uint64_t index = 0; index < writes; ++index) {
+        m_recent_queue_depths[(m_recent_queue_depth_cursor + static_cast<std::size_t>(index)) %
+                              m_recent_queue_depths.size()] = 0;
+    }
+    m_recent_queue_depth_cursor =
+        (m_recent_queue_depth_cursor +
+         static_cast<std::size_t>(skipped % m_recent_queue_depths.size())) %
+        m_recent_queue_depths.size();
+    m_recent_queue_depth_count =
+        std::min(m_recent_queue_depths.size(),
+                 m_recent_queue_depth_count + static_cast<std::size_t>(skipped));
+    m_update_tick_counter =
+        (m_update_tick_counter + static_cast<int>(skipped % STREAMING_ACTIVATION_INTERVAL_FRAMES)) %
+        STREAMING_ACTIVATION_INTERVAL_FRAMES;
+    return true;
+}
+
 // loaded-boot water pause passthrough (see WaterSystem::SetBootPaused).
 void SHIELD_WorldSystem::SetWaterBootPaused(bool on) {
     if (m_water_system)

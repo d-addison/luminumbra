@@ -388,9 +388,9 @@ bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
         stable = (count == last_count) ? stable + 1 : 0;
         last_count = count;
     }
-    // Fresh water has no global all-asleep fixed point: wet/dry seams can
-    // perpetually wake neighbours. Initialize the backlog, then consume the
-    // original fixed transient budget. Loaded/continued water must not advance.
+    // Wet/dry seams can perpetually wake neighbours. Keep the original bounded
+    // transient budget unless the complete boot state admits an exact continuation.
+    // Loaded/continued water must not advance.
     int settle_iters = 0;
     if (!continuation && !water_loaded_from_save) {
         ws->SetWaterBootSettleMode(true);
@@ -417,16 +417,20 @@ bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
             if (uninited_now == 0)
                 break;
         }
-        // 2b: exactly kPostInitSettleTicks full-set sim iterations — the flood
-        // transient (lakes/rivers redistributing from their seeded rest levels)
-        // drains and the calm-able majority of chunks reaches sleep. A fixed count
-        // is deterministic (run==replay, host==peer) and bounded by construction.
+        // 2b: at most 240 full-set passes. Once all water and streaming state is
+        // fixed, continue non-timing observations exactly for the omitted suffix.
+        // The synchronous loop keeps anchors, registry and configuration unchanged.
         constexpr int kPostInitSettleTicks = 240;
+        const std::vector<Vec3> spawn_anchor{m_metadata.spawnPoint};
+        const auto& settle_anchors = anchors.empty() ? spawn_anchor : anchors;
         for (int i = 0; i < kPostInitSettleTicks; ++i) {
             ++settle_iters;
             if (stop.stop_requested())
                 return false;
             stream_once();
+            const auto skipped = static_cast<std::uint64_t>(kPostInitSettleTicks - i - 1);
+            if (ws->TryCompleteBootWaterSettle(m_registry, settle_anchors, phys, skipped))
+                break;
         }
     }
     if (stop.stop_requested())
@@ -450,11 +454,12 @@ bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
         }
         LUMINUMBRA_CORE_INFO(
             "Boot water settle exit: {} water-inited ({} awake), {} NOT water-inited, {} "
-            "chunks total{}",
+            "chunks total, {} settle passes{}",
             water_chunks,
             awake,
             uninited,
             ws->snapshot_streamed_chunks().size(),
+            settle_iters,
             water_loaded_from_save ? " [loaded: water settle skipped, state preserved]" : "");
         stats.water_chunks = water_chunks;
         stats.awake = awake;
