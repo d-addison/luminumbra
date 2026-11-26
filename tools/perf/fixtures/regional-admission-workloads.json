@@ -1,0 +1,22 @@
+{
+  "schema": "luminumbra.regional_admission_workloads.v1",
+  "paths": [
+    "entity_admission", "scent_admission", "plant_environment_sampling", "wind_sampling", "weather_sampling", "aether_sampling",
+    "crop_birth", "event_continuation", "ground_settlement",
+    "mixed_cadence", "boundary_admission", "frozen_history"
+  ],
+  "workloads": {
+    "populated": {
+      "description": "Shipping planted and ecology rosters with participating regional entities, scent and environmental sampling.",
+      "required_paths": ["entity_admission", "scent_admission", "plant_environment_sampling", "wind_sampling", "weather_sampling", "aether_sampling", "crop_birth", "event_continuation", "ground_settlement"]
+    },
+    "mixed-cadence-boundary": {
+      "description": "Populated regions at distinct admission cadences with entities crossing admission boundaries. Record cadence and boundary observations explicitly.",
+      "required_paths": ["entity_admission", "scent_admission", "plant_environment_sampling", "wind_sampling", "weather_sampling", "aether_sampling", "crop_birth", "event_continuation", "ground_settlement", "mixed_cadence", "boundary_admission"]
+    },
+    "growing-frozen-history": {
+      "description": "Repeat the same active setup with increasing frozen history. Pin each history size separately; hold participating regions and their cadence fixed. Distinct history sizes are distinct workloads, not timing comparison pairs.",
+      "required_paths": ["entity_admission", "scent_admission", "plant_environment_sampling", "wind_sampling", "weather_sampling", "aether_sampling", "crop_birth", "event_continuation", "ground_settlement", "frozen_history"]
+    }
+  }
+}
