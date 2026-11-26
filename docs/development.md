@@ -673,6 +673,62 @@ restoration remain explicit failures; the script does not repair dependencies or
 claim a measurement for an unavailable intervention. A run with a different setup
 has a different provisioning profile, so its observations must retain that identity.
 
+## Deferred persistence evidence
+
+For issue #617, `tools/perf/capture_deferred_stack.py` wraps the four existing
+render regressions and both unchanged 3600-tick SimBudget parity cases. Capture
+uses 180 seconds for each render process and 1800 seconds for each parity case.
+It does not change registered native test limits. Run this only on a native host
+with the built client, `world_open_refusal_test`, and synthetic render content
+prepared by the existing `RenderBenchmarkAssets` fixture.
+
+Supply an external build record produced for those exact binaries. It is a JSON
+object with `source_sha` (the full clean Git SHA), `source_root` (the absolute
+`CMAKE_HOME_DIRECTORY` used to compile all supplied binaries), `binaries` (SHA-256 strings keyed
+by `client` and `parity`, plus `server` when supplying `--server`), and
+`build_flags` (the complete `configuration` object from the existing
+`performance-build.json`: `build_type`, `effective_flags_sha256`, `asan`,
+`coverage`, `diligent`, `frame_pointers`, `tracy`, and `warnings_as_errors`, with
+all switches recorded as `ON` or `OFF`). The record is operator-supplied
+build provenance; the wrapper verifies its SHA and executable hashes before and
+after capture. The source root must match `--source`: parity fixtures read from
+that compiled root. Keep evidence outside the source checkout and use a new directory
+for every capture:
+
+```sh
+python3 -I -B tools/perf/capture_deferred_stack.py capture \
+  --source . --assets "$renderAssets" --client "$clientBinary" \
+  --parity "$parityBinary" --build-record "$buildRecord" --evidence-dir "$evidenceDir"
+python3 -I -B tools/perf/capture_deferred_stack.py report --evidence-dir "$evidenceDir"
+```
+
+Failures retain process receipts, logs and available captures. A report classifies
+observed boot breadcrumbs, streaming-drain waits and save stages; absent
+breadcrumbs remain unknown. Missing durations and profiles are JSON `null`, never
+inferred as zero. The report always leaves native qualification pending; this
+capture alone cannot close the epic. The capture directory cannot be reused.
+
+Optional `report --populated-capture "$populatedDir/capture.json"` validates the
+existing `capture_sim_budget.py` artifacts against the same source, server binary
+(supply `capture --server`) and resolved fixture identity. These observations
+supplement the parity cases. They do not replace either parity workload.
+
+For profiler attribution, supply `report --profile "$profileExport"`. This export
+uses schema `luminumbra.deferred_stack_profile.v1`, the capture's complete
+`identity`, and a `runs` array. Each row contains `case`, `commands_sha256`
+(SHA-256 of the report process commands list encoded as UTF-8, ASCII-escaped JSON with sorted keys,
+two-space indentation and a final newline), `artifacts` (relative contained file
+paths beside the export), and `samples` (symbolized `stack` string arrays and positive integer
+`samples` counts). Include worker and blocked-wait stacks in the export. The report
+hashes the artifacts and counts inclusive samples for `SaveTransaction::commit`,
+`WorldSaveService::member_digest`, `DecodeChunkRecord`, and
+`quiesce_streaming_jobs_for_save`. Sample counts are observations, not durations.
+Empty sample sets remain missing. Record profiled and unprofiled executions in
+separate capture directories because profiling changes elapsed time. JSON, logs
+and attached artifacts are limited to 16 MiB each, with at most 4096 stacks of
+128 frames and 64 artifacts per profile row. The fast, mocked contracts are
+registered as `DeferredStackEvidenceSmoke` and `DeferredStackEvidenceContract`.
+
 ## Local validation
 
 Run the preset that matches the affected platform and configuration. At minimum:
