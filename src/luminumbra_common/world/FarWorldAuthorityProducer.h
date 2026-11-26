@@ -66,11 +66,12 @@ public:
         Persistence::WorldSaveService::AuthorityReadLimits read;
         std::uint32_t deadline_frames = 0;
         // Required monotone clock and finite allowance for each transaction,
-        // spanning source assembly and all sampling. Its context outlives us.
+        // spanning source assembly and all sampling. Its context remains valid
+        // until retirement or destruction.
         CaptureClock clock{};
     };
     // Source assembly only. These owned inputs have no frozen-use eligibility.
-    // The pointer returned by capture() lasts until replacement or destruction.
+    // The pointer returned by capture() lasts until replacement, retirement or destruction.
     struct SourceCapture {
         std::uint64_t serial = 0;
         Persistence::WorldSaveService::AuthorityWindow window;
@@ -148,6 +149,10 @@ public:
     void pump_capture();
     void fence_source_reads(bool paused);
     void invalidate_source();
+    // Permanent owner-thread retirement. Cancels sampling before borrowed world
+    // services or clock contexts disappear; source refresh cannot revive it.
+    void retire();
+    bool retired() const;
     bool refresh_saved_source(const std::filesystem::path& root, std::string& error);
     const SourceCapture* capture() const;
     CaptureStatus capture_status() const;

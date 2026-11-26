@@ -273,10 +273,22 @@ public:
 
     // Explicit owner-thread opt-in for bounded source capture. No play path
     // enables this service. Attachment refuses unpublished streaming work;
-    // successful world replacement releases the binding.
+    // successful world replacement retires the binding.
     bool EnableFarWorldAuthorityProducer(const World::FarWorldAuthorityConfig& config,
                                          std::string& error);
     World::FarWorldAuthorityProducer* GetFarWorldAuthorityProducer();
+    struct FarCaptureBinding {
+        std::shared_ptr<World::FarWorldAuthorityProducer> producer;
+        std::shared_ptr<const Systems::SHIELD_WorldSystem> world;
+        std::uint64_t world_revision = 0;
+        std::uint64_t epoch = 0;
+        // Owner-thread lifetime diagnostic; readiness remains capture_status().
+        // Retirement is permanent even if owners survive.
+        bool current() const;
+    };
+    // Owner-thread acquisition at a simulation boundary. Both pointers own their
+    // objects; pass them together with epoch to retained session capture.
+    FarCaptureBinding AcquireFarWorldCaptureBinding() const;
     void PumpFarWorldAuthorityCapture();
     void FenceFarWorldAuthorityReads(bool paused);
 
@@ -852,7 +864,8 @@ private:
     [[nodiscard]] std::span<const Vec3> SimulationAnchors() const;
     void StepHostPhysics();
     void DisableFarWorldAuthorityProducer();
-    std::unique_ptr<World::FarWorldAuthorityProducer> m_farWorldAuthorityProducer;
+    std::shared_ptr<World::FarWorldAuthorityProducer> m_farWorldAuthorityProducer;
+    std::uint64_t m_farWorldBindingEpoch = 0;
     bool m_farWorldSourceNeedsRefresh = false;
     luminumbra::simulation::SimBudgetTelemetry m_simBudgetTelemetry;
     entt::registry m_registry;
@@ -995,7 +1008,7 @@ private:
     luminumbra::core::SimulationClock m_simulationClock{
         luminumbra::core::SimulationClock::kCanonicalTickRateHz, 2u};
     luminumbra::simulation::OrderedEventBus m_simulationEventBus;
-    std::unique_ptr<Systems::SHIELD_WorldSystem> m_worldSystem;
+    std::shared_ptr<Systems::SHIELD_WorldSystem> m_worldSystem;
     std::unique_ptr<Systems::WaterSystem> m_waterSystem;
     std::unique_ptr<Systems::WindFieldSystem> m_windFieldSystem;
     std::unique_ptr<Systems::WeatherSystem> m_weatherSystem;
