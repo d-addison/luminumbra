@@ -2956,7 +2956,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             luminumbra::ai::CleanupNewbornCarcasses(m_registry);
             // Foliage callbacks and regional water can still refuse after their registry
             // publication. Keep ambient authority staged until every consumer succeeds.
-            PublishRegionCompletedWork(defer_water_authority);
+            PublishRegionCompletedWork(scheduled_energy, defer_water_authority);
             if (field_candidate) {
                 m_fieldPages.adopt_weather_state(*field_candidate);
                 m_fieldPages.adopt_scheduled_pages(std::move(*field_candidate));
@@ -3905,9 +3905,9 @@ void GameSession::PublishRegionConsumers(FieldPageState* fields,
                              : std::span<const std::pair<RegionKey, std::uint64_t>>{};
     const auto next_id =
         foliage ? foliage->registry.next_id() : m_activeRegionLedger.next_persistent_id();
-    // Publish ages and IDs for foliage callbacks and regional water, retaining completed
-    // work for the final combined publication with ambient authority after all consumers.
-    if (!m_activeRegionLedger.prepare_energy_work(ages, {}, next_id)) {
+    // Validate all known work before publishing foliage or energy. A consumer may have
+    // invalidated an owner; final admission also rechecks callbacks and regional water.
+    if (!m_activeRegionLedger.prepare_energy_work(ages, m_regionCompletedWork, next_id)) {
         throw std::runtime_error("Regional registers refused");
     }
     if (foliage) {
@@ -3929,6 +3929,11 @@ void GameSession::PublishRegionConsumers(FieldPageState* fields,
         BindRegionalFieldQueries();
         ProjectRegionalWeather(m_worldClock.tick(), false);
     }
+    // Callbacks need ages and IDs now, but work remains private until ambient commit.
+    // The full preparation above already reserved the bounded publication scratch.
+    if (!m_activeRegionLedger.prepare_energy_work(ages, {}, next_id)) {
+        throw std::runtime_error("Regional registers refused");
+    }
     m_activeRegionLedger.commit_energy_work();
     if (energy) {
         energy->transaction.commit();
@@ -3945,7 +3950,8 @@ void GameSession::PublishRegionConsumers(FieldPageState* fields,
     }
 }
 
-void GameSession::PublishRegionCompletedWork(bool defer_water_authority) {
+void GameSession::PublishRegionCompletedWork(RegionalEnergyStep* energy,
+                                             bool defer_water_authority) {
     if (!m_activeRegionsEnabled) {
         return;
     }
@@ -3957,7 +3963,11 @@ void GameSession::PublishRegionCompletedWork(bool defer_water_authority) {
     if (m_regionFault) {
         throw std::runtime_error("Water authority settlement refused");
     }
-    if (!m_activeRegionLedger.prepare_energy_work({}, m_regionCompletedWork)) {
+    // Reuse only participating ages, preserving the sparse publication diagnostic
+    // across the final work pass. These ages were already admitted before callbacks.
+    const auto ages = energy ? energy->transaction.ages()
+                             : std::span<const std::pair<RegionKey, std::uint64_t>>{};
+    if (!m_activeRegionLedger.prepare_energy_work(ages, m_regionCompletedWork)) {
         throw std::runtime_error("Regional registers refused");
     }
     m_activeRegionLedger.commit_energy_work();

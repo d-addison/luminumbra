@@ -368,6 +368,8 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertNotIn("adopt_weather_state(", consumers)
         self.assertIn("energy->transaction.commit();", consumers)
         self.assertIn("prepare_energy_work(ages, {}, next_id)", consumers)
+        self.assertLess(consumers.index("prepare_energy_work(ages, m_regionCompletedWork, next_id)"),
+                        consumers.index("foliage->PreparePublication(*this);"))
         self.assertNotIn("m_regionCompletedWork.clear();", consumers)
         publish = function(session, "void GameSession::PublishRegionCompletedWork(")
         self.assertEqual(function(publish, "if (!m_activeRegionsEnabled)"), "return;")
@@ -375,7 +377,8 @@ class RegionAuthorityWiring(unittest.TestCase):
                          "SettleWaterAuthority(defer_water_authority);")
         self.assertEqual(publish.count("SettleWaterAuthority(defer_water_authority);"), 1)
         self.assertLess(publish.index("if (m_regionFault)"),
-                        publish.index("prepare_energy_work({}, m_regionCompletedWork)"))
+                        publish.index("prepare_energy_work(ages, m_regionCompletedWork)"))
+        self.assertIn("energy ? energy->transaction.ages()", publish)
         self.assertLess(publish.index("m_activeRegionLedger.commit_energy_work();"),
                         publish.index("m_regionCompletedWork.clear();"))
         self.assertNotIn("m_regionalFieldView", publish)

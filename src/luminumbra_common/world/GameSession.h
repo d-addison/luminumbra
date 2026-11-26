@@ -962,7 +962,7 @@ private:
     void PublishRegionConsumers(FieldPageState* fields,
                                 RegionalEnergyStep* energy,
                                 bool defer_water_authority);
-    void PublishRegionCompletedWork(bool defer_water_authority);
+    void PublishRegionCompletedWork(RegionalEnergyStep* energy, bool defer_water_authority);
     void BindRegionalFieldQueries();
     [[nodiscard]] FieldPageView RegionalFields() const;
     [[nodiscard]] std::string RegionalAmbientHash(std::uint8_t channels, bool weather) const;
