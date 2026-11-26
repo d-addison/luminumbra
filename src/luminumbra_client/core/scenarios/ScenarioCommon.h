@@ -18,7 +18,6 @@ extern const std::uint64_t kMinNearBlackClusterPx;
 
 double PixelLuminance(unsigned char r, unsigned char g, unsigned char b);
 bool IsWaterLikePixel(unsigned char r, unsigned char g, unsigned char b);
-bool IsBelowHorizonSkyPixel(unsigned char r, unsigned char g, unsigned char b);
 nlohmann::json WaterVisualTargetToJson(const WaterVisualCameraTarget& target);
 
 // Capture-only inputs: live simulation weather must not influence comparisons.
