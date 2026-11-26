@@ -7,6 +7,7 @@
 using Luminumbra::Server::AuthoritativeStateEqual;
 using Luminumbra::Server::CaptureGroundObjects;
 using Luminumbra::Server::CaptureScentBits;
+using Luminumbra::Server::FieldPageDifference;
 using Luminumbra::Server::GroundObjectDifference;
 using Luminumbra::Server::HeavyHashes;
 using Luminumbra::Server::HeavyOwnerCapture;
@@ -33,6 +34,9 @@ HeavyHashes CaptureHashes(Luminumbra::Server::ServerWorldRunner& runner) {
     if (h.active_regions) {
         h.clock_bytes = runner.Session()->GetWorldClock().canonical_bytes();
         h.ledger_bytes = runner.Session()->GetActiveRegionLedger().canonical_bytes();
+        // Diagnostic checkpoint only: bounded by the existing field-store admission caps.
+        // Capture full canonical authority independently of the consumers' ambient hashes.
+        h.field_page_bytes = runner.Session()->GetFieldPages().canonical_bytes();
     }
     if (runner.Session()) {
         h.ground_objects = CaptureGroundObjects(runner.Session()->GetGroundObjects());
@@ -85,7 +89,7 @@ nlohmann::json HeavyHashJson(const HeavyHashes& h) {
                                   {"payload", object.payload},
                                   {"flags", object.flags}});
     }
-    return nlohmann::json{
+    nlohmann::json result{
         {"world_hash", h.world_hash},
         {"ground_objects", std::move(ground_objects)},
         {"ground_notifications", h.ground_notifications},
@@ -103,6 +107,13 @@ nlohmann::json HeavyHashJson(const HeavyHashes& h) {
              {"scents", h.scent_hash},
          }},
     };
+    if (h.active_regions) {
+        result["field_pages"] = {
+            {"present", !h.field_page_bytes.empty()},
+            {"canonical_byte_count", h.field_page_bytes.size()},
+            {"fingerprint", Luminumbra::Persistence::StableChecksum(h.field_page_bytes)}};
+    }
+    return result;
 }
 
 } // namespace
@@ -203,6 +214,12 @@ int RunHeavy(const ServerCliOptions& options,
         LUMINUMBRA_CORE_ERROR("heavy: roundtrip differs in {}", roundtrip_owner_difference);
     }
     const std::string roundtrip_scent_difference = ScentDifference(orig_at_save, loaded_at_load);
+    const std::string roundtrip_field_page_difference =
+        FieldPageDifference(orig_at_save, loaded_at_load);
+    if (!roundtrip_field_page_difference.empty()) {
+        LUMINUMBRA_CORE_ERROR("heavy: saved field authority differs in {}",
+                              roundtrip_field_page_difference);
+    }
     if (!roundtrip_scent_difference.empty()) {
         LUMINUMBRA_CORE_ERROR("heavy: saved scent differs in {}", roundtrip_scent_difference);
     }
@@ -221,6 +238,11 @@ int RunHeavy(const ServerCliOptions& options,
         LUMINUMBRA_CORE_ERROR("heavy: resim differs in {}", resim_owner_difference);
     }
     const std::string resim_scent_difference = ScentDifference(orig_final, loaded_final);
+    const std::string resim_field_page_difference = FieldPageDifference(orig_final, loaded_final);
+    if (!resim_field_page_difference.empty()) {
+        LUMINUMBRA_CORE_ERROR("heavy: resim field authority differs in {}",
+                              resim_field_page_difference);
+    }
     if (!resim_scent_difference.empty()) {
         LUMINUMBRA_CORE_ERROR("heavy: resim scent differs in {}", resim_scent_difference);
     }
@@ -374,6 +396,12 @@ int RunHeavy(const ServerCliOptions& options,
     if (profile.owner_continuation) {
         artifact["roundtrip_owner_difference"] = roundtrip_owner_difference;
         artifact["resim_owner_difference"] = resim_owner_difference;
+    }
+    if (orig_at_save.active_regions || loaded_at_load.active_regions || orig_final.active_regions ||
+        loaded_final.active_regions) {
+        artifact["roundtrip_field_page_difference"] = roundtrip_field_page_difference;
+        artifact["resim_field_page_difference"] = resim_field_page_difference;
+        artifact["authoritative_sections"].push_back("field_pages");
     }
 
     // Tear down both and clean up the throwaway save directory.

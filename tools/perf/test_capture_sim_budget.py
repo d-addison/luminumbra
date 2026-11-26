@@ -9,6 +9,7 @@ import io
 import json
 from pathlib import Path
 import shlex
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -26,6 +27,7 @@ def artifact() -> dict:
     return {
         "schema": "luminumbra.server_tick.v1", "preset": "default", "seed": "1337",
         "ticks_requested": 2, "passed": True,
+        "runs": [{"ticks_executed": 2}, {"ticks_executed": 2}],
         "world_hash": "0123456789abcdef", "world_hash_replay": "0123456789abcdef",
         "effective_simulation": dict.fromkeys(
             capture.shipping_simulation_gates() + ("finite_hydrology", "weather_rain"), True),
@@ -444,6 +446,179 @@ class SimBudgetCaptureTests(unittest.TestCase):
             "python3 head/tools/perf/check_sim_budgets.py", 1)[1].split("||", 1)[0].replace("\\\n", ""))
         self.assertIn("head/tools/perf/baselines/sim-budgets.json", check_command)
         self.assertIn("--require-complete", check_command)
+
+
+class SimBudgetNeutralityTests(unittest.TestCase):
+    def capture_run(self, evidence, *, enabled=True, mutate=None, fixture_changed=False):
+        binary = evidence.parent / "server"
+        binary.write_bytes(b"synthetic server; never executed")
+        commands = []
+
+        def launch(argv, **kwargs):
+            self.assertEqual(kwargs["cwd"], Path(capture.__file__).resolve().parents[2])
+            self.assertIs(kwargs["check"], True)
+            self.assertEqual(kwargs["stderr"], subprocess.STDOUT)
+            commands.append(argv)
+            kwargs["stdout"].write(b"synthetic diagnostic\n")
+            data = artifact()
+            data["preset"] = argv[argv.index("--preset") + 1]
+            if "--sim-budget" not in argv:
+                del data["sim_budget"]
+            if mutate:
+                data = mutate(data, argv)
+            if data is not None:
+                path = Path(argv[argv.index("--artifact") + 1])
+                path.write_text(json.dumps(data), encoding="utf-8")
+
+        args = ["capture_sim_budget.py", "--binary", str(binary),
+                "--evidence-dir", str(evidence), "--ticks", "2", "--seed", "1337",
+                "--radius", "2", "--collision-radius", "3"]
+        if enabled:
+            args.append("--check-neutrality")
+        with mock.patch("sys.argv", args), \
+                mock.patch.object(capture, "capture_fixture_hash",
+                                  side_effect=["a" * 64, ("c" if fixture_changed else "a") * 64]), \
+                mock.patch.object(capture, "fixture_hash", return_value="b" * 64), \
+                mock.patch.object(capture.subprocess, "check_output", side_effect=["d" * 40, ""]), \
+                mock.patch.object(capture.subprocess, "run", side_effect=launch), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()) as error:
+            try:
+                code = capture.main()
+            except SystemExit as exc:
+                code = exc.code
+        return code, commands, error.getvalue()
+
+    def test_neutrality_changes_only_telemetry_and_output_arguments(self):
+        import sim_budget_io
+
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as temp:
+                evidence = Path(temp).resolve() / "evidence"
+                code, commands, error = self.capture_run(evidence, enabled=enabled)
+                self.assertEqual(code, 0, error)
+                self.assertEqual(len(commands), len(capture.PRESETS) * (2 if enabled else 1))
+                manifest = json.loads((evidence / "capture.json").read_text(encoding="utf-8"))
+                self.assertEqual(manifest["schema"], "luminumbra.sim_budget_capture.v1")
+                self.assertEqual(sim_budget_io.load_capture(evidence)["manifest"], manifest)
+                self.assertEqual([run["preset"] for run in manifest["runs"]], list(capture.PRESETS))
+                for index, run in enumerate(manifest["runs"]):
+                    traced = commands[index * (2 if enabled else 1)]
+                    self.assertEqual(run["command"], traced)
+                    self.assertEqual(run["artifact"], f"{run['preset']}.json")
+                    self.assertEqual(traced, capture.command(
+                        Path(temp).resolve() / "server", Path(capture.__file__).resolve().parents[2],
+                        evidence / run["artifact"], run["preset"], "1337", 2, 2, 3))
+                    paths = [evidence / run["artifact"]]
+                    if enabled:
+                        counterpart = run["telemetry_off"]
+                        self.assertEqual(counterpart["artifact"], f"{run['preset']}-telemetry-off.json")
+                        disabled = traced.copy()
+                        disabled.remove("--sim-budget")
+                        disabled[-1] = str(evidence / counterpart["artifact"])
+                        self.assertEqual(counterpart["command"], disabled)
+                        self.assertEqual(commands[index * 2 + 1], disabled)
+                        paths.append(evidence / counterpart["artifact"])
+                        self.assertNotIn("sim_budget", json.loads(paths[-1].read_text(encoding="utf-8")))
+                    else:
+                        self.assertNotIn("telemetry_off", run)
+                    for path in paths:
+                        self.assertTrue(path.is_file())
+                        self.assertEqual(path.with_suffix(".log").read_bytes(), b"synthetic diagnostic\n")
+
+    def test_neutrality_rejects_hash_or_gate_mismatch(self):
+        mutations = (
+            {"world_hash": "fedcba9876543210"},
+            {"world_hash_replay": "fedcba9876543210"},
+            {"world_hash": "fedcba9876543210", "world_hash_replay": "fedcba9876543210"},
+            {"effective_simulation": {**artifact()["effective_simulation"], "future_gate": True}},
+            {"effective_simulation": {**artifact()["effective_simulation"], "plant_growth": False}},
+            {"effective_simulation": {**artifact()["effective_simulation"], "plant_growth": 1}},
+            {"effective_simulation": None},
+            {"schema": "future"}, {"preset": "mountains"}, {"seed": "42"},
+            {"passed": False}, {"ticks_requested": 1}, {"ticks_requested": True},
+            *({"runs": runs} for runs in (None, [], [{"ticks_executed": 2}],
+                [{"ticks_executed": 2}] * 3, [None, {}],
+                [{"ticks_executed": 1}, {"ticks_executed": 2}],
+                [{"ticks_executed": 2}, {"ticks_executed": True}]))
+        )
+        for changes in mutations:
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as temp:
+                def mutate(data, argv):
+                    if "--sim-budget" not in argv:
+                        data.update(changes)
+                    return data
+
+                evidence = Path(temp).resolve() / "evidence"
+                code, commands, error = self.capture_run(evidence, mutate=mutate)
+                self.assertEqual(code, 1, error)
+                self.assertEqual(len(commands), 2)
+                self.assertFalse((evidence / "capture.json").exists())
+
+    def test_neutrality_rejects_disabled_artifact_with_telemetry(self):
+        for budget in (None, {}, artifact()["sim_budget"]):
+            with self.subTest(budget=budget), tempfile.TemporaryDirectory() as temp:
+                def mutate(data, argv):
+                    if "--sim-budget" not in argv:
+                        data["sim_budget"] = budget
+                    return data
+
+                evidence = Path(temp).resolve() / "evidence"
+                code, _, error = self.capture_run(evidence, mutate=mutate)
+                self.assertEqual(code, 1)
+                self.assertIn("telemetry-disabled artifact contains sim_budget", error)
+                self.assertFalse((evidence / "capture.json").exists())
+
+    def test_failed_neutrality_does_not_publish_success_manifest(self):
+        for failure in ("launch", "missing", "partial", "non-object", "unreadable", "incomplete-trace",
+                        "invalid-trace", "invalid-gate-type", "fixture-change", "inside-checkout"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
+                evidence = Path(temp).resolve() / "evidence"
+
+                def mutate(data, argv):
+                    if failure == "invalid-gate-type":
+                        data["effective_simulation"]["future_gate"] = 1
+                    # Fail on the final counterpart, after earlier pairs validated.
+                    if data["preset"] == capture.PRESETS[-1] and "--sim-budget" not in argv:
+                        if failure == "launch":
+                            raise subprocess.CalledProcessError(1, argv)
+                        if failure == "missing":
+                            return None
+                        if failure == "partial":
+                            Path(argv[-1]).write_text('{', encoding="utf-8")
+                            return None
+                        if failure == "non-object":
+                            return []
+                    if "--sim-budget" in argv:
+                        if failure == "incomplete-trace":
+                            data["runs"][1]["ticks_executed"] = 1
+                        if failure == "invalid-trace":
+                            data["sim_budget"]["stages"][0]["work_trace"] = []
+                    return data
+
+                if failure == "inside-checkout":
+                    with mock.patch.object(capture, "__file__", str(Path(temp).resolve() / "tools/perf/capture_sim_budget.py")):
+                        code, commands, error = self.capture_run(evidence, mutate=mutate)
+                    self.assertEqual(code, 2)
+                    self.assertEqual(commands, [])
+                    self.assertFalse(evidence.exists())
+                    self.assertIn("outside the checkout", error)
+                    continue
+                original_read = capture.read_text
+
+                def read(root, path, **kwargs):
+                    if failure == "unreadable" and path.name == "archipelago-telemetry-off.json":
+                        raise PermissionError("synthetic read failure")
+                    return original_read(root, path, **kwargs)
+
+                with mock.patch.object(capture, "read_text", side_effect=read):
+                    code, commands, error = self.capture_run(
+                        evidence, mutate=mutate, fixture_changed=failure == "fixture-change")
+                self.assertEqual(code, 1, error)
+                self.assertFalse((evidence / "capture.json").exists())
+                self.assertTrue((evidence / "default.json").is_file())
+                self.assertTrue((evidence / "default.log").is_file())
+                self.assertTrue(commands)
 
 
 if __name__ == "__main__":

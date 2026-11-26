@@ -12,6 +12,7 @@
 #include "luminumbra_common/components/ForagingComponents.h"
 #include "luminumbra_common/components/LightingComponents.h"
 #include "luminumbra_common/core/DeterministicRng.h"
+#include "luminumbra_common/core/IntegerPrimitives.h"
 #include "luminumbra_common/foliage/SpeciesRegistry.h"
 #include "luminumbra_common/systems/FarmingSystem.h"
 #include "luminumbra_common/systems/PlantGrowthSystem.h"
@@ -123,7 +124,7 @@ std::size_t RebakeAllPlants(ProcgenPlantState& state,
 
     // Cheap change key: scatter revision + each sim plant's (id, stage). Skip rebuild+upload when
     // unchanged (the common settled frame).
-    std::uint64_t sig = 1469598103934665603ull ^ (state.scatterRevision * 1099511628211ull);
+    std::uint64_t sig = Core::kFnv1a64HistoricalBasis ^ (state.scatterRevision * 1099511628211ull);
     for (const entt::entity e : ents) {
         const auto& gg = view.get<const C::PlantGrowthComponent>(e);
         sig = (sig ^ ((static_cast<std::uint64_t>(entt::to_integral(e)) << 8) ^

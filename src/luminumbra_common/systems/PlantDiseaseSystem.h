@@ -30,6 +30,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
+#include <span>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -42,6 +44,7 @@
 
 #include "../simulation/SimulationParticipantOrder.h"
 #include "RegionConsumerGate.h"
+#include "RegionalPlantTicks.h"
 
 namespace luminumbra::foliage {
 
@@ -94,25 +97,11 @@ inline std::uint16_t SatSub(std::uint16_t a, std::uint32_t b) {
     return static_cast<std::uint16_t>(b >= a ? 0u : (static_cast<std::uint32_t>(a) - b));
 }
 
-// Advance the plant blight by ONE fixed tick. Pure function of registry state +
-// tick id. Returns telemetry (also useful for the world sub-hash). Deterministic,
-// id-ordered, two-phase. `world_seed` lets distinct worlds diverge (reserved for a
-// future stochastic variant); the default deterministic path ignores it.
-// The candidate traversal is permutation invariant: each source contribution is
-// converted to an integer before summation (unsigned addition is associative),
-// and each health write reads only the pre-tick source snapshot. There are no
-// ordered events or entity destruction here. Candidate ordering validates identity
-// admission before the snapshot; keep the legacy sort until activation.
-template<bool StableIdentity = false>
-inline PlantDiseaseStats
-RunPlantDiseaseOnTick(entt::registry& reg,
-                      std::uint64_t tick,
-                      std::uint64_t world_seed = 0,
-                      const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
-    (void)tick;       // unused by the deterministic threshold path
-    (void)world_seed; // reserved for the +20 stochastic variant
-    PlantDiseaseStats stats;
+namespace disease_detail {
 
+template<bool StableIdentity>
+inline std::vector<entt::entity> Collect(entt::registry& reg,
+                                         const ::Luminumbra::world::RegionConsumerGate& gate) {
     auto view =
         reg.view<Comp::PlantTag, Comp::PlantHealthComponent, const Comp::TransformComponent>();
 
@@ -131,6 +120,14 @@ RunPlantDiseaseOnTick(entt::registry& reg,
         });
     }
 
+    return ents;
+}
+
+inline PlantDiseaseStats
+Run(entt::registry& reg, std::span<const entt::entity> ents, bool saturate) {
+    PlantDiseaseStats stats;
+    auto view =
+        reg.view<Comp::PlantTag, Comp::PlantHealthComponent, const Comp::TransformComponent>();
     if (ents.empty())
         return stats; // explicit no-op for the empty roster
 
@@ -193,7 +190,8 @@ RunPlantDiseaseOnTick(entt::registry& reg,
             // fights back a little. Net fixed-point integer step.
             h.infection = SatAdd(h.infection, effective);
             h.infection = SatSub(h.infection, kInfectionDecayPerTick);
-            ++h.infected_ticks;
+            if (!saturate || h.infected_ticks < std::numeric_limits<std::uint32_t>::max())
+                ++h.infected_ticks;
 
             if (h.infected_ticks >= kSickTicks) {
                 if (h.resistance >= kRecoverResistance) {
@@ -233,6 +231,45 @@ RunPlantDiseaseOnTick(entt::registry& reg,
     }
 
     return stats;
+}
+
+} // namespace disease_detail
+
+// Legacy one-tick entry point deliberately ignores elapsed windows. Disease uses
+// no RNG; tick and world_seed remain reserved for the stochastic variant.
+template<bool StableIdentity = false>
+inline PlantDiseaseStats
+RunPlantDiseaseOnTick(entt::registry& reg,
+                      std::uint64_t tick,
+                      std::uint64_t world_seed = 0,
+                      const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
+    (void)tick;
+    (void)world_seed;
+    const auto participants = disease_detail::Collect<StableIdentity>(reg, gate);
+    return disease_detail::Run(reg, participants, false);
+}
+
+// Each substep snapshots only sources whose windows overlap that tick. Frozen,
+// zero-window and unborn neighbours neither emit pressure nor receive it. Repeat
+// integer rounding, saturation and resolution at each step; newly infected plants
+// first become sources on the next step. Terminal transitions publish once.
+template<bool StableIdentity = false>
+inline PlantDiseaseStats
+RunPlantDiseaseRegional(entt::registry& reg,
+                        std::uint64_t due_tick,
+                        const ::Luminumbra::world::RegionConsumerGate& gate) {
+    const auto participants = disease_detail::Collect<StableIdentity>(reg, gate);
+    plant_elapsed_detail::RegionalPlantTicks schedule(reg, participants, gate, due_tick);
+    PlantDiseaseStats total;
+    schedule.Run([&](std::span<const entt::entity> active, std::uint64_t, std::uint32_t) {
+        const auto stats = disease_detail::Run(reg, active, true);
+        plant_elapsed_detail::AddCount(total.considered, stats.considered);
+        plant_elapsed_detail::AddCount(total.infected, stats.infected);
+        plant_elapsed_detail::AddCount(total.new_infections, stats.new_infections);
+        plant_elapsed_detail::AddCount(total.recovered, stats.recovered);
+        plant_elapsed_detail::AddCount(total.died, stats.died);
+    });
+    return total;
 }
 
 } // namespace luminumbra::foliage

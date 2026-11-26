@@ -34,6 +34,22 @@ preparation, kernel and face work, including both endpoints of a same-owner face
 A larger grant never repeats rain, source injection, damping or sleep advancement
 on a selected interior in the same opportunity.
 
+The approved allocation policy credits proportional awake candidate demand in
+Q32 units, distributes fractional remainders by remainder descending and region
+key ascending, then services post-credit debt in a fixed descending order with
+region-key ties. Scheduler priority does not replace this ranking. Serviceable
+demand caps new credit; unused grants retain debt, and zero-candidate, sleeping
+or frozen owners retain their existing registers when no work is admitted.
+
+The `RegionalWaterCadence` regressions qualify the existing policy with this
+bounded matrix; native execution remains pending:
+
+| Coverage | Inputs | Checked result |
+| --- | --- | --- |
+| Budget and preparation | Resolutions 8/16/32; zero, subwindow and whole-window budgets; initialized, uninitialized, resized and unready grids | Independently counted preparation, interiors and both seam endpoints stay within the global cap; unready owners defer |
+| Paired seams and sealing | Same-owner pairs; cross-owner awake/sleeping endpoints; all sleeping, frozen, off-phase and absent-due controls | Both endpoints are funded together; sealed owners retain volume, water state, debt and cursor |
+| Ranking and continuation | Unequal candidate demand, carried and fractional debt, key ties, maximal cursor, zero and excess funding; resident, source and due permutations | Independent integer credit/service oracle and canonical plans agree before and after existing ledger encode/decode |
+
 ## Validation and publication
 
 The checked kernels reject malformed depth, bed, momentum and mirror shapes

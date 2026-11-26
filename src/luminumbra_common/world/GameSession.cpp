@@ -14,6 +14,7 @@
 #include "Chunk.h"
 #include "FarWorldAuthorityProducer.h"
 #include "SurfaceWorkBudget.h"
+#include "TerrainCollision.h"
 #include "entt/entity/fwd.hpp"
 #include "entt/entt.hpp"
 #include "luminumbra/core/Types.h"
@@ -4411,7 +4412,8 @@ std::map<RegionKey, std::uint64_t> GameSession::AdvanceRegionalWeather(FieldPage
         // Strike cadence follows the storm's own active age, not elapsed absolute ticks.
         const float intensity = std::bit_cast<float>(storm.intensity);
         if (interior_due && storm.active_age % 18 == 0 && intensity >= 0.45f) {
-            auto key = mix((seed + 40) ^ 0x535452494b455300ull ^
+            auto key = mix((seed + FieldPageState::kWeatherSeedOffset) ^
+                           FieldPageState::kWeatherStrikeDomain ^
                            (static_cast<std::uint64_t>(storm.seed_salt) * 0x9e3779b97f4a7c15ull));
             key = mix(key ^ ((storm.active_age / 18) * 0xff51afd7ed558ccdull));
             if (unit(key) < 0.4f * intensity) {
@@ -4456,7 +4458,8 @@ std::map<RegionKey, std::uint64_t> GameSession::AdvanceRegionalWeather(FieldPage
         const auto age = fields.stage_weather_owner(owner).clock.value_or(0);
         if (age % 45 != 0)
             continue;
-        auto key = mix((seed + 40) ^ 0x535041574e000000ull ^ ((age / 45) * 0x100000001b3ull));
+        auto key = mix((seed + FieldPageState::kWeatherSeedOffset) ^
+                       FieldPageState::kWeatherSpawnDomain ^ ((age / 45) * 0x100000001b3ull));
         key ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(owner.x)) * 0x9e3779b1u;
         key ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(owner.z)) * 0x85ebca77u;
         if (unit(key) >= 0.55f)
@@ -6673,10 +6676,37 @@ bool GameSession::ReadPreparedWorldState(
         auto physics = std::make_unique<Systems::PhysicsSystem>();
         physics->startup();
         bool restored = true;
+        // Startup-only index, bounded by the admitted saved chunks. Legacy body
+        // continuation must use the same descending slab projection as live edits.
+        std::map<std::pair<i32, i32>, std::map<i32, const Chunk*, std::greater<i32>>>
+            terrain_layers;
+        for (const auto& source : state.chunks.snapshot_chunks()) {
+            if (source && source->has_terrain_authority() && !source->sdf_data.empty()) {
+                const auto coords = source->get_coords();
+                terrain_layers[{coords.x, coords.z}].emplace(coords.y, source.get());
+            }
+        }
         for (const auto& terrain : state.continuation->terrain) {
             const auto chunk = state.chunks.find_chunk(terrain.chunk_id);
-            if (cancelled() || !chunk ||
-                !physics->add_chunk_collision(*chunk, JPH::BodyID(terrain.body_id)) ||
+            std::array<float, (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1)> heights{};
+            bool valid_heights = chunk && chunk->heightmap_data.size() == heights.size();
+            if (valid_heights) {
+                std::copy(
+                    chunk->heightmap_data.begin(), chunk->heightmap_data.end(), heights.begin());
+                const auto coords = chunk->get_coords();
+                const auto layers = terrain_layers.find({coords.x, coords.z});
+                if (layers != terrain_layers.end()) {
+                    for (const auto& [slab_y, source] : layers->second) {
+                        (void)slab_y;
+                        if (!World::OverlayTerrainCollision(*source, heights)) {
+                            valid_heights = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (cancelled() || !chunk || !valid_heights ||
+                !physics->add_chunk_collision(*chunk, JPH::BodyID(terrain.body_id), heights) ||
                 physics->chunk_collision_body(terrain.chunk_id) != JPH::BodyID(terrain.body_id)) {
                 restored = false;
                 break;

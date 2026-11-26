@@ -74,9 +74,14 @@ struct TerritoryStats {
 // id-ordered, two-phase. `tick` is accepted for signature parity with the other tick systems
 // (this system is rng-free, so it does not consume the tick, but keeping it keeps the wire
 // site uniform).
-inline TerritoryStats RunTerritoryOnTick(entt::registry& reg,
-                                         std::uint64_t /*tick*/ = 0,
-                                         const CreatureTickAdmission* admission = nullptr) {
+// Elapsed opt-in: claim once at the due-time position and assign the current homing
+// field once, regardless of positive window length. Zero/frozen windows retain both
+// the claim and any existing bias; they do not create an output component.
+inline TerritoryStats
+RunTerritoryOnTick(entt::registry& reg,
+                   std::uint64_t /*tick*/ = 0,
+                   const CreatureTickAdmission* admission = nullptr,
+                   const ::Luminumbra::world::RegionConsumerGate* elapsed_gate = nullptr) {
     TerritoryStats stats;
 
     auto view = reg.view<Comp::TerritoryComponent, Comp::TransformComponent>();
@@ -99,7 +104,7 @@ inline TerritoryStats RunTerritoryOnTick(entt::registry& reg,
     std::vector<Snap> snap;
     snap.reserve(ents.size());
     for (auto e : ents) {
-        if (admission && !admission->Allows(e)) {
+        if (!AllowsElapsedParticipant(reg, e, admission, elapsed_gate)) {
             continue;
         }
         auto& terr = view.get<Comp::TerritoryComponent>(e);

@@ -80,6 +80,59 @@ Streaming transients inside the measured window are included. The example is
 surface flight only. The scripted workloads below use traversal v2 and artifact
 v4; edited-world bake qualification remains separate.
 
+## Far budget observations (issue #133)
+
+Benchmark artifacts additionally contain the optional, versioned
+`far_budget` block (`luminumbra.far_budget.v1`). Existing benchmark schemas,
+timing frame IDs and settled Ladder baseline checks retain their meaning.
+The recorder arms immediately before the first world render, before far
+advancement, and retains loading, warmup, upload waits, measured renders and
+reload settling. Ordinary play allocates no budget observation storage.
+
+Each observation binds the renderer's `render_frame`, optional measured
+`timing_frame`, world epoch, target serial, cohort fingerprint, content identity
+and bake generation. `phase` is `measured` when joined to a timing sample, or
+`cold_or_settling` otherwise. Multiple reload renders may join the same timing
+frame. Measured frames without a world render retain their existing timing
+identity: every scene-pass timer is explicitly unissued. They have no budget
+render join; a budget observation claiming such a frame is refused. Missing or
+partial timer metadata cannot establish a no-render frame. Upload-only frames
+without a current diagnostic remain explicitly
+unaccepted; retained coverage from an earlier render cannot complete a fill.
+Elapsed time uses a monotonic clock from the armed origin; `render_wall_ms`
+measures each render call. Full frame CPU/GPU timing remains in the joined
+measurement rows. Fingerprints use FNV-1a over little-endian uint64 words and
+XOR across diagnostic tiles, independent of visitor order; they identify
+observations and never participate in simulation, saves or replay identity.
+
+Every observation retains all five tiers' sampled CPU/GPU/total/peak bytes,
+limits and admission refusals; wanted, covering, settled and queued counts;
+draws and indices; build attempts, dispatches, completions, upload attempts and
+successes, attempted/successful upload bytes, rejections and evictions. Memory
+fields retain the existing independently sampled semantics; their components
+need not sum at one instant. Serialization runs after measurement. Storage is
+bounded to 36000 fixed observations, checked before allocation. Overflow
+refuses evidence through `storage_complete=false` rather than overwriting rows.
+
+`fills` records the cold event separately from epoch, edit/bake, cohort and
+coverage-loss refill events. Each event retains its origin, explicit cohort
+acceptance, per-tier completion timestamps and all-tier completion, or an
+`incomplete`/`timeout` status. Completion requires nonempty current coverage in
+every tier, matching build/binding identities, complete water and unsuppressed
+submission. The latest session target must also be serving. The observation
+deadline is inclusive at 90000 ms; later observations cannot repair a timed-out
+event. These records do not claim edit commit or all-tier bake qualification.
+
+`render_contract.validate(..., far_budget=True)` requires complete cold-fill
+evidence, contiguous renderer frames from the armed origin, and joins for every
+measured timing frame that renders the world. It recomputes event summaries from retained observations.
+Missing cold rows, fabricated completion, unknown schemas/phases and storage overflow
+cannot qualify. Without this argument, older artifacts remain readable; a
+present block is still validated, and honestly incomplete events remain visible.
+Cold-fill validation includes streaming work and does not relax the independent
+settled Ladder baseline checks. Native captures and measured budget proposals
+remain pending; this block sets no enforced residency or streaming limits.
+
 ## Far-mode reporting and Ladder baselines
 
 V2, v3 and v4 include `far_world.frames`, one row for every measured frame,

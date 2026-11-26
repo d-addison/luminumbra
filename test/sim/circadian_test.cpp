@@ -6,14 +6,19 @@
 // across the day boundary, run==replay, and empty-roster no-op.
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
+#include <map>
 #include <vector>
 
 #include <entt/entt.hpp>
 
 #include "ai/CircadianSystem.h"
 #include "components/CircadianComponents.h"
+
+#include "world/WorldClock.h"
 
 namespace {
 
@@ -211,6 +216,67 @@ TEST(Circadian, RunEqualsReplay) {
     for (std::size_t i = 0; i < run.size(); ++i) {
         // Exact equality: deterministic math must reproduce identical bits.
         EXPECT_EQ(run[i], replay[i]) << "divergence at sample " << i;
+    }
+}
+
+TEST(Circadian, RegionalElapsedSamplesApprovedSolarPhase) {
+    namespace W = Luminumbra::world;
+    for (const auto ticks : {1u, 8u, 36001u, 65536u}) {
+        SCOPED_TRACE(ticks);
+        entt::registry r;
+        const auto active = spawnCreature(r, false);
+        const auto nocturnal = spawnCreature(r, true); // supported non-creature opt-in
+        const auto frozen = spawnCreature(r, false);
+        const auto zero = spawnCreature(r, false);
+        const auto missing_window = spawnCreature(r, false);
+        const auto missing_position = spawnCreature(r, false);
+        const auto invalid_position = spawnCreature(r, false);
+        const std::array entities{
+            active, nocturnal, frozen, zero, missing_window, missing_position, invalid_position};
+        for (const auto entity : entities) {
+            r.get<Comp::CircadianComponent>(entity).activity = 0.37f;
+            if (entity != missing_position) {
+                r.emplace<Comp::TransformComponent>(entity).position = {4, 0, 4};
+            }
+        }
+        r.emplace<Comp::CreatureComponent>(active);
+        r.emplace<Comp::CreatureComponent>(frozen);
+        r.get<Comp::TransformComponent>(frozen).position.x = 513;
+        r.get<Comp::TransformComponent>(zero).position.x = 1025;
+        r.get<Comp::TransformComponent>(missing_window).position.x = 1537;
+        r.get<Comp::TransformComponent>(invalid_position).position.x =
+            std::numeric_limits<float>::infinity();
+        const std::array<W::RegionKey, 3> due{{{0, 0}, {2, 0}, {3, 0}}};
+        const std::map<W::RegionKey, std::uint32_t> windows{{{0, 0}, ticks}, {{2, 0}, 0}};
+        const W::RegionConsumerGate gate(r, due, W::RegionElapsedTicks(windows));
+        luminumbra::ai::CreatureTickAdmission admission;
+        admission.Capture(r, gate);
+        // Moving cannot transfer an owner's elapsed window or thaw a frozen creature.
+        r.get<Comp::TransformComponent>(active).position.x = 513;
+        r.get<Comp::TransformComponent>(frozen).position.x = 4;
+        const W::WorldClock clock;
+        const auto phase = static_cast<float>(clock.solar_phase(27000));
+        EXPECT_EQ(phase, 0.25f);
+        EXPECT_NE(phase, static_cast<float>(clock.day_phase(27000)));
+        const auto stats = RunCircadianOnTick(r, phase, 0.8f, &admission, &gate);
+        EXPECT_EQ(stats.participants, 2);
+        EXPECT_EQ(stats.diurnal, 1);
+        EXPECT_EQ(stats.nocturnal, 1);
+        // Three due-index entries, two captured owners and three positioned opt-ins:
+        // elapsed window length must not multiply owner lookups or replay the roster.
+        EXPECT_EQ(gate.owner_visits(), 8u);
+        EXPECT_EQ(activityOf(r, active), CircadianActivity(phase, false, 0.8f));
+        EXPECT_EQ(activityOf(r, nocturnal), CircadianActivity(phase, true, 0.8f));
+        for (const auto entity :
+             {frozen, zero, missing_window, missing_position, invalid_position}) {
+            EXPECT_EQ(activityOf(r, entity), 0.37f);
+        }
+        // Gate-only callers also schedule non-creature opt-ins; empty due sets do nothing.
+        const W::RegionConsumerGate empty(r, std::span<const W::RegionKey>{});
+        EXPECT_EQ(RunCircadianOnTick(r, 0.0f, 1.0f, nullptr, &empty).participants, 0);
+        // The existing entry point keeps its boolean-only zero-window behaviour.
+        EXPECT_EQ(RunCircadianOnTick(r, 0.0f, 1.0f, &admission).participants, 6);
+        EXPECT_EQ(activityOf(r, zero), CircadianActivity(0.0f, false));
     }
 }
 

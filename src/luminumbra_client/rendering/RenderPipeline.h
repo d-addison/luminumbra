@@ -1042,6 +1042,11 @@ public:
     const FarWorldDiagnosticSnapshot& far_world_diagnostic() const {
         return m_far_world->Diagnostic();
     }
+    // Owner-thread frame identity also advances during upload-only loading.
+    // Recorders must not attach a retained snapshot to one of those frames.
+    std::uint64_t far_world_render_frame() const noexcept {
+        return m_far_world_frame;
+    }
     FarWorldReportingState far_world_reporting_state() const {
         const auto& diagnostic = m_far_world->Diagnostic();
         const bool terrain_submission =

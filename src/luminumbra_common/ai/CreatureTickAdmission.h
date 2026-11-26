@@ -55,4 +55,25 @@ private:
     entt::storage<Entry> m_entries;
 };
 
+// Optional elapsed opt-in for state assignments. With no elapsed gate, preserve the
+// legacy boolean contract (including an allowed zero window). Captured creature owners
+// survive movement; uncaptured newborns keep the cache's single current tick. Other
+// opted-in entities resolve their own regional owner rather than the cache's fallback.
+[[nodiscard]] inline bool
+AllowsElapsedParticipant(const entt::registry& registry,
+                         entt::entity entity,
+                         const CreatureTickAdmission* admission,
+                         const ::Luminumbra::world::RegionConsumerGate* elapsed_gate) {
+    if (admission && !admission->Allows(entity)) {
+        return false;
+    }
+    if (!elapsed_gate) {
+        return true;
+    }
+    if (admission && registry.all_of<::Luminumbra::Components::CreatureComponent>(entity)) {
+        return admission->ElapsedTicks(entity) != 0;
+    }
+    return elapsed_gate->ElapsedTicks(entity) != 0;
+}
+
 } // namespace luminumbra::ai

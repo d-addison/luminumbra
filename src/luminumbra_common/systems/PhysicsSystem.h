@@ -80,15 +80,23 @@ public:
     // Streaming admits up to 8192 chunks, with at most one terrain body each.
     // Frozen capsules must leave this many body slots free after allocation.
     static constexpr std::uint32_t kTerrainBodyHeadroom = 8192;
-    // False only when the body pool refuses creation; callers may retry later.
+    // False on invalid authoritative samples or body-pool refusal; callers may retry.
     bool add_chunk_collision(Chunk& chunk);
-    bool add_chunk_collision(Chunk& chunk, JPH::BodyID restored_id);
+    // Continuation may supply a column projected from all saved vertical slabs.
+    bool add_chunk_collision(Chunk& chunk,
+                             JPH::BodyID restored_id,
+                             std::span<const float> restored_heights = {});
+    // Prepare replacement geometry before removing an existing legacy collider.
+    bool refresh_chunk_collision(Chunk& chunk);
     // Const continuation diagnostic. Missing means this chunk has no terrain body.
     std::optional<JPH::BodyID> chunk_collision_body(ChunkID chunk_id) const;
     // Explicit-save capture only; refuses above the 8192-terrain-owner bound
     // before allocating. Output is sorted by chunk ID and unchanged on refusal.
     bool capture_chunk_collision_owners(std::vector<std::pair<ChunkID, JPH::BodyID>>& output) const;
     void remove_chunk_collision(ChunkID chunk_id);
+    // Owner-thread edit notification, for a finite positive brush accepted by the world.
+    // Wakes overlapping rigid bodies in BodyID order, including sleeping supports.
+    void wake_terrain_bodies(const Vec3& center, float radius);
     // Explicit continuation only. At most 128 private terrain bodies and sampled
     // columns; unused bodies retain their reserved IDs outside the broadphase.
     struct SimulationTerrainState {
@@ -118,6 +126,11 @@ public:
     bool
     prepare_simulation_collisions(std::span<const Vec3> anchors,
                                   std::uint64_t tick = std::numeric_limits<std::uint64_t>::max());
+    // Refresh edited geometry without retiring any previously admitted columns.
+    bool refresh_simulation_collisions(const Vec3& edit_anchor);
+    // Owner-thread collision mode/readiness queries used by terrain refresh.
+    bool simulation_collisions_enabled() const;
+    bool simulation_collisions_ready() const;
     void clear_simulation_collisions();
     // Const diagnostics, never session hash/save inputs. Counts actual sampled columns.
     std::size_t simulation_collision_sample_count() const;
@@ -352,6 +365,13 @@ public:
 
 private:
     bool capture_player_owner(World::PhysicsOwnerState& output) const;
+    bool prepare_simulation_collisions_impl(std::span<const Vec3> anchors,
+                                            std::uint64_t tick,
+                                            bool retain_horizon);
+    bool add_chunk_collision_impl(Chunk& chunk,
+                                  JPH::BodyID restored_id,
+                                  std::span<const float> restored_heights,
+                                  bool replace_existing);
     bool restore_player_owner(const World::PhysicsOwnerState& state);
     bool capture_avatar_owner(std::size_t index, World::PhysicsOwnerState& output) const;
     bool restore_avatar_owner(const World::PhysicsOwnerState& state,
@@ -359,8 +379,6 @@ private:
                               std::span<const World::PhysicsOwnerState> remaining_frozen = {});
     struct SimulationCollisions;
     std::unique_ptr<SimulationCollisions> m_simulation_collisions;
-    bool simulation_collisions_enabled() const;
-    bool simulation_collisions_ready() const;
     bool can_admit_simulation_owner(const glm::vec3& position, bool replacing_player) const;
     std::uint32_t non_simulation_body_count() const;
 
