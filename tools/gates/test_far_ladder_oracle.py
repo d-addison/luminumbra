@@ -7,6 +7,8 @@ import sys
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from far_ladder_oracle import (ArtifactError, IDENTITY, SNAPSHOT_FIELDS, TIER_COUNTERS,
                                legacy_count, read_artifact, validate_artifact, wanted_tiles)
 
@@ -515,7 +517,8 @@ class SessionValidatorTests(unittest.TestCase):
         snapshot = artifact["stations"][0]["snapshot"]
         snapshot.update(authority_kind="session", serving_serial=3, target_serial=3,
                         latest_target_ready=True, source_error=0, capture_error=0,
-                        submitted_water_indices=6)
+                        submitted_water_indices=6, committed_generation=5,
+                        serving_committed_generation=5, manifest_fingerprint=123)
         for index, tile in enumerate(snapshot["tiles"]):
             accepted = 100 + index if heterogeneous else snapshot["content_identity"]
             tile["desired"]["content_identity"] = tile["built"]["content_identity"] = accepted
@@ -525,11 +528,45 @@ class SessionValidatorTests(unittest.TestCase):
             tile["built_span"] = [(-320 // edge) * edge, ((128 + edge - 1) // edge) * edge]
         return artifact
 
+    def test_native_gate_dispatch_preserves_mode_requirements(self):
+        gate = Path(__file__).with_name("validate-engine-frontier.ps1").read_text()
+        start = gate.index("function Test-FarLodHorizon {")
+        body = gate[start:gate.index("# ---  isolation/layer", start)]
+        self.assertNotIn("Ladder qualification is unsupported", body)
+        self.assertIn('Assert-FarHorizonV2Artifact -Path', body)
+        self.assertIn('-Renderer ($FarWorldRenderer.ToLowerInvariant())', body)
+        self.assertIn('if ($wantLadder) {', body)
+        self.assertIn('$station.snapshot.authority_kind -cne "session"', body)
+        self.assertIn('Assert-FarHorizonLegacyCompatibility -SelectedEvidence $oracleResult', body)
+        for check in ('Assert-FarLodHorizonStationCoverage', 'oracle.legacy.$counter',
+                      'regions_missing -gt 0', 'resident_budget_bytes', 'far_region_draws -le 0',
+                      'last-known-runtime.json', 'gbuffer_delta_ms', 'bands_resolved -le 0',
+                      'boundary_band.band_sky_ratio', 'horizon.below_horizon_sky_ratio',
+                      'submitted_water_indices', 'maxBandWaterRatio',
+                      'Assert-FarHorizonVisualStations', 'Ladder qualification requires GPU timer samples',
+                      'maxFarAttributable', 'elevatedSandFlat', 'Assert-CapturePinned'):
+            # PowerShell variable names are case-insensitive.
+            self.assertIn(check.lower(), body.lower())
+        for preset in ('default', 'mountains', 'archipelago', 'cave_dense'):
+            self.assertIn('"' + preset + '"', body)
+        artifact = self.session()
+        validate_artifact(artifact)
+        for mutate in (lambda a: a.update(mode="legacy"),
+                       lambda a: a["stations"][0].update(settle_seconds=91),
+                       lambda a: a["stations"][0]["snapshot"].update(effective_mode="legacy"),
+                       lambda a: a["stations"][0]["snapshot"].update(submitted_water_indices=0),
+                       lambda a: a["stations"][0]["ladder"].update(resident_tiles=[])):
+            invalid = copy.deepcopy(artifact)
+            mutate(invalid)
+            with self.assertRaises(ArtifactError):
+                validate_artifact(invalid)
+
     def test_session_accepts_heterogeneous_fingerprints_and_generation_zero(self):
         for generation in (0, 5):
             artifact = self.session()
             snapshot = artifact["stations"][0]["snapshot"]
-            snapshot.update(content_identity=0, bake_generation=generation)
+            snapshot.update(content_identity=0, bake_generation=generation,
+                            committed_generation=generation, serving_committed_generation=generation)
             for tile in snapshot["tiles"]:
                 tile["desired"]["bake_generation"] = tile["built"]["bake_generation"] = generation
             validate_artifact(artifact)
@@ -541,6 +578,12 @@ class SessionValidatorTests(unittest.TestCase):
     def test_session_refuses_old_serving_pending_target_and_unknown_metadata(self):
         mutations = (
             lambda s: s.update(serving_serial=2),
+            lambda s: s.update(manifest_fingerprint=0),
+            lambda s: s.update(manifest_fingerprint=2**64),
+            lambda s: s.update(target_serial=2**64, serving_serial=2**64),
+            lambda s: s.pop("manifest_fingerprint"),
+            lambda s: s.update(serving_committed_generation=4),
+            lambda s: s.update(committed_generation=6),
             lambda s: s.update(target_serial=0),
             lambda s: s.update(latest_target_ready=False),
             lambda s: s.update(source_error=8),
@@ -591,7 +634,8 @@ class SessionValidatorTests(unittest.TestCase):
             second["name"] = "refresh"
             snapshot = second["snapshot"]
             snapshot.update(frame_id=10, target_serial=serial, serving_serial=serial,
-                            bake_generation=generation)
+                            bake_generation=generation, committed_generation=generation,
+                            serving_committed_generation=generation)
             for tile in snapshot["tiles"]:
                 tile["desired"]["bake_generation"] = tile["built"]["bake_generation"] = generation
             artifact["stations"].append(second)
@@ -666,6 +710,7 @@ class SessionValidatorTests(unittest.TestCase):
             lambda row: row["snapshot"]["tiles"][0].update(requested_span=[80, -256]),
             lambda row: row["snapshot"].update(tiles=[]),
             lambda row: row["snapshot"].update(authority_kind="unknown"),
+            lambda row: row["snapshot"].update(manifest_fingerprint=124),
             lambda row: row.update(settle_seconds=91),
         )
         for mutate in mutations:

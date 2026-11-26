@@ -12893,6 +12893,98 @@ TEST(ScenarioGeometryMask, BoundaryMaterialCountsExcludeClearDepth) {
     }
 }
 
+TEST(FarHorizonQualification, SelectedModePreservesVisualAndLegacyEvidence) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    using namespace Luminumbra::Rendering;
+    // File-only writer regression: two stations, no context or engine launch.
+    for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+        for (const bool expired : {false, true}) {
+            const Luminumbra::TestSupport::ScopedTempFile temporary("horizon-evidence-", ".root");
+            const auto directory = temporary.Path().parent_path();
+            std::vector<FarLodHorizonStationCapture> captures(2);
+            for (std::size_t index = 0; index < captures.size(); ++index) {
+                auto& capture = captures[index];
+                capture.station.name = index == 0 ? "origin" : "translated";
+                capture.camera_world_x = index == 0 ? 0.0f : -512.0f;
+                capture.regions_wanted = 132;
+                capture.regions_resident = 132;
+                capture.resident_bytes = 4096;
+                capture.far_world.selection =
+                    SelectFarWorld(mode, FarWorldPurpose::World, FarWorldRefusal::None);
+                capture.far_world.captured = true;
+                capture.far_world.complete = true;
+                capture.ready_within_deadline = !expired;
+                capture.paired_capture_preserved = true;
+            }
+            WriteFarLodHorizonAnalysis(
+                directory, "cave_dense", 0.0, captures, 2, 1.0, 1.25, true, true);
+            const bool compatibility = mode == FarWorldMode::Legacy;
+            std::ifstream visual_input(directory / (compatibility ? "farlod-horizon-analysis.json"
+                                                                  : "farlod-horizon-visual.json"));
+            ASSERT_TRUE(visual_input.is_open());
+            const auto visual = nlohmann::json::parse(visual_input);
+            EXPECT_EQ(visual.at("schema"),
+                      compatibility ? "luminumbra.farlod_horizon.v1"
+                                    : "luminumbra.farlod_horizon.visual.v1");
+            EXPECT_EQ(visual.at("stations").size(), 2u);
+            EXPECT_EQ(visual.contains("farlod"), compatibility);
+            EXPECT_EQ(visual.at("thresholds").contains("f2_outer_range_m"), compatibility);
+            EXPECT_EQ(visual.at("thresholds").at("max_gbuffer_delta_ms"), 1.5);
+            EXPECT_EQ(visual.at("gbuffer").at("gbuffer_delta_ms"), 0.25);
+            std::ifstream oracle_input(directory / "farlod-horizon-ladder-oracle.json");
+            ASSERT_TRUE(oracle_input.is_open());
+            const auto oracle = nlohmann::json::parse(oracle_input);
+            EXPECT_EQ(oracle.at("mode"), FarWorldModeName(mode));
+            EXPECT_EQ(oracle.at("complete"), !expired);
+            EXPECT_EQ(oracle.contains("legacy"), compatibility);
+            EXPECT_EQ(oracle.at("ladder_checked"), !compatibility);
+        }
+    }
+}
+
+TEST(FarHorizonQualification, EmptyMixedAndVisualFailureRemainFailures) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    using namespace Luminumbra::Rendering;
+    for (const int fault : {0, 1, 2}) {
+        const Luminumbra::TestSupport::ScopedTempFile temporary("horizon-refusal-", ".root");
+        const auto directory = temporary.Path().parent_path();
+        std::vector<FarLodHorizonStationCapture> captures(fault == 0 ? 0u : 2u);
+        for (std::size_t index = 0; index < captures.size(); ++index) {
+            auto& capture = captures[index];
+            capture.station.name = index == 0 ? "origin" : "other";
+            const auto mode =
+                fault == 1 && index == 0 ? FarWorldMode::Legacy : FarWorldMode::Ladder;
+            capture.far_world.selection =
+                SelectFarWorld(mode, FarWorldPurpose::World, FarWorldRefusal::None);
+            capture.far_world.captured = true;
+            capture.far_world.complete = true;
+            capture.ready_within_deadline = true;
+            capture.paired_capture_preserved = true;
+            capture.sky.void_cluster_count = fault == 2 ? 1u : 0u;
+        }
+        WriteFarLodHorizonAnalysis(directory, "default", 0.0, captures, 2, 1.0, 1.25, true, true);
+        std::ifstream oracle_input(directory / "farlod-horizon-ladder-oracle.json");
+        ASSERT_TRUE(oracle_input.is_open());
+        const auto oracle = nlohmann::json::parse(oracle_input);
+        if (fault != 2) {
+            EXPECT_EQ(oracle.at("complete"), false);
+        }
+        if (fault == 2) {
+            std::ifstream visual_input(directory / "farlod-horizon-visual.json");
+            ASSERT_TRUE(visual_input.is_open());
+            EXPECT_EQ(nlohmann::json::parse(visual_input).at("passed"), false);
+        }
+    }
+    const Luminumbra::TestSupport::ScopedTempFile blocked("horizon-write-refusal-", ".root");
+    {
+        std::ofstream file(blocked.Path());
+        file << "occupied";
+    }
+    EXPECT_THROW(
+        WriteFarLodHorizonAnalysis(blocked.Path(), "default", 0.0, {}, 2, 1.0, 1.25, true, true),
+        std::runtime_error);
+}
+
 TEST(ScenarioGeometryMask, FiniteSliverSurvivesAndPairedLiveGeometryCancels) {
     using namespace Luminumbra::Client::ScenarioHarness;
     constexpr int width = 128;

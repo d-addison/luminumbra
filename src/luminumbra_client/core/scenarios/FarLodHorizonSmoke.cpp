@@ -550,7 +550,8 @@ WriteLegacyFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
                                  double baseline_gbuffer_gpu_ms,
                                  double far_gbuffer_gpu_ms,
                                  bool gpu_timers_supported,
-                                 bool enforce_sky_ratio) {
+                                 bool enforce_sky_ratio,
+                                 bool legacy_evidence) {
     const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
     const double gbuffer_delta_ms = far_gbuffer_gpu_ms - baseline_gbuffer_gpu_ms;
 
@@ -733,9 +734,10 @@ WriteLegacyFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
     // position so the wanted ring is identical and residency fills in monotonically; reading
     // the converged station avoids failing the gate on a single station captured mid-build.
     const bool coverage_passed =
-        !captures.empty() && final_missing <= kFarLodHorizonMaxMissingRegions;
+        !captures.empty() && (!legacy_evidence || final_missing <= kFarLodHorizonMaxMissingRegions);
     const bool budget_passed =
-        !captures.empty() && final_resident_bytes < kFarLodHorizonResidentBudgetBytes;
+        !captures.empty() &&
+        (!legacy_evidence || final_resident_bytes < kFarLodHorizonResidentBudgetBytes);
     // gpu timer support is hardware-dependent; without timers the delta gate
     // records zeros and passes (the honest comparison needs the timers).
     const bool gbuffer_passed =
@@ -760,8 +762,9 @@ WriteLegacyFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
     const bool passed = all_stations_passed && coverage_passed && budget_passed && gbuffer_passed &&
                         sliver_passed && sand_flat_passed && gl_debug.errors == 0;
 
-    const nlohmann::json artifact = {
-        {"schema", "luminumbra.farlod_horizon.v1"},
+    nlohmann::json artifact = {
+        {"schema",
+         legacy_evidence ? "luminumbra.farlod_horizon.v1" : "luminumbra.farlod_horizon.visual.v1"},
         {"sky_classifier", "reversed_z_depth_water"},
         {"timestamp_utc", TimestampUtc()},
         {"scenario", "farlod_horizon_smoke"},
@@ -857,15 +860,30 @@ WriteLegacyFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
         {"passed", passed},
     };
 
+    // Ladder shares the pixel and GPU-delta analysis, never Legacy residency evidence.
+    if (!legacy_evidence) {
+        artifact.erase("farlod");
+        for (auto& row : artifact["stations"])
+            row.erase("farlod");
+        for (const char* field :
+             {"max_missing_wanted_regions", "resident_budget_bytes", "f2_outer_range_m"})
+            artifact["thresholds"].erase(field);
+    }
     std::error_code ec;
     std::filesystem::create_directories(artifact_dir, ec);
-    std::ofstream output(artifact_dir / "farlod-horizon-analysis.json");
+    if (ec)
+        throw std::runtime_error("Cannot create far horizon artifact directory");
+    std::ofstream output(artifact_dir / (legacy_evidence ? "farlod-horizon-analysis.json"
+                                                         : "farlod-horizon-visual.json"));
     output << std::setw(2) << artifact << '\n';
+    output.close();
+    if (!output)
+        throw std::runtime_error("Cannot write far horizon visual evidence");
 
     nlohmann::json oracle = nlohmann::json::object();
     // Preserve #199's additional legacy aggregate keys for historical readers.
     // Ladder evidence is exclusively per-station; no ladder pair is fabricated.
-    if (had_converged_capture) {
+    if (legacy_evidence && had_converged_capture) {
         std::vector<Luminumbra::World::FarTileKey> expected;
         const auto error =
             Luminumbra::World::ComputeFarWantedSet(final_camera_x, final_camera_z, expected);
@@ -912,16 +930,16 @@ void WriteFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
                    Luminumbra::Rendering::FarWorldMode::Legacy;
         });
     nlohmann::json legacy_compatibility = nlohmann::json::object();
-    if (legacy_evidence)
-        legacy_compatibility = WriteLegacyFarLodHorizonAnalysis(artifact_dir,
-                                                                world_preset,
-                                                                duration_seconds,
-                                                                captures,
-                                                                expected_station_count,
-                                                                baseline_gbuffer_gpu_ms,
-                                                                far_gbuffer_gpu_ms,
-                                                                gpu_timers_supported,
-                                                                enforce_sky_ratio);
+    legacy_compatibility = WriteLegacyFarLodHorizonAnalysis(artifact_dir,
+                                                            world_preset,
+                                                            duration_seconds,
+                                                            captures,
+                                                            expected_station_count,
+                                                            baseline_gbuffer_gpu_ms,
+                                                            far_gbuffer_gpu_ms,
+                                                            gpu_timers_supported,
+                                                            enforce_sky_ratio,
+                                                            legacy_evidence);
     std::error_code ec;
     std::filesystem::create_directories(artifact_dir, ec);
     // V2 qualifies every station,
@@ -992,6 +1010,9 @@ void WriteFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
     oracle.update(legacy_compatibility);
     std::ofstream oracle_output(artifact_dir / "farlod-horizon-ladder-oracle.json");
     oracle_output << std::setw(2) << oracle << '\n';
+    oracle_output.close();
+    if (!oracle_output)
+        throw std::runtime_error("Cannot write far horizon station evidence");
 }
 
 } // namespace Luminumbra::Client::ScenarioHarness
