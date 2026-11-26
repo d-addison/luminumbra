@@ -169,7 +169,7 @@ TEST(FarWorldDiagnostics, SessionManifestIdentityIsOrderIndependent) {
         FillSessionManifest(*input);
         auto& value = input->tiles[0].observation;
         ASSERT_TRUE(value.target);
-        auto& target = *value.target;
+        auto& target = value.target.value();
         switch (control) {
             case 0:
                 ++target.identity.content_hash;
@@ -222,10 +222,11 @@ TEST(FarWorldDiagnostics, SessionManifestIdentityIsOrderIndependent) {
     EXPECT_NE(output->manifest_fingerprint, fingerprint);
     FillSessionManifest(*input);
     ASSERT_TRUE(input->tiles[0].observation.target);
-    input->tiles[0].observation.target->intent.extra_span = FarVolumeCoverageSpan{0.0f, 128};
+    input->tiles[0].observation.target.value().intent.extra_span = FarVolumeCoverageSpan{0.0f, 128};
     ProjectSessionManifest(*input, *output);
     const auto zero_fingerprint = output->manifest_fingerprint;
-    input->tiles[0].observation.target->intent.extra_span = FarVolumeCoverageSpan{-0.0f, 128};
+    input->tiles[0].observation.target.value().intent.extra_span =
+        FarVolumeCoverageSpan{-0.0f, 128};
     ProjectSessionManifest(*input, *output);
     EXPECT_EQ(output->manifest_fingerprint, zero_fingerprint);
 }
@@ -270,11 +271,11 @@ TEST(FarWorldDiagnostics, SessionManifestRefusesUnavailableAndIncompleteEvidence
                 break;
             case 10:
                 ASSERT_TRUE(input->tiles[0].observation.target);
-                input->tiles[0].observation.target->identity.content_hash = 0;
+                input->tiles[0].observation.target.value().identity.content_hash = 0;
                 break;
             case 11:
                 ASSERT_TRUE(input->tiles[0].observation.target);
-                input->tiles[0].observation.target->intent.extra_span =
+                input->tiles[0].observation.target.value().intent.extra_span =
                     FarVolumeCoverageSpan{std::numeric_limits<float>::quiet_NaN(), 128};
                 break;
             case 12:
