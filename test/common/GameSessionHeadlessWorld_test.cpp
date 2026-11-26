@@ -141,6 +141,66 @@ using Luminumbra::TestSupport::SessionWorldHash;
 using Luminumbra::TestSupport::SessionWorldSubHashes;
 using Luminumbra::TestSupport::SourcePresetPath;
 
+using Luminumbra::world::ActiveRegionLedger;
+using Luminumbra::world::ActiveRegionRecord;
+using Luminumbra::world::FieldPageState;
+using Luminumbra::world::RegionKey;
+using Luminumbra::world::RegionState;
+using Luminumbra::world::WorldClock;
+
+std::map<RegionKey, std::uint64_t> StepExpectedAmbient(FieldPageState& fields,
+                                                       const ActiveRegionLedger& ledger,
+                                                       std::span<const RegionKey> due,
+                                                       std::uint64_t tick) {
+    const auto previous = fields.scheduled_snapshot(ledger.records(), due, tick);
+    std::map<RegionKey, std::uint64_t> work;
+    for (const auto owner : due) {
+        const auto count = fields.owned_initialized_cells(owner);
+        EXPECT_TRUE(fields.activate_region(owner, 1337, tick));
+        const auto added = fields.owned_initialized_cells(owner) - count;
+        if (added != 0)
+            work[owner] = added;
+    }
+    for (const auto& [owner, updates] :
+         fields.step_scheduled(ledger.records(), due, 1337, tick, &previous))
+        work[owner] += updates;
+    return work;
+}
+
+// Exact page and clock oracle for ticks before the first regional spawn (active age 45).
+std::map<RegionKey, std::uint64_t> StepExpectedQuietAmbient(FieldPageState& fields,
+                                                            const ActiveRegionLedger& ledger,
+                                                            std::span<const RegionKey> due,
+                                                            std::uint64_t tick) {
+    auto work = StepExpectedAmbient(fields, ledger, due, tick);
+    for (const auto owner : due) {
+        const auto* previous = fields.owner_weather(owner);
+        const auto age = previous ? previous->clock.value_or(0) : 0;
+        EXPECT_LT(age + 1, 45u);
+        EXPECT_TRUE(fields.set_weather_age(owner, age + 1));
+        ++work[owner];
+    }
+    return work;
+}
+
+std::uint64_t AmbientWorkTotal(const std::map<RegionKey, std::uint64_t>& work) {
+    std::uint64_t total = 0;
+    for (const auto& [owner, updates] : work) {
+        (void)owner;
+        total += updates;
+    }
+    return total;
+}
+
+void PublishExpectedAmbientWork(ActiveRegionLedger& ledger,
+                                const std::map<RegionKey, std::uint64_t>& work) {
+    std::vector<Luminumbra::world::RegionWork> records;
+    records.reserve(work.size());
+    for (const auto& [owner, updates] : work)
+        records.push_back({owner, 0, 0, 0, updates});
+    ledger.publish_completed_work(records);
+}
+
 // Fault injection exercises scan errors on every platform and under elevated users.
 // No permission-dependent fixture or skipped assertion is needed.
 enum class SpeciesScanFailure : std::uint8_t {
@@ -4638,6 +4698,8 @@ TEST(GameSessionHeadlessWorldTest, AbsentLedgerAtRestoredTickAllowsEditAndPinBef
     original.SetJobSystem(&jobs);
     original.SetActiveRegionsEnabled(true);
     ASSERT_TRUE(original.CreateWorld("Absent ledger", "1337", "default"));
+    // Legacy ledger absence requires no owner-bearing ambient payload.
+    original.SetReplicatedSimulationAnchors({});
     for (int i = 0; i < 7; ++i) {
         ASSERT_EQ(original.TickSimulation(original.GetSimulationClock().fixed_dt()), 1u);
     }
@@ -5232,6 +5294,12 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAllResidentOwnersh
         [&owned_keys](RegionKey key) {
             return std::find(owned_keys.begin(), owned_keys.end(), key) != owned_keys.end();
         });
+    FieldPageState expected_fields;
+    PublishExpectedAmbientWork(expected,
+                               StepExpectedQuietAmbient(expected_fields,
+                                                        expected,
+                                                        expected_schedule.due,
+                                                        ActiveRegionLedger::kIdleEvictionTicks));
     const auto dt = session.GetSimulationClock().fixed_dt();
     ASSERT_EQ(session.TickSimulation(dt), 1u);
     ASSERT_FALSE(session.GetRegionSchedulerFault());
@@ -5244,22 +5312,29 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAllResidentOwnersh
     }
     EXPECT_FALSE(session.GetActiveRegionLedger().records().contains(unowned));
 
-    // Consumed work must stop owning records on the next scheduling call.
+    // Newly activated ambient cells now retain their due owners after external work is consumed.
     const auto next_schedule = expected.schedule(
         WorldClock(ActiveRegionLedger::kIdleEvictionTicks + 1),
         std::span<const Luminumbra::Vec3>{},
         {},
         {},
-        [resident, pristine, loading, pristine_loading](RegionKey key) {
-            return key == resident || key == pristine || key == loading || key == pristine_loading;
+        [&expected_fields, resident, pristine, loading, pristine_loading](RegionKey key) {
+            return expected_fields.owns_region(key) || key == resident || key == pristine ||
+                   key == loading || key == pristine_loading;
         });
+    PublishExpectedAmbientWork(
+        expected,
+        StepExpectedQuietAmbient(expected_fields,
+                                 expected,
+                                 next_schedule.due,
+                                 ActiveRegionLedger::kIdleEvictionTicks + 1));
     ASSERT_EQ(session.TickSimulation(dt), 1u);
     ASSERT_FALSE(session.GetRegionSchedulerFault());
     EXPECT_EQ(session.GetRegionSchedule(), next_schedule);
     EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), expected.canonical_bytes());
     EXPECT_EQ(session.GetActiveRegionLedger().encode(), expected.encode());
-    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), 4u);
-    for (const auto key : {resident, pristine, loading, pristine_loading}) {
+    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), owned_keys.size());
+    for (const auto key : owned_keys) {
         EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(key));
     }
 }
@@ -5378,6 +5453,12 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionUsesWorkRegardlessOfStreamedResi
         [&owned_keys](RegionKey key) {
             return std::find(owned_keys.begin(), owned_keys.end(), key) != owned_keys.end();
         });
+    FieldPageState expected_fields;
+    PublishExpectedAmbientWork(expected,
+                               StepExpectedQuietAmbient(expected_fields,
+                                                        expected,
+                                                        expected_schedule.due,
+                                                        ActiveRegionLedger::kIdleEvictionTicks));
     const auto dt = session.GetSimulationClock().fixed_dt();
     for (auto* current : {&session, &peer}) {
         ASSERT_EQ(current->TickSimulation(dt), 1u);
@@ -5403,13 +5484,21 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionUsesWorkRegardlessOfStreamedResi
         EXPECT_FALSE(session.GetActiveRegionLedger().records().contains(key));
     }
 
-    // Consumed work must stop owning records on the next scheduling call.
+    // Newly activated ambient cells now retain their due owners after external work is consumed.
     const auto next_schedule =
         expected.schedule(WorldClock(ActiveRegionLedger::kIdleEvictionTicks + 1),
                           std::span<const Luminumbra::Vec3>{},
                           {},
                           {},
-                          [plant_owner](RegionKey key) { return key == plant_owner; });
+                          [&expected_fields, plant_owner](RegionKey key) {
+                              return expected_fields.owns_region(key) || key == plant_owner;
+                          });
+    PublishExpectedAmbientWork(
+        expected,
+        StepExpectedQuietAmbient(expected_fields,
+                                 expected,
+                                 next_schedule.due,
+                                 ActiveRegionLedger::kIdleEvictionTicks + 1));
     for (auto* current : {&session, &peer}) {
         ASSERT_EQ(current->TickSimulation(dt), 1u);
         ASSERT_FALSE(current->GetRegionSchedulerFault());
@@ -5423,8 +5512,11 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionUsesWorkRegardlessOfStreamedResi
     EXPECT_EQ(session.GetRegionSchedule(), next_schedule);
     EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), expected.canonical_bytes());
     EXPECT_EQ(session.GetActiveRegionLedger().encode(), expected.encode());
-    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), 4u);
-    for (const auto key : {edited, resident, loading, plant_owner}) {
+    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), owned_keys.size() + 3);
+    for (const auto key : owned_keys) {
+        EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(key));
+    }
+    for (const auto key : {edited, resident, loading}) {
         EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(key));
     }
 }
@@ -5476,9 +5568,22 @@ TEST(GameSessionHeadlessWorldTest, LedgerFileAbsenceCorruptionFutureAndDisabledR
     owner.SetJobSystem(&jobs);
     owner.SetActiveRegionsEnabled(true);
     ASSERT_TRUE(owner.CreateWorld("Ledger refusal", "1337", "default"));
+    // Due regions create ambient authority, which cannot survive removal of its ledger.
+    // Model legacy absence with an empty schedule, then pin directly after the tick.
+    // Publishing an event would persist its sequence in the ground-object file even
+    // with no objects; that file also requires the ledger.
+    owner.SetReplicatedSimulationAnchors({});
     ASSERT_EQ(owner.TickSimulation(owner.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_TRUE(owner.GetRegionSchedule().due.empty());
+    owner.PinActiveRegion({0, 0}, true);
+    ASSERT_EQ(owner.GetActiveRegionLedger().records().size(), 1u);
+    ASSERT_TRUE(owner.GetActiveRegionLedger().records().at({0, 0}).pinned);
+    ASSERT_TRUE(owner.GetGroundObjects().empty());
+    ASSERT_TRUE(owner.CaptureGroundNotifications().canonical_bytes().empty());
     ASSERT_TRUE(owner.SaveWorldState());
     const auto save = owner.GetWorldSaveDir();
+    ASSERT_FALSE(fs::exists(P::WorldSaveService::ground_objects_path(save)));
+    ASSERT_FALSE(fs::exists(P::WorldSaveService::field_pages_path(save)));
     const auto path = P::WorldSaveService::active_regions_path(save);
     const auto good = ReadClockTestFile(path);
     ASSERT_TRUE(P::WorldSaveService::validate_save(save));
@@ -5665,12 +5770,18 @@ void ArmSchedulerFault(GameSession& session,
     session.SetActiveRegionsEnabled(true);
     session.SetRegionSchedulerConfig({1, 1, 1});
     ASSERT_TRUE(session.CreateWorld("Scheduler fault", "1337", "default"));
-    session.PinActiveRegion(kFaultRegion, true);
+    session.SetReplicatedSimulationAnchors({});
+    // Admit just before the two pressure ticks. Earlier ambient work must not
+    // trigger the deliberately delayed fault before the injected work does.
+    if (k == 3)
+        session.PinActiveRegion(kFaultRegion, true);
     const auto region = P::WorldSaveService::region_file_path(
         session.GetWorldSaveDir(), kFaultRegion.x, kFaultRegion.z);
     fs::create_directories(region.parent_path());
     std::ofstream(region, std::ios::binary) << "not a region file";
     session.GetSimulationEventBus().subscribe([&session, k](const auto& event) {
+        if (k > 3 && event.tick == k - 3)
+            session.PinActiveRegion(kFaultRegion, true);
         if (event.tick == k - 2 || event.tick == k - 1)
             session.RecordActiveRegionWork({kFaultRegion, 5, 0, 0, 0});
     });
@@ -6897,9 +7008,10 @@ void FreezeRegionalWaterFixture(RegionalWaterScenario& scenario,
     EXPECT_EQ(frozen_record.water_cursor, 0u);
     EXPECT_EQ(frozen_record.pressure, 0u);
     EXPECT_EQ(frozen_record.last_proximity, initial_record.last_proximity);
+    auto frozen_inputs = P::RegionDigestInputs{{chunk}, {}, {}};
+    frozen_inputs.field_page_bytes = session.GetFieldPages().region_bytes(water_region);
     EXPECT_EQ(frozen_record.frozen_digest,
-              P::WorldSaveService::region_simulation_digest(
-                  {}, water_region, P::RegionDigestInputs{{chunk}, {}, {}}));
+              P::WorldSaveService::region_simulation_digest({}, water_region, frozen_inputs));
     const auto* world = session.GetWorldSystem();
     const auto before_projection = world->region_digest_input_items();
     for (const auto& [rx, rz] : world->authority_region_keys()) {
@@ -6956,6 +7068,7 @@ void ReopenRegionalWaterBeforeRetention(GameSession& session,
 
 void AssertWaterRetentionRecords(GameSession& session,
                                  RegionKey water_region,
+                                 RegionKey work_region,
                                  const ActiveRegionRecord& frozen_record) {
     const auto& records = session.GetActiveRegionLedger().records();
     ASSERT_TRUE(records.contains(water_region));
@@ -6969,8 +7082,17 @@ void AssertWaterRetentionRecords(GameSession& session,
     EXPECT_FALSE(retained.populated);
     EXPECT_EQ(retained.water_cursor, 0u);
     EXPECT_EQ(retained.pressure, 0u);
-    // All visited neighbours lack authority and must have been evicted.
-    EXPECT_EQ(records.size(), 2u);
+    // The 3x3 cohort around the visit and the remote work owner now retain ambient authority.
+    EXPECT_EQ(records.size(), 10u);
+    EXPECT_TRUE(records.contains(work_region));
+    EXPECT_TRUE(session.GetFieldPages().owns_region(work_region));
+    const Luminumbra::Vec3 visit{static_cast<float>(water_region.x * 512 + 256),
+                                 0,
+                                 static_cast<float>(water_region.z * 512 + 256)};
+    for (const auto owner : ActiveRegionLedger::activation_regions(visit)) {
+        EXPECT_TRUE(records.contains(owner));
+        EXPECT_TRUE(session.GetFieldPages().owns_region(owner));
+    }
 }
 
 void TickRegionalWaterRetention(GameSession& session,
@@ -6986,8 +7108,8 @@ void TickRegionalWaterRetention(GameSession& session,
             active_session->RecordActiveRegionWork({work_region, 1, 0, 0, 0});
             ASSERT_EQ(active_session->TickSimulation(dt), 1u);
             ASSERT_FALSE(active_session->GetRegionSchedulerFault());
-            ASSERT_NO_FATAL_FAILURE(
-                AssertWaterRetentionRecords(*active_session, water_region, frozen_record));
+            ASSERT_NO_FATAL_FAILURE(AssertWaterRetentionRecords(
+                *active_session, water_region, work_region, frozen_record));
         }
         EXPECT_EQ(reopened.GetRegionSchedule(), session.GetRegionSchedule());
         EXPECT_EQ(reopened.GetActiveRegionLedger().canonical_bytes(),
@@ -7013,12 +7135,12 @@ void AssertDurableWaterContinuation(GameSession& session,
     EXPECT_EQ(durable_chunk->water_edge_flux, expected.flux);
     EXPECT_EQ(durable_chunk->is_water_sleeping.load(), chunk->is_water_sleeping.load());
     EXPECT_EQ(reopened.ComputeChunkStateHash(), session.ComputeChunkStateHash());
-    EXPECT_EQ(
-        P::WorldSaveService::region_simulation_digest(
-            session.GetWorldSaveDir(),
-            water_region,
-            P::RegionDigestInputs{{}, {}, reopened.GetWorldSystem()->durable_chunk_inventory()}),
-        frozen_record.frozen_digest);
+    auto durable_inputs =
+        P::RegionDigestInputs{{}, {}, reopened.GetWorldSystem()->durable_chunk_inventory()};
+    durable_inputs.field_page_bytes = reopened.GetFieldPages().region_bytes(water_region);
+    EXPECT_EQ(P::WorldSaveService::region_simulation_digest(
+                  session.GetWorldSaveDir(), water_region, durable_inputs),
+              frozen_record.frozen_digest);
 }
 } // namespace
 
@@ -7074,7 +7196,13 @@ TEST(GameSessionHeadlessWorldTest, DisplacementWaterPromotesBeforeFreezeAndSurvi
         const auto frozen_record = session.GetActiveRegionLedger().records().at(water_region);
         if (!displace) {
             generated_digest = frozen_record.frozen_digest;
-            EXPECT_EQ(generated_digest, empty_digest);
+            // Generated water contributes no authority; the activated ambient owner does.
+            P::RegionDigestInputs ambient_inputs;
+            ambient_inputs.field_page_bytes = session.GetFieldPages().region_bytes(water_region);
+            ASSERT_FALSE(ambient_inputs.field_page_bytes.empty());
+            EXPECT_EQ(
+                generated_digest,
+                P::WorldSaveService::region_simulation_digest({}, water_region, ambient_inputs));
             EXPECT_EQ(chunk->water_depth_mm, generated_depth);
             EXPECT_FALSE(chunk->has_water_authority());
             EXPECT_FALSE(chunk->is_voxel_data_dirty());
@@ -8502,12 +8630,16 @@ TEST(GameSessionHeadlessWorldTest, UnknownRegionWorkFromEventCallbackIsRejectedA
         session.RecordActiveRegionWork({unknown, 1, 0, 0, 0});
         session.RecordActiveRegionWork({kGroundRegion, 0, 2, 0, 0});
     });
+    auto expected_fields = session.GetFieldPages();
     TickOnce(session);
     ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
-    EXPECT_EQ(session.GetActiveRegionLedger().completed_work().at(kGroundRegion), 3u);
+    auto expected_work = StepExpectedQuietAmbient(
+        expected_fields, session.GetActiveRegionLedger(), session.GetRegionSchedule().due, 1);
+    expected_work[kGroundRegion] += 3;
+    EXPECT_EQ(session.GetActiveRegionLedger().completed_work(), expected_work);
     TickOnce(session);
     EXPECT_EQ(session.GetRegionSchedule().rejected.work, 1u);
-    EXPECT_EQ(session.GetRegionSchedule().work, 3u);
+    EXPECT_EQ(session.GetRegionSchedule().work, AmbientWorkTotal(expected_work));
     EXPECT_FALSE(session.GetActiveRegionLedger().records().contains(unknown));
     TickOnce(session);
     EXPECT_EQ(session.GetRegionSchedule().rejected.work, 0u);
@@ -9255,9 +9387,13 @@ TEST(GameSessionHeadlessWorldTest, DespawnedGroundWorkSurvivesBoundarySaveAndReo
     CreateGroundWorld(owner, root, jobs, "Completed despawn work");
     EnableSnapshotSession(loaded, root, jobs);
     ASSERT_EQ(SpawnGround(owner, 5200, -1500, 1), 1u);
+    auto expected_fields = owner.GetFieldPages();
     TickOnce(owner);
+    auto expected_work = StepExpectedQuietAmbient(
+        expected_fields, owner.GetActiveRegionLedger(), owner.GetRegionSchedule().due, 1);
+    ++expected_work[kGroundRegion];
     EXPECT_TRUE(owner.GetGroundObjects().empty());
-    EXPECT_EQ(owner.GetActiveRegionLedger().completed_work().at(kGroundRegion), 1u);
+    EXPECT_EQ(owner.GetActiveRegionLedger().completed_work(), expected_work);
     EXPECT_TRUE(owner.IsSimulationTickBoundary());
     ASSERT_TRUE(owner.SaveWorldState());
     ASSERT_TRUE(owner.SaveWorld());
@@ -9265,12 +9401,14 @@ TEST(GameSessionHeadlessWorldTest, DespawnedGroundWorkSurvivesBoundarySaveAndReo
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(owner));
     TickOnce(owner);
     TickOnce(loaded);
-    EXPECT_EQ(owner.GetRegionSchedule().work, 1u);
+    EXPECT_EQ(owner.GetRegionSchedule().work, AmbientWorkTotal(expected_work));
     EXPECT_EQ(loaded.GetRegionSchedule(), owner.GetRegionSchedule());
-    EXPECT_TRUE(owner.GetActiveRegionLedger().completed_work().empty());
+    expected_work = StepExpectedQuietAmbient(
+        expected_fields, owner.GetActiveRegionLedger(), owner.GetRegionSchedule().due, 2);
+    EXPECT_EQ(owner.GetActiveRegionLedger().completed_work(), expected_work);
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(owner));
     TickOnce(owner);
-    EXPECT_EQ(owner.GetRegionSchedule().work, 0u);
+    EXPECT_EQ(owner.GetRegionSchedule().work, AmbientWorkTotal(expected_work));
 }
 
 TEST(GameSessionHeadlessWorldTest, EventConsumerFaultStopsDeliveryAndClearsCompletedWork) {
@@ -9852,6 +9990,10 @@ void CheckEmptySessionFieldCompatibility(bool active_regions) {
     EnableSnapshotSession(session, root, jobs);
     session.SetActiveRegionsEnabled(active_regions);
     ASSERT_TRUE(session.CreateWorld("Empty fields", "1337", "default"));
+    // Enabled empty-authority compatibility is an idle-schedule property. Due owners
+    // bootstrap ambient pages; the disabled case retains the default spawn anchors.
+    if (active_regions)
+        session.SetReplicatedSimulationAnchors({});
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
     EXPECT_FALSE(session.GetRegionSchedulerFault());
     EXPECT_TRUE(session.GetFieldPages().empty());
@@ -10224,6 +10366,179 @@ void CheckSessionFieldOwnershipRetention() {
 
 } // namespace
 
+TEST(GameSessionHeadlessWorldTest, FreshDueRegionCreatesAmbientAuthority) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const bool regional_water : {false, true}) {
+        SCOPED_TRACE(regional_water);
+        for (const auto* seed : {"1337", "regional-activation"}) {
+            SCOPED_TRACE(seed);
+            const GameSession::AuthorityProfileOptions profile{.regional_water = regional_water};
+            GameSession session(profile, GameSession::AuthorityProfileTestOnly{});
+            EnableSnapshotSession(session, root, jobs);
+            ASSERT_TRUE(session.CreateTransientWorld("Ambient activation", seed, "default"));
+            session.SetReplicatedSimulationAnchors({});
+            session.PinActiveRegion(kFieldOwner, true);
+            ASSERT_TRUE(session.GetFieldPages().empty());
+            EXPECT_EQ(session.TickSimulation(0), 0u);
+            EXPECT_TRUE(session.GetFieldPages().empty());
+            const auto numeric_seed = Luminumbra::world::ResolveWorldSeed(
+                seed, Luminumbra::world::kSeedConversionVersion);
+            FieldPageState expected;
+            ASSERT_TRUE(expected.activate_region(kFieldOwner, numeric_seed, 1));
+            ASSERT_TRUE(expected.set_weather_age(kFieldOwner, 1));
+            std::array<std::string, 3> candidate_hashes;
+            unsigned observations = 0;
+            session.GetSimulationEventBus().subscribe([&](const auto&) {
+                ++observations;
+                EXPECT_TRUE(session.GetFieldPages().empty());
+                candidate_hashes = {session.ComputeRegionalWindSubHash(),
+                                    session.ComputeRegionalWeatherSubHash(),
+                                    session.ComputeRegionalAetherSubHash()};
+            });
+            session.GetSimulationEventBus().publish(1, "activation-hash", "");
+            TickOnce(session);
+            ASSERT_FALSE(session.GetRegionSchedulerFault());
+            EXPECT_EQ(observations, 1u);
+            EXPECT_EQ(candidate_hashes,
+                      (std::array{session.ComputeRegionalWindSubHash(),
+                                  session.ComputeRegionalWeatherSubHash(),
+                                  session.ComputeRegionalAetherSubHash()}));
+            EXPECT_EQ(session.GetRegionSchedule().due, (std::vector<RegionKey>{kFieldOwner}));
+            EXPECT_EQ(session.GetFieldPages().serialize(), expected.serialize());
+            EXPECT_EQ(session.GetActiveRegionLedger().completed_work(),
+                      (std::map<RegionKey, std::uint64_t>{{kFieldOwner, 442}}));
+            EXPECT_EQ(session.GetRegionalFieldActivationVisits(), 1u);
+            // All consumers read the same candidate, including during the first weather update.
+            const Luminumbra::Vec3 position{108, 0, 108};
+            EXPECT_EQ(session.GetWindFieldSystem()->SampleWind(position),
+                      session.SampleRegionalWind(position, Luminumbra::Systems::WindLayer::Ground));
+            const auto weather = session.GetWeatherSystem()->SampleAt(position);
+            const auto reference = session.SampleRegionalWeather(position);
+            EXPECT_EQ(weather.category, reference.category);
+            EXPECT_EQ(weather.precip_intensity, reference.precip_intensity);
+            EXPECT_EQ(weather.wind, reference.wind);
+            EXPECT_EQ(session.GetAetherFieldSystem()->SampleAether(position),
+                      session.SampleRegionalAether(position));
+            const auto hashes = SessionWorldSubHashes(session);
+            EXPECT_EQ(hashes.at("wind"), session.ComputeRegionalWindSubHash());
+            EXPECT_EQ(hashes.at("weather"), session.ComputeRegionalWeatherSubHash());
+            EXPECT_EQ(hashes.at("aether"), session.ComputeRegionalAetherSubHash());
+        }
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, EnteringRegionSeedsAtAbsoluteEpoch) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const RegionKey entering{-1, 0}, thawing{0, 0}, idle{2, 0};
+    auto ledger = ScheduledFieldLedger(31,
+                                       {{entering, RegionState::Active},
+                                        {thawing, RegionState::Frozen},
+                                        {idle, RegionState::Reduced}});
+    FieldPageState fields;
+    ASSERT_TRUE(fields.activate_region(thawing, 1337, 0));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    const std::array<RegionKey, 1> due{entering};
+    auto work = StepExpectedAmbient(fields, ledger, due, 32);
+    ASSERT_TRUE(fields.set_weather_age(entering, 1));
+    ++work[entering];
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetRegionSchedule().due, (std::vector<RegionKey>{entering}));
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+    EXPECT_EQ(session.GetActiveRegionLedger().completed_work(), work);
+    EXPECT_EQ(session.GetFieldPages().owned_initialized_cells(idle), 0u);
+    for (const auto& [x, z] : FieldPageState::cells_of_region(entering)) {
+        for (int channel = 0; channel < FieldPageState::kChannels; ++channel) {
+            std::uint16_t value = 0;
+            ASSERT_TRUE(session.GetFieldPages().sample(channel, x, z, value));
+            EXPECT_EQ(value, FieldPageState::seed_value(1337, channel, x, z, 4));
+        }
+    }
+    // Thaw retains initialized values and takes one scheduled step, without reseeding
+    // them at the new epoch or exchanging with cells absent from the sealed snapshot.
+    session.PinActiveRegion(thawing, true);
+    ledger = session.GetActiveRegionLedger();
+    const auto schedule = ledger.schedule(WorldClock(33), std::span<const Luminumbra::Vec3>{});
+    work = StepExpectedAmbient(fields, ledger, schedule.due, 33);
+    for (const auto owner : schedule.due) {
+        ASSERT_TRUE(fields.set_weather_age(owner, owner == entering ? 2 : 1));
+        ++work[owner];
+    }
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+    EXPECT_EQ(session.GetActiveRegionLedger().completed_work(), work);
+}
+
+TEST(GameSessionHeadlessWorldTest, RefusedActivationPublishesNoPagesOrWork) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const int failure : {0, 1, 2, 3, 4, 5, 6}) {
+        SCOPED_TRACE(failure);
+        const GameSession::AuthorityProfileOptions profile{.regional_water =
+                                                               failure == 4 || failure == 6};
+        GameSession session(profile, GameSession::AuthorityProfileTestOnly{});
+        const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
+        FieldPageState fields;
+        if (failure == 0) {
+            ASSERT_TRUE(fields.set_weather_age(kFieldOwner, WorldClock::kTickLimit - 1));
+        }
+        ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+        if (failure >= 3) {
+            ClockTestPlant(session.GetRegistry(), {32.0f, 0.0f, 32.0f});
+        }
+        if (failure != 0) {
+            session.GetSimulationEventBus().subscribe([&](const auto&) {
+                EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+                EXPECT_EQ(session.GetRegionalFieldCandidatePageCount(), 4u);
+                // Newly created clocks copy no records from live authority.
+                EXPECT_EQ(session.GetRegionalWeatherCandidateRecordCount(), 0u);
+                EXPECT_EQ(session.GetWindFieldSystem()->ComputeWindSubHash(),
+                          session.ComputeRegionalWindSubHash());
+                EXPECT_EQ(session.GetWeatherSystem()->ComputeWeatherSubHash(),
+                          session.ComputeRegionalWeatherSubHash());
+                EXPECT_EQ(session.GetAetherFieldSystem()->ComputeAetherSubHash(),
+                          session.ComputeRegionalAetherSubHash());
+                if (failure >= 3) {
+                    EXPECT_EQ(session.GetFoliageRegistryPublications(), 1u);
+                    EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+                }
+                if (failure == 1 || failure == 3 || failure == 4)
+                    throw std::runtime_error("injected ambient consumer fault");
+                const_cast<std::map<RegionKey, ActiveRegionRecord>&>(
+                    session.GetActiveRegionLedger().records())
+                    .erase(kFieldOwner);
+            });
+            session.GetSimulationEventBus().publish(32, "ambient-refusal", "");
+        }
+        TickOnce(session);
+        ASSERT_TRUE(session.GetRegionSchedulerFault());
+        EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+        EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+        EXPECT_EQ(session.GetRegionalFieldCandidatePageCount(), 0u);
+        EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 0u);
+        if (failure != 0) {
+            Luminumbra::Systems::WindFieldSystem wind(1337);
+            Luminumbra::Systems::WeatherSystem weather(1337);
+            Luminumbra::Systems::AetherFieldSystem aether(1337);
+            weather.RestoreAtTick(32, session.GetMetadata().spawnPoint, wind);
+            aether.Update(32, session.GetMetadata().spawnPoint, &wind);
+            EXPECT_EQ(session.GetWindFieldSystem()->ComputeWindSubHash(),
+                      wind.ComputeWindSubHash());
+            EXPECT_EQ(session.GetWeatherSystem()->ComputeWeatherSubHash(),
+                      weather.ComputeWeatherSubHash());
+            EXPECT_EQ(session.GetAetherFieldSystem()->ComputeAetherSubHash(),
+                      aether.ComputeAetherSubHash());
+        }
+    }
+}
+
 TEST(GameSessionHeadlessWorldTest, ScheduledFieldsPreserveOrderAndCompletedWorkAcrossReopen) {
     ASSERT_NO_FATAL_FAILURE(CheckScheduledFieldOrderAndCompletedWork());
 }
@@ -10372,7 +10687,7 @@ void CheckWeatherHandover() {
     EXPECT_EQ(moved.active_age, storm.active_age);
     EXPECT_EQ(moved.seed_salt, storm.seed_salt);
     EXPECT_EQ(session.GetActiveRegionLedger().completed_work(),
-              (std::map<RegionKey, std::uint64_t>{{source, 1}, {target, 2}}));
+              (std::map<RegionKey, std::uint64_t>{{source, 1}, {target, 464}}));
     ASSERT_NO_FATAL_FAILURE(ReopenSessionWeather(session, reopened, root, jobs));
     TickOnce(session);
     TickOnce(reopened);
@@ -10405,9 +10720,9 @@ void CheckWeatherBoundaryTargetAdmission(bool frozen_target) {
     expected.owner = target;
     expected.center_x = std::bit_cast<std::uint32_t>(512.75f);
     EXPECT_EQ(session.GetFieldPages().storms().front(), expected);
-    EXPECT_FALSE(session.GetFieldPages().weather_clocks().contains(target));
+    EXPECT_EQ(session.GetFieldPages().weather_clocks().at(target), 1u);
     EXPECT_EQ(session.GetActiveRegionLedger().completed_work(),
-              (std::map<RegionKey, std::uint64_t>{{source, 1}, {target, 1}, {due_owner, 1}}));
+              (std::map<RegionKey, std::uint64_t>{{source, 1}, {target, 464}, {due_owner, 463}}));
 }
 
 void CheckWeatherWithoutDueAuthority(bool unrelated_weather, int page_kind) {
@@ -10440,7 +10755,9 @@ void CheckWeatherWithoutDueAuthority(bool unrelated_weather, int page_kind) {
         if (event.topic != "idle-weather-test")
             return;
         ++observations;
-        EXPECT_EQ(session.GetRegionalWeatherCandidateRecordCount(), unrelated_weather ? 2u : 1u);
+        // The source storm and an optional existing unrelated clock are copied.
+        EXPECT_EQ(session.GetRegionalWeatherCandidateRecordCount(),
+                  std::size_t{1} + static_cast<std::size_t>(unrelated_weather));
         EXPECT_EQ(session.GetRegionalWeatherProjectionCount(), 1u);
     });
     session.GetSimulationEventBus().publish(1004, "idle-weather-test", "");
@@ -10454,12 +10771,15 @@ void CheckWeatherWithoutDueAuthority(bool unrelated_weather, int page_kind) {
     expected.owner = target;
     expected.center_x = std::bit_cast<std::uint32_t>(512.75f);
     EXPECT_EQ(session.GetFieldPages().storms().front(), expected);
-    EXPECT_EQ(session.GetFieldPages().pages(), fields.pages());
-    EXPECT_FALSE(session.GetFieldPages().weather_clocks().contains(target));
+    auto expected_fields = fields;
+    const auto ambient_work = StepExpectedAmbient(expected_fields, ledger, due, 1004);
+    EXPECT_EQ(session.GetFieldPages().pages(), expected_fields.pages());
+    EXPECT_EQ(session.GetFieldPages().weather_clocks().at(target), 1u);
     auto expected_work = std::map<RegionKey, std::uint64_t>{{source, 1}, {target, 1}};
-    if (unrelated_weather) {
-        expected_work.emplace(unrelated, 1);
-    }
+    for (const auto& [owner, updates] : ambient_work)
+        expected_work[owner] += updates;
+    for (const auto owner : due)
+        ++expected_work[owner];
     EXPECT_EQ(session.GetActiveRegionLedger().completed_work(), expected_work);
 }
 
@@ -10686,12 +11006,20 @@ void CheckWeatherCorner(int blocked) {
     EXPECT_FLOAT_EQ(std::bit_cast<float>(after.center_z), blocked == 0 ? 512.75f : 511.75f);
     EXPECT_EQ(after.active_age, storm.active_age);
     const auto& work = session.GetActiveRegionLedger().completed_work();
-    if (blocked == 3) {
-        EXPECT_TRUE(work.empty());
-    } else {
-        EXPECT_EQ(work.at(target), blocked == 0 ? 2u : 1u);
-        EXPECT_EQ(work.contains(source), blocked == 0);
+    // Both cardinal Reduced phases are zero at tick 1004: 21*22 seeds + one clock.
+    // The Active diagonal destination has 22*22 seeds + one clock.
+    std::map<RegionKey, std::uint64_t> expected_work;
+    if (blocked != 1)
+        expected_work[east] = 463;
+    if (blocked != 2)
+        expected_work[north] = 463;
+    if (blocked != 3)
+        expected_work[target] = 485;
+    if (blocked == 0) {
+        ++expected_work[source];
+        ++expected_work[target];
     }
+    EXPECT_EQ(work, expected_work);
 }
 
 void CheckWeatherFrozenAndExpiry(bool frozen) {
@@ -10727,7 +11055,7 @@ void CheckWeatherFrozenAndExpiry(bool frozen) {
         EXPECT_TRUE(session.GetFieldPages().storms().empty());
         EXPECT_TRUE(session.GetFieldPages().strikes().empty());
         EXPECT_EQ(session.GetFieldPages().weather_clocks().at(owner), 8u);
-        EXPECT_EQ(session.GetActiveRegionLedger().completed_work().at(owner), 3u);
+        EXPECT_EQ(session.GetActiveRegionLedger().completed_work().at(owner), 444u);
     }
     EXPECT_TRUE(session.GetWeatherSystem()->StrikesThisTick().empty());
 }
@@ -11002,12 +11330,21 @@ void CheckWeatherOverlayView() {
     candidate.copy_weather_from(fields);
     ASSERT_EQ(candidate.page_count(), 1u);
     auto expected = fields;
+    // Cover new keys before, between and after live keys, plus shared page replacement.
+    for (const auto owner : {RegionKey{-1, 0}, kFieldOwner, RegionKey{30, 0}}) {
+        ASSERT_TRUE(candidate.activate_region(owner, 1337, 32));
+        ASSERT_TRUE(expected.activate_region(owner, 1337, 32));
+    }
     const auto work = expected.step_scheduled(ledger.records(), schedule.due, 1337, 32, &fields);
     ASSERT_EQ(candidate.step_scheduled(ledger.records(), schedule.due, 1337, 32, &previous), work);
     // Empty candidate weather must override populated live weather as well.
     ASSERT_TRUE(candidate.replace_weather({}, {}, {}));
     ASSERT_TRUE(expected.replace_weather({}, {}, {}));
     const Luminumbra::world::FieldPageView view(fields, &candidate), live_view(fields, nullptr);
+    const FieldPageState empty;
+    auto pages_only = fields;
+    ASSERT_TRUE(pages_only.replace_weather({}, {}, {}));
+    const Luminumbra::world::FieldPageView empty_overlay(fields, &empty), empty_view(empty, &empty);
     EXPECT_TRUE(view.storms().empty());
     EXPECT_TRUE(view.strikes().empty());
     EXPECT_EQ(live_view.storms(), fields.storms());
@@ -11019,6 +11356,11 @@ void CheckWeatherOverlayView() {
         EXPECT_EQ(view.ambient_bytes(channels, true), expected.ambient_bytes(channels, true));
         EXPECT_EQ(live_view.ambient_bytes(channels, false), fields.ambient_bytes(channels, false));
         EXPECT_EQ(live_view.ambient_bytes(channels, true), fields.ambient_bytes(channels, true));
+        EXPECT_EQ(empty_overlay.ambient_bytes(channels, false),
+                  fields.ambient_bytes(channels, false));
+        EXPECT_EQ(empty_overlay.ambient_bytes(channels, true),
+                  pages_only.ambient_bytes(channels, true));
+        EXPECT_EQ(empty_view.ambient_bytes(channels, true), empty.ambient_bytes(channels, true));
     }
 }
 
@@ -11040,7 +11382,7 @@ void CheckBoundedWeatherOverlay(std::size_t unrelated_pages, WeatherOverlayFailu
     ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
     const auto schedule = ledger.schedule(WorldClock(32), std::span<const Luminumbra::Vec3>{});
     auto expected = fields;
-    const auto work = expected.step_scheduled(ledger.records(), schedule.due, 1337, 32, &fields);
+    const auto work = StepExpectedAmbient(expected, ledger, schedule.due, 32);
     ASSERT_FALSE(work.empty());
     ASSERT_NE(expected.pages(), fields.pages());
     const auto before_hashes = WeatherOverlayHashes(session);
@@ -11049,7 +11391,7 @@ void CheckBoundedWeatherOverlay(std::size_t unrelated_pages, WeatherOverlayFailu
     AdoptUnpromotedWaterChunk(session);
     session.GetWorldSystem()->SetWaterAuthorityObserver([&](const auto&) {
         ++observations;
-        EXPECT_EQ(session.GetRegionalFieldCandidatePageCount(), 1u);
+        EXPECT_EQ(session.GetRegionalFieldCandidatePageCount(), 4u);
         EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
         ASSERT_NO_FATAL_FAILURE(ExpectWeatherOverlaySample(session, expected, 20));
         ASSERT_NO_FATAL_FAILURE(ExpectWeatherOverlaySample(session, fields, 21));
@@ -11078,7 +11420,7 @@ void CheckBoundedWeatherOverlay(std::size_t unrelated_pages, WeatherOverlayFailu
         return;
     }
     ASSERT_FALSE(session.GetRegionSchedulerFault());
-    EXPECT_EQ(session.GetFieldPages().page_count(), unrelated_pages + 1);
+    EXPECT_EQ(session.GetFieldPages().page_count(), unrelated_pages + 4);
     EXPECT_EQ(session.GetFieldPages().pages(), expected.pages());
     EXPECT_EQ(WeatherOverlayHashes(session), during_hashes);
     ASSERT_NO_FATAL_FAILURE(ExpectWeatherOverlayPublication(session, fields));
@@ -11173,14 +11515,15 @@ void CheckFrozenWeatherWork(std::size_t frozen_owners,
         if (event.topic != "weather-work-test")
             return;
         ++observations;
-        EXPECT_EQ(session.GetRegionalFieldCandidatePageCount(), work_kind == 4 ? 1u : 0u);
+        EXPECT_EQ(session.GetRegionalFieldCandidatePageCount(), 4u);
         EXPECT_EQ(session.GetRegionalWeatherProjectionCount(),
                   work_kind == 2 || work_kind == 4 ? 1u : 0u);
         if (work_kind == 0) {
             EXPECT_EQ(session.GetRegionalWeatherCandidateRecordCount(), 0u);
         }
+        EXPECT_EQ(session.GetRegionalFieldActivationVisits(), 1u);
         const auto staged = session.GetRegionalWeatherCandidateRecordCount();
-        EXPECT_LE(staged, 1u);
+        EXPECT_EQ(staged, work_kind == 0 ? 0u : 1u);
         if (measured) {
             *measured = {staged,
                          session.GetRegionalWeatherScanCount(),
@@ -11198,9 +11541,12 @@ void CheckFrozenWeatherWork(std::size_t frozen_owners,
     EXPECT_EQ(weather->AnchorCategory(),
               weather->SampleAt(session.GetMetadata().spawnPoint).category);
     if (work_kind == 0) {
+        const auto schedule = session.GetRegionSchedule();
+        auto work = StepExpectedAmbient(expected, ledger, schedule.due, 32);
+        ASSERT_TRUE(expected.set_weather_age(kFieldOwner, 1));
+        work[kFieldOwner] += 2; // Weather clock plus the initialized soil cell.
         EXPECT_EQ(session.GetFieldPages().serialize(), expected.serialize());
-        EXPECT_EQ(session.GetActiveRegionLedger().completed_work(),
-                  (std::map<RegionKey, std::uint64_t>{{kFieldOwner, 1}}));
+        EXPECT_EQ(session.GetActiveRegionLedger().completed_work(), work);
     } else {
         EXPECT_EQ(session.GetFieldPages().weather_clocks().at(kFieldOwner),
                   work_kind == 1 ? 8u : 1u);
@@ -11360,13 +11706,11 @@ void CheckWeatherWithoutAmbientPages(int authority, bool clock) {
     ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
     TickOnce(session);
     ASSERT_FALSE(session.GetRegionSchedulerFault());
-    EXPECT_EQ(session.GetFieldPages().page_count(), 0u);
-    if (clock) {
-        EXPECT_EQ(session.GetFieldPages().weather_clocks(),
-                  (std::map<RegionKey, std::uint64_t>{{kFieldOwner, 8}}));
-    } else {
-        EXPECT_TRUE(session.GetFieldPages().weather_clocks().empty());
-    }
+    FieldPageState expected_ambient;
+    ASSERT_TRUE(expected_ambient.activate_region(kFieldOwner, 1337, 32));
+    EXPECT_EQ(session.GetFieldPages().pages(), expected_ambient.pages());
+    EXPECT_EQ(session.GetFieldPages().weather_clocks(),
+              (std::map<RegionKey, std::uint64_t>{{kFieldOwner, clock ? 8u : 1u}}));
     EXPECT_EQ(session.GetFieldPages().scent_cells(), fields.scent_cells());
     if (authority == 1) {
         ASSERT_TRUE(fields.set_soil({0, 0}, 100 + luminumbra::foliage::kSoilRegenPerTick));
@@ -11398,6 +11742,15 @@ void CheckUnrelatedFieldOwnerWeather(int authority) {
         31, {{kFieldOwner, RegionState::Active}, {weather_owner, RegionState::Active}});
     ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
     for (int i = 0; i < 2; ++i) {
+        const std::array due{kFieldOwner, weather_owner};
+        auto expected_work =
+            StepExpectedAmbient(fields, ledger, due, static_cast<std::uint64_t>(32 + i));
+        ASSERT_TRUE(fields.set_weather_age(kFieldOwner, static_cast<std::uint64_t>(1 + i)));
+        ASSERT_TRUE(fields.set_weather_age(weather_owner, static_cast<std::uint64_t>(8 + i)));
+        ++expected_work[kFieldOwner];
+        ++expected_work[weather_owner];
+        if (authority != 0)
+            ++expected_work[kFieldOwner];
         TickOnce(session);
         ASSERT_FALSE(session.GetRegionSchedulerFault());
         if (authority == 1) {
@@ -11409,9 +11762,8 @@ void CheckUnrelatedFieldOwnerWeather(int authority) {
         }
         EXPECT_EQ(session.GetFieldPages().region_bytes(kFieldOwner),
                   fields.region_bytes(kFieldOwner));
-        EXPECT_FALSE(session.GetFieldPages().owns_weather(kFieldOwner));
-        EXPECT_EQ(session.GetActiveRegionLedger().completed_work().contains(kFieldOwner),
-                  authority != 0);
+        EXPECT_TRUE(session.GetFieldPages().owns_weather(kFieldOwner));
+        EXPECT_EQ(session.GetActiveRegionLedger().completed_work(), expected_work);
         EXPECT_EQ(session.GetFieldPages().weather_clocks().at(weather_owner),
                   static_cast<std::uint64_t>(8 + i));
     }
@@ -11461,22 +11813,17 @@ void CheckNewWorldRegionalBinding() {
     session.SetReplicatedSimulationAnchors({});
     session.PinActiveRegion(kFieldOwner, true);
     ASSERT_TRUE(session.GetFieldPages().empty());
-    FieldPageState fields;
-    AddWeatherOverlayCell(fields, 4, {1024, 64512, 32768, 32768, 16384});
-    ASSERT_TRUE(fields.replace_weather({SessionStorm(kFieldOwner, 108, 108)}, {}));
-    // No runtime ambient-page producer exists yet. Introduce first authority at an event
-    // boundary, without loading the original session or invoking its restore path.
-    int adoptions = 0;
-    session.GetSimulationEventBus().subscribe([&](const auto& event) {
-        if (event.topic == "first-regional-authority") {
-            const_cast<FieldPageState&>(session.GetFieldPages()) = fields;
-            ++adoptions;
-        }
-    });
-    session.GetSimulationEventBus().publish(1, "first-regional-authority", "");
     TickOnce(session);
     ASSERT_FALSE(session.GetRegionSchedulerFault());
-    EXPECT_EQ(adoptions, 1);
+    FieldPageState expected;
+    ASSERT_TRUE(expected.activate_region(kFieldOwner, 1337, 1));
+    ASSERT_TRUE(expected.set_weather_age(kFieldOwner, 1));
+    EXPECT_EQ(session.GetFieldPages().serialize(), expected.serialize());
+    // Keep the existing storm projection/continuation checks after production activation.
+    ASSERT_TRUE(const_cast<FieldPageState&>(session.GetFieldPages())
+                    .replace_weather({SessionStorm(kFieldOwner, 108, 108)}, {}));
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
     ASSERT_NO_FATAL_FAILURE(ReopenSessionWeather(session, reopened, root, jobs));
     ASSERT_NO_FATAL_FAILURE(ExpectNewWorldRegionalWeather(session, reopened));
     TickOnce(session);
@@ -12099,25 +12446,28 @@ void CheckScentSpawnChange(float offset) {
     // An inactive tick must not erase historical cells outside the moved window.
     session.GetRegistry().destroy(ant_entity);
     session.GetRegistry().destroy(food_entity);
+    auto expected = session.GetFieldPages();
     TickOnce(session);
     ASSERT_FALSE(session.GetRegionSchedulerFault());
-    EXPECT_EQ(session.GetFieldPages().serialize(), before);
+    (void)StepExpectedQuietAmbient(expected, ledger, session.GetRegionSchedule().due, 33);
+    const auto after = expected.serialize();
+    EXPECT_EQ(session.GetFieldPages().serialize(), after);
     session.SetSpawnPoint(original_spawn);
     ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(session));
-    EXPECT_EQ(session.GetFieldPages().serialize(), before);
+    EXPECT_EQ(session.GetFieldPages().serialize(), after);
     // Repeated and sub-cell moves reuse the same world cells without duplication.
     session.SetSpawnPoint(original_spawn);
     session.SetSpawnPoint(original_spawn + Luminumbra::Vec3(0.25f, 0, 0.25f));
     ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(session));
-    EXPECT_EQ(session.GetFieldPages().serialize(), before);
+    EXPECT_EQ(session.GetFieldPages().serialize(), after);
     auto invalid_spawn = original_spawn;
     invalid_spawn.x = std::numeric_limits<float>::quiet_NaN();
     session.SetSpawnPoint(invalid_spawn);
     EXPECT_FALSE(session.GetScentField()->SimulationCellAllowed(64, 64));
-    EXPECT_EQ(session.GetFieldPages().serialize(), before);
+    EXPECT_EQ(session.GetFieldPages().serialize(), after);
     session.SetSpawnPoint(original_spawn);
     ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(session));
-    EXPECT_EQ(session.GetFieldPages().serialize(), before);
+    EXPECT_EQ(session.GetFieldPages().serialize(), after);
 }
 
 void CheckSessionScentDueQueryCost() {
@@ -12169,10 +12519,14 @@ void CheckSessionScentDueQueryCost() {
         for (int tick = 0; tick < 3; ++tick) {
             TickOnce(session);
             ASSERT_FALSE(session.GetRegionSchedulerFault());
-            EXPECT_TRUE(session.GetFieldPages().weather_clocks().empty());
-            EXPECT_EQ(session.GetRegionalWeatherScheduleVisits(), 0u);
+            EXPECT_EQ(session.GetFieldPages().weather_clocks().size(), unrelated + 1);
+            for (const auto& [owner, age] : session.GetFieldPages().weather_clocks()) {
+                (void)owner;
+                EXPECT_EQ(age, static_cast<std::uint64_t>(tick + 2));
+            }
+            EXPECT_EQ(session.GetRegionalWeatherScheduleVisits(), unrelated + 1);
             EXPECT_EQ(session.GetRegionalWeatherCandidateRecordCount(), 0u);
-            EXPECT_EQ(session.GetRegionalWeatherScanCount(), 0u);
+            EXPECT_EQ(session.GetRegionalWeatherScanCount(), 2 * (unrelated + 1));
         }
     }
 }
@@ -12191,7 +12545,7 @@ void CheckActiveScentContinuation(bool moved_spawn) {
     TickOnce(session);
     ASSERT_FALSE(session.GetRegionSchedulerFault());
     session.GetRegistry().destroy(old_emitter);
-    const auto historical = session.GetFieldPages().region_bytes(kFieldOwner);
+    auto historical = session.GetFieldPages();
     if (moved_spawn) {
         auto spawn = session.GetMetadata().spawnPoint;
         spawn.x += 1024.25f;
@@ -12202,6 +12556,8 @@ void CheckActiveScentContinuation(bool moved_spawn) {
     session.GetRegistry().get<C::TransformComponent>(emitter).position.z = spawn.z;
     TickOnce(session);
     ASSERT_FALSE(session.GetRegionSchedulerFault());
+    (void)StepExpectedQuietAmbient(
+        historical, session.GetActiveRegionLedger(), session.GetRegionSchedule().due, 33);
     ASSERT_TRUE(session.SaveWorld());
     EnableSnapshotSession(reopened, root, jobs);
     ASSERT_TRUE(reopened.LoadWorld(session.GetMetadata().worldId)) << reopened.GetWorldOpenError();
@@ -12224,8 +12580,13 @@ void CheckActiveScentContinuation(bool moved_spawn) {
         EXPECT_EQ(reopened.GetActiveRegionLedger().completed_work(),
                   session.GetActiveRegionLedger().completed_work());
         EXPECT_FALSE(session.GetActiveRegionLedger().completed_work().empty());
+        (void)StepExpectedQuietAmbient(historical,
+                                       session.GetActiveRegionLedger(),
+                                       session.GetRegionSchedule().due,
+                                       static_cast<std::uint64_t>(34 + tick));
         if (moved_spawn) {
-            EXPECT_EQ(session.GetFieldPages().region_bytes(kFieldOwner), historical);
+            EXPECT_EQ(session.GetFieldPages().region_bytes(kFieldOwner),
+                      historical.region_bytes(kFieldOwner));
         }
         ASSERT_TRUE(session.SaveWorld());
         const auto saved_fields =
@@ -12293,11 +12654,11 @@ void CheckProceduralWeatherWithScent(GameSession& session, GameSession& control)
         ASSERT_FALSE(control.GetRegionSchedulerFault());
         ASSERT_EQ(WeatherOverlayHashes(session), WeatherOverlayHashes(control));
         saw_storm = saw_storm || !control.GetWeatherSystem()->StormCells().empty();
-        EXPECT_EQ(session.GetRegionalWeatherScheduleVisits(), 0u);
+        EXPECT_EQ(session.GetRegionalWeatherScheduleVisits(), 1u);
     }
     EXPECT_TRUE(saw_storm);
     EXPECT_TRUE(session.GetFieldPages().has_scent());
-    EXPECT_FALSE(session.GetFieldPages().has_ambient());
+    EXPECT_TRUE(session.GetFieldPages().has_ambient());
 }
 
 void CheckScentOnlyWeatherContinuation(bool stored_scent) {
@@ -12428,8 +12789,7 @@ void CheckSessionScentCandidate(bool ambient_pages, bool weather, bool fail_cons
     ASSERT_FALSE(session.GetRegionSchedulerFault());
     EXPECT_GT(session.GetFieldPages().scent_cells().size(), fields.scent_cells().size());
     EXPECT_EQ(session.GetFieldPages().region_bytes(frozen), fields.region_bytes(frozen));
-    EXPECT_EQ(session.GetFieldPages().weather_clocks().contains(kFieldOwner),
-              ambient_pages || weather);
+    EXPECT_TRUE(session.GetFieldPages().weather_clocks().contains(kFieldOwner));
     if (weather) {
         EXPECT_EQ(session.GetFieldPages().weather_clocks().at(kFieldOwner), 8u);
     }
@@ -12564,7 +12924,7 @@ void CheckDisjointSessionScentWindows() {
             TickOnce(session);
             ASSERT_FALSE(session.GetRegionSchedulerFault()) << "window=" << window;
             EXPECT_GT(session.GetScentField()->Sample(0, 65, 65), 1.0e-9);
-            EXPECT_EQ(session.GetRegionalWeatherScheduleVisits(), 0u);
+            EXPECT_EQ(session.GetRegionalWeatherScheduleVisits(), 6u);
         }
         session.GetRegistry().destroy(emitter);
     }
@@ -12691,14 +13051,20 @@ void CheckSessionScentCapacityRetention(bool floors, RegionState historical_stat
     session.SetSpawnPoint({128, 0, 128});
     const auto emitter = AddSessionScentParticipant(session, 0, 129);
     session.GetRegistry().get<Luminumbra::Components::TransformComponent>(emitter).position.z = 129;
-    const auto before = fields.serialize();
+    auto expected = fields;
     const auto frozen_digest = ledger.records().at(frozen_owner).frozen_digest;
     for (int tick = 0; tick < 3; ++tick) {
         TickOnce(session);
         ASSERT_FALSE(session.GetRegionSchedulerFault());
         EXPECT_EQ(session.GetWorldClock().tick(), 32u + static_cast<unsigned>(tick));
         if (historical_state == RegionState::Frozen) {
-            EXPECT_EQ(session.GetFieldPages().serialize(), before);
+            (void)StepExpectedQuietAmbient(expected,
+                                           session.GetActiveRegionLedger(),
+                                           session.GetRegionSchedule().due,
+                                           static_cast<std::uint64_t>(32 + tick));
+            EXPECT_EQ(session.GetFieldPages().serialize(), expected.serialize());
+            EXPECT_EQ(session.GetFieldPages().region_bytes(frozen_owner),
+                      fields.region_bytes(frozen_owner));
             EXPECT_FALSE(session.GetActiveRegionLedger().completed_work().contains(frozen_owner));
         } else {
             EXPECT_NE(session.GetFieldPages().region_bytes(frozen_owner),
@@ -12770,6 +13136,8 @@ void CheckEmptyScentCompatibility(bool active_regions) {
     EnableSnapshotSession(session, root, jobs);
     session.SetActiveRegionsEnabled(active_regions);
     ASSERT_TRUE(session.CreateWorld("Empty scent", "1337", "default"));
+    if (active_regions)
+        session.SetReplicatedSimulationAnchors({});
     const auto live = SessionScentBits(session);
     TickOnce(session);
     EXPECT_EQ(SessionScentBits(session), live);
@@ -12993,7 +13361,10 @@ void CheckEmptyRegionalEnergyAge() {
         TickOnce(session);
     }
     ASSERT_FALSE(session.GetRegionSchedulerFault());
-    EXPECT_TRUE(session.GetFieldPages().empty());
+    FieldPageState expected;
+    for (std::uint64_t tick = 32; tick <= 38; ++tick)
+        (void)StepExpectedQuietAmbient(expected, ledger, std::array{kFieldOwner}, tick);
+    EXPECT_EQ(session.GetFieldPages().serialize(), expected.serialize());
     EXPECT_TRUE(session.ComputeAetherStateSubHash().empty());
     ASSERT_TRUE(session.SaveWorld());
     const auto save = session.GetWorldSaveDir();
@@ -13525,9 +13896,10 @@ void CheckSessionEnergyRegisterReuse() {
         ASSERT_EQ(live.completed_work().size(), 1u);
         EXPECT_EQ(&live.completed_work().at(active), completed);
         if (age % luminumbra::fields::kEnergyCadenceTicks != 0) {
-            EXPECT_EQ(live.completed_work().at(active), 1u); // The due owner's age update.
+            // 441 relaxations, two endpoints of 840 edges, weather clock and energy age.
+            EXPECT_EQ(live.completed_work().at(active), 2123u);
         } else {
-            EXPECT_GT(live.completed_work().at(active), 1u); // Age and processed pages.
+            EXPECT_GT(live.completed_work().at(active), 2123u); // Also processed energy pages.
         }
         // Stable node addresses catch scheduler copies even if the explicit growth hook misses one.
         for (const auto& [owner, address] : registers) {
@@ -14729,10 +15101,11 @@ void CheckFoliageEmptyTickEvents(bool participants, bool due, int failure) {
         EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 0u);
         EXPECT_EQ(callbacks, 1);
     } else {
-        EXPECT_EQ(session.GetActiveRegionLedger().completed_work().at(kFieldOwner), 9u);
+        EXPECT_EQ(session.GetActiveRegionLedger().completed_work().at(kFieldOwner),
+                  due ? 451u : 9u);
         TickOnce(session);
         ASSERT_FALSE(session.GetRegionSchedulerFault());
-        EXPECT_EQ(session.GetRegionSchedule().work, 9u);
+        EXPECT_EQ(session.GetRegionSchedule().work, due ? 451u : 9u);
         EXPECT_EQ(session.GetRegionSchedule().rejected.work, 1u);
         EXPECT_EQ(callbacks, 1);
     }
@@ -14806,19 +15179,19 @@ void CheckFoliageCallbacks(bool birth, int failure) {
     } else {
         TickOnce(session);
         ASSERT_FALSE(session.GetRegionSchedulerFault());
-        EXPECT_EQ(session.GetRegionSchedule().work, 9u);
+        EXPECT_EQ(session.GetRegionSchedule().work, 451u);
         EXPECT_EQ(session.GetRegionSchedule().rejected.work, 1u);
         if (birth) {
             const auto feeders = session.GetRegistry().view<C::SoilFeederComponent>();
             ASSERT_EQ(feeders.size(), 1u);
             EXPECT_GT(feeders.get<C::SoilFeederComponent>(feeders.front()).absorbed, 0u);
             EXPECT_EQ(session.GetFieldPages().soil().pages().size(), 1u);
-            EXPECT_EQ(session.GetActiveRegionLedger().completed_work().at(kFieldOwner), 257u);
+            EXPECT_EQ(session.GetActiveRegionLedger().completed_work().at(kFieldOwner), 2379u);
         } else {
             EXPECT_TRUE(session.GetFieldPages().soil().empty());
         }
         TickOnce(session);
-        EXPECT_EQ(session.GetRegionSchedule().work, birth ? 257u : 1u);
+        EXPECT_EQ(session.GetRegionSchedule().work, birth ? 2379u : 2123u);
         EXPECT_EQ(session.GetRegionSchedule().rejected.work, 0u);
         EXPECT_EQ(callbacks, 1);
     }
@@ -15862,15 +16235,17 @@ TEST(GameSessionHeadlessWorldTest, FoliageHistoryDropsEveryEvictedOwnerIncluding
     std::map<RegionKey, RegionState> owners;
     for (int index = 0; index < 32; ++index) {
         owners.emplace(RegionKey{index, 0},
-                       index == 0 ? RegionState::Reduced : RegionState::Active);
+                       index == 0 ? RegionState::Reduced : RegionState::Frozen);
     }
-    auto ledger =
-        ScheduledFieldLedger(tick - 1, owners, {std::numeric_limits<std::uint64_t>::max(), 1, 2});
+    auto ledger = ScheduledFieldLedger(tick - 1, owners);
     for (int index = 0; index < 32; ++index) {
         ledger.pin({index, 0}, false, WorldClock(tick - 1));
         auto& record =
             const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at({index, 0});
         record.last_proximity = static_cast<std::uint64_t>(index);
+        // Exercise the first owner's recovery transition while every later
+        // eviction candidate stays frozen and acquires no ambient ownership.
+        record.under_hold = index == 0 ? ledger.config().hold_ticks - 1 : 0;
     }
     ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
     session.SetReplicatedSimulationAnchors({});
@@ -16051,7 +16426,10 @@ TEST(GameSessionHeadlessWorldTest, LongFoliageWindowStopsRemainingHostBatchUntil
     EXPECT_EQ(batched.GetWorldClock().tick(), 34u);
     TickOnce(separate);
     TickOnce(separate);
-    EXPECT_EQ(batched.GetFieldPages().serialize(), fields.serialize());
+    auto expected_fields = fields;
+    ASSERT_TRUE(expected_fields.activate_region(*owner, 1337, 34));
+    ASSERT_TRUE(expected_fields.set_weather_age(*owner, 1));
+    EXPECT_EQ(batched.GetFieldPages().serialize(), expected_fields.serialize());
     EXPECT_EQ(batched.GetFoliageRegistryPublications(), 0u);
     for (auto* session : {&batched, &separate}) {
         ASSERT_NO_FATAL_FAILURE(CompleteFoliageTick(*session));
@@ -16624,6 +17002,11 @@ TEST(GameSessionHeadlessWorldTest, FoliageFaultKeepsExpiredReducedHistorySaveFen
             TickOnce(session);
             ASSERT_EQ(session.GetWorldClock().tick(), 31u);
             ASSERT_FALSE(session.GetRegionSchedulerFault());
+            auto expected_fields = fields;
+            (void)StepExpectedQuietAmbient(expected_fields,
+                                           session.GetActiveRegionLedger(),
+                                           session.GetRegionSchedule().due,
+                                           31);
             ASSERT_TRUE(session.SaveWorld());
             const auto disk = SavedPresetTestDiskBytes(session.GetWorldSaveDir());
             const auto loadable = GameSession::PrepareWorldState(
@@ -16632,6 +17015,10 @@ TEST(GameSessionHeadlessWorldTest, FoliageFaultKeepsExpiredReducedHistorySaveFen
             if (fault_tick == 33) {
                 TickOnce(session);
                 ASSERT_FALSE(session.GetRegionSchedulerFault());
+                (void)StepExpectedQuietAmbient(expected_fields,
+                                               session.GetActiveRegionLedger(),
+                                               session.GetRegionSchedule().due,
+                                               32);
             }
             const auto emitter = session.GetRegistry().create();
             session.GetRegistry().emplace<C::TransformComponent>(emitter).position = {8, 0, 8};
@@ -16642,7 +17029,7 @@ TEST(GameSessionHeadlessWorldTest, FoliageFaultKeepsExpiredReducedHistorySaveFen
             EXPECT_EQ(session.GetActiveRegionLedger().records().at(owner).state,
                       RegionState::Reduced);
             EXPECT_EQ(session.GetActiveRegionLedger().records().at(owner).last_ticked, 0u);
-            EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+            EXPECT_EQ(session.GetFieldPages().serialize(), expected_fields.serialize());
             session.GetRegistry().destroy(emitter);
             ASSERT_NO_FATAL_FAILURE(
                 ExpectFoliageHistorySaveRefusal(session, root.path() / "expired-fault-save"));
@@ -17392,7 +17779,11 @@ TEST(GameSessionHeadlessWorldTest, FoliageReplayVisitBudgetExcludesDormantPages)
         jobs.startup(1);
         GameSession session;
         ASSERT_NO_FATAL_FAILURE(BuildOrdinaryFoliageGap(session, root, jobs, dormant));
-        const auto fields = session.GetFieldPages().serialize();
+        auto expected_fields = session.GetFieldPages();
+        const auto owner = LongCadenceOwner();
+        ASSERT_TRUE(expected_fields.activate_region(owner, 1337, 34));
+        ASSERT_TRUE(expected_fields.set_weather_age(owner, 1));
+        const auto fields = expected_fields.serialize();
         TickOnce(session);
         TickOnce(session);
         EXPECT_EQ(session.GetFieldPages().serialize(), fields);

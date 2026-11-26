@@ -350,8 +350,11 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertIn("else { CommitTicks(session); }", idle_ticks)
         self.assertIn("m_foliageStep->CompleteIdleTicks(*this);", tail)
         ordered = ("if (!foliage_step)", "PublishRegionConsumers(",
-                   "m_regionalFieldView = nullptr;", "foliage_step->Commit(*this);",
-                   "UpdateRegionalWaterFromSimulation();", "PublishRegionCompletedWork(")
+                   "foliage_step->Commit(*this);", "UpdateRegionalWaterFromSimulation();",
+                   "CleanupNewbornCarcasses(", "PublishRegionCompletedWork(",
+                   "m_fieldPages.adopt_weather_state(*field_candidate);",
+                   "m_fieldPages.adopt_scheduled_pages(std::move(*field_candidate));",
+                   "m_regionalFieldView = nullptr;")
         for before, after in zip(ordered, ordered[1:]):
             self.assertLess(tail.index(before), tail.index(after))
         self.assertIn("if (m_regionFault) { return i + 1; } "
@@ -361,18 +364,21 @@ class RegionAuthorityWiring(unittest.TestCase):
         legacy = function(consumers, "if (!m_authorityProfile.regional_water)")
         self.assertEqual(legacy, "SettleWaterAuthority(defer_water_authority);")
         self.assertIn("foliage->PreparePublication(*this);", consumers)
-        self.assertIn("m_fieldPages.adopt_scheduled_pages(std::move(*fields));", consumers)
+        self.assertNotIn("adopt_scheduled_pages(", consumers)
+        self.assertNotIn("adopt_weather_state(", consumers)
         self.assertIn("energy->transaction.commit();", consumers)
-        self.assertIn("const auto completed = m_authorityProfile.regional_water "
-                      "? std::span<const RegionWork>{} "
-                      ": std::span<const RegionWork>{m_regionCompletedWork};", consumers)
-        self.assertIn("prepare_energy_work(ages, completed, next_id)", consumers)
+        self.assertIn("prepare_energy_work(ages, {}, next_id)", consumers)
+        self.assertLess(consumers.index("prepare_energy_work(ages, m_regionCompletedWork, next_id)"),
+                        consumers.index("foliage->PreparePublication(*this);"))
+        self.assertNotIn("m_regionCompletedWork.clear();", consumers)
         publish = function(session, "void GameSession::PublishRegionCompletedWork(")
-        self.assertEqual(function(publish, "if (!m_activeRegionsEnabled || "
-                                  "!m_authorityProfile.regional_water)"), "return;")
+        self.assertEqual(function(publish, "if (!m_activeRegionsEnabled)"), "return;")
+        self.assertEqual(function(publish, "if (m_authorityProfile.regional_water)"),
+                         "SettleWaterAuthority(defer_water_authority);")
         self.assertEqual(publish.count("SettleWaterAuthority(defer_water_authority);"), 1)
         self.assertLess(publish.index("if (m_regionFault)"),
-                        publish.index("prepare_energy_work({}, m_regionCompletedWork)"))
+                        publish.index("prepare_energy_work(ages, m_regionCompletedWork)"))
+        self.assertIn("energy ? energy->transaction.ages()", publish)
         self.assertLess(publish.index("m_activeRegionLedger.commit_energy_work();"),
                         publish.index("m_regionCompletedWork.clear();"))
         self.assertNotIn("m_regionalFieldView", publish)
@@ -685,8 +691,8 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertIn(": m_authorityProfile(authority_profile)", session)
         # Uses are confined to construction, eviction, water and elapsed-consumer gates.
         # Config, hashes and save writers cannot read this dormant profile.
-        self.assertEqual(session.count("m_authorityProfile"), 21)
-        self.assertEqual(session.count("m_authorityProfile.regional_water"), 11)
+        self.assertEqual(session.count("m_authorityProfile"), 19)
+        self.assertEqual(session.count("m_authorityProfile.regional_water"), 9)
         self.assertEqual(session.count("residency_free_eviction"), 1)
         native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(
             encoding="utf-8")

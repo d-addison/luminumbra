@@ -1670,13 +1670,16 @@ std::string FieldPageState::ambient_bytes(std::uint8_t channels,
                                           bool weather,
                                           const FieldPageState* overlay) const {
     std::string out;
-    for (const auto& [key, live_page] : m_pages) {
-        const auto* page = &live_page;
-        if (overlay) {
-            const auto found = overlay->m_pages.find(key);
-            if (found != overlay->m_pages.end())
-                page = &found->second;
-        }
+    // Merge the ordered keys so pages first admitted by this tick hash exactly as
+    // they will after publication. Each store is bounded by kMaxPages.
+    auto live = m_pages.begin();
+    const auto& updates = overlay ? overlay->m_pages : m_pages;
+    auto update = overlay ? updates.begin() : updates.end();
+    while (live != m_pages.end() || update != updates.end()) {
+        const bool use_update =
+            update != updates.end() && (live == m_pages.end() || update->first <= live->first);
+        const auto& [key, stored_page] = use_update ? *update : *live;
+        const auto* page = &stored_page;
         AppendLe(out, static_cast<std::uint32_t>(key.x), 4);
         AppendLe(out, static_cast<std::uint32_t>(key.z), 4);
         for (const auto mask : page->mask)
@@ -1685,6 +1688,10 @@ std::string FieldPageState::ambient_bytes(std::uint8_t channels,
             if ((channels & (1u << channel)) != 0)
                 for (const auto word : page->cells[static_cast<std::size_t>(channel)])
                     AppendLe(out, word, 2);
+        if (live != m_pages.end() && live->first == key)
+            ++live;
+        if (use_update)
+            ++update;
     }
     if (weather) {
         const auto& fields = overlay ? *overlay : *this;

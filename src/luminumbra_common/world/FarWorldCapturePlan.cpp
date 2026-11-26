@@ -162,8 +162,9 @@ FarWorldCapturePlan::Start(const std::shared_ptr<Producer>& producer,
     if (impl_->count > limits.tiles) {
         return {Error::Capacity};
     }
-    if (!producer || !world || producer->frozen_active() ||
-        !producer->capture_status().latest_ready || !producer->capture()) {
+    if (!producer || !world || producer->frozen_active() || !producer->capture() ||
+        producer->capture_status().active || producer->capture_status().paused ||
+        producer->capture_status().error != Producer::Error::None) {
         return {Error::SourceRefused};
     }
     if (impl_->accepted &&

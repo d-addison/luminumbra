@@ -123,6 +123,14 @@ public:
                        const World::FarWorldAuthorityProducer::FrozenPolicy&,
                        const World::FarFrozenCaptureLimits&,
                        const World::FarFrozenCaptureWork::Counts&);
+    // Owning session aliases; null when unbound or for an invalid tier.
+    std::shared_ptr<World::FarVolumeMemoryPool> SessionMemoryPool(std::size_t tier) const;
+    World::FarWorldAuthorityProducer::FrozenResult SessionCaptureFailure() const;
+    FarWorldRefusal SessionAdmissionRefusal() const;
+    // Refresh refusal is independent of handoff admission and survives its pumps.
+    void SetSessionRefresh(FarWorldRefusal refusal,
+                           const World::FarWorldAuthorityProducer::FrozenResult& failure,
+                           const FarWorldRefreshWork& work);
     FarHandoffAdmissionPump PumpAdmission(std::uint64_t budget);
     FarHandoffAdmissionStatus CancelAdmission();
     FarHandoffAdmissionStatus AdmissionStatus() const;
@@ -235,6 +243,9 @@ private:
         diagnostic_budget_before_{};
     // Explicit destruction in Drain, then Shutdown: residency -> authority and
     // integration charges -> memory -> driver. Driver lives through GPU release.
+    FarWorldRefusal refresh_refusal_ = FarWorldRefusal::None;
+    World::FarWorldAuthorityProducer::FrozenResult refresh_failure_;
+    std::optional<FarWorldRefreshWork> refresh_work_;
     std::unique_ptr<FarWorldHandoffRenderer> session_;
     std::optional<World::FarCaveMode> session_caves_;
     World::FarVolumeNumericProfile session_numeric_ = World::FarVolumeNumericProfile::RawFloat;
