@@ -148,7 +148,8 @@ protected:
         for (unsigned pump = 0; pump < 2048; ++pump) {
             const auto phase = controller.Pump(++frame);
             ASSERT_NE(phase, Controller::Phase::Refused)
-                << int(controller.failure().source) << ":" << int(controller.failure().capture);
+                << int(controller.failure().source) << ":" << int(controller.failure().capture)
+                << ":" << int(renderer.Selection(FarWorldPurpose::World, true).refusal);
             if (phase == Controller::Phase::Waiting)
                 return;
         }
@@ -216,7 +217,8 @@ TEST_F(FarWorldSessionController, ContinuousEditsCompleteActiveTransaction) {
         ASSERT_TRUE(controller.Request(keys));
         const auto phase = controller.Pump(++frame);
         ASSERT_NE(phase, Controller::Phase::Refused)
-            << int(controller.failure().source) << ":" << int(controller.failure().capture);
+            << int(controller.failure().source) << ":" << int(controller.failure().capture) << ":"
+            << int(renderer.Selection(FarWorldPurpose::World, true).refusal);
         EXPECT_EQ(producer->capture(), source);
         EXPECT_EQ(producer->capture_status().serving_serial, serial);
         EXPECT_LE(controller.work().capture_work - previous_planning, limits.operations_per_pump);
