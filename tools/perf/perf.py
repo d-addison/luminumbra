@@ -298,6 +298,59 @@ def read_evidence_metric(path: Path, name: str) -> float:
     return float(value)
 
 
+def _far_uint64_identity(value: Any) -> bool:
+    return (isinstance(value, str) and re.fullmatch(r"[0-9]{1,20}", value) is not None
+            and int(value) < 2**64)
+
+
+def _validate_far_authority(row: dict[str, Any], ladder_baseline: bool) -> None:
+    identity = row.get("content_identity")
+    if not _far_uint64_identity(identity):
+        raise ValueError("invalid far-world content identity")
+    metadata = ("world_epoch", "committed_generation", "serving_committed_generation",
+                "serving_serial", "target_serial", "manifest_fingerprint", "latest_target_ready",
+                "source_error", "capture_error", "refresh_work")
+    # Older fixture captures remain valid. Partial new evidence never becomes an old fixture.
+    kind = row.get("authority_kind", "fixture")
+    if kind not in ("fixture", "session"):
+        raise ValueError("invalid far-world authority kind")
+    if "authority_kind" in row or any(key in row for key in metadata):
+        if "authority_kind" not in row or any(key not in row for key in metadata):
+            raise ValueError("missing far-world authority metadata")
+        for key in metadata[:5]:
+            if type(row[key]) is not int or not 0 <= row[key] < 2**64:
+                raise ValueError(f"invalid far-world authority {key}")
+        if (not _far_uint64_identity(row["manifest_fingerprint"])
+                or type(row["latest_target_ready"]) is not bool):
+            raise ValueError("invalid far-world manifest identity or readiness")
+        for key, maximum in (("source_error", 10), ("capture_error", 10)):
+            if type(row[key]) is not int or not 0 <= row[key] <= maximum:
+                raise ValueError(f"invalid far-world {key}")
+        work = row["refresh_work"]
+        if work is not None:
+            counters = ("source_read_bytes", "source_copied_bytes", "source_decode_work",
+                        "capture_work", "admission_work", "admission_height_observations")
+            if (not isinstance(work, dict) or any(type(work.get(key)) is not int
+                    or not 0 <= work[key] < 2**64 for key in counters)):
+                raise ValueError("invalid far-world refresh work")
+            duration = work.get("source_ms")
+            if (type(duration) not in (int, float) or not 0 <= duration <= sys.float_info.max
+                    or not math.isfinite(duration)):
+                raise ValueError("invalid far-world source duration")
+    if kind == "session":
+        if int(identity) != 0:
+            raise ValueError("session authority must preserve unavailable fixture content identity")
+        if ladder_baseline and (int(row["manifest_fingerprint"]) == 0 or row["world_epoch"] == 0
+                or row["target_serial"] == 0 or row["serving_serial"] != row["target_serial"]
+                or row["serving_committed_generation"] != row["committed_generation"]
+                or not row["latest_target_ready"] or row["source_error"] or row["capture_error"]):
+            raise ValueError(f"Ladder baseline refused at measured frame {row['frame']}: "
+                             "session authority is missing, stale or refused")
+    elif ladder_baseline and int(identity) == 0:
+        raise ValueError(f"Ladder baseline refused at measured frame {row['frame']}: "
+                         "far-world content identity is unavailable (zero)")
+
+
 def validate_far_world_reporting(document: Any, ladder_baseline: bool = False) -> None:
     """Validate measured-frame evidence; a Ladder label never waives missing coverage."""
     if not isinstance(document, dict):
@@ -361,12 +414,7 @@ def validate_far_world_reporting(document: Any, ladder_baseline: bool = False) -
         if density is not None and (isinstance(density, bool) or not isinstance(density, (int, float))
                                     or not math.isfinite(density) or density < 0):
             raise ValueError("invalid resolved grass density")
-        identity = row.get("content_identity")
-        if not isinstance(identity, str) or not re.fullmatch(r"[0-9]{1,20}", identity) or int(identity) >= 2**64:
-            raise ValueError("invalid far-world content identity")
-        if ladder_baseline and int(identity) == 0:
-            raise ValueError(f"Ladder baseline refused at measured frame {row['frame']}: "
-                             "far-world content identity is unavailable (zero)")
+        _validate_far_authority(row, ladder_baseline)
         if ladder_baseline and (row["requested_mode"] != "ladder" or row["effective_mode"] != "ladder"
                 or row["refusal"] != "None" or row["suppressed"]
                 or row["submission_refusal"] != "None" or unsettled):
