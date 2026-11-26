@@ -625,6 +625,45 @@ TEST(GBufferInstances, OffCentreSkinnedSphereUsesDrawRotationAndAbsoluteScale) {
     }
 }
 
+// Movement must invalidate both the spatial bounds (underground -> visible)
+// and retained selection bytes (visible -> another visible pose).
+void ExpectGBufferMovementInvalidatesCaches(auto& pass,
+                                            auto& ctx,
+                                            auto& camera,
+                                            glm::vec4 (&planes)[6],
+                                            entt::registry& entities,
+                                            auto& input,
+                                            const auto& readback) {
+    using namespace Luminumbra::Rendering;
+    constexpr unsigned extent = 32;
+    planes[0] = glm::vec4(0, 1, 0, 2);
+    for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+        camera.SelectFarWorldPlane(mode);
+        ctx.far_world_ladder = mode == FarWorldMode::Ladder;
+        ctx.gbuffer_projection = camera.GetProjectionMatrix(extent, extent);
+        input.far_selection = SelectFarWorld(mode, FarWorldPurpose::World, FarWorldRefusal::None);
+        for (const float height : {-1000.0f, 0.0f, 0.25f}) {
+            for (const auto entity : entities.view<Luminumbra::Components::StaticMeshComponent>()) {
+                entities.patch<Luminumbra::Components::TransformComponent>(
+                    entity, [height](auto& transform) { transform.position.y = height; });
+            }
+            pass.execute_external(ctx, entities, input);
+            const auto data = readback();
+            const auto depth_begin = data.begin() + extent * extent * 20;
+            const auto covered =
+                std::count_if(depth_begin, data.end(), [](float depth) { return depth > 0; });
+            EXPECT_EQ(covered > 0, height >= 0);
+            EXPECT_EQ(pass.static_prop_work().instances, height >= 0 ? 2u : 0u);
+            if (height >= 0) {
+                glm::mat4 uploaded(0);
+                glGetNamedBufferSubData(
+                    pass.instance_matrix_vbo(), 0, sizeof(uploaded), glm::value_ptr(uploaded));
+                EXPECT_FLOAT_EQ(uploaded[3].y, height);
+            }
+        }
+    }
+}
+
 TEST(PassContext, GBufferKnownAndExternalEntriesAreEquivalentOnBothBackends) {
     HiddenGlContext gl;
     ASSERT_TRUE(gl.ready()) << gl.error();
@@ -748,36 +787,9 @@ TEST(PassContext, GBufferKnownAndExternalEntriesAreEquivalentOnBothBackends) {
             }
         }
     }
-    // Movement must invalidate both the spatial bounds (underground -> visible)
-    // and retained selection bytes (visible -> another visible pose).
     ctx.frozen_replay = false;
     isolation.layer_mask = SH::IsolationLayer::All;
-    planes[0] = glm::vec4(0, 1, 0, 2);
-    for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
-        camera.SelectFarWorldPlane(mode);
-        ctx.far_world_ladder = mode == FarWorldMode::Ladder;
-        ctx.gbuffer_projection = camera.GetProjectionMatrix(extent, extent);
-        input.far_selection = SelectFarWorld(mode, FarWorldPurpose::World, FarWorldRefusal::None);
-        for (const float height : {-1000.0f, 0.0f, 0.25f}) {
-            for (const auto entity : entities.view<Luminumbra::Components::StaticMeshComponent>()) {
-                entities.patch<Luminumbra::Components::TransformComponent>(
-                    entity, [height](auto& transform) { transform.position.y = height; });
-            }
-            pass.execute_external(ctx, entities, input);
-            const auto data = readback();
-            const auto depth_begin = data.begin() + extent * extent * 20;
-            const auto covered =
-                std::count_if(depth_begin, data.end(), [](float depth) { return depth > 0; });
-            EXPECT_EQ(covered > 0, height >= 0);
-            EXPECT_EQ(pass.static_prop_work().instances, height >= 0 ? 2u : 0u);
-            if (height >= 0) {
-                glm::mat4 uploaded(0);
-                glGetNamedBufferSubData(
-                    pass.instance_matrix_vbo(), 0, sizeof(uploaded), glm::value_ptr(uploaded));
-                EXPECT_FLOAT_EQ(uploaded[3].y, height);
-            }
-        }
-    }
+    ExpectGBufferMovementInvalidatesCaches(pass, ctx, camera, planes, entities, input, readback);
     // Invalid authored input refuses before changing state or any target attachment.
     auto authored = std::make_shared<StaticDrawSnapshot>();
     authored->draws.emplace_back();
