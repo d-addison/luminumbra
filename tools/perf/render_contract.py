@@ -324,15 +324,36 @@ def validate_far_budget(data, required=False):
         raise ValueError('missing or oversized far budget frames')
     if not isinstance(fills, list) or not 1 <= len(fills) <= len(rows):
         raise ValueError('missing far budget fill events')
-    expected_rows = data.get('frame_samples', data.get('far_world', {}).get('frames'))
+    far_world = data.get('far_world')
+    expected_rows = (data.get('frame_samples') if 'frame_samples' in data else
+                     far_world.get('frames') if isinstance(far_world, dict) else None)
     if not isinstance(expected_rows, list) or not 1 <= len(expected_rows) <= MAX_FRAMES:
         raise ValueError('missing far budget timing samples')
-    expected_ids = set()
+    sample_ids, expected_ids = set(), set()
+    pass_inventories = (frozenset(PASSES), frozenset(PASSES + GPU_STAGES))
     for sample in expected_rows:
         if not isinstance(sample, dict):
             raise ValueError('invalid far budget timing sample')
-        expected_ids.add(integer(sample.get('frame'), 'budget sample frame', 0, 2**64 - 1))
-    if len(expected_ids) != len(expected_rows):
+        timing_id = integer(sample.get('frame'), 'budget sample frame', 0, 2**64 - 1)
+        sample_ids.add(timing_id)
+        if 'frame_samples' in data:
+            # A complete set of unissued scene timers identifies a measured
+            # frame without a world render (menus/loading). Missing timer data
+            # cannot excuse a missing join. Work is bounded by MAX_FRAMES and
+            # the fixed pass inventory, including optional stage attribution.
+            passes = sample.get('passes')
+            if (not isinstance(passes, dict) or len(passes) not in (len(PASSES), len(PASSES + GPU_STAGES)) or
+                    passes.keys() not in pass_inventories):
+                raise ValueError('incomplete far budget scene timer coverage')
+            for timer in passes.values():
+                if (not isinstance(timer, dict) or 'ms' not in timer or
+                        type(timer.get('issued')) is not bool or
+                        (not timer['issued'] and timer.get('ms') is not None)):
+                    raise ValueError('invalid far budget scene timer status')
+            if not any(timer['issued'] for timer in passes.values()):
+                continue
+        expected_ids.add(timing_id)
+    if len(sample_ids) != len(expected_rows):
         raise ValueError('duplicate far budget timing samples')
     for fill in fills:
         if not isinstance(fill, dict):

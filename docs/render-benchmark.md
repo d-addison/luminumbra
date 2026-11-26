@@ -93,7 +93,11 @@ Each observation binds the renderer's `render_frame`, optional measured
 `timing_frame`, world epoch, target serial, cohort fingerprint, content identity
 and bake generation. `phase` is `measured` when joined to a timing sample, or
 `cold_or_settling` otherwise. Multiple reload renders may join the same timing
-frame. Upload-only frames without a current diagnostic remain explicitly
+frame. Measured frames without a world render retain their existing timing
+identity: every scene-pass timer is explicitly unissued. They have no budget
+render join; a budget observation claiming such a frame is refused. Missing or
+partial timer metadata cannot establish a no-render frame. Upload-only frames
+without a current diagnostic remain explicitly
 unaccepted; retained coverage from an earlier render cannot complete a fill.
 Elapsed time uses a monotonic clock from the armed origin; `render_wall_ms`
 measures each render call. Full frame CPU/GPU timing remains in the joined
@@ -121,7 +125,7 @@ event. These records do not claim edit commit or all-tier bake qualification.
 
 `render_contract.validate(..., far_budget=True)` requires complete cold-fill
 evidence, contiguous renderer frames from the armed origin, and joins for every
-measured timing frame. It recomputes event summaries from retained observations.
+measured timing frame that renders the world. It recomputes event summaries from retained observations.
 Missing cold rows, fabricated completion, unknown schemas/phases and storage overflow
 cannot qualify. Without this argument, older artifacts remain readable; a
 present block is still validated, and honestly incomplete events remain visible.

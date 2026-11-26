@@ -1,7 +1,7 @@
 {
   "id": "render.far-budget-recording",
   "source": "docs/render-benchmark.md#far-budget-observations-issue-133",
-  "statement": "Optional versioned benchmark budget observations retain the cold phase and timing-frame joins, sampled tier memory, work and draws, explicit cohort acceptance, per-tier and all-tier fill completion, timeout/incomplete states and separate epoch, edit/bake, cohort and refill events. Bounded storage refuses overflow. Cold-fill validation retains streaming work and preserves settled Ladder checks. Native captures, measured proposals and enforcement remain pending.",
+  "statement": "Optional versioned benchmark budget observations retain the cold phase and world-rendering timing-frame joins, sampled tier memory, work and draws, explicit cohort acceptance, per-tier and all-tier fill completion, timeout/incomplete states and separate epoch, edit/bake, cohort and refill events. Measured frames with complete, explicitly unissued scene timers need no render join and cannot claim one. Bounded storage refuses overflow. Cold-fill validation retains streaming work and preserves settled Ladder checks. Native captures, measured proposals and enforcement remain pending.",
   "status": "covered",
   "evidence": [
     {"kind": "ctest", "ref": "FarBudgetMeasurement.ColdFillIncludesWarmupAndRequiresCurrentCoverage"},
