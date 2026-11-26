@@ -128,13 +128,19 @@ Valid legacy metadata v2 and manifest v1 saves, including clock/ledger pairs, lo
 LMR1 payload version 2 and the snapshot index schema remain unchanged; older readers refuse the new envelope.
 Previously stripped draft saves cannot be distinguished retroactively from valid legacy saves, and fingerprints do not authenticate history.
 
-Journal v4 binds undo, publication and quarantine identities before either POSIX move; the snapshot index publishes last as the durable commit point.
+Journal v5 binds undo, publication and quarantine identities before either POSIX move, retains historical v4 decoding, and records identity-bound receipts discoverable as `<save>/journal.receipts.<txn_id>.<volume>.<file_id_high>.<file_id_low>` after control-file cleanup; the snapshot index publishes last as the durable commit point.
 Before that point, successful rollback restores the complete previous committed member tree and leaves dirty and revision acknowledgements pending.
 After that point, cleanup failure preserves the new commit and leaves recovery work.
 Failed rollback of any transaction with a previous commit retains the recovery journal and refuses further admission until recovery succeeds.
 Creation alone may retire its journal before artifact rollback, because no previous commit exists and the created-artifacts registry retains identities and failed-rollback evidence until cleanup succeeds.
 Rollback and journal retirement refuse foreign occupants and unknown contents; Windows checks the bound handle at deletion and POSIX verifies a quarantined entry before unlinking it.
 Journal control records are limited to 16 MiB and snapshot membership to 1,048,576 entries, with overflow-safe admission before allocation.
+Receipt phases record namespace completion, a later successful same-volume NTFS file flush, and separate receipt retirement, while POSIX repeats directory fsync.
+On ReFS, FAT/exFAT, network and unknown volumes, receipts remain retained and durability remains unqualified.
+Recovery verifies identities again, refuses removal of foreign and unknown artifacts, and re-deletes resurrected owned names before completing their receipts.
+Receipt streams retain the 16 MiB journal limit, reserve completion capacity before forward publication, and bound save-root discovery by the existing member ceiling.
+NTFS abrupt VM reset qualification remains pending in a later native slice.
+Ordinary service-level removal and artifact-registry cleanup completion remain pending.
 Client periodic and pressure saves use the same entry, digest and capture-content refusal gate as exit saves.
 Region digest operations copy only each region's inputs and admit the index once per operation, invalidating that admission on publication while checking actual region bytes on every read, and water authority synchronization visits only queued dirty chunks.
 

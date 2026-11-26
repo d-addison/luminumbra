@@ -1405,6 +1405,90 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertLess(append.index("if (!ok || !closed)"),
                         append.index("*observation = completed_flush;"))
 
+    def assert_transaction_receipt_integration(self, source):
+        parse = self.function(source, "ParseJournalRecord", "")
+        self.assertIn('schema->get<std::string>() != "luminumbra.journal.v4"', parse)
+        self.assertIn('parsed.modern = schema->get<std::string>() == kJournalSchema;', parse)
+        self.assertIn('root.size() != expected_fields', parse)
+        self.assertIn('phase->get<std::uint64_t>() > 3', parse)
+        stream = self.function(source, "ParseJournal", "")
+        self.assertIn('record.modern != out.modern', stream)
+        self.assertIn('journal receipt transition invalid', stream)
+        completion = self.function(source, "CompleteReceipts", "")
+        self.assertIn('latest_flush.volume != receipt.completion.identity.front()', completion)
+        self.assertIn('!latest_flush.volume_known || !latest_flush.ntfs', completion)
+        self.assertIn('FlushReceiptCarrier(RecoveryControl(save_dir, document), control)', completion)
+        self.assertIn('NearestExistingDirectory((save_dir / receipt.path).parent_path())', completion)
+        self.assertLess(completion.index('WorldSaveService::remove_owned_entry('),
+                        completion.index('namespace_done, 1, control, errors, &latest_flush'))
+        self.assertLess(completion.index('namespace_done, 1, control, errors, &latest_flush'),
+                        completion.index('latest_flush.volume != receipt.completion.identity.front()'))
+        self.assertLess(completion.index('latest_flush.volume != receipt.completion.identity.front()'),
+                        completion.index('flush_observed, 2, control, errors'))
+        self.assertLess(completion.index('flush_observed, 2, control, errors'),
+                        completion.index('retired, 3, control, errors'))
+        encoder = self.function(source, "RecordReceipts", "")
+        self.assertIn('kMaxSnapshotIndexBytes - 1 - batch_bytes - comma', encoder)
+        self.assertLess(encoder.index('AppendMetadata('), encoder.index('receipts[i]->completion.phase'))
+        self.assertIn('journal duplicate receipt path', parse)
+        self.assertIn('next_phase == previous_phase + 1', stream)
+        flush = self.function(source, "FlushReceiptCarrier", "")
+        self.assertIn('actual == expected', flush)
+        self.assertLess(flush.index('::FlushFileBuffers(file)'),
+                        flush.index('::GetVolumeInformationByHandleW(file,'))
+        self.assertIn('serial == actual.front()', flush)
+        self.assertIn('FILE_NAME_NORMALIZED | VOLUME_NAME_GUID', flush)
+        self.assertIn('if (!::CloseHandle(file))', flush)
+        finish = self.function(source, "FinishJournal", "")
+        self.assertLess(finish.index('PrepareReceipts('), finish.index('WorldSaveService::publish_restoration('))
+        self.assertLess(finish.index('document.external_control = true;'), finish.index('bool all_retired'))
+        self.assertLess(finish.index('if (!all_retired)'), finish.index('"crash-before-receipt-retirement"'))
+        self.assertIn('if (!document.modern)', finish)
+        self.assertIn('return FinishLegacyJournal(', finish)
+        aliases = self.function(source, "ControlAliasLinks", "")
+        self.assertIn('"undo/cleanup.txn.json"', aliases)
+        self.assertIn('false, present)', aliases)
+        inventory = self.function(source, "JournalInventory", "")
+        self.assertIn('ControlAliasLinks(save_dir, document)', inventory)
+        notifications = self.function(source, "report_snapshot_step", "void ")
+        self.assertIn('.starts_with("journal.receipts.")', notifications)
+        for event in ('before-publication', 'after-publication',
+                      'publication-quarantined', 'retirement-quarantined'):
+            self.assertIn('"crash-receipt-' + event + '"', notifications)
+        self.assertNotIn('"receipt-recorded"', source)
+        self.assertIn('if (kNeedsFileReceipts)', finish)
+        recovery = self.function(source, "recover_pending_journal", "")
+        self.assertLess(recovery.index('RecoverReceiptCarriers(save_dir, errors)'),
+                        recovery.index('fs::symlink_status(journal, ec)'))
+        rollback = self.function(source, "RollbackEntries", "")
+        self.assertIn('const auto identity = missing ? entry->rollback_retired_identity : current;', rollback)
+        self.assertIn('CompleteRemoval(save_dir,', rollback)
+        self.assertIn('"crash-before-restoration-completion"', rollback)
+        self.assertNotIn('if (!missing && !WorldSaveService::remove_owned_entry(', rollback)
+
+    def test_transaction_v5_receipts_survive_control_cleanup_and_complete_absent_retries(self):
+        source = read_source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        self.assert_transaction_receipt_integration(source)
+        for token in ('record.modern != out.modern',
+                      '"crash-receipt-before-publication"',
+                      'root.size() != expected_fields',
+                      'phase->get<std::uint64_t>() > 3',
+                      'latest_flush.volume != receipt.completion.identity.front()',
+                      'RecoverReceiptCarriers(save_dir, errors)',
+                      'const auto identity = missing ? entry->rollback_retired_identity : current;'):
+            with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):
+                self.assert_transaction_receipt_integration(source.replace(token, 'removed', 1))
+        native = read_source("test/persistence/SaveTransaction_test.cpp")
+        for name in ('AbsentCreateRetryCompletesBeforePayloadRollback',
+                     'AbortFlushFailureRetainsRecoveryEvidence',
+                     'MatchingRestoreFailureBlocksCleanup',
+                     'ReceiptDiscoverySurvivesControlAndDirectoryRetirement',
+                     'ReceiptDiscoveryCompletesOnlyRecordedControlAliases',
+                     'ReceiptDiscoveryRefusesMalformedOrForeignEvidence',
+                     'HistoricalV4JournalStillDecodesAndRecovers'):
+            self.assertIn('TEST(SaveTransaction, ' + name + ')', native)
+        self.assertIn('persistence/SaveTransaction_test.cpp', read_source('test/CMakeLists.txt'))
+
     def assert_matching_restoration_completion(self, source):
         rollback = self.function(source, "RollbackEntries", "")
         matching = re.search(
