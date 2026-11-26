@@ -1131,12 +1131,21 @@ class FrameAttributionWiring(unittest.TestCase):
         for path, signature, storage in (
                 ("app/FrameAttribution.h", "inline bool& shader_first_use_collection_enabled()",
                  "static constinit bool enabled = false; return enabled;"),
-                ("rendering/AttributedGl.h", "inline Client::Attribution::ProgramFirstUse& programs()",
-                 "static Client::Attribution::ProgramFirstUse state; return state;"),
                 ("rendering/FarWorldReplay.h", "inline ReplayStateAccess*& active_replay_state()",
                  "static thread_local ReplayStateAccess* state = nullptr; return state;")):
             with self.subTest(path=path):
                 self.assertEqual(compact(block(read(CLIENT / path), signature)), storage)
+
+    def test_program_accessor_has_constant_initialized_storage_without_a_local_guard(self):
+        gl = read(CLIENT / "rendering/AttributedGl.h")
+        self.assertEqual(compact(block(gl, "inline Client::Attribution::ProgramFirstUse& programs()")),
+                         "return detail::program_storage.state;")
+        self.assertIn("inline constinit const ProgramStorage program_storage{};", gl)
+        self.assertEqual(compact(block(gl, "struct ProgramStorage")),
+                         "mutable Client::Attribution::ProgramFirstUse state;")
+        helper = read(CLIENT / "app/ProgramFirstUse.h")
+        self.assertIn("constexpr ProgramFirstUse() = default;", helper)
+        self.assertIn("std::optional<std::unordered_map<std::uint32_t, State>> m_programs;", helper)
 
     def test_all_program_lifetimes_and_submissions_use_first_use_attribution(self):
         # Enumerate the rendering and both UI backends, including state restores,
