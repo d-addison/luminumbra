@@ -5809,5 +5809,31 @@ class PassCallerStateContract(unittest.TestCase):
             self.assertLess(gbuffer.index(call), gbuffer.index("StaticDrawPass::CallerState authored_caller"))
 
 
+class SweepCameraInputWiring(unittest.TestCase):
+    def test_hold_covers_event_polling_driving_and_nested_capture(self):
+        loop = block(read(CLIENT / "main_client.cpp"),
+                     "while (!glfwWindowShouldClose(window))")
+        hold = ("const UiInputRouter::GameplayInputHold sweep_input_hold( "
+                "uiInputRouter, scenario_config.world_visual_sweep() || "
+                "scenario_config.temporal_audit);")
+        self.assertTrue(hold in compact(loop), "sweep input hold must begin the frame scope")
+        prefix = loop[:loop.index("const UiInputRouter::GameplayInputHold")]
+        self.assertFalse(re.sub(r"//[^\n]*", "", prefix).strip())
+        for consumer in ("glfwPollEvents()", "onGameStateInGame(deltaTime)",
+                         "onPreRenderWorldSweep()", "onPostRenderCapture(deltaTime)"):
+            self.assertIn(consumer, loop)
+        callbacks = read(CLIENT / "app/InputCallbacks.cpp")
+        refresh = block(callbacks, "void RefreshInputOwnership(")
+        changed = block(refresh, "if (b.router->SetOwnership(ownership))")
+        self.assertIn("app.input.firstMouse = true;", changed)
+        self.assertIn("player->ClearQueuedLiveInput();", changed)
+        for signature in ("void mouse_callback(", "void scroll_callback("):
+            callback = compact(block(callbacks, signature))
+            self.assertIn("if (bindings.router && !bindings.router->GameplayMouseAllowed()) "
+                          "return;", callback)
+        self.assertIn("g_playerController->SetLiveInputGate(", loop)
+        self.assertIn("uiInputRouter.GameplayKeyAllowed(key)", loop)
+
+
 if __name__ == "__main__":
     unittest.main()
