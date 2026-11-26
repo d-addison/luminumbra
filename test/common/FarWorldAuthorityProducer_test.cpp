@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -565,6 +566,279 @@ protected:
         ASSERT_TRUE(producer.request_capture(windows));
     }
 };
+
+TEST_F(FarWorldSourceCaptureTest, MultiTileCaptureReadsEachTileWithinPerReadBounds) {
+    WorldStreamingState disk;
+    ASSERT_TRUE(disk.insert_chunk(Edited({1, 0, 1}, 2)));
+    ASSERT_TRUE(disk.insert_chunk(Edited({65, 0, 1}, 3)));
+    ASSERT_TRUE(Save{}.save_world(disk, root));
+    std::string error;
+    ASSERT_TRUE(producer.admit_saved_source(root, reads, error)) << error;
+    auto bounded = reads;
+    bounded.members = 1;
+    ASSERT_TRUE(producer.configure_capture({bounded, 512, SourceCaptureClock()}));
+    const std::array<Save::AuthorityWindow, 2> windows{{{1, 1, 1, 1}, {65, 65, 1, 1}}};
+    // The old rectangle needs 65 columns and three evidence entries. Each
+    // actual requested window needs just one of each; the middle is unrequested.
+    ASSERT_GT(65u, source_limits.query_columns);
+    ASSERT_GT(3u, bounded.members);
+    ASSERT_TRUE(producer.request_capture(windows));
+    std::uint64_t observed = 0;
+    for (unsigned pump = 0; pump < 512; ++pump) {
+        EXPECT_LE(producer.pump_capture(1), 1u);
+        const auto progress = producer.capture_progress();
+        if (progress.reads != observed) {
+            EXPECT_EQ(progress.reads, observed + 1);
+            EXPECT_LE(progress.last_columns, source_limits.query_columns);
+            EXPECT_LE(progress.last_members, bounded.members);
+            EXPECT_EQ(progress.last_window.min_chunk_x, windows[observed].min_chunk_x);
+            observed = progress.reads;
+        }
+        ASSERT_EQ(producer.capture_status().error, Producer::Error::None);
+        if (!producer.capture_status().active) {
+            break;
+        }
+        EXPECT_EQ(producer.capture(), nullptr);
+    }
+    ASSERT_TRUE(producer.capture_status().latest_ready);
+    EXPECT_EQ(observed, 2u);
+    EXPECT_EQ(producer.capture_progress().columns, 2u);
+    EXPECT_EQ(producer.capture_progress().members, 2u);
+    ASSERT_NE(producer.capture(), nullptr);
+    EXPECT_EQ(producer.capture()->committed.chunks.size(), 2u);
+    EXPECT_EQ(producer.capture()->committed.members.size(), 2u);
+}
+
+TEST_F(FarWorldSourceCaptureTest, SingleRectangleEquivalenceForFittingCaptures) {
+    WorldStreamingState disk;
+    ASSERT_TRUE(disk.insert_chunk(Edited({1, 0, 1}, 2)));
+    ASSERT_TRUE(disk.insert_chunk(Edited({34, 0, 1}, 3)));
+    ASSERT_TRUE(Save{}.save_world(disk, root));
+    Producer fitting({512, 4u * 1024u * 1024u, 8192, source_limits.memory});
+    std::string error;
+    ASSERT_TRUE(fitting.admit_saved_source(root, reads, error)) << error;
+    ASSERT_TRUE(fitting.configure_capture({reads, 4, SourceCaptureClock()}));
+    fitting.changes()->membership(Edited({2, 0, 2}, 4), false, true);
+    fitting.changes()->membership(Edited({35, 0, 2}, 5), true, true);
+    std::array<Save::AuthorityWindow, 2> windows{};
+    ASSERT_TRUE(Producer::source_window({1, 0, 0}, windows[0]));
+    ASSERT_TRUE(Producer::source_window({1, 1, 0}, windows[1]));
+    for (std::size_t count = 1; count <= windows.size(); ++count) {
+        SCOPED_TRACE(count);
+        auto rectangle = windows[0];
+        rectangle.max_chunk_x = windows[count - 1].max_chunk_x;
+        // This is the pre-change single-rectangle authority oracle, using the
+        // same admitted reader and the same owned volatile publication boundary.
+        const auto before = fitting.read_committed(rectangle, reads);
+        ASSERT_NE(before.membership, Save::AuthorityMembership::Unavailable) << before.error;
+        Producer::Images published;
+        ASSERT_EQ(fitting.copy_published(rectangle, published), Producer::Error::None);
+        ASSERT_TRUE(fitting.request_capture({windows.data(), count}));
+        fitting.pump_capture();
+        fitting.pump_capture();
+        ASSERT_TRUE(fitting.capture_status().latest_ready);
+        const auto* after = fitting.capture();
+        ASSERT_NE(after, nullptr);
+        EXPECT_EQ(after->committed.generation, before.generation);
+        EXPECT_EQ(after->committed.source_identity, before.source_identity);
+        EXPECT_EQ(after->committed.membership, before.membership);
+        ASSERT_EQ(after->committed.members.size(), before.members.size());
+        for (std::size_t index = 0; index < before.members.size(); ++index) {
+            const auto& expected = before.members[index];
+            const auto& actual = after->committed.members[index];
+            EXPECT_EQ(actual.region_x, expected.region_x);
+            EXPECT_EQ(actual.region_z, expected.region_z);
+            EXPECT_EQ(actual.generation, expected.generation);
+            EXPECT_EQ(actual.membership, expected.membership);
+        }
+        ASSERT_EQ(after->committed.chunks.size(), before.chunks.size());
+        for (std::size_t index = 0; index < before.chunks.size(); ++index) {
+            EXPECT_EQ(Persistence::SerializeChunkRecordPayloadJson(*after->committed.chunks[index]),
+                      Persistence::SerializeChunkRecordPayloadJson(*before.chunks[index]));
+        }
+        ASSERT_EQ(after->published.size(), published.size());
+        for (std::size_t index = 0; index < published.size(); ++index) {
+            const auto& expected = published[index];
+            const auto& actual = after->published[index];
+            EXPECT_EQ(actual.coords, expected.coords);
+            EXPECT_EQ(actual.parked, expected.parked);
+            EXPECT_EQ(actual.terrain_authority, expected.terrain_authority);
+            EXPECT_EQ(actual.water_authority, expected.water_authority);
+            EXPECT_EQ(actual.water_resolution, expected.water_resolution);
+            EXPECT_EQ(actual.sdf, expected.sdf);
+            EXPECT_EQ(actual.material, expected.material);
+            EXPECT_EQ(actual.bed, expected.bed);
+            EXPECT_EQ(actual.depth, expected.depth);
+        }
+        EXPECT_EQ(fitting.capture_progress().reads, count);
+    }
+}
+
+TEST_F(FarWorldSourceCaptureTest, SourceChangeBetweenTileReadsRefusesAndKeepsTarget) {
+    Request();
+    producer.pump_capture();
+    producer.pump_capture();
+    const auto* accepted = producer.capture();
+    ASSERT_NE(accepted, nullptr);
+    const std::array<Save::AuthorityWindow, 2> windows{{{1, 1, 1, 1}, {65, 65, 1, 1}}};
+    for (const bool readmit : {false, true}) {
+        SCOPED_TRACE(readmit);
+        std::string error;
+        ASSERT_TRUE(producer.admit_saved_source(root, reads, error)) << error;
+        ASSERT_TRUE(producer.configure_capture({reads, 512, SourceCaptureClock()}));
+        ASSERT_TRUE(producer.request_capture(windows));
+        ASSERT_EQ(producer.pump_capture(2), 2u); // snapshot, then the first tile read
+        ASSERT_EQ(producer.capture_progress().reads, 1u);
+        ASSERT_TRUE(producer.capture_status().active);
+        if (readmit) {
+            ASSERT_TRUE(producer.refresh_saved_source(root, error)) << error;
+        } else {
+            WorldStreamingState replacement;
+            ASSERT_TRUE(replacement.insert_chunk(Edited({65, 0, 1}, 9)));
+            ASSERT_TRUE(Save{}.save_world(replacement, root));
+            producer.pump_capture(512);
+        }
+        EXPECT_EQ(producer.capture_status().error, Producer::Error::CommittedReadRefused);
+        EXPECT_FALSE(producer.capture_read_error().empty());
+        EXPECT_FALSE(producer.capture_status().active);
+        EXPECT_FALSE(producer.capture_status().latest_ready);
+        EXPECT_EQ(producer.capture(), accepted);
+    }
+}
+
+TEST_F(FarWorldSourceCaptureTest, CancelMidCaptureUnwindsPartialTiles) {
+    WorldStreamingState disk;
+    ASSERT_TRUE(disk.insert_chunk(Edited({1, 0, 1}, 2)));
+    ASSERT_TRUE(Save{}.save_world(disk, root));
+    std::string error;
+    ASSERT_TRUE(producer.admit_saved_source(root, reads, error)) << error;
+    Request();
+    producer.pump_capture();
+    producer.pump_capture();
+    const auto* accepted = producer.capture();
+    ASSERT_NE(accepted, nullptr);
+    const auto baseline = source_limits.memory->used();
+    const std::array<Save::AuthorityWindow, 2> windows{{{1, 1, 1, 1}, {65, 65, 1, 1}}};
+    for (const std::uint64_t units : {2u, 5u, 10u}) {
+        SCOPED_TRACE(units);
+        ASSERT_TRUE(producer.configure_capture({reads, 512, SourceCaptureClock()}));
+        ASSERT_TRUE(producer.request_capture(windows));
+        ASSERT_EQ(producer.pump_capture(units), units);
+        ASSERT_TRUE(producer.capture_status().active);
+        ASSERT_GE(producer.capture_progress().reads, 1u);
+        EXPECT_GT(source_limits.memory->used(), baseline);
+        producer.cancel_capture();
+        producer.cancel_capture();
+        EXPECT_FALSE(producer.capture_status().active);
+        EXPECT_FALSE(producer.capture_status().latest_ready);
+        EXPECT_EQ(producer.capture(), accepted);
+        EXPECT_EQ(source_limits.memory->used(), baseline);
+    }
+}
+
+TEST_F(FarWorldSourceCaptureTest, AggregateBytesAndDeadlineSpanAllReads) {
+    Request();
+    producer.pump_capture();
+    producer.pump_capture();
+    const auto* accepted = producer.capture();
+    ASSERT_NE(accepted, nullptr);
+    const std::array<Save::AuthorityWindow, 2> windows{{{1, 1, 1, 1}, {2, 2, 1, 1}}};
+    const auto single = producer.read_committed(windows[0], reads);
+    ASSERT_NE(single.membership, Save::AuthorityMembership::Unavailable);
+    ASSERT_GT(single.compressed_bytes, 0u);
+    ASSERT_GT(single.decoded_bytes, 0u);
+    const auto baseline = source_limits.memory->used();
+    for (const bool compressed : {false, true}) {
+        auto aggregate = reads;
+        if (compressed) {
+            aggregate.compressed_member_bytes = single.compressed_bytes;
+            aggregate.compressed_total_bytes = single.compressed_bytes;
+        } else {
+            aggregate.decoded_member_bytes = single.decoded_bytes;
+            aggregate.decoded_total_bytes = single.decoded_bytes;
+        }
+        ASSERT_TRUE(producer.configure_capture({aggregate, 4, SourceCaptureClock()}));
+        // Each tile alone fits the complete aggregate allowance.
+        for (const auto& window : windows) {
+            EXPECT_NE(producer.read_committed(window, aggregate).membership,
+                      Save::AuthorityMembership::Unavailable);
+        }
+        ASSERT_TRUE(producer.request_capture(windows));
+        producer.pump_capture();
+        producer.pump_capture();
+        EXPECT_EQ(producer.capture_progress().reads, 1u);
+        EXPECT_EQ(producer.capture_status().error, Producer::Error::CommittedReadRefused);
+        EXPECT_EQ(producer.capture(), accepted);
+        EXPECT_EQ(source_limits.memory->used(), baseline);
+    }
+    std::uint64_t ticks = 0;
+    const auto now = [](const void* context) noexcept {
+        return *static_cast<const std::uint64_t*>(context);
+    };
+    ASSERT_TRUE(producer.configure_capture({reads, 4, {now, &ticks, 10}}));
+    ASSERT_TRUE(producer.request_capture(windows));
+    ASSERT_EQ(producer.pump_capture(2), 2u);
+    ASSERT_EQ(producer.capture_progress().reads, 1u);
+    ticks = 10;
+    producer.pump_capture(512);
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::SourceReadExpired);
+    EXPECT_EQ(producer.capture(), accepted);
+    ASSERT_TRUE(producer.configure_capture({reads, 1, SourceCaptureClock()}));
+    ASSERT_TRUE(producer.request_capture(windows));
+    EXPECT_EQ(producer.pump_capture(0), 0u);
+    ASSERT_EQ(producer.pump_capture(2), 2u);
+    ASSERT_EQ(producer.capture_progress().reads, 1u);
+    producer.pump_capture(512);
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::DeadlineExceeded);
+    EXPECT_EQ(producer.capture(), accepted);
+    EXPECT_EQ(source_limits.memory->used(), baseline);
+    ASSERT_TRUE(producer.configure_capture({reads, 4, SourceCaptureClock()}));
+}
+
+TEST_F(FarWorldSourceCaptureTest, PartialAssemblyAllocationFailureUnwindsEveryMap) {
+    Request();
+    producer.pump_capture();
+    producer.pump_capture();
+    const auto* accepted = producer.capture();
+    ASSERT_NE(accepted, nullptr);
+    const auto baseline = source_limits.memory->used();
+    const std::array<Save::AuthorityWindow, 2> windows{{{1, 1, 1, 1}, {65, 65, 1, 1}}};
+    ASSERT_TRUE(producer.request_capture(windows));
+    ASSERT_EQ(producer.pump_capture(2), 2u);
+    ASSERT_EQ(producer.capture_progress().reads, 1u);
+    source_limits.memory->RefuseAttemptsFrom(source_limits.memory->attempts());
+    producer.pump_capture(1); // evidence-map admission after a successful read
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::AllocationFailure);
+    EXPECT_FALSE(producer.capture_status().active);
+    EXPECT_EQ(producer.capture(), accepted);
+    EXPECT_EQ(source_limits.memory->used(), baseline);
+    source_limits.memory->RefuseAttemptsFrom(std::numeric_limits<std::uint64_t>::max());
+}
+
+TEST_F(FarWorldSourceCaptureTest, PartialSecondMemberRefusesAndUnwindsFirstTile) {
+    WorldStreamingState disk;
+    ASSERT_TRUE(disk.insert_chunk(Edited({65, 0, 1}, 2)));
+    ASSERT_TRUE(Save{}.save_world(disk, root));
+    std::string error;
+    ASSERT_TRUE(producer.admit_saved_source(root, reads, error)) << error;
+    Request();
+    producer.pump_capture();
+    producer.pump_capture();
+    const auto* accepted = producer.capture();
+    ASSERT_NE(accepted, nullptr);
+    const auto baseline = source_limits.memory->used();
+    const std::array<Save::AuthorityWindow, 2> windows{{{1, 1, 1, 1}, {65, 65, 1, 1}}};
+    ASSERT_TRUE(producer.request_capture(windows));
+    ASSERT_EQ(producer.pump_capture(2), 2u);
+    ASSERT_EQ(producer.capture_progress().reads, 1u);
+    // No reader retains an open file between pumps, including on Windows.
+    std::filesystem::resize_file(Save::region_file_path(root, 2, 0), 1);
+    producer.pump_capture(512);
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::CommittedReadRefused);
+    EXPECT_FALSE(producer.capture_status().active);
+    EXPECT_EQ(producer.capture(), accepted);
+    EXPECT_EQ(source_limits.memory->used(), baseline);
+}
 
 TEST_F(FarWorldSourceCaptureTest, CandidateAndReadRefusalsReleaseChargesAndPreserveServing) {
     Request();
@@ -1241,7 +1515,9 @@ TEST_F(FarWorldSourceCaptureTest, InvalidRequestsAndMissingSourcesNeverReplaceAc
     EXPECT_FALSE(cold.request_capture(single));
     ASSERT_TRUE(cold.configure_capture({reads, 3, SourceCaptureClock()}));
     EXPECT_FALSE(cold.request_capture(single));
-    const std::array<Save::AuthorityWindow, 2> wide{{{0, 0, 0, 0}, {100, 100, 0, 0}}};
+    // Disjoint windows are read separately, so only a single window that alone
+    // exceeds the per-read column bound is an invalid request.
+    const std::array<Save::AuthorityWindow, 1> wide{{{0, 100, 0, 0}}};
     EXPECT_FALSE(producer.request_capture(wide));
     auto invalid = reads;
     invalid.decoded_total_bytes = 0;
@@ -1428,6 +1704,94 @@ protected:
         return producer.compose_frozen(*world, Request(x), policy, limits, pool, output);
     }
 };
+
+TEST_F(FarWorldFrozenComposeTest, UncapturedGapRefusesBeforeComposition) {
+    ASSERT_NO_FATAL_FAILURE(Capture(WorldStreamingState{}));
+    std::shared_ptr<const World::FarFrozenObservation> image;
+    ASSERT_TRUE(Compose(image).ok());
+    const auto accepted = image;
+    std::array<Save::AuthorityWindow, 2> windows{};
+    ASSERT_TRUE(Producer::source_window({1, 0, 0}, windows[0]));
+    ASSERT_TRUE(Producer::source_window({1, 2, 0}, windows[1]));
+    ASSERT_TRUE(producer.request_capture(windows));
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_TRUE(producer.capture_status().latest_ready);
+    const auto baseline = pool->used();
+    EXPECT_EQ(Compose(image, 1).source, Producer::Error::InvalidWindow);
+    EXPECT_EQ(image, accepted);
+    EXPECT_EQ(pool->used(), baseline);
+}
+
+TEST_F(FarWorldFrozenComposeTest, FittingTileReadsPreserveFrozenAuthorityBytes) {
+    WorldStreamingState disk;
+    ASSERT_TRUE(disk.insert_chunk(Edited({1, 0, 1}, 2)));
+    ASSERT_TRUE(disk.insert_chunk(Edited({34, 0, 1}, 3)));
+    std::array<Save::AuthorityWindow, 2> windows{};
+    ASSERT_TRUE(Producer::source_window({1, 0, 0}, windows[0]));
+    ASSERT_TRUE(Producer::source_window({1, 1, 0}, windows[1]));
+    for (std::size_t count = 1; count <= windows.size(); ++count) {
+        SCOPED_TRACE(count);
+        ASSERT_NO_FATAL_FAILURE(Capture(disk));
+        auto rectangle = windows[0];
+        rectangle.max_chunk_x = windows[count - 1].max_chunk_x;
+        ASSERT_TRUE(producer.request_capture({&rectangle, 1}));
+        producer.pump_capture();
+        producer.pump_capture();
+        std::array<std::shared_ptr<const World::FarFrozenObservation>, 2> before{};
+        for (std::size_t tile = 0; tile < count; ++tile) {
+            ASSERT_TRUE(Compose(before[tile], static_cast<std::int64_t>(tile)).ok());
+        }
+        ASSERT_TRUE(producer.request_capture({windows.data(), count}));
+        producer.pump_capture();
+        producer.pump_capture();
+        for (std::size_t tile = 0; tile < count; ++tile) {
+            std::shared_ptr<const World::FarFrozenObservation> after;
+            ASSERT_TRUE(Compose(after, static_cast<std::int64_t>(tile)).ok());
+            ASSERT_NE(after, nullptr);
+            ASSERT_NE(before[tile], nullptr);
+            EXPECT_EQ(after->content_identity(), before[tile]->content_identity());
+            EXPECT_EQ(after->payload_bytes(), before[tile]->payload_bytes());
+            // Compare every captured scalar bit, including both density layers
+            // and the rectangular normal halo, through immutable public access.
+            const auto origin = static_cast<std::int64_t>(tile) * 512;
+            for (std::int64_t z = -4; z <= 516; z += 4) {
+                for (std::int64_t x = origin - 4; x <= origin + 516; x += 4) {
+                    const auto old_height = before[tile]->Height(1, x, z);
+                    const auto new_height = after->Height(1, x, z);
+                    if (old_height && new_height) {
+                        EXPECT_EQ(std::bit_cast<std::uint32_t>(*old_height),
+                                  std::bit_cast<std::uint32_t>(*new_height));
+                    } else {
+                        FAIL() << "missing captured height";
+                    }
+                    const auto old_water = before[tile]->WaterSample(0, x, z);
+                    const auto new_water = after->WaterSample(0, x, z);
+                    if (old_water && new_water) {
+                        EXPECT_EQ(old_water->wet, new_water->wet);
+                        EXPECT_EQ(std::bit_cast<std::uint32_t>(old_water->surface_height),
+                                  std::bit_cast<std::uint32_t>(new_water->surface_height));
+                    } else {
+                        FAIL() << "missing captured water";
+                    }
+                    for (std::int64_t y = -20; y <= 20; y += 4) {
+                        for (const bool pristine : {false, true}) {
+                            const auto old_sample = before[tile]->Sample(1, {x, y, z}, pristine);
+                            const auto new_sample = after->Sample(1, {x, y, z}, pristine);
+                            if (old_sample && new_sample) {
+                                EXPECT_EQ(std::bit_cast<std::uint32_t>(old_sample->density),
+                                          std::bit_cast<std::uint32_t>(new_sample->density));
+                                EXPECT_EQ(old_sample->material, new_sample->material);
+                            } else {
+                                FAIL() << "missing captured density";
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 TEST_F(FarWorldFrozenComposeTest, CompositionScratchAdmissionPreservesAcceptedImage) {
     WorldStreamingState disk;

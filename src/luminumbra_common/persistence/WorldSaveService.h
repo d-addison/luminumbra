@@ -495,6 +495,9 @@ public:
         AuthorityMembership membership = AuthorityMembership::Unavailable;
         std::uint64_t generation = 0;
         std::uint64_t source_identity = 0;
+        // Read-local work receipts, including envelope verification and validation
+        // outside the window. Process-local only; never serialized.
+        std::uint64_t compressed_bytes = 0, decoded_bytes = 0;
         std::vector<AuthorityMemberEvidence, World::FarVolumePoolAllocator<AuthorityMemberEvidence>>
             members;
         std::vector<std::shared_ptr<const Chunk>,
