@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -34,20 +35,24 @@ public:
         : m_simulationIdentity(identity == PlantIdentity::Simulation) {}
     RegionConsumerGate(const entt::registry& registry,
                        std::span<const RegionKey> due,
-                       const RegionElapsedTicks& elapsed = {})
+                       const RegionElapsedTicks& elapsed = {},
+                       std::optional<std::uint64_t> due_tick = {})
         : m_registry(&registry)
         , m_due(due)
-        , m_elapsed(elapsed) {}
+        , m_elapsed(elapsed)
+        , m_dueTick(due_tick) {}
     RegionConsumerGate(const entt::registry& registry,
                        std::span<const RegionKey> due,
                        std::vector<std::uint64_t>& scratch,
                        PlantIdentity identity = PlantIdentity::Legacy,
-                       const RegionElapsedTicks& elapsed = {})
+                       const RegionElapsedTicks& elapsed = {},
+                       std::optional<std::uint64_t> due_tick = {})
         : m_registry(&registry)
         , m_due(due)
         , m_scratch(&scratch)
         , m_simulationIdentity(identity == PlantIdentity::Simulation)
-        , m_elapsed(elapsed) {}
+        , m_elapsed(elapsed)
+        , m_dueTick(due_tick) {}
 
     // Explicit candidate selection, independent of regional scheduling. Shipping
     // construction keeps the legacy identity/ordering path until activation.
@@ -79,12 +84,31 @@ public:
         if (!m_registry) {
             return {true, 1};
         }
+        Admission result{false, 0};
         if (const auto* owner =
                 m_registry->try_get<const Components::PlantRegionComponent>(entity)) {
-            return ForOwner({owner->owner_x, owner->owner_z});
+            result = ForOwner({owner->owner_x, owner->owner_z});
+        } else if (const auto* transform =
+                       m_registry->try_get<const Components::TransformComponent>(entity)) {
+            result = AtPosition(transform->position);
         }
-        const auto* transform = m_registry->try_get<const Components::TransformComponent>(entity);
-        return transform ? AtPosition(transform->position) : Admission{false, 0};
+        // Optional due-time binding clips plant windows to their birth. Later consumers
+        // can see crop children created in this transaction, but never pre-birth history.
+        // Gates without due-time binding retain their existing owner-window semantics.
+        if (m_dueTick && result.elapsed_ticks != 0) {
+            if (const auto* growth =
+                    m_registry->try_get<const Components::PlantGrowthComponent>(entity)) {
+                if (growth->planted_tick > *m_dueTick) {
+                    result.elapsed_ticks = 0;
+                } else {
+                    const auto age = *m_dueTick - growth->planted_tick;
+                    if (age < result.elapsed_ticks) {
+                        result.elapsed_ticks = static_cast<std::uint32_t>(age) + 1u;
+                    }
+                }
+            }
+        }
+        return result;
     }
 
     [[nodiscard]] bool AllowsPosition(const Vec3& position) const {
@@ -141,6 +165,7 @@ private:
     std::vector<std::uint64_t>* m_scratch = nullptr;
     bool m_simulationIdentity = false;
     RegionElapsedTicks m_elapsed;
+    std::optional<std::uint64_t> m_dueTick;
     mutable std::vector<entt::entity> m_plantIdentityScratch;
     mutable std::vector<std::uint64_t> m_owned;
     mutable bool m_built = false;

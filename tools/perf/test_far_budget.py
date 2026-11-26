@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Synthetic controls for matrix completeness and frame-attributed measurements."""
 import copy
+import contextlib
 import math
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -14,6 +16,321 @@ import render_contract
 import test_render_contract as controls
 from test_perf import far_capture, update_far_summary
 from test_render_contract import budget_artifact
+
+
+def receipt_evidence(root):
+    """Synthetic reporter files, with real source hashing and process custody.
+
+    Native dependency readiness and render measurements are mocked separately;
+    this fixture cannot represent a qualified native run.
+    """
+    import run_far_budget as runner
+    from test_run_far_budget import write_evidence
+
+    matrix = budget.load_matrix()
+    template = matrix['worlds'][0]
+    for world in matrix['worlds']:
+        world.update(script=template['script'], script_sha256=template['script_sha256'],
+                     pose=dict(x=0, y=80, z=0, yaw=0, pitch=0))
+    verdict = {'schema': budget.render_budget.VERDICT_SCHEMA,
+               'floor': {'verdict': 'pass', 'limit_ms': budget.render_budget.FLOOR_MS, 'p99_ms': 1}}
+    checked = dict(metrics={}, verdict=verdict, state='complete', reasons=[])
+    text = budget.fixture_paths.decode_text(budget.read(budget.ROOT, template['script'], budget.MAX_SCRIPT_BYTES))
+    results = []
+    for cell in budget.cells(matrix):
+        world = next(world for world in matrix['worlds'] if world['id'] == cell['world'])
+        selected, receipt = write_evidence(root, cell, {'workload': {'script': text}})
+        work = root / 'work' / cell['id']
+        receipt.update(client_path=str(root / 'client'), runtime_root=str(root / 'runtime'),
+                       save_root=str(work / 'storage'))
+        receipt['systems_config']['path'] = str(root / 'runtime/data/common/systems.json')
+        receipt['command'] = runner.command(cell, world, matrix, receipt['client_path'], selected['capture'],
+            work / 'workload.traversal' if cell['workload'] == 'traversal' else None)
+        receipt['command'] += budget.qualification.runtime_options(receipt['systems_config']['path'],
+            receipt['runtime_root'], receipt['save_root'])
+        receipt['command'] += ['--declare-render-overrides', str(work / 'render-overrides.json')]
+        selected['receipt'].write_bytes(budget.canonical(receipt))
+        snapshots = {key: path.read_bytes() for key, path in selected.items() if key != 'log'}
+        results.append(dict(cell, **copy.deepcopy(checked),
+            fixture_sha256=budget.fixture_identity(world),
+            capture_sha256=budget.digest(snapshots['capture']),
+            process=runner.custody(root, cell, snapshots),
+            sources={key: dict(path=selected[key].relative_to(root).as_posix(),
+                              sha256=budget.digest(payload)) for key, payload in snapshots.items()}))
+    index = runner.build_index(matrix, results)
+    index.update(matrix=matrix, evidence_root=str(root))
+    payload = budget.canonical(index)
+    (root / 'baseline.json').write_bytes(payload)
+    (root / 'index.json').write_bytes(payload)
+    approval = dict(schema=budget.APPROVAL_SCHEMA, revision='1' * 40,
+        profile_id='synthetic-reviewed-profile', limits_sha256='d' * 64,
+        matrix_sha256=budget.digest(budget.canonical(matrix)), baseline_sha256=budget.digest(payload),
+        client_sha256='a' * 64, build_manifest_sha256='b' * 64, systems_config_sha256='c' * 64)
+    section = dict(status='pass', evidence='index.json', baseline='baseline.json',
+        approval_sha256=budget.digest(budget.canonical(approval)),
+        **{key: approval[key] for key in ('profile_id', 'limits_sha256', 'baseline_sha256')})
+    return matrix, approval, section, index, checked
+
+
+@contextlib.contextmanager
+def synthetic_receipt_measurements(matrix, checked):
+    # Only native readiness/measurement is substituted. All file reads, matrix
+    # completeness, source hashes, custody and candidate binding remain real.
+    with mock.patch.object(budget, 'load_matrix', return_value=matrix), \
+            mock.patch.object(budget, 'dependencies', return_value=[]), \
+            mock.patch.object(budget, 'evaluate', return_value=checked):
+        yield
+
+
+class FarBudgetReceiptTests(unittest.TestCase):
+    def setUp(self):
+        self.storage = tempfile.TemporaryDirectory()
+        self.addCleanup(self.storage.cleanup)
+        self.root = Path(self.storage.name)
+        self.matrix, self.approval, self.section, self.index, self.checked = receipt_evidence(self.root)
+        self.measurements = synthetic_receipt_measurements(self.matrix, self.checked)
+        self.measurements.__enter__()
+        self.addCleanup(self.measurements.__exit__, None, None, None)
+
+    def qualify(self):
+        budget.qualify_receipt(self.section, self.root, self.approval, self.approval['revision'])
+
+    def write_index(self):
+        (self.root / 'index.json').write_bytes(budget.canonical(self.index))
+
+    def test_complete_synthetic_aggregation_requires_all_sources(self):
+        self.qualify()
+        self.index['cells'][0]['sources']['retained']['sha256'] = '0' * 64
+        self.write_index()
+        with self.assertRaisesRegex(ValueError, 'source identity'):
+            self.qualify()
+
+    def test_missing_budget_evidence_cannot_pass(self):
+        for key in ('evidence', 'baseline', 'approval_sha256', 'profile_id', 'limits_sha256', 'baseline_sha256'):
+            with self.subTest(key=key):
+                section = dict(self.section)
+                section.pop(key)
+                with self.assertRaises(ValueError):
+                    budget.qualify_receipt(section, self.root, self.approval, self.approval['revision'])
+        for key in self.approval:
+            approval = dict(self.approval)
+            approval.pop(key)
+            with self.subTest(approval=key), self.assertRaises(ValueError):
+                budget.qualify_receipt(self.section, self.root, approval, '1' * 40)
+        with self.assertRaises(ValueError):
+            budget.qualify_receipt(self.section, self.root, None, '1' * 40)
+
+    def test_profile_or_revision_mismatch_fails(self):
+        for key in ('profile_id', 'limits_sha256', 'baseline_sha256', 'approval_sha256'):
+            section = dict(self.section, **{key: '0' * 64})
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                budget.qualify_receipt(section, self.root, self.approval, '1' * 40)
+        for revision in (None, '', '1234', '2' * 40):
+            with self.subTest(revision=revision), self.assertRaises(ValueError):
+                budget.qualify_receipt(self.section, self.root, self.approval, revision)
+        for key in budget.APPROVAL_HASHES:
+            approval = dict(self.approval, **{key: '0' * 64})
+            section = dict(self.section, approval_sha256=budget.digest(budget.canonical(approval)))
+            with self.subTest(approval=key), self.assertRaises(ValueError):
+                budget.qualify_receipt(section, self.root, approval, '1' * 40)
+
+    def test_single_failed_cell_blocks_acceptance(self):
+        baseline = copy.deepcopy(self.index)
+        for position in range(32):
+            for state in ('fail', 'invalid', 'incomplete', 'unevaluated'):
+                self.index = copy.deepcopy(baseline)
+                self.index['cells'][position]['state'] = state
+                self.write_index()
+                with self.subTest(position=position, state=state), self.assertRaises(ValueError):
+                    self.qualify()
+
+    def test_omitted_duplicate_reordered_empty_and_failed_timing_cells_refuse(self):
+        baseline = copy.deepcopy(self.index)
+        cases = [[], baseline['cells'][:-1], baseline['cells'] + baseline['cells'][:1],
+                 list(reversed(baseline['cells']))]
+        duplicate = copy.deepcopy(baseline['cells'])
+        duplicate[-1] = duplicate[0]
+        cases.append(duplicate)
+        for cells in cases:
+            self.index['cells'] = cells
+            self.write_index()
+            with self.assertRaises(ValueError):
+                self.qualify()
+        self.index = baseline
+        self.index['cells'][-1]['verdict']['floor']['verdict'] = 'fail'
+        self.write_index()
+        with self.assertRaisesRegex(ValueError, 'timing check failed'):
+            self.qualify()
+
+    def test_malformed_or_unapproved_floor_summary_refuses(self):
+        actual = self.index['cells'][0]
+        original = copy.deepcopy(actual['verdict'])
+        for key, value in [('verdict', 'unevaluated'), ('limit_ms', 100), ('p99_ms', True),
+                           ('p99_ms', -1), ('p99_ms', None), ('p99_ms', 10**400)]:
+            actual['verdict'] = copy.deepcopy(original)
+            actual['verdict']['floor'][key] = value
+            self.write_index()
+            with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, 'timing check failed'):
+                self.qualify()
+        for value in (None, {}, {'schema': 'unknown', 'floor': original['floor']}):
+            actual['verdict'] = value
+            self.write_index()
+            with self.subTest(verdict=value), self.assertRaises(ValueError):
+                self.qualify()
+
+    def test_source_refusals_and_unavailable_dependencies(self):
+        baseline = copy.deepcopy(self.index)
+        for key in ('fixture_sha256', 'capture_sha256', 'process', 'sources'):
+            self.index = copy.deepcopy(baseline)
+            self.index['cells'][0].pop(key)
+            self.write_index()
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.qualify()
+        self.index = baseline
+        self.write_index()
+        with mock.patch.object(budget, 'dependencies', return_value=['commit/all-tier bake unavailable']):
+            with self.assertRaisesRegex(ValueError, 'dependency unavailable'):
+                self.qualify()
+        for state in ('fail', 'incomplete'):
+            with mock.patch.object(budget, 'evaluate', return_value=dict(self.checked, state=state)):
+                with self.assertRaisesRegex(ValueError, 'timing/coverage'):
+                    self.qualify()
+        with mock.patch.object(budget, 'read', side_effect=PermissionError('denied')):
+            with self.assertRaises(PermissionError):
+                self.qualify()
+
+    def test_partial_unknown_and_escaping_evidence_refuses(self):
+        for path in ('index.json', 'baseline.json'):
+            saved = (self.root / path).read_bytes()
+            for payload in (b'{', b'[]', b'', b'{"x":NaN}'):
+                (self.root / path).write_bytes(payload)
+                with self.subTest(path=path, payload=payload), self.assertRaises(ValueError):
+                    self.qualify()
+            (self.root / path).write_bytes(saved)
+        for reference in ('../index.json', 'C:index.json', '/index.json', '.', ''):
+            with self.subTest(reference=reference), self.assertRaises(ValueError):
+                budget.qualify_receipt(dict(self.section, evidence=reference), self.root,
+                                       self.approval, '1' * 40)
+        for source_root in ('', 'relative', str(self.root.parent)):
+            self.index['evidence_root'] = source_root
+            self.write_index()
+            with self.subTest(source_root=source_root), self.assertRaises(ValueError):
+                self.qualify()
+
+    def test_unknown_approval_metadata_and_stale_matrix_refuse(self):
+        for key, value in [('schema', 'unknown'), ('profile_id', ''), ('profile_id', 'legacy'),
+                           ('profile_id', 'development'), ('profile_id', 'unavailable'),
+                           ('profile_id', 'x' * 129), ('profile_id', []), ('limits_sha256', 'bad'),
+                           ('limits_sha256', 1e38), ('extra', True)]:
+            approval = dict(self.approval, **{key: value})
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                budget.validate_approval(approval, '1' * 40)
+        baseline = copy.deepcopy(self.index)
+        for key, value in [('schema', 'unknown'), ('state', 'incomplete'), ('group_count', True),
+                           ('group_count', 0), ('matrix_sha256', '0' * 64), ('matrix', {})]:
+            self.index = dict(baseline, **{key: value})
+            self.write_index()
+            with self.subTest(index=key), self.assertRaises(ValueError):
+                self.qualify()
+        self.index = copy.deepcopy(baseline)
+        # Python equality alone considers 400 and 400.0 identical; matrix
+        # identity still covers the reporter's exact canonical representation.
+        self.index['matrix']['warmup_frames'] = 400.0
+        self.write_index()
+        with self.assertRaisesRegex(ValueError, 'stale far budget evidence matrix'):
+            self.qualify()
+
+    def test_rehashed_process_override_and_native_identity_mismatch_refuse(self):
+        import run_far_budget as runner
+        actual = self.index['cells'][0]
+        cell = budget.cells(self.matrix)[0]
+        selected = runner.paths(self.root, cell)
+        original = selected['receipt'].read_bytes()
+        mutations = [lambda r: r['command'].append('--far-budget-unreviewed'),
+                     lambda r: r['client'].update(sha256_verified=False),
+                     lambda r: r.update(outcome='timed_out'),
+                     lambda r: r['systems_config'].update(sha256='0' * 64),
+                     lambda r: r['client'].update(build_manifest_sha256='0' * 64),
+                     lambda r: r.update(return_code=1), lambda r: r.pop('client_path')]
+        for mutate in mutations:
+            receipt = budget.decode(original)
+            mutate(receipt)
+            payload = budget.canonical(receipt)
+            selected['receipt'].write_bytes(payload)
+            actual['sources']['receipt']['sha256'] = budget.digest(payload)
+            # Rehashing and editing all index claims must not confer approval.
+            try:
+                actual['process'] = runner.custody(self.root, cell, {
+                    key: path.read_bytes() for key, path in selected.items() if key != 'log'})
+            except ValueError:
+                pass
+            self.write_index()
+            with self.subTest(mutation=mutations.index(mutate)), self.assertRaises((ValueError, KeyError)):
+                self.qualify()
+
+    def test_source_paths_missing_files_wrong_types_and_changed_summaries_refuse(self):
+        actual = self.index['cells'][0]
+        baseline = copy.deepcopy(actual)
+        for source in (None, {}, dict(path='../escape', sha256='a' * 64),
+                       dict(path='C:escape', sha256='a' * 64)):
+            actual['sources']['capture'] = source
+            self.write_index()
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                self.qualify()
+        self.index['cells'][0] = baseline
+        self.write_index()
+        source = self.root / baseline['sources']['capture']['path']
+        payload = source.read_bytes()
+        source.unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.qualify()
+        source.mkdir()
+        with self.assertRaises(ValueError):
+            self.qualify()
+        source.rmdir()
+        source.write_bytes(payload)
+        with mock.patch.object(budget, 'evaluate', return_value=dict(self.checked, metrics={'changed': True})):
+            with self.assertRaisesRegex(ValueError, 'summary differs'):
+                self.qualify()
+
+    def test_approval_does_not_make_partial_baseline_complete(self):
+        self.index['cells'].pop()
+        payload = budget.canonical(self.index)
+        (self.root / 'baseline.json').write_bytes(payload)
+        self.approval['baseline_sha256'] = budget.digest(payload)
+        self.section.update(baseline_sha256=self.approval['baseline_sha256'],
+                            approval_sha256=budget.digest(budget.canonical(self.approval)))
+        with self.assertRaisesRegex(ValueError, 'every matrix cell'):
+            self.qualify()
+
+    def test_rehashed_partial_and_wrong_type_captures_refuse(self):
+        import run_far_budget as runner
+        for position, payloads in ((0, (b'{', b'[]', b'null', b'1', b'"text"')),
+                                   (1, (b'{"workload":[]}', b'{"workload":null}',
+                                        b'{"workload":{"script":"changed"}}'))):
+            cell = budget.cells(self.matrix)[position]
+            actual = self.index['cells'][position]
+            selected = runner.paths(self.root, cell)
+            originals = {key: selected[key].read_bytes() for key in ('capture', 'retained', 'receipt')}
+            original_summary = copy.deepcopy(actual)
+            for payload in payloads:
+                selected['capture'].write_bytes(payload)
+                selected['retained'].write_bytes(payload)
+                receipt = budget.decode(originals['receipt'])
+                receipt['capture_sha256'] = budget.digest(payload)
+                selected['receipt'].write_bytes(budget.canonical(receipt))
+                snapshots = {key: selected[key].read_bytes() for key in originals}
+                actual['capture_sha256'] = budget.digest(payload)
+                actual['process'] = runner.custody(self.root, cell, snapshots)
+                for key, snapshot in snapshots.items():
+                    actual['sources'][key]['sha256'] = budget.digest(snapshot)
+                self.write_index()
+                with self.subTest(position=position, payload=payload), self.assertRaises(ValueError):
+                    self.qualify()
+            for key, original in originals.items():
+                selected[key].write_bytes(original)
+            self.index['cells'][position] = original_summary
+            self.write_index()
 
 
 def synthetic_capture(directory):

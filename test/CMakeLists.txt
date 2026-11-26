@@ -386,6 +386,7 @@ add_executable(common_tests
     tools/active_regions_dump_test.cpp
     ../tools/active_regions_dump.cpp
     common/ActiveRegionPriority_test.cpp
+    common/ActiveRegionScale_test.cpp
     common/ActiveRegionAcceptance_test.cpp
     common/SimulationIdentityAllocator_test.cpp
     common/PlantCreationIdentity_test.cpp
@@ -458,6 +459,7 @@ add_executable(common_tests
     sim/crop_lifecycle_test.cpp
     sim/PlantReproductionContinuation_test.cpp
     sim/foliage_drift_integration_test.cpp
+    sim/RegionalCadenceIntegration_test.cpp
     sim/species_registry_test.cpp
     sim/movement_hardening_test.cpp
     sim/lifecycle_hardening_test.cpp
@@ -2638,6 +2640,9 @@ set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tool
 add_test(NAME RegionalAdmissionReportContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_regional_admission_report.py")
 set_tests_properties(RegionalAdmissionReportContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
+add_test(NAME ActiveRegionScaleReportContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_active_region_scale.py")
+set_tests_properties(ActiveRegionScaleReportContract PROPERTIES LABELS "simulation;tools" TIMEOUT 5)
 add_test(NAME DeferredStackEvidenceContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_deferred_stack.py")
 set_tests_properties(DeferredStackEvidenceContract PROPERTIES LABELS "perf;tools" TIMEOUT 30)
@@ -2769,8 +2774,11 @@ if(DEFINED ENV{VISUAL_SWEEP_PYTHON})
 endif()
 if(Python3_FOUND)
     add_test(NAME FarHorizonV2ValidatorContract
-        COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover -s "${CMAKE_SOURCE_DIR}/tools/gates" -p test_far_ladder_oracle.py)
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/gates/test_far_ladder_oracle.py")
     set_tests_properties(FarHorizonV2ValidatorContract PROPERTIES LABELS "tools" TIMEOUT 60)
+    add_test(NAME FarWorldReportPython
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_far_world_report.py")
+    set_tests_properties(FarWorldReportPython PROPERTIES LABELS "tools" TIMEOUT 60)
     if(Python3_VERSION VERSION_GREATER_EQUAL "3.10")
         add_test(NAME FoliageEvidenceContract
             COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_foliage_evidence.py)
@@ -3047,6 +3055,11 @@ add_test(NAME FarBudgetPython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/perf/test_far_budget.py)
 add_test(NAME FarBudgetRunnerPython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/perf/test_run_far_budget.py)
+add_test(NAME FarBudgetReceiptPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/ci/test_check_v03_receipt.py
+    FarBudgetReceiptContract.test_missing_budget_evidence_cannot_pass
+    FarBudgetReceiptContract.test_profile_or_revision_mismatch_fails
+    FarBudgetReceiptContract.test_single_failed_cell_blocks_acceptance)
 add_test(NAME ContainmentLinkClosurePython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_containment_link_closure.py)
 add_test(NAME AsanShardContractPython COMMAND "${Python3_EXECUTABLE}" -I -B
