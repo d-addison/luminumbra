@@ -84,8 +84,10 @@ history even when they contribute no frozen content. Consumed work stops owning
 records on the next tick.
 
 Invalid host input never throws out of the session. Non-finite or out-of-range
-(outside -2^24 <= x,z < 2^24) walking anchors, ground-object edit positions and region pins are
-ignored and counted (observational, never hashed or saved). Invalid replicated anchors, work for
+(outside -2^24 <= x,z < 2^24) walking anchors and ground-object edit positions are
+ignored and counted once per refused call, as are pin requests outside
+-32768 <= x,z < 32768, while unpinning an unknown region is an uncounted no-op
+(observational, never hashed or saved). Invalid replicated anchors, work for
 regions the ledger does not know, and visit-time ledger exhaustion are skipped inside the scheduler
 and counted in the schedule's `rejected` triple; the schedule digest appends that triple only when
 it is non-zero, so valid input keeps its digest.

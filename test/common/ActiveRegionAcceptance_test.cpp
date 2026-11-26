@@ -42,7 +42,10 @@ void ReplayInputs(unsigned workers, bool reopen, std::vector<AcceptanceFrame>& f
     original.NotifyGroundObjectEdit(Vec3(20488, 0, -20472));
     original.PinActiveRegion(kRemote, true);
     auto* session = &original;
-    // Twelve ticks, two chunks and at most six ledger records. No procedural jobs.
+    // Twelve ticks, two chunks and exactly ten ledger records. The 512 m disc
+    // at (256, 256) intersects all nine squares in [-1, 1] on each axis:
+    // even the corners are only sqrt(256^2 + 256^2) m away. The remote edited
+    // and pinned region adds the tenth record. No procedural jobs.
     for (std::uint64_t tick = 1; tick <= 12; ++tick) {
         SCOPED_TRACE(tick);
         // Equality after tick 7 deliberately selects the under-hold path.
@@ -50,7 +53,11 @@ void ReplayInputs(unsigned workers, bool reopen, std::vector<AcceptanceFrame>& f
         ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
         ASSERT_FALSE(session->GetRegionSchedulerFault().has_value());
         const auto& ledger = session->GetActiveRegionLedger();
-        ASSERT_LE(ledger.records().size(), 6u);
+        ASSERT_EQ(ledger.records().size(), 10u);
+        for (int x = -1; x <= 1; ++x)
+            for (int z = -1; z <= 1; ++z)
+                EXPECT_TRUE(ledger.records().contains(RegionKey{x, z}));
+        ASSERT_TRUE(ledger.records().contains(kRemote));
         const auto& record = ledger.records().at(kRemote);
         const auto expected = tick < 3 || tick >= 11  ? RegionState::Active
                               : tick < 5 || tick >= 9 ? RegionState::Reduced
@@ -92,6 +99,34 @@ TEST_P(ActiveRegionAcceptance, EnabledReplayMatchesAcrossWorkers) {
 
 INSTANTIATE_TEST_SUITE_P(Workers, ActiveRegionAcceptance, testing::Values(1u, 2u, 4u));
 
+void ExpectPinRejections(GameSession& session, const std::string& before) {
+    std::uint32_t rejected_pins = 0;
+    // Unpinning an unknown valid key does not create a record or reject input.
+    session.PinActiveRegion({123, 456}, false);
+    EXPECT_EQ(session.GetRegionInputRejections().pins, 0u);
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), before);
+    for (const bool x_axis : {true, false}) {
+        for (const int coordinate :
+             {-32769, 32768, std::numeric_limits<int>::min(), std::numeric_limits<int>::max()}) {
+            const RegionKey key = x_axis ? RegionKey{coordinate, 0} : RegionKey{0, coordinate};
+            // Missing-key unpins return before key validation. An invalid pin
+            // is refused and counted; a later unpin is still an uncounted no-op.
+            EXPECT_NO_THROW(session.PinActiveRegion(key, false));
+            EXPECT_EQ(session.GetRegionInputRejections().pins, rejected_pins);
+            EXPECT_EQ(session.GetActiveRegionLedger().encode(), before);
+            EXPECT_NO_THROW(session.PinActiveRegion(key, true));
+            ++rejected_pins;
+            EXPECT_EQ(session.GetRegionInputRejections().pins, rejected_pins);
+            EXPECT_EQ(session.GetActiveRegionLedger().encode(), before);
+            EXPECT_NO_THROW(session.PinActiveRegion(key, false));
+            EXPECT_EQ(session.GetRegionInputRejections().pins, rejected_pins);
+            EXPECT_EQ(session.GetActiveRegionLedger().encode(), before);
+        }
+    }
+    // Two axes and four invalid keys: only pin attempts count as refusals.
+    EXPECT_EQ(session.GetRegionInputRejections().pins, 8u);
+}
+
 TEST(ActiveRegionAcceptance, SessionInputBoundsPreserveValidAuthority) {
     ActiveRegionAcceptanceWorld fixture(1);
     GameSession session;
@@ -131,7 +166,23 @@ TEST(ActiveRegionAcceptance, SessionInputBoundsPreserveValidAuthority) {
     // Noclip cannot replace the walking anchor, even with otherwise valid input.
     session.SetLocalPlayerSimulationPosition(Vec3(1024, 0, 1024), false);
     session.SetLocalPlayerSimulationPosition(Vec3(nan, 0, 0), false);
-    std::uint32_t rejected = 0;
+    EXPECT_EQ(session.GetRegionInputRejections().anchors, 0u);
+    EXPECT_EQ(session.GetRegionInputRejections().edits, 0u);
+    EXPECT_EQ(session.GetRegionInputRejections().pins, 0u);
+    std::uint32_t rejected_anchors = 0, rejected_edits = 0;
+    const auto reject_position = [&](const Vec3& position) {
+        SCOPED_TRACE(testing::Message() << position.x << ',' << position.y << ',' << position.z);
+        EXPECT_NO_THROW(session.SetLocalPlayerSimulationPosition(position, true));
+        ++rejected_anchors;
+        EXPECT_EQ(session.GetRegionInputRejections().anchors, rejected_anchors);
+        EXPECT_NO_THROW(session.NotifyGroundObjectEdit(position));
+        // valid_anchor rejects both finite out-of-range and non-finite positions
+        // before mark_edited; each refused call increments exactly once.
+        ++rejected_edits;
+        EXPECT_EQ(session.GetRegionInputRejections().edits, rejected_edits);
+        EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(), std::optional(walking));
+        EXPECT_EQ(session.GetActiveRegionLedger().encode(), before);
+    };
     for (const int axis : {0, 2}) {
         for (const float coordinate : {limit,
                                        std::nextafter(limit, infinity),
@@ -141,35 +192,17 @@ TEST(ActiveRegionAcceptance, SessionInputBoundsPreserveValidAuthority) {
                                        -infinity}) {
             Vec3 position(256, 0, 256);
             position[axis] = coordinate;
-            EXPECT_NO_THROW(session.SetLocalPlayerSimulationPosition(position, true));
-            EXPECT_NO_THROW(session.NotifyGroundObjectEdit(position));
-            ++rejected;
-            EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(), std::optional(walking));
-            EXPECT_EQ(session.GetActiveRegionLedger().encode(), before);
+            reject_position(position);
         }
     }
     for (const float coordinate : {nan, infinity, -infinity}) {
         const Vec3 position(256, coordinate, 256);
-        session.SetLocalPlayerSimulationPosition(position, true);
-        session.NotifyGroundObjectEdit(position);
-        ++rejected;
-        EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(), std::optional(walking));
-        EXPECT_EQ(session.GetActiveRegionLedger().encode(), before);
+        reject_position(position);
     }
-    std::uint32_t rejected_pins = 0;
-    for (const bool x_axis : {true, false}) {
-        for (const int coordinate :
-             {-32769, 32768, std::numeric_limits<int>::min(), std::numeric_limits<int>::max()}) {
-            const RegionKey key = x_axis ? RegionKey{coordinate, 0} : RegionKey{0, coordinate};
-            for (const bool pinned : {false, true}) {
-                EXPECT_NO_THROW(session.PinActiveRegion(key, pinned));
-                ++rejected_pins;
-            }
-        }
-    }
-    EXPECT_EQ(session.GetRegionInputRejections().anchors, rejected);
-    EXPECT_EQ(session.GetRegionInputRejections().edits, rejected);
-    EXPECT_EQ(session.GetRegionInputRejections().pins, rejected_pins);
+    ExpectPinRejections(session, before);
+    // Six finite XZ boundary refusals plus nine non-finite XYZ refusals.
+    EXPECT_EQ(session.GetRegionInputRejections().anchors, 15u);
+    EXPECT_EQ(session.GetRegionInputRejections().edits, 15u);
     EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(), std::optional(walking));
     EXPECT_EQ(session.GetActiveRegionLedger().encode(), before);
     EXPECT_EQ(SessionWorldHash(session), authority);

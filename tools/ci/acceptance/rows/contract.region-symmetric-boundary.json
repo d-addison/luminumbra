@@ -1,7 +1,7 @@
 {
   "id": "contract.region-symmetric-boundary",
   "source": "docs/active-regions.md#activation-and-ordering",
-  "statement": "Non-finite or out-of-range (outside -2^24 <= x,z < 2^24) walking anchors, ground-object edit positions and region pins are ignored and counted (observational, never hashed or saved).",
+  "statement": "Non-finite or out-of-range (outside -2^24 <= x,z < 2^24) walking anchors and ground-object edit positions are ignored and counted once per refused call, as are pin requests outside -32768 <= x,z < 32768, while unpinning an unknown region is an uncounted no-op (observational, never hashed or saved).",
   "status": "partial",
   "requirements": [
     "ar.activation.050"
