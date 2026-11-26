@@ -63,6 +63,33 @@ def artifact():
     return data
 
 
+def budget_artifact():
+    """Synthetic complete cold phase followed by the existing timing window."""
+    data = artifact()
+    tiers = [dict(tier=index, current_coverage=True, wanted=1, covering=1, settled=1,
+                  pending=0, building=0, ready=0, draws=1, indices=3, draw_refusals=0,
+                  memory=dict(limit=1000, cpu_bytes=10, gpu_bytes=20, total_bytes=30,
+                              peak_bytes=40, admission_refusals=0),
+                  work=dict(build_attempts=1, dispatched=1, completed=1, upload_attempts=1,
+                            uploaded=1, upload_bytes=20, successful_upload_bytes=20,
+                            rejected=0, evicted=0)) for index in range(1, 6)]
+    rows = []
+    for frame in range(1, 7):
+        rows.append(dict(render_frame=frame, timing_frame=frame - 1 if frame >= 3 else None,
+                         phase='measured' if frame >= 3 else 'cold_or_settling',
+                         elapsed_ms=frame * 10, render_wall_ms=10, event=0,
+                         world_epoch=1, target_serial=1, target_cohort='42',
+                         content_identity='43', bake_generation=0, accepted=True,
+                         current_coverage=frame >= 2, tiers=copy.deepcopy(tiers)))
+    rows[0]['tiers'][0].update(current_coverage=False, covering=0, settled=0, pending=1)
+    data['far_budget'] = dict(schema='luminumbra.far_budget.v1', origin='before_first_advancement',
+                              origin_ms=0, deadline_ms=90000, storage_complete=True, frames=rows,
+                              fills=[dict(event=0, kind='cold', origin_ms=0, accepted_ms=10,
+                                          completed_ms=20, status='complete',
+                                          tier_completed_ms=[20, 10, 10, 10, 10])])
+    return data
+
+
 def args(**overrides):
     result = dict(position=None, yaw=None, pitch=None, tod=None, fov=None,
                   qualified_renderer=QUALIFIED, qualified_vendor=None,
@@ -74,6 +101,143 @@ def args(**overrides):
 
 
 class RenderContractTests(unittest.TestCase):
+    def test_far_budget_cold_phase_includes_streaming_and_preserves_baseline(self):
+        data = budget_artifact()
+        self.assertEqual(contract.validate(data, QUALIFIED, far_budget=True)['verdict'], 'PASS')
+        data['far_world'] = far_capture()['far_world']
+        self.assertEqual(contract.validate(data, QUALIFIED, ladder_baseline=True,
+                                           far_budget=True)['verdict'], 'PASS')
+        data['far_world']['frames'][1]['coverage_settled'] = False
+        update_far_summary(data)
+        with self.assertRaisesRegex(ValueError, 'Ladder baseline refused'):
+            contract.validate(data, QUALIFIED, ladder_baseline=True, far_budget=True)
+
+    def test_far_budget_epoch_bake_cohort_and_refill_events_are_separate(self):
+        data = budget_artifact()
+        rows = data['far_budget']['frames']
+        for row in rows[2:]:
+            row.update(world_epoch=2, event=1)
+        for row in rows[3:]:
+            row.update(bake_generation=1, event=2)
+        for row in rows[4:]:
+            row.update(target_cohort='99', event=3)
+        rows[5].update(event=4, current_coverage=False)
+        rows[5]['tiers'][0].update(current_coverage=False, pending=1, settled=0, covering=0)
+        for event, kind, elapsed in [(1, 'epoch', 30), (2, 'edit_bake', 40), (3, 'cohort', 50)]:
+            data['far_budget']['fills'].append(dict(event=event, kind=kind, origin_ms=elapsed - 10,
+                accepted_ms=elapsed, completed_ms=elapsed, status='complete', tier_completed_ms=[elapsed] * 5))
+        data['far_budget']['fills'].append(dict(event=4, kind='refill', origin_ms=50,
+            accepted_ms=60, completed_ms=None, status='incomplete', tier_completed_ms=[None, 60, 60, 60, 60]))
+        self.assertEqual(contract.validate(data, QUALIFIED, far_budget=True)['verdict'], 'PASS')
+        for event in range(1, 5):
+            broken = copy.deepcopy(data)
+            broken['far_budget']['fills'][event]['kind'] = 'cold'
+            with self.assertRaises(ValueError):
+                contract.validate(broken, QUALIFIED, far_budget=True)
+
+    def test_far_budget_unknown_frame_cannot_hide_epoch_change(self):
+        data = budget_artifact()
+        rows = data['far_budget']['frames']
+        rows[2].update(world_epoch=0, target_serial=0, target_cohort='0', content_identity='0',
+                       accepted=False, current_coverage=False, event=1)
+        for tier in rows[2]['tiers']:
+            tier['current_coverage'] = False
+        for row in rows[3:]:
+            row.update(world_epoch=2, event=2)
+        data['far_budget']['fills'].extend([
+            dict(event=1, kind='refill', origin_ms=20, accepted_ms=None, completed_ms=None,
+                 status='incomplete', tier_completed_ms=[None] * 5),
+            dict(event=2, kind='epoch', origin_ms=30, accepted_ms=40, completed_ms=40,
+                 status='complete', tier_completed_ms=[40] * 5)])
+        contract.validate_far_budget(data, required=True)
+        data['far_budget']['fills'][2]['kind'] = 'refill'
+        with self.assertRaises(ValueError):
+            contract.validate_far_budget(data)
+
+    def test_far_budget_present_block_is_always_validated(self):
+        data = budget_artifact()
+        data['far_budget']['frames'].pop(0)
+        with self.assertRaisesRegex(ValueError, 'far budget frame'):
+            contract.validate(data, QUALIFIED)
+
+    def test_far_budget_missing_frames_and_metadata_are_refused(self):
+        mutations = [lambda d: d.pop('far_budget'),
+                     lambda d: d['far_budget'].update(frames=[]),
+                     lambda d: d['far_budget']['frames'].pop(0),
+                     lambda d: d['far_budget']['frames'].pop(1),
+                     lambda d: d['far_budget']['frames'].pop(),
+                     lambda d: d['far_budget'].update(fills=[]),
+                     lambda d: d['far_budget'].update(storage_complete=False),
+                     lambda d: d['far_budget'].update(schema='unknown'),
+                     lambda d: d['far_budget'].update(origin='after_warmup'),
+                     lambda d: d['far_budget']['frames'][0]['tiers'].pop(),
+                     lambda d: d['far_budget']['frames'][0]['tiers'][0].pop('work'),
+                     lambda d: d['far_budget']['frames'][0]['tiers'][0]['memory'].pop('cpu_bytes'),
+                     lambda d: d.update(frame_samples=None),
+                     lambda d: d['far_budget']['fills'][0].update(accepted_ms=True),
+                     lambda d: d['far_budget']['fills'][0].update(origin_ms=True),
+                     lambda d: d['far_budget']['fills'][0].update(tier_completed_ms=[True] * 5)]
+        for mutation in mutations:
+            with self.subTest(mutation=mutations.index(mutation)):
+                data = budget_artifact()
+                mutation(data)
+                with self.assertRaises(ValueError):
+                    contract.validate(data, QUALIFIED, far_budget=True)
+
+    def test_far_budget_malformed_identity_time_coverage_and_work_are_refused(self):
+        for key, values in dict(render_frame=[0, True, 1e38], timing_frame=[0, True, 999],
+                                world_epoch=[True, -1, 2**64], target_serial=[True, -1],
+                                target_cohort=['0', '01', '18446744073709551616', 42],
+                                content_identity=['0', 'bad', ''], bake_generation=[-1, True],
+                                accepted=[None, 1], current_coverage=[None, 1],
+                                elapsed_ms=[-1, float('nan'), float('inf')],
+                                render_wall_ms=[-1, 31], phase=['warmup'], event=[True, 4]).items():
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    data = budget_artifact()
+                    data['far_budget']['frames'][2][key] = value
+                    with self.assertRaises(ValueError):
+                        contract.validate(data, QUALIFIED, far_budget=True)
+        for section, key, value in [('work', 'uploaded', 2), ('work', 'dispatched', 2),
+                                     ('work', 'successful_upload_bytes', 21),
+                                     ('memory', 'limit', -1), ('memory', 'total_bytes', True)]:
+            with self.subTest(section=section, key=key):
+                data = budget_artifact()
+                data['far_budget']['frames'][1]['tiers'][0][section][key] = value
+                with self.assertRaises(ValueError):
+                    contract.validate(data, QUALIFIED, far_budget=True)
+        for changes in [dict(current_coverage=True), dict(accepted=False)]:
+            data = budget_artifact()
+            data['far_budget']['frames'][0].update(changes)
+            with self.assertRaises(ValueError):
+                contract.validate(data, QUALIFIED, far_budget=True)
+
+    def test_far_budget_fill_summaries_cannot_hide_incomplete_or_timeout(self):
+        for key, value in [('completed_ms', 10), ('accepted_ms', 0), ('status', 'timeout'),
+                           ('tier_completed_ms', [10] * 5), ('kind', 'refill')]:
+            with self.subTest(key=key):
+                data = budget_artifact()
+                data['far_budget']['fills'][0][key] = value
+                with self.assertRaises(ValueError):
+                    contract.validate(data, QUALIFIED, far_budget=True)
+        data = budget_artifact()
+        for row in data['far_budget']['frames']:
+            row['current_coverage'] = False
+            row['tiers'][0].update(current_coverage=False, covering=0, settled=0, pending=1)
+        fill = data['far_budget']['fills'][0]
+        fill.update(completed_ms=None, status='incomplete', tier_completed_ms=[None, 10, 10, 10, 10])
+        contract.validate_far_budget(data)  # Incomplete evidence is retained honestly.
+        with self.assertRaisesRegex(ValueError, 'cold.*incomplete'):
+            contract.validate(data, QUALIFIED, far_budget=True)
+        for index, row in enumerate(data['far_budget']['frames']):
+            row['elapsed_ms'] = 90000 + index
+            row['render_wall_ms'] = 90000 if index == 0 else 1
+        fill.update(accepted_ms=90000, status='timeout',
+                    tier_completed_ms=[None, 90000, 90000, 90000, 90000])
+        contract.validate_far_budget(data)
+        with self.assertRaisesRegex(ValueError, 'cold.*timed out'):
+            contract.validate(data, QUALIFIED, far_budget=True)
+
     def test_gallery_capture_omits_only_personal_metadata(self):
         root = Path(__file__).resolve().parents[2]
         source = (root / 'src/luminumbra_client/ui/Rml_UIManager.cpp').read_text(encoding='utf-8')
