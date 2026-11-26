@@ -33,7 +33,7 @@
 #include <string>
 #include <vector>
 
-#include <entt/entt.hpp>
+#include <entt/entity/registry.hpp>
 
 #include "components/AlarmComponents.h"
 #include "components/CircadianComponents.h" //  v2: circadian activity
@@ -42,13 +42,14 @@
 #include "components/PackHunterComponents.h"
 #include "components/ThirstComponents.h"           //  v2: thirst state
 #include "persistence/WorldPersistenceRoundtrip.h" // Persistence::StableChecksum
+#include "simulation/ParticipantProjection.h"
 
 namespace luminumbra::ai {
 
 // Computes the id-ordered ecology sub-hash over every CreatureComponent-bearing
 // entity in `registry`. Returns the EMPTY string when the roster carries no
 // creatures (additivity-neutral; mirrors ComputeScentSubHash).
-inline std::string ComputeEcologySubHash(const entt::registry& registry) {
+inline std::string ComputeLegacyEcologySubHash(const entt::registry& registry) {
     namespace Comp = ::Luminumbra::Components;
 
     // id-sorted creature set -> stable order independent of view iteration order
@@ -100,6 +101,14 @@ inline std::string ComputeEcologySubHash(const entt::registry& registry) {
         bytes << ';';
     }
     return ::Luminumbra::Persistence::StableChecksum(bytes.str());
+}
+
+// The checkpoint selection changes only with the common authority activation.
+// Keep the legacy projection explicit for historical byte-compatibility checks.
+inline std::string ComputeEcologySubHash(const entt::registry& registry) {
+    if constexpr (::Luminumbra::simulation::UseCompleteSimulationProjections())
+        return ::Luminumbra::simulation::ComputeCandidateEcologySubHash(registry);
+    return ComputeLegacyEcologySubHash(registry);
 }
 
 } // namespace luminumbra::ai
