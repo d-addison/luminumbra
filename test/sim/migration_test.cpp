@@ -6,8 +6,11 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
+#include <map>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -15,6 +18,8 @@
 #include "ai/MigrationSystem.h"
 #include "components/CoreComponents.h"
 #include "components/MigratoryComponents.h"
+
+#include "world/WorldClock.h"
 
 namespace {
 
@@ -243,6 +248,68 @@ TEST(Migration, OrderIndependent) {
         EXPECT_EQ(forward[i].first, reversed[i].first);
         EXPECT_FLOAT_EQ(forward[i].second.first, reversed[i].second.first);
         EXPECT_FLOAT_EQ(forward[i].second.second, reversed[i].second.second);
+    }
+}
+
+TEST(Migration, RegionalElapsedUsesCalendarAndCapturedOwner) {
+    namespace W = Luminumbra::world;
+    const W::WorldClock clock;
+    for (const auto ticks : {1u, 8u, 36001u, 65536u}) {
+        for (const auto due_tick : {0u, 162000u, 324000u}) {
+            SCOPED_TRACE(ticks);
+            SCOPED_TRACE(due_tick);
+            entt::registry r;
+            const auto active = spawnMigrant(r, 4, 4);
+            const auto frozen = spawnMigrant(r, 513, 4);
+            const auto zero = spawnMigrant(r, 1025, 4);  // non-creature opt-in
+            const auto opted_in = spawnMigrant(r, 4, 8); // non-creature, admitted
+            const auto at_target = spawnMigrant(r, 4, 4);
+            const auto missing_window = spawnMigrant(r, 1537, 4);
+            r.emplace<Comp::CreatureComponent>(active);
+            r.emplace<Comp::CreatureComponent>(frozen);
+            r.emplace<Comp::CreatureComponent>(at_target);
+            for (const auto entity : {active, frozen, zero, opted_in, at_target, missing_window}) {
+                r.get<Comp::MigratoryComponent>(entity) = {0.3f, 0.2f, -0.1f};
+            }
+            const std::array<W::RegionKey, 3> due{{{0, 0}, {2, 0}, {3, 0}}};
+            const std::map<W::RegionKey, std::uint32_t> windows{{{0, 0}, ticks}, {{2, 0}, 0}};
+            const W::RegionConsumerGate gate(r, due, W::RegionElapsedTicks(windows));
+            luminumbra::ai::CreatureTickAdmission admission;
+            admission.Capture(r, gate);
+            r.get<Comp::TransformComponent>(active).position.x = 513;
+            r.get<Comp::TransformComponent>(frozen).position.x = 4;
+            const auto phase = static_cast<float>(clock.spring_phase(due_tick));
+            EXPECT_NE(phase, static_cast<float>(clock.year_phase(due_tick)));
+            const auto target = MigrationTargetAt(phase);
+            r.get<Comp::TransformComponent>(at_target).position = {target.x, 0, target.z};
+            // A creature born after capture gets one current tick, not the owner's history.
+            const auto newborn = spawnMigrant(r, 4, 4);
+            r.emplace<Comp::CreatureComponent>(newborn);
+            const auto stats = RunMigrationOnTick(r, phase, &admission, &gate);
+            EXPECT_EQ(stats.participants, 4);
+            EXPECT_EQ(stats.target_x, target.x);
+            EXPECT_EQ(stats.target_z, target.z);
+            EXPECT_EQ(stats.drive, MigrationDriveAt(phase));
+            EXPECT_EQ(migOf(r, at_target).wish_x, 0);
+            EXPECT_EQ(migOf(r, at_target).wish_z, 0);
+            EXPECT_EQ(migOf(r, at_target).drive, stats.drive);
+            for (const auto entity : {frozen, zero, missing_window}) {
+                EXPECT_EQ(migOf(r, entity).drive, 0.3f);
+                EXPECT_EQ(migOf(r, entity).wish_x, 0.2f);
+                EXPECT_EQ(migOf(r, entity).wish_z, -0.1f);
+            }
+            // Independent one-step reference at the same sampled phase and current position.
+            entt::registry reference;
+            const auto expected = spawnMigrant(reference, 513, 4);
+            RunMigrationOnTick(reference, phase);
+            EXPECT_EQ(migOf(r, active).drive, migOf(reference, expected).drive);
+            EXPECT_EQ(migOf(r, active).wish_x, migOf(reference, expected).wish_x);
+            EXPECT_EQ(migOf(r, active).wish_z, migOf(reference, expected).wish_z);
+            EXPECT_EQ(migOf(r, opted_in).drive, stats.drive);
+            EXPECT_EQ(migOf(r, newborn).drive, stats.drive);
+            const W::RegionConsumerGate empty(r, std::span<const W::RegionKey>{});
+            EXPECT_EQ(RunMigrationOnTick(r, phase, nullptr, &empty).participants, 0);
+        }
     }
 }
 
