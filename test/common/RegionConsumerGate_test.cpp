@@ -52,6 +52,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -1049,18 +1050,26 @@ TEST(RegionConsumerGate, FrozenRegionDigestIncludesExactWaterDebtAndEmptyDebtKee
         if (debt != 0) {
             ASSERT_TRUE(ledger.set_water_debts({{owner, debt}}));
         }
+        // Stage the wake and reduction without a world consumer, so the tested
+        // owner has no ambient bytes when the session freezes it. Empty debt
+        // must still use the legacy chunk-only digest, even with activation enabled.
+        const std::array<W::RegionWork, 1> pressure{{{{0, 0}, 2, 0, 0, 0}}};
+        for (std::uint64_t tick = 1; tick <= 2; ++tick) {
+            clock.set_tick(tick);
+            (void)ledger.schedule(clock, std::nullopt, pressure);
+        }
+        ASSERT_EQ(ledger.records().at(owner).state, W::RegionState::Reduced);
         nlohmann::json metadata{{"container_version", P::WorldSaveService::kContainerVersion}};
         clock.write_metadata(metadata);
         ASSERT_TRUE(P::WorldSaveService::save_metadata_and_active_regions(
             metadata.dump(), ledger, directory));
         ASSERT_TRUE(session.LoadWorldStateFrom(directory)) << session.GetWorldOpenError();
         session.SetReplicatedSimulationAnchors({});
-        // One wake and two budget transitions suffice for this two-owner roster.
-        for (int step = 0; step < 3; ++step) {
-            session.RecordActiveRegionWork({{0, 0}, 2, 0, 0, 0});
-            ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
-            ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
-        }
+        ASSERT_TRUE(session.GetFieldPages().region_bytes(owner).empty());
+        session.RecordActiveRegionWork({{0, 0}, 2, 0, 0, 0});
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+        EXPECT_TRUE(session.GetFieldPages().region_bytes(owner).empty());
         const auto& record = session.GetActiveRegionLedger().records().at(owner);
         ASSERT_EQ(record.state, W::RegionState::Frozen);
         P::RegionDigestInputs inputs;
