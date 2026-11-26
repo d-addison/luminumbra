@@ -52,6 +52,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -1049,18 +1050,26 @@ TEST(RegionConsumerGate, FrozenRegionDigestIncludesExactWaterDebtAndEmptyDebtKee
         if (debt != 0) {
             ASSERT_TRUE(ledger.set_water_debts({{owner, debt}}));
         }
+        // Stage the wake and reduction without a world consumer, so the tested
+        // owner has no ambient bytes when the session freezes it. Empty debt
+        // must still use the legacy chunk-only digest, even with activation enabled.
+        const std::array<W::RegionWork, 1> pressure{{{{0, 0}, 2, 0, 0, 0}}};
+        for (std::uint64_t tick = 1; tick <= 2; ++tick) {
+            clock.set_tick(tick);
+            (void)ledger.schedule(clock, std::nullopt, pressure);
+        }
+        ASSERT_EQ(ledger.records().at(owner).state, W::RegionState::Reduced);
         nlohmann::json metadata{{"container_version", P::WorldSaveService::kContainerVersion}};
         clock.write_metadata(metadata);
         ASSERT_TRUE(P::WorldSaveService::save_metadata_and_active_regions(
             metadata.dump(), ledger, directory));
         ASSERT_TRUE(session.LoadWorldStateFrom(directory)) << session.GetWorldOpenError();
         session.SetReplicatedSimulationAnchors({});
-        // One wake and two budget transitions suffice for this two-owner roster.
-        for (int step = 0; step < 3; ++step) {
-            session.RecordActiveRegionWork({{0, 0}, 2, 0, 0, 0});
-            ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
-            ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
-        }
+        ASSERT_TRUE(session.GetFieldPages().region_bytes(owner).empty());
+        session.RecordActiveRegionWork({{0, 0}, 2, 0, 0, 0});
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+        EXPECT_TRUE(session.GetFieldPages().region_bytes(owner).empty());
         const auto& record = session.GetActiveRegionLedger().records().at(owner);
         ASSERT_EQ(record.state, W::RegionState::Frozen);
         P::RegionDigestInputs inputs;
@@ -5120,4 +5129,64 @@ TEST(Decomposition, ElapsedDetachedTraversalStaysBoundedByCandidatePool) {
     const std::set<entt::entity> empty;
     EXPECT_EQ(AI::RunDecompositionStage(registry, 12, &admission, gate, empty, false, true).visited,
               0u);
+}
+
+TEST(RegionConsumerGate, ElapsedSecondaryPublicationIsBoundedAndRefusesTopologyRemoval) {
+    for (const unsigned unrelated : {0u, 1000u}) {
+        entt::registry registry;
+        for (unsigned index = 0; index < unrelated; ++index)
+            registry.emplace<C::TransformComponent>(registry.create());
+        const auto participant = registry.create();
+        registry.emplace<C::TransformComponent>(participant).position = {8, 0, 8};
+        registry.emplace<C::TerritoryComponent>(participant);
+        EXPECT_FALSE(F::FoliageRegistryStage::HasWork(registry));
+        EXPECT_TRUE(F::FoliageRegistryStage::HasWork(registry, true));
+        F::FoliageRegistryStage stage;
+        const W::ActiveRegionLedger allocator;
+        stage.Begin(registry, allocator, true);
+        EXPECT_LE(stage.entity_visits(), 2u);
+        stage.registry().remove<C::TerritoryComponent>(participant);
+        EXPECT_THROW(stage.PreparePublication(registry), std::runtime_error);
+        stage.Abort();
+        EXPECT_TRUE(registry.all_of<C::TerritoryComponent>(participant));
+        EXPECT_FALSE(registry.all_of<C::TerritoryBiasComponent>(participant));
+        stage.Begin(registry, 1, true);
+        const std::array<RegionKey, 1> due{{{0, 0}}};
+        const std::map<RegionKey, std::uint32_t> windows{{{0, 0}, 1}};
+        const RegionConsumerGate gate(stage.registry(), due, W::RegionElapsedTicks(windows));
+        luminumbra::ai::RunTerritoryOnTick(stage.registry(), 1, nullptr, &gate);
+        const auto before = stage.publication_entity_visits();
+        stage.PreparePublication(registry);
+        EXPECT_FALSE(registry.all_of<C::TerritoryBiasComponent>(participant));
+        stage.Commit(registry);
+        EXPECT_TRUE(registry.all_of<C::TerritoryBiasComponent>(participant));
+        EXPECT_EQ(registry.get<C::TerritoryComponent>(participant).established, 1u);
+        EXPECT_LE(stage.publication_entity_visits() - before, 8u);
+    }
+}
+
+TEST(RegionElapsedTicks, DueTimeBindingClipsPlantBirthsWithoutChangingLegacyAdmission) {
+    entt::registry registry;
+    const auto plant = Plant(registry, 8);
+    const std::array<RegionKey, 1> due{{{0, 0}}};
+    const std::map<RegionKey, std::uint32_t> windows{{{0, 0}, 8}};
+    const RegionConsumerGate legacy(registry, due, W::RegionElapsedTicks(windows));
+    const RegionConsumerGate elapsed(registry, due, W::RegionElapsedTicks(windows), 8);
+    for (const auto birth : {0ull, 1ull, 5ull, 8ull, 9ull}) {
+        registry.get<C::PlantGrowthComponent>(plant).planted_tick = birth;
+        EXPECT_TRUE(elapsed.Allows(plant));
+        EXPECT_EQ(legacy.ElapsedTicks(plant), 8u);
+        const auto expected =
+            birth > 8 ? 0u : static_cast<std::uint32_t>(std::min(8ull, 9ull - birth));
+        EXPECT_EQ(elapsed.ElapsedTicks(plant), expected);
+    }
+    registry.get<C::PlantGrowthComponent>(plant).planted_tick =
+        std::numeric_limits<std::uint64_t>::max();
+    const RegionConsumerGate maximum(
+        registry, due, W::RegionElapsedTicks(windows), std::numeric_limits<std::uint64_t>::max());
+    EXPECT_EQ(maximum.ElapsedTicks(plant), 1u);
+    const std::array<RegionKey, 0> empty{};
+    const RegionConsumerGate frozen(registry, empty, W::RegionElapsedTicks(windows), 8);
+    EXPECT_FALSE(frozen.Allows(plant));
+    EXPECT_EQ(frozen.ElapsedTicks(plant), 0u);
 }

@@ -5568,15 +5568,22 @@ TEST(GameSessionHeadlessWorldTest, LedgerFileAbsenceCorruptionFutureAndDisabledR
     owner.SetJobSystem(&jobs);
     owner.SetActiveRegionsEnabled(true);
     ASSERT_TRUE(owner.CreateWorld("Ledger refusal", "1337", "default"));
-    // Keep this legacy-absence fixture free of ambient owner authority.
+    // Due regions create ambient authority, which cannot survive removal of its ledger.
+    // Model legacy absence with an empty schedule, then pin directly after the tick.
+    // Publishing an event would persist its sequence in the ground-object file even
+    // with no objects; that file also requires the ledger.
     owner.SetReplicatedSimulationAnchors({});
-    // Admit after scheduling so the nonempty ledger has not reached a due tick.
-    owner.GetSimulationEventBus().subscribe(
-        [&owner](const auto&) { owner.PinActiveRegion({0, 0}, true); });
-    owner.GetSimulationEventBus().publish(1, "legacy-ledger", "");
     ASSERT_EQ(owner.TickSimulation(owner.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_TRUE(owner.GetRegionSchedule().due.empty());
+    owner.PinActiveRegion({0, 0}, true);
+    ASSERT_EQ(owner.GetActiveRegionLedger().records().size(), 1u);
+    ASSERT_TRUE(owner.GetActiveRegionLedger().records().at({0, 0}).pinned);
+    ASSERT_TRUE(owner.GetGroundObjects().empty());
+    ASSERT_TRUE(owner.CaptureGroundNotifications().canonical_bytes().empty());
     ASSERT_TRUE(owner.SaveWorldState());
     const auto save = owner.GetWorldSaveDir();
+    ASSERT_FALSE(fs::exists(P::WorldSaveService::ground_objects_path(save)));
+    ASSERT_FALSE(fs::exists(P::WorldSaveService::field_pages_path(save)));
     const auto path = P::WorldSaveService::active_regions_path(save);
     const auto good = ReadClockTestFile(path);
     ASSERT_TRUE(P::WorldSaveService::validate_save(save));

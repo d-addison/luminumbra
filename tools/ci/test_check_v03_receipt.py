@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_v03_receipt as tool
@@ -760,6 +761,122 @@ class V03AcceptanceReceiptContract(unittest.TestCase):
         self.assertEqual(len(verdict["checks"]), len(REQUIRED))
         for check in verdict["checks"]:
             self.assertEqual(check["verdict"], "unevaluated")
+
+
+class FarBudgetReceiptContract(unittest.TestCase):
+    def setUp(self):
+        self.storage = tempfile.TemporaryDirectory()
+        self.addCleanup(self.storage.cleanup)
+        self.root = Path(self.storage.name)
+        self.budget = tool._budget_tools()
+        from test_far_budget import receipt_evidence, synthetic_receipt_measurements
+        matrix, self.approval, section, self.index, checked = receipt_evidence(self.root)
+        self.measurements = synthetic_receipt_measurements(matrix, checked)
+        self.measurements.__enter__()
+        self.addCleanup(self.measurements.__exit__, None, None, None)
+        self.receipt = valid_receipt()
+        self.receipt.update(schema=tool.INPUT_SCHEMA_V032, release="v0.3.2", revision="1" * 40)
+        self.receipt["sections"]["far_budget"] = section
+        for name, item in self.receipt["sections"].items():
+            if name != "far_budget":
+                path = self.root / item["evidence"]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}\n", encoding="utf-8")
+
+    def evaluate(self, **options):
+        return tool.evaluate(self.receipt, self.root, budget_approval=self.approval,
+                             expected_revision="1" * 40, require_version="v0.3.2", **options)
+
+    def assert_refused(self):
+        verdict = self.evaluate()
+        self.assertNotEqual(verdict["verdict"], "pass", verdict)
+        self.assertNotEqual(_check(verdict, "far_budget")["verdict"], "pass")
+
+    def test_missing_budget_evidence_cannot_pass(self):
+        self.assertEqual(self.evaluate()["verdict"], "pass")
+        section = self.receipt["sections"].pop("far_budget")
+        self.assert_refused()
+        self.receipt["sections"]["far_budget"] = section
+        for status in ("pass", "fail", "skipped", "unevaluated", "unknown"):
+            for evidence in (None, "", "missing.json"):
+                self.receipt["sections"]["far_budget"] = dict(section, status=status, evidence=evidence)
+                with self.subTest(status=status, evidence=evidence):
+                    self.assert_refused()
+        self.receipt["sections"]["far_budget"] = section
+        self.approval = None
+        self.assert_refused()
+
+    def test_profile_or_revision_mismatch_fails(self):
+        for key, values in (("release", (None, "v0.3.1")),
+                            ("revision", (None, "", "2" * 40))):
+            previous = self.receipt[key]
+            for value in values:
+                self.receipt[key] = value
+                with self.subTest(key=key, value=value):
+                    if value is None and key == "revision":
+                        with self.assertRaises(tool.InputError):
+                            self.evaluate()
+                    else:
+                        self.assert_refused()
+            self.receipt[key] = previous
+        self.receipt["sections"]["far_budget"]["profile_id"] = "legacy"
+        self.assert_refused()
+
+    def test_single_failed_cell_blocks_acceptance(self):
+        self.index["cells"][-1]["state"] = "fail"
+        (self.root / "index.json").write_bytes(self.budget.canonical(self.index))
+        self.assert_refused()
+
+    def test_legacy_reader_and_release_guard_are_independent(self):
+        legacy = valid_receipt()
+        self.assertEqual(tool.evaluate(legacy, self.root)["verdict"], "pass")
+        with self.assertRaisesRegex(tool.InputError, "version 2 receipt"):
+            tool.evaluate(legacy, self.root, require_version="v0.3.2")
+        for options in ({"budget_approval": self.approval}, {"expected_revision": "1" * 40}):
+            with self.subTest(options=options), self.assertRaises(tool.InputError):
+                tool.evaluate(legacy, self.root, **options)
+        with self.assertRaises(tool.InputError):
+            tool.evaluate(dict(legacy, release="v0.3.2"), self.root)
+        for options in ({}, {"budget_approval": self.approval}, {"expected_revision": "1" * 40}):
+            verdict = tool.evaluate(self.receipt, self.root, **options)
+            self.assertEqual(verdict["verdict"], "fail")
+
+    def test_cli_requires_independent_authority_and_never_launches(self):
+        receipt_path = self.root / "receipt.json"
+        receipt_path.write_text(json.dumps(self.receipt), encoding="utf-8")
+        code, out, _ = _run([str(receipt_path), "--require-version", "v0.3.2"])
+        self.assertEqual(code, tool.EXIT_FAIL, out)
+        for payload in (b'{', b'[]', b'{"schema":1,"schema":2}', b''):
+            approval_path = self.root / "approval.json"
+            approval_path.write_bytes(payload)
+            code, out, err = _run([str(receipt_path), "--budget-approval", str(approval_path),
+                                   "--expected-revision", "1" * 40])
+            self.assertNotEqual(code, tool.EXIT_PASS, out + err)
+        result = subprocess.run([sys.executable, "-I", "-B", str(Path(tool.__file__)),
+                                 str(receipt_path), "--require-version", "v0.3.2"],
+                                cwd=self.root, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, tool.EXIT_FAIL, result.stderr)
+
+    def test_invalid_or_unreadable_source_becomes_failed_verdict(self):
+        for error in (PermissionError("denied"), ValueError("partial"), KeyError("missing"),
+                      TypeError("wrong type"), AttributeError("wrong object"),
+                      OverflowError("range"), RecursionError("depth")):
+            with self.subTest(error=type(error).__name__), \
+                    mock.patch.object(self.budget, "qualify_receipt", side_effect=error):
+                self.assert_refused()
+
+    def test_receipt_loader_bounds_and_ambiguous_json_refuse(self):
+        path = self.root / "receipt.json"
+        for payload in (b'{', b'{"schema":1,"schema":2}', b'{"x":NaN}', b'\xff'):
+            path.write_bytes(payload)
+            with self.subTest(payload=payload), self.assertRaises(tool.InputError):
+                tool.load_receipt(path)
+        with mock.patch.object(self.budget, "MAX_INDEX_BYTES", 4):
+            path.write_bytes(b'{} \n')
+            self.assertEqual(tool.load_receipt(path), {})
+            path.write_bytes(b'{}  \n')
+            with self.assertRaisesRegex(tool.InputError, "oversized"):
+                tool.load_receipt(path)
 
 
 if __name__ == "__main__":

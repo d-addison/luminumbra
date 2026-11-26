@@ -141,6 +141,7 @@ struct HostFaultObservation {
     std::size_t availability_ticks = 0;
     fs::path save_dir;
     std::string expected_contents;
+    std::string expected_fields;
     std::string fault_message;
     std::string metadata_at_shutdown;
     // Script only the mode/runner boundary; real preparation is exercised below.
@@ -218,6 +219,8 @@ public:
             EXPECT_EQ(Session()->GetSimulationTickCount(), kFaultTick);
             RemoveHostFaultFile(*Session());
             HostObservation()->expected_contents = LiveAuthoritativeContents(*Session());
+            HostObservation()->expected_fields = Session()->GetFieldPages().canonical_bytes();
+            EXPECT_FALSE(Session()->GetFieldPages().empty());
         }
         return report;
     }
@@ -324,7 +327,9 @@ protected:
         return options;
     }
 
-    void ExpectRecoveryWorld(const fs::path& directory, const std::string& expected_contents) {
+    void ExpectRecoveryWorld(const fs::path& directory,
+                             const std::string& expected_contents,
+                             const std::string& expected_fields) {
         ASSERT_TRUE(WorldSaveService::validate_save(directory));
         Luminumbra::WorldStreamingState saved;
         std::vector<std::string> errors;
@@ -344,7 +349,9 @@ protected:
         EXPECT_EQ(saved_ledger.records().at(kFaultRegion).last_save, kFaultTick);
         Luminumbra::world::FieldPageState saved_fields;
         ASSERT_TRUE(WorldSaveService::load_field_pages(saved_fields, directory, &errors));
-        EXPECT_TRUE(saved_fields.empty());
+        // Recovery persists authority committed before the fault, including ambient pages.
+        EXPECT_FALSE(saved_fields.empty());
+        EXPECT_EQ(saved_fields.canonical_bytes(), expected_fields);
     }
 };
 
@@ -657,8 +664,8 @@ TEST_F(HostSchedulerFault, ServerSavesTheFaultedWorldBeforeReturningExitThree) {
     EXPECT_EQ(metadata.at("simulationTick"), kFaultTick);
     EXPECT_EQ(metadata.at("seed"), "1337");
     EXPECT_EQ(metadata.at("name"), "Headless Server World");
-    ASSERT_NO_FATAL_FAILURE(
-        ExpectRecoveryWorld(observation.save_dir, observation.expected_contents));
+    ASSERT_NO_FATAL_FAILURE(ExpectRecoveryWorld(
+        observation.save_dir, observation.expected_contents, observation.expected_fields));
 }
 
 TEST_F(HostSchedulerFault, RecordFaultAbortsWithoutPublishingReplayOrRegionTrace) {
@@ -870,6 +877,7 @@ TEST_F(HostSchedulerFault, ClientFaultRequestsQuitAndSavesStateBeforeSpawnMetada
     for (std::uint64_t tick = 1; tick <= kFaultTick; ++tick)
         ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
     ASSERT_TRUE(session.GetRegionSchedulerFault().has_value());
+    const auto expected_fields = session.GetFieldPages().canonical_bytes();
     Luminumbra::Client::PollSessionFault(session, [&] { quit_requested = true; });
     ASSERT_TRUE(quit_requested);
     EXPECT_NE(log_output.str().find("; saving and quitting"), std::string::npos);
@@ -883,6 +891,7 @@ TEST_F(HostSchedulerFault, ClientFaultRequestsQuitAndSavesStateBeforeSpawnMetada
         [] { FAIL() << "A failed state save must not be reported as successful"; });
     EXPECT_TRUE(failed_spawn_captured);
     EXPECT_TRUE(quit_requested);
+    EXPECT_EQ(session.GetFieldPages().canonical_bytes(), expected_fields);
     ASSERT_NO_FATAL_FAILURE(RemoveHostFaultFile(session));
     const auto expected_contents = LiveAuthoritativeContents(session);
     const auto directory = session.GetWorldSaveDir();
@@ -911,7 +920,7 @@ TEST_F(HostSchedulerFault, ClientFaultRequestsQuitAndSavesStateBeforeSpawnMetada
     EXPECT_TRUE(saved_reported);
     // GLFW loop exit and renderer reader draining remain NEEDS-NATIVE. This
     // test covers the production quit/save decisions without simulating a window.
-    ASSERT_NO_FATAL_FAILURE(ExpectRecoveryWorld(directory, expected_contents));
+    ASSERT_NO_FATAL_FAILURE(ExpectRecoveryWorld(directory, expected_contents, expected_fields));
 }
 
 TEST_F(HostSchedulerFault, CapturePersistencePolicy) {
@@ -1060,6 +1069,7 @@ TEST_F(HostSchedulerFault, ClientMetadataSaveFailureSuppressesSuccessAndAllowsRe
     if (!fault_optional.has_value())
         return;
     const auto& fault = fault_optional.value();
+    const auto expected_fields = session.GetFieldPages().canonical_bytes();
     const auto expect_consistent_session = [&] {
         const auto& current_fault = session.GetRegionSchedulerFault();
         ASSERT_TRUE(current_fault.has_value());
@@ -1070,6 +1080,7 @@ TEST_F(HostSchedulerFault, ClientMetadataSaveFailureSuppressesSuccessAndAllowsRe
         EXPECT_EQ(session.GetSimulationTickCount(), kFaultTick);
         EXPECT_TRUE(session.IsSimulationTickBoundary());
         EXPECT_TRUE(session.GetWorldOpenError().empty());
+        EXPECT_EQ(session.GetFieldPages().canonical_bytes(), expected_fields);
     };
 
     // Establish the state-save failure baseline: edits and save stamps remain pending.
@@ -1153,7 +1164,7 @@ TEST_F(HostSchedulerFault, ClientMetadataSaveFailureSuppressesSuccessAndAllowsRe
     EXPECT_EQ(retried_metadata.at("spawnPoint").at("y"), exit_spawn.y);
     EXPECT_EQ(retried_metadata.at("spawnPoint").at("z"), exit_spawn.z);
     ASSERT_NO_FATAL_FAILURE(expect_consistent_session());
-    ASSERT_NO_FATAL_FAILURE(ExpectRecoveryWorld(directory, expected_contents));
+    ASSERT_NO_FATAL_FAILURE(ExpectRecoveryWorld(directory, expected_contents, expected_fields));
 }
 } // namespace
 

@@ -7406,6 +7406,38 @@ int main(int argc, char* argv[]) {
                     Luminumbra::Rendering::FarWorldSubmissionRefusalName(
                         slow_far.submission_refusal),
                     slow_far.coverage_settled);
+                const auto& slow_authority = renderPipeline.far_world_diagnostic();
+                if (slow_authority.authority_kind ==
+                    Luminumbra::Rendering::FarWorldAuthorityKind::Session) {
+                    LUMINUMBRA_CORE_WARN(
+                        "  far-session: generation={}/{} serial={}/{} ready={} manifest={} "
+                        "source_error={} capture_error={} admission_status={}",
+                        slow_authority.serving_committed_generation,
+                        slow_authority.bake_generation,
+                        slow_authority.serving_serial,
+                        slow_authority.target_serial,
+                        slow_authority.latest_target_ready,
+                        slow_authority.manifest_fingerprint,
+                        static_cast<int>(slow_authority.source_failure.source),
+                        static_cast<int>(slow_authority.source_failure.capture),
+                        static_cast<int>(renderPipeline.far_world_renderer().AdmissionStatus()));
+                    if (slow_authority.refresh_work) {
+                        const auto& work = *slow_authority.refresh_work;
+                        LUMINUMBRA_CORE_WARN(
+                            "  far-refresh: read_bytes={} copied_bytes={} decode_work={} "
+                            "source_ms={:.3f} capture_work={} admission_work={} "
+                            "height_observations={}",
+                            work.source_read_bytes,
+                            work.source_copied_bytes,
+                            work.source_decode_work,
+                            work.source_ms,
+                            work.capture_work,
+                            work.admission_work,
+                            work.admission_height_observations);
+                    } else {
+                        LUMINUMBRA_CORE_WARN("  far-refresh: work unavailable");
+                    }
+                }
                 if (entry_presentation_work.total > 0) {
                     LUMINUMBRA_CORE_WARN("  entry-split: total={:.3f} water={:.3f} scatter={:.3f} "
                                          "foliage={:.3f} render={:.3f} observe={:.3f}",
@@ -7759,8 +7791,11 @@ int main(int argc, char* argv[]) {
                     renderPipeline.get_last_mesh_upload_stats().terrain_uploads_deferred;
                 if (const auto* foliage = renderPipeline.foliage())
                     far_sample.grass_density_scale = foliage->density_scale();
-                far_sample.content_identity =
-                    renderPipeline.far_world_diagnostic().content_identity;
+                Measurement::capture_far_world_authority(
+                    far_sample,
+                    renderPipeline.far_world_diagnostic(),
+                    renderPipeline.far_world_renderer().AdmissionStatus() ==
+                        Luminumbra::Rendering::FarHandoffAdmissionStatus::Pending);
                 rb_shadow += s.shadow_gpu_ms;
                 rb_gbuffer += s.gbuffer_gpu_ms;
                 rb_ssao += s.ssao_gpu_ms;

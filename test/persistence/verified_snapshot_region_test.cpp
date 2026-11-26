@@ -55,13 +55,19 @@ protected:
             session.RecordActiveRegionWork({kDistantRegion, 5, 0, 0, 0});
             (void)event;
         });
+        std::string before_freeze;
         for (std::uint64_t tick = 1; tick <= 3; ++tick) {
+            if (tick == 3) {
+                before_freeze = session.GetFieldPages().region_bytes(kDistantRegion);
+                ASSERT_FALSE(before_freeze.empty());
+            }
             session.GetSimulationEventBus().publish(tick, "region-pressure", "");
             ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
             ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
         }
         const auto& record = session.GetActiveRegionLedger().records().at(kDistantRegion);
         ASSERT_EQ(record.state, Luminumbra::world::RegionState::Frozen);
+        EXPECT_EQ(session.GetFieldPages().region_bytes(kDistantRegion), before_freeze);
     }
 
     void CheckFieldSnapshotRestoration() {
@@ -150,8 +156,6 @@ TEST_F(VerifiedSnapshotRegion, LivePartialRegionCannotChangeFreezeAfterFailedSav
         const Measurement::VerifiedSaveSnapshot snapshot(
             directory, Measurement::saved_world_digest(directory), id);
         ASSERT_TRUE(session.LoadWorldFrom(id, snapshot.root()));
-        const auto expected = WorldSaveService::region_simulation_digest(
-            snapshot.root() / "worlds/saves" / id, kDistantRegion, {});
         const auto live_region =
             WorldSaveService::region_file_path(directory, kDistantRegion.x, kDistantRegion.z);
         if (replacement) {
@@ -164,8 +168,14 @@ TEST_F(VerifiedSnapshotRegion, LivePartialRegionCannotChangeFreezeAfterFailedSav
         const auto metadata = directory / "world_info.json";
         ASSERT_TRUE(fs::remove(metadata));
         ASSERT_TRUE(fs::create_directory(metadata));
+        const auto fields_before_save = session.GetFieldPages().canonical_bytes();
         EXPECT_FALSE(session.SaveWorld());
+        EXPECT_EQ(session.GetFieldPages().canonical_bytes(), fields_before_save);
         ASSERT_NO_FATAL_FAILURE(FreezeDistantRegion(session));
+        Luminumbra::Persistence::RegionDigestInputs inputs;
+        inputs.field_page_bytes = session.GetFieldPages().region_bytes(kDistantRegion);
+        const auto expected = WorldSaveService::region_simulation_digest(
+            snapshot.root() / "worlds/saves" / id, kDistantRegion, inputs);
         EXPECT_EQ(session.GetActiveRegionLedger().records().at(kDistantRegion).frozen_digest,
                   expected);
     }

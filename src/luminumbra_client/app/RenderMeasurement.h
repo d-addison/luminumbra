@@ -100,6 +100,18 @@ struct FarFrameSample {
     int water_cells_per_side = 0;
     std::optional<float> grass_density_scale;
     std::uint64_t content_identity = 0;
+    const char* authority_kind = "fixture";
+    std::uint64_t world_epoch = 0, committed_generation = 0, serving_committed_generation = 0;
+    std::uint64_t serving_serial = 0, target_serial = 0, manifest_fingerprint = 0;
+    bool latest_target_ready = false;
+    int source_error = 0, capture_error = 0;
+    // Keep measurement storage independent of renderer headers and resources.
+    struct RefreshWork {
+        std::uint64_t source_read_bytes = 0, source_copied_bytes = 0, source_decode_work = 0;
+        std::uint64_t capture_work = 0, admission_work = 0, admission_height_observations = 0;
+        double source_ms = 0;
+    };
+    std::optional<RefreshWork> refresh_work;
     std::size_t generation_pending = 0, meshing_pending = 0, terrain_uploads_pending = 0;
     bool generation_outstanding = false, meshing_outstanding = false;
 };

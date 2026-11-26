@@ -130,10 +130,19 @@ def validate_snapshot(s, mode, camera, expected):
     if session:
         require(mode == "ladder", "session evidence requires ladder")
         obj(s, ("serving_serial", "target_serial", "latest_target_ready", "source_error", "capture_error",
-                "submitted_water_indices"), "session")
+                "submitted_water_indices", "committed_generation", "serving_committed_generation",
+                "manifest_fingerprint"), "session")
         serial = integer(s["target_serial"], "target_serial", 1)
         require(integer(s["serving_serial"], "serving_serial", 1) == serial, "old serving serial")
         require(boolean(s["latest_target_ready"], "latest_target_ready"), "latest target not ready")
+        generation = integer(s["committed_generation"], "committed_generation")
+        require(all(integer(s[field], field) < 2**64 for field in
+                    ("world_epoch", "serving_serial", "target_serial", "committed_generation",
+                     "serving_committed_generation")), "session metadata exceeds uint64")
+        require(integer(s["serving_committed_generation"], "serving_committed_generation") == generation
+                and s["bake_generation"] == generation, "stale committed generation")
+        require(0 < integer(s["manifest_fingerprint"], "manifest_fingerprint") < 2**64,
+                "invalid session manifest fingerprint")
         require(integer(s["source_error"], "source_error") == 0 and
                 integer(s["capture_error"], "capture_error") == 0, "producer refusal")
     require(s["requested_mode"] == mode and s["effective_mode"] == mode, "wrong-mode/refused selection")
@@ -329,6 +338,7 @@ def validate_artifact(a, renderer="ladder", required_stations=None, oracle=wante
     previous_publication = None
     # Retain one tile map per distinct publication, bounded by serials times tiles.
     publication_tiles = {}
+    publication_manifests = {}
     for row in a["stations"]:
         fields = ("name", "camera", "settle_seconds", "ready_within_deadline", "paired_capture_preserved", "snapshot", "ladder")
         obj(row, fields + (("legacy",) if renderer == "legacy" else ()), "station")
@@ -372,6 +382,10 @@ def validate_artifact(a, renderer="ladder", required_stations=None, oracle=wante
                     (publication[0] >= previous_publication[0] and publication[1] >= previous_publication[1] and
                      (publication[0] != previous_publication[0] or publication[1] == previous_publication[1])),
                     "out-of-order session publication")
+            require(publication not in publication_manifests or
+                    publication_manifests[publication] == s["manifest_fingerprint"],
+                    "changed session publication manifest")
+            publication_manifests[publication] = s["manifest_fingerprint"]
             tiles = {
                 tuple(tile["desired"]["key"]): (
                     tile["accepted_content_identity"], tile["built_field_identity"],
