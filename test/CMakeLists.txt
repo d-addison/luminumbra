@@ -3036,6 +3036,10 @@ add_test(NAME BlenderReviewedRecipesPython COMMAND "${Python3_EXECUTABLE}" -I -B
 add_test(NAME BlenderRecipeOperatorPython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/blender/authoring/extension_tests/test_recipe_operator.py)
 add_test(NAME RenderContractPython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_contract.py)
+add_test(NAME FarBudgetPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/perf/test_far_budget.py)
+add_test(NAME FarBudgetRunnerPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/perf/test_run_far_budget.py)
 add_test(NAME ContainmentLinkClosurePython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_containment_link_closure.py)
 add_test(NAME AsanShardContractPython COMMAND "${Python3_EXECUTABLE}" -I -B
