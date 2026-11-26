@@ -82,7 +82,7 @@ class PlantProcgenPass;
 class FarLodSystem;
 class GroundDecalPass;
 class DebugViewPass;
-class FinalBlitPass;
+class PostPass;
 class AerialPass;
 class GodRaysPass;
 class TaauPass;
@@ -516,6 +516,10 @@ public:
     // to the legacy behaviour). Render-only; nothing is hashed.
     void set_offscreen_target(u32 fbo, u32 fbo_w, u32 fbo_h);
     void clear_offscreen_target();
+    // Render-only opt-in; every preset retains the original filtered blit by default.
+    void set_post_lut_enabled(bool enabled) {
+        m_post_lut_enabled = enabled;
+    }
     bool has_offscreen_target() const {
         return m_offscreen_target_active;
     }
@@ -1625,7 +1629,8 @@ private:
     std::unique_ptr<GroundDecalPass> m_ground_decal_pass; //   pheromone trail (enabled by default)
     std::unique_ptr<DebugViewPass>
         m_debug_view_pass; // render-only G-buffer debug overlay (default-OFF)
-    std::unique_ptr<FinalBlitPass> m_final_blit_pass; // -T01: first pass on the RenderContext seam
+    std::unique_ptr<PostPass> m_post_pass;
+    bool m_post_lut_enabled = false;
     // The aerial/god-rays/TAAU post-passes take a RenderContext& (frame state
     // from ctx; only the pass-owned shaders + TAAU history stay members) so
     // they sit on the same seam as the other pass classes.

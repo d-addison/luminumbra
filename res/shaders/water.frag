@@ -318,7 +318,8 @@ void main()
     water_color *= light_scale;
 
     // --- 8. Specular Highlight ---
-    vec3 half_vector = normalize(u_sun_direction - view_dir);
+    // Both inputs point toward the surface; Blinn needs surface-to-light + surface-to-eye.
+    vec3 half_vector = normalize(-u_sun_direction - view_dir);
     float specular_power = pow(max(0.0, dot(surface_normal, half_vector)), 64.0);
     vec3 specular_highlight = u_sun_color * specular_power * fresnel * 2.0;
 

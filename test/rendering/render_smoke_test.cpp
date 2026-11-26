@@ -854,6 +854,7 @@ std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
         {"skybox", "skybox.vert", "enhanced_skybox.frag"},
         {"shadow_map", "shadow_map.vert", "shadow_map.frag"},
         {"ssao", "ssao.vert", "ssao.frag"},
+        {"post", "ssao.vert", "post.frag"},
         {"ssao_blur", "ssao.vert", "ssao_blur.frag"},
         {"water", "water.vert", "water.frag"},
         {"rml_ui", "rml.vert", "rml.frag"},
@@ -3419,6 +3420,184 @@ TEST(RenderSmokeTest, ReversedDepthSoftParticlesFadeAgainstGeometry) {
         EXPECT_GT(probe.draw()[16].r, 0.25f);
     }
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
+// Integrate the visible area of the continuous four-texel box independently of
+// the shader's 25 discrete taps. Anything beyond the map has white visibility.
+float ShadowBoxVisibility(const glm::vec3& projected,
+                          const glm::ivec2& extent,
+                          const std::vector<float>& depths,
+                          int layer,
+                          float bias) {
+    for (int axis = 0; axis < 3; ++axis)
+        if (projected[axis] < 0 || projected[axis] > 1)
+            return 1;
+    const glm::vec2 start = glm::vec2(projected) * glm::vec2(extent) - glm::vec2(2);
+    const glm::vec2 finish = start + glm::vec2(4);
+    float occluded_area = 0;
+    // Test maps are at most 32 by 16; no scene-sized staging or traversal.
+    for (int y = 0; y < extent.y; ++y) {
+        const float overlap_y = std::max(0.0f,
+                                         std::min(finish.y, static_cast<float>(y + 1)) -
+                                             std::max(start.y, static_cast<float>(y)));
+        for (int x = 0; x < extent.x; ++x) {
+            const auto index = static_cast<std::size_t>((layer * extent.y + y) * extent.x + x);
+            if (projected.z - bias > depths[index]) {
+                const float overlap_x = std::max(0.0f,
+                                                 std::min(finish.x, static_cast<float>(x + 1)) -
+                                                     std::max(start.x, static_cast<float>(x)));
+                occluded_area += overlap_x * overlap_y;
+            }
+        }
+    }
+    return 1 - occluded_area / 16;
+}
+
+TEST(RenderSmokeTest, ShadowFilterFractionalFootprintCascadesBiasAndWhiteBorders) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const std::string source = ReadTextFile(SourceRoot() / "res/shaders/lighting_pass.frag");
+    const auto begin = source.find("float filteredShadow(");
+    ASSERT_NE(begin, std::string::npos);
+    const auto end = source.find("\n// sample the tinted transmission", begin);
+    ASSERT_NE(end, std::string::npos);
+    // As in the historical shadow probe, compile the shipping filter. Include
+    // CalculateShadow too so layer selection and the production bias are exercised.
+    const std::string fragment_source = R"(#version 450 core
+out vec4 FragColor;
+uniform sampler2DArray u_shadowCascades;
+uniform mat4 u_lightSpaceMatrices[4];
+uniform vec4 u_cascadeSplits;
+uniform vec3 u_points[32];
+uniform int u_layer;
+uniform float u_bias;
+)" + source.substr(begin, end - begin) + R"(
+void main() {
+    vec3 point = u_points[int(gl_FragCoord.x)];
+    vec3 normal = vec3(0, 1, 0);
+    FragColor = vec4(filteredShadow(point, u_layer, u_bias),
+        CalculateShadow(point * 2 - 1, normal, normal, float(u_layer) + 0.5),
+        CalculateShadow(point * 2 - 1, normal, normal, float(u_layer) + 1.0), 1);
+})";
+    const GLuint fragment = glCreateShader(GL_FRAGMENT_SHADER);
+    const char* fragment_text = fragment_source.c_str();
+    glShaderSource(fragment, 1, &fragment_text, nullptr);
+    glCompileShader(fragment);
+    GLint compiled = GL_FALSE;
+    glGetShaderiv(fragment, GL_COMPILE_STATUS, &compiled);
+    ASSERT_EQ(compiled, GL_TRUE) << GetShaderInfoLog(fragment);
+    const GLuint vertex = CompileShader(SourceRoot() / "res/shaders/ssao.vert", GL_VERTEX_SHADER);
+    ASSERT_NE(vertex, 0u);
+    const GLuint program = glCreateProgram();
+    glAttachShader(program, vertex);
+    glAttachShader(program, fragment);
+    glLinkProgram(program);
+    glDeleteShader(vertex);
+    glDeleteShader(fragment);
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    ASSERT_EQ(linked, GL_TRUE) << GetProgramInfoLog(program);
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "u_shadowCascades"), 0);
+    glUniform4f(glGetUniformLocation(program, "u_cascadeSplits"), 1, 2, 3, 4);
+    const glm::mat4 identity(1);
+    for (int layer = 0; layer < 4; ++layer) {
+        const auto name = "u_lightSpaceMatrices[" + std::to_string(layer) + "]";
+        glUniformMatrix4fv(
+            glGetUniformLocation(program, name.c_str()), 1, GL_FALSE, &identity[0][0]);
+    }
+    FullscreenFloatProbe probe;
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    GLuint shadows = 0;
+    glGenTextures(1, &shadows);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, shadows);
+    // Match ShadowPass: nearest depth, comparison in GLSL, white border.
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+    constexpr std::array<float, 4> border = {1, 1, 1, 1};
+    glTexParameterfv(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BORDER_COLOR, border.data());
+    for (const glm::ivec2 extent : {glm::ivec2(8, 8), glm::ivec2(16, 8), glm::ivec2(32, 16)}) {
+        SCOPED_TRACE(::testing::Message() << extent.x << 'x' << extent.y);
+        // Four layers of at most 32 by 16 floats: 8 KiB of CPU staging.
+        std::vector<float> depths(static_cast<std::size_t>(extent.x * extent.y * 4));
+        for (int layer = 0; layer < 4; ++layer)
+            for (int y = 0; y < extent.y; ++y)
+                for (int x = 0; x < extent.x; ++x)
+                    depths[static_cast<std::size_t>((layer * extent.y + y) * extent.x + x)] =
+                        static_cast<float>(1 + (x * 3 + y * 5 + layer * 7) % 11 % 3) * 0.25f;
+        glTexImage3D(GL_TEXTURE_2D_ARRAY,
+                     0,
+                     GL_DEPTH_COMPONENT32F,
+                     extent.x,
+                     extent.y,
+                     4,
+                     0,
+                     GL_DEPTH_COMPONENT,
+                     GL_FLOAT,
+                     depths.data());
+        std::array<glm::vec3, FullscreenFloatProbe::width> points{};
+        std::size_t next = 0;
+        for (const float offset_y : {-0.75f, -0.25f, 0.25f, 0.75f})
+            for (const float offset_x : {-0.75f, -0.25f, 0.25f, 0.75f})
+                points[next++] = glm::vec3(0.5f + offset_x / static_cast<float>(extent.x),
+                                           0.5f + offset_y / static_cast<float>(extent.y),
+                                           0.5f);
+        for (int axis = 0; axis < 2; ++axis)
+            for (const float edge : {0.0f, 1.0f}) {
+                glm::vec3 point(0.5f);
+                point[axis] = edge;
+                points[next++] = point;
+            }
+        for (const float coord_y : {0.0f, 1.0f})
+            for (const float coord_x : {0.0f, 1.0f})
+                points[next++] = glm::vec3(coord_x, coord_y, 0.5f);
+        for (int axis = 0; axis < 3; ++axis)
+            for (const float outside : {-0.125f, 1.125f}) {
+                glm::vec3 point(0.5f);
+                point[axis] = outside;
+                points[next++] = point;
+            }
+        points[next++] = glm::vec3(0.5f, 0.5f, 0);
+        points[next++] = glm::vec3(0.5f, 0.5f, 1);
+        ASSERT_EQ(next, points.size());
+        // Flatten explicitly so aligned GLM configurations have identical uniforms.
+        std::array<float, FullscreenFloatProbe::width * 3> coordinates{};
+        for (std::size_t index = 0; index < points.size(); ++index)
+            for (int axis = 0; axis < 3; ++axis)
+                coordinates[index * 3 + static_cast<std::size_t>(axis)] = points[index][axis];
+        glUniform3fv(glGetUniformLocation(program, "u_points[0]"),
+                     FullscreenFloatProbe::width,
+                     coordinates.data());
+        // 36 draws total, each checking 32 positions against an area oracle.
+        for (int layer = 0; layer < 4; ++layer) {
+            SCOPED_TRACE(layer);
+            glUniform1i(glGetUniformLocation(program, "u_layer"), layer);
+            for (const float bias : {0.0f, 0.001f, 0.25f}) {
+                SCOPED_TRACE(bias);
+                glUniform1f(glGetUniformLocation(program, "u_bias"), bias);
+                const auto pixels = probe.draw();
+                for (std::size_t index = 0; index < points.size(); ++index) {
+                    SCOPED_TRACE(index);
+                    EXPECT_NEAR(pixels[index].r,
+                                ShadowBoxVisibility(points[index], extent, depths, layer, bias),
+                                1e-6f);
+                    const float expected =
+                        ShadowBoxVisibility(points[index], extent, depths, layer, 0.001f);
+                    EXPECT_NEAR(pixels[index].g, expected, 1e-6f);
+                    EXPECT_NEAR(pixels[index].b, expected, 1e-6f);
+                }
+            }
+        }
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteTextures(1, &shadows);
+    glUseProgram(0);
     glDeleteProgram(program);
 }
 
@@ -6548,10 +6727,11 @@ TEST(RenderSmokeTest, RenderFrameworkContractsEmitArtifacts) {
     shader_health << "{\n";
     shader_health << "  \"schema\": \"luminumbra.render_framework.shader_health.v1\",\n";
     shader_health << "  \"runtime_validity_requires_compile_and_link_success\": true,\n";
-    shader_health << "  \"programs\": [\"basic\", \"g_buffer\", \"instanced_mesh_gbuffer\", "
-                     "\"lighting_pass\", \"skybox\", \"shadow_map\", \"ssao\", \"ssao_blur\", "
-                     "\"water\", \"rml_ui\", \"loading_hologram\", \"loading_visual\", "
-                     "\"volumetric_lighting\", \"magical_particles\"]\n";
+    shader_health
+        << "  \"programs\": [\"basic\", \"g_buffer\", \"instanced_mesh_gbuffer\", "
+           "\"lighting_pass\", \"skybox\", \"shadow_map\", \"ssao\", \"ssao_blur\", \"post\", "
+           "\"water\", \"rml_ui\", \"loading_hologram\", \"loading_visual\", "
+           "\"volumetric_lighting\", \"magical_particles\"]\n";
     shader_health << "}\n";
 
     std::ofstream capture_hooks(RenderFrameworkArtifactRoot() / "capture_hooks.json");
@@ -9733,6 +9913,245 @@ TEST(RenderSmokeTest, AllocationLedgerMipSizesAreBoundedAndSaturating) {
     EXPECT_EQ(resources.allocated_bytes(), 0u);
 }
 
+TEST(RenderSmokeTest, VolumeTextureLedgerCountsDepthMipsAndRejectsInvalidExtents) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderResourceRegistry resources;
+    TextureDesc desc;
+    desc.width = desc.height = desc.depth = 4;
+    desc.internal_format = GL_RGBA16F;
+    desc.format = GL_RGBA;
+    desc.type = GL_FLOAT;
+    desc.wrap_r = GL_CLAMP_TO_EDGE;
+    EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc), 512u);
+    EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc, 32), 584u);
+    const auto texture = resources.create_texture("volume", desc);
+    ASSERT_NE(texture.id, 0u);
+    EXPECT_EQ(LedgerBytes(resources.allocation_ledger(), "volume"),
+              GlTextureAllocationBytes(texture.id));
+    GLint wrapping = 0;
+    glGetTextureParameteriv(texture.id, GL_TEXTURE_WRAP_R, &wrapping);
+    EXPECT_EQ(wrapping, GL_CLAMP_TO_EDGE);
+    const auto invalid = [&](const TextureDesc& rejected) {
+        EXPECT_EQ(resources.create_texture("invalid_volume", rejected).id, 0u);
+        EXPECT_EQ(resources.allocation_ledger().size(), 1u);
+    };
+    desc.layers = 2;
+    invalid(desc);
+    EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc),
+              std::numeric_limits<std::size_t>::max());
+    desc.layers = 1;
+    desc.depth = std::numeric_limits<Luminumbra::u32>::max();
+    invalid(desc);
+    desc.width = desc.height = desc.depth;
+    EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc),
+              std::numeric_limits<std::size_t>::max());
+    invalid(desc);
+    desc.width = 0;
+    invalid(desc);
+    EXPECT_FALSE(resources.resize_texture("volume", 0, 4));
+    ASSERT_NE(resources.owned_texture_desc("volume"), nullptr);
+    EXPECT_EQ(resources.owned_texture_desc("volume")->width, 4u);
+    const std::array replacement{RenderResourceRegistry::TargetExtent{"volume", 2, 2}};
+    ASSERT_TRUE(resources.replace_targets(replacement));
+    EXPECT_EQ(LedgerBytes(resources.allocation_ledger(), "volume"), 128u);
+    // Depth-one volumes still have a 3D target and a single slice.
+    desc.width = desc.height = desc.depth = 1;
+    const auto single = resources.create_texture("single_slice", desc);
+    ASSERT_NE(single.id, 0u);
+    EXPECT_EQ(GlTextureAllocationBytes(single.id), 8u);
+    resources.destroy_all_owned();
+    EXPECT_TRUE(resources.allocation_ledger().empty());
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+namespace {
+// Names the leaking resource class instead of only reporting the aggregate flag.
+void ExpectPipelineResourcesReleased(const RenderPipeline& pipeline) {
+    const auto stats = pipeline.get_resource_registry_stats();
+    EXPECT_EQ(stats.framebuffers, 0u);
+    EXPECT_EQ(stats.textures, 0u);
+    EXPECT_EQ(stats.renderbuffers, 0u);
+    EXPECT_EQ(stats.buffers, 0u);
+    EXPECT_EQ(stats.vertex_arrays, 0u);
+    EXPECT_EQ(stats.shader_programs, 0u);
+    EXPECT_EQ(stats.terrain_slots, 0u);
+    EXPECT_EQ(stats.water_slots, 0u);
+    EXPECT_TRUE(stats.empty_after_shutdown);
+}
+} // namespace
+
+TEST(RenderSmokeTest, PostShaderStartupFailureReleasesAllRegistryResources) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    ReloadShaderSources sources(true);
+    const auto fragment = sources.directory / "res/shaders/post.frag";
+    // Missing source, compile failure, and a linked but incompatible LUT sampler.
+    for (int input = 0; input < 3; ++input) {
+        SCOPED_TRACE(input);
+        if (input == 0) {
+            ASSERT_TRUE(fs::remove(fragment));
+        } else {
+            ASSERT_TRUE(
+                WriteLayoutShader(fragment,
+                                  input == 1 ? "#version 450 core\n#error invalid post shader\n"
+                                             : "#version 450 core\nuniform sampler2D u_scene;\n"
+                                               "uniform sampler2D u_lookLut;\nout vec4 color;\n"
+                                               "void main() { color = texture(u_scene, vec2(.5)) + "
+                                               "texture(u_lookLut, vec2(.5)); }\n"));
+        }
+        RenderPipeline pipeline;
+        pipeline.enable_static_model_content(false);
+        pipeline.set_post_lut_enabled(true);
+        EXPECT_FALSE(pipeline.startup(32, 24, sources.directory));
+        EXPECT_TRUE(pipeline.allocation_ledger().empty());
+        pipeline.shutdown();
+        EXPECT_TRUE(pipeline.allocation_ledger().empty());
+        ExpectPipelineResourcesReleased(pipeline);
+    }
+}
+
+TEST(RenderSmokeTest, PostLutDefaultBlitIdentityAndChannelSwapAtBothRenderScales) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(32, 24, SourceRoot()));
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(false);
+    RenderResourceRegistry targets;
+    struct Cleanup {
+        RenderPipeline& pipeline;
+        RenderResourceRegistry& targets;
+        ~Cleanup() {
+            pipeline.shutdown();
+            targets.destroy_all_owned();
+        }
+    } cleanup{pipeline, targets};
+    TextureDesc desc;
+    desc.width = 32;
+    desc.height = 24;
+    desc.internal_format = GL_RGBA8;
+    desc.format = GL_RGBA;
+    desc.type = GL_UNSIGNED_BYTE;
+    for (const auto* name : {"actual", "reference"}) {
+        ASSERT_NE(targets.create_texture(name, desc).id, 0u);
+        FboDesc fbo;
+        fbo.attachments = {{GL_COLOR_ATTACHMENT0, name}};
+        ASSERT_NE(targets.create_fbo(name, fbo).id, 0u);
+    }
+    GLuint lut = 0;
+    for (const auto& entry : pipeline.allocation_ledger())
+        if (entry.name == "post_look_lut") {
+            lut = entry.gl_id;
+            EXPECT_EQ(entry.bytes, 32u * 32u * 32u * 8u);
+            EXPECT_EQ(entry.bytes, GlTextureAllocationBytes(lut));
+        }
+    ASSERT_NE(lut, 0u);
+    std::vector<float> identity(32u * 32u * 32u * 4u);
+    glGetTextureImage(lut,
+                      0,
+                      GL_RGBA,
+                      GL_FLOAT,
+                      static_cast<GLsizei>(identity.size() * sizeof(float)),
+                      identity.data());
+    std::vector<float> swapped(identity.size());
+    for (std::size_t index = 0; index < identity.size(); index += 4) {
+        const auto texel = index / 4;
+        EXPECT_NEAR(identity[index], static_cast<float>(texel % 32u) / 31.0f, 0.0005f);
+        EXPECT_NEAR(identity[index + 1], static_cast<float>((texel / 32u) % 32u) / 31.0f, 0.0005f);
+        EXPECT_NEAR(identity[index + 2], static_cast<float>(texel / (32u * 32u)) / 31.0f, 0.0005f);
+        EXPECT_EQ(identity[index + 3], 1.0f);
+        swapped[index] = identity[index + 2];
+        swapped[index + 1] = identity[index + 1];
+        swapped[index + 2] = identity[index];
+        swapped[index + 3] = identity[index + 3];
+    }
+    Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    entt::registry registry;
+    Camera camera({0, 32, 0});
+    const auto read = [&](const char* name) {
+        std::array<std::uint8_t, 32 * 24 * 4> pixels{};
+        glGetTextureImage(targets.texture(name).id,
+                          0,
+                          GL_RGBA,
+                          GL_UNSIGNED_BYTE,
+                          static_cast<GLsizei>(pixels.size()),
+                          pixels.data());
+        return pixels;
+    };
+    const auto compare = [&](bool enabled, bool channel_swap) {
+        pipeline.set_offscreen_target(targets.fbo("actual").id, 32, 24);
+        pipeline.render_frame(registry, world, camera, 0.0f);
+        const auto actual = read("actual");
+        // Independent oracle: exactly the previous clear + GL_LINEAR blit,
+        // reading this same frame's lit scene after the production post stage.
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, pipeline.lighting_fbo().fbo_id);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, targets.fbo("reference").id);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glBlitFramebuffer(0,
+                          0,
+                          static_cast<GLsizei>(pipeline.internal_width()),
+                          static_cast<GLsizei>(pipeline.internal_height()),
+                          0,
+                          0,
+                          32,
+                          24,
+                          GL_COLOR_BUFFER_BIT,
+                          GL_LINEAR);
+        const auto reference = read("reference");
+        if (!enabled) {
+            EXPECT_EQ(actual, reference);
+        } else {
+            std::size_t changed_channels = 0;
+            for (std::size_t index = 0; index < actual.size(); ++index) {
+                const auto channel = index % 4;
+                const auto expected_index = channel_swap && (channel == 0 || channel == 2)
+                                                ? index - channel + (2 - channel)
+                                                : index;
+                EXPECT_LE(std::abs(static_cast<int>(actual[index]) - reference[expected_index]), 1);
+                if (std::abs(static_cast<int>(actual[index]) - reference[index]) > 8)
+                    ++changed_channels;
+            }
+            if (channel_swap) {
+                EXPECT_GT(changed_channels, 32u) << "fixture must visibly distinguish red and blue";
+            }
+        }
+        const auto& trace = pipeline.frame_stage_trace();
+        EXPECT_EQ(trace, BuildLuminumbraFrameGraph().schedule());
+        const auto post = std::find(trace.begin(), trace.end(), "final_blit");
+        ASSERT_NE(post, trace.end());
+        EXPECT_LT(std::find(trace.begin(), trace.end(), "lightning_overlay"), post);
+        EXPECT_LT(post, std::find(trace.begin(), trace.end(), "debug_view"));
+        const auto& metadata = pipeline.get_last_render_pass_metadata();
+        ASSERT_FALSE(metadata.empty());
+        EXPECT_EQ(metadata.back().name, "final_blit");
+        EXPECT_EQ(metadata.back().inputs, (std::vector<std::string>{"lighting.color"}));
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    };
+    // First render exercises the preset/default state without calling the enable setter.
+    compare(false, false);
+    for (const float scale : {1.0f, 0.67f}) {
+        SCOPED_TRACE(scale);
+        pipeline.set_render_scale(scale);
+        pipeline.set_post_lut_enabled(false);
+        compare(false, false);
+        glTextureSubImage3D(lut, 0, 0, 0, 0, 32, 32, 32, GL_RGBA, GL_FLOAT, identity.data());
+        pipeline.set_post_lut_enabled(true);
+        compare(true, false);
+        glTextureSubImage3D(lut, 0, 0, 0, 0, 32, 32, 32, GL_RGBA, GL_FLOAT, swapped.data());
+        compare(true, true);
+        pipeline.set_post_lut_enabled(false);
+        compare(false, false);
+    }
+    pipeline.shutdown();
+    EXPECT_TRUE(pipeline.allocation_ledger().empty());
+    ExpectPipelineResourcesReleased(pipeline);
+}
+
 TEST(RenderSmokeTest, AllocationLedgerOwnedTargetsReconcileResizeFailureAndPixelParity) {
     HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();
@@ -12370,4 +12789,204 @@ TEST(RenderSmokeTest, WaterCausticsRegenerateIdenticallyAfterSkippedFrames) {
     water.reset_shader();
     EXPECT_FALSE(water.caustics_valid());
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(ScenarioGeometryMask, ReversedDepthAndWaterOverrideEveryDisplayColour) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    constexpr int width = 8;
+    constexpr int height = 8;
+    std::vector<float> depth(width * height, 0.5f);
+    depth[0] = 0.0f;
+    depth[1] = std::numeric_limits<float>::denorm_min();
+    std::vector<unsigned char> water(width * height, 0);
+    water[0] = 255;
+    const auto opaque = BuildSkyPixelMask(depth, width, height);
+    const auto covered = BuildSkyPixelMask(depth, width, height, water);
+    ASSERT_TRUE(opaque.valid_for(width, height));
+    ASSERT_TRUE(covered.valid_for(width, height));
+    EXPECT_EQ(opaque.pixels[0], 1);
+    EXPECT_EQ(opaque.pixels[1], 0);
+    EXPECT_EQ(covered.pixels[0], 0);
+
+    // A hole below the horizon is visible even when the sky is amber or black.
+    // Blue distant terrain at finite depth cannot hide or manufacture a hole.
+    for (const auto colour : {std::array<unsigned char, 3>{25, 70, 120},
+                              std::array<unsigned char, 3>{210, 150, 80},
+                              std::array<unsigned char, 3>{0, 0, 0}}) {
+        std::vector<unsigned char> rgb(width * height * 3);
+        for (std::size_t index = 0; index < rgb.size(); ++index) {
+            rgb[index] = colour[index % 3];
+        }
+        const auto hole = AnalyzePlayerViewPixels(rgb, opaque, width, height, 2);
+        EXPECT_EQ(hole.below_horizon_sky_pixels, 1);
+        EXPECT_GT(hole.below_horizon_sky_ratio, 0.005);
+        EXPECT_EQ(AnalyzePlayerViewPixels(rgb, covered, width, height, 2).below_horizon_sky_pixels,
+                  0);
+        const auto boundary = AnalyzeFarLodBoundaryBand(rgb, opaque, width, height, 4, 7);
+        EXPECT_TRUE(boundary.band_resolved);
+        EXPECT_EQ(boundary.band_sky_pixels, 1);
+        EXPECT_GT(boundary.band_sky_ratio, 0.02);
+        EXPECT_EQ(AnalyzeFarLodBoundaryBand(rgb, covered, width, height, 4, 7).band_sky_pixels, 0);
+    }
+}
+
+TEST(ScenarioGeometryMask, BoundaryMaterialCountsExcludeClearDepth) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    constexpr int width = 8;
+    constexpr int height = 8;
+    for (const auto colour :
+         {std::array<unsigned char, 3>{50, 70, 90}, std::array<unsigned char, 3>{240, 240, 230}}) {
+        std::vector<unsigned char> rgb(width * height * 3);
+        for (std::size_t index = 0; index < rgb.size(); ++index) {
+            rgb[index] = colour[index % 3];
+        }
+        for (const float depth_value : {0.0f, 0.5f}) {
+            const auto mask =
+                BuildSkyPixelMask(std::vector<float>(width * height, depth_value), width, height);
+            std::uint64_t water_pixels = 0;
+            std::uint64_t band_pixels = 0;
+            std::uint64_t sand_pixels = 0;
+            AnalyzeFarLodBoundaryBandWater(
+                rgb, mask, width, height, 4, 7, water_pixels, band_pixels, &sand_pixels);
+            EXPECT_EQ(band_pixels, 32);
+            EXPECT_EQ(water_pixels + sand_pixels, depth_value == 0.0f ? 0 : 32);
+            EXPECT_EQ(water_pixels, depth_value != 0.0f && colour[0] == 50 ? 32 : 0);
+            EXPECT_EQ(sand_pixels, depth_value != 0.0f && colour[0] == 240 ? 32 : 0);
+        }
+    }
+}
+
+TEST(ScenarioGeometryMask, FiniteSliverSurvivesAndPairedLiveGeometryCancels) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    constexpr int width = 128;
+    constexpr int height = 720;
+    constexpr int horizon = 360;
+    std::vector<float> depth(width * height, 0.0f);
+    const auto clear_mask = BuildSkyPixelMask(depth, width, height);
+    EXPECT_EQ(AnalyzeFarLodHorizonSkySliver(clear_mask, width, height, horizon).tallest_sliver_px,
+              0);
+    // A one-column geometry streak spans 300 rows, exceeding the existing 64px budget.
+    for (int row = 0; row < 300; ++row) {
+        depth[static_cast<std::size_t>(height - 1 - row) * width + width / 2] = 0.00001f;
+    }
+    const auto streak = BuildSkyPixelMask(depth, width, height);
+    EXPECT_EQ(AnalyzeFarLodHorizonSkySliver(streak, width, height, horizon).tallest_sliver_px, 300);
+    EXPECT_EQ(AnalyzeFarLodHorizonSkySliver(streak, width, height, horizon, &clear_mask)
+                  .tallest_sliver_px,
+              300);
+    EXPECT_EQ(
+        AnalyzeFarLodHorizonSkySliver(streak, width, height, horizon, &streak).tallest_sliver_px,
+        0);
+    // A neighboring live silhouette cancels with the unchanged 3x3 jitter allowance.
+    std::vector<float> baseline_depth(width * height, 0.0f);
+    for (int row = 0; row < 300; ++row) {
+        baseline_depth[static_cast<std::size_t>(height - 1 - row) * width + width / 2 + 1] = 0.5f;
+    }
+    const auto baseline = BuildSkyPixelMask(baseline_depth, width, height);
+    EXPECT_EQ(
+        AnalyzeFarLodHorizonSkySliver(streak, width, height, horizon, &baseline).tallest_sliver_px,
+        0);
+    EXPECT_EQ(AnalyzeFarLodHorizonSkySliver(streak, width, height, 0).tallest_sliver_px, 0);
+    EXPECT_EQ(AnalyzeFarLodHorizonSkySliver(streak, width, height, -1).tallest_sliver_px, 0);
+    EXPECT_EQ(AnalyzeFarLodHorizonSkySliver(streak, width, height, std::numeric_limits<int>::max())
+                  .tallest_sliver_px,
+              300);
+    std::fill(depth.begin(), depth.end(), 0.5f);
+    const auto ridge = BuildSkyPixelMask(depth, width, height);
+    EXPECT_EQ(AnalyzeFarLodHorizonSkySliver(ridge, width, height, horizon).tallest_sliver_px, 0);
+}
+
+TEST(ScenarioGeometryMask, CreatureCompositionDetectsMissingHorizonAndExcludesSkyFromSubject) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    constexpr int width = 128;
+    constexpr int height = 128;
+    std::vector<unsigned char> rgb(width * height * 3, 100);
+    std::vector<float> depth(width * height, 0.5f);
+    const auto ground = BuildSkyPixelMask(depth, width, height);
+    const auto ground_comp = AnalyzeCreatureSliceComposition(rgb, ground, width, height, 64, 64);
+    EXPECT_LT(ground_comp.sky_ratio, 0.05);
+    for (int row = height * 3 / 4; row < height; ++row) {
+        for (int column = 0; column < width; ++column) {
+            depth[static_cast<std::size_t>(row) * width + static_cast<std::size_t>(column)] = 0.0f;
+        }
+    }
+    const auto horizon_mask = BuildSkyPixelMask(depth, width, height);
+    const auto composition =
+        AnalyzeCreatureSliceComposition(rgb, horizon_mask, width, height, 64, 64);
+    EXPECT_DOUBLE_EQ(composition.sky_ratio, 0.25);
+    EXPECT_GT(composition.creature_roi_pixels, 0);
+    const auto sky_only = BuildSkyPixelMask(std::vector<float>(width * height, 0), width, height);
+    const auto sky_comp = AnalyzeCreatureSliceComposition(rgb, sky_only, width, height, 64, 64);
+    EXPECT_GT(sky_comp.sky_ratio, 0.6);
+    EXPECT_EQ(sky_comp.creature_roi_pixels, 0);
+    EXPECT_EQ(sky_comp.terrain_ref_pixels, 0);
+}
+
+TEST(ScenarioGeometryMask, IncompleteOrInvalidEvidenceCannotReportZeroDefects) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    constexpr int width = 8;
+    constexpr int height = 8;
+    const std::vector<unsigned char> rgb(width * height * 3, 100);
+    std::vector<float> depth(width * height, 0.5f);
+    const auto mask = BuildSkyPixelMask(depth, width, height);
+    EXPECT_FALSE(BuildSkyPixelMask({}, 0, height).valid_for(0, height));
+    EXPECT_FALSE(BuildSkyPixelMask({}, -1, height).valid_for(-1, height));
+    EXPECT_FALSE(
+        BuildSkyPixelMask({}, std::numeric_limits<int>::max(), height).valid_for(width, height));
+    EXPECT_FALSE(BuildSkyPixelMask({}, width, height).valid_for(width, height));
+    EXPECT_FALSE(BuildSkyPixelMask(depth, width, height, {255}).valid_for(width, height));
+    EXPECT_FALSE(mask.valid_for(width + 1, height));
+    for (const float invalid : {-0.1f,
+                                1.1f,
+                                std::numeric_limits<float>::infinity(),
+                                std::numeric_limits<float>::quiet_NaN()}) {
+        depth[0] = invalid;
+        EXPECT_FALSE(BuildSkyPixelMask(depth, width, height).valid_for(width, height));
+    }
+    const SkyPixelMask missing;
+    EXPECT_THROW(AnalyzePlayerViewPixels(rgb, missing, width, height, 2), std::invalid_argument);
+    EXPECT_THROW(AnalyzePlayerViewPixels({}, mask, width, height, 2), std::invalid_argument);
+    EXPECT_THROW(AnalyzeFarLodBoundaryBand(rgb, missing, width, height, 4, 7),
+                 std::invalid_argument);
+    EXPECT_THROW(AnalyzeCreatureSliceComposition(rgb, missing, width, height, 4, 4),
+                 std::invalid_argument);
+    EXPECT_THROW(AnalyzeFarLodHorizonSkySliver(missing, width, height, 4), std::invalid_argument);
+    EXPECT_THROW(AnalyzeFarLodHorizonSkySliver(missing, width, std::numeric_limits<int>::min(), 4),
+                 std::invalid_argument);
+    EXPECT_THROW(AnalyzeFarLodHorizonSkySliver(mask, width, height, 4, &missing),
+                 std::invalid_argument);
+    std::uint64_t water_pixels = 123;
+    std::uint64_t band_pixels = 456;
+    EXPECT_THROW(AnalyzeFarLodBoundaryBandWater(
+                     rgb, missing, width, height, 4, 7, water_pixels, band_pixels, nullptr),
+                 std::invalid_argument);
+    EXPECT_EQ(water_pixels, 123);
+    EXPECT_EQ(band_pixels, 456);
+}
+
+TEST(ScenarioGeometryMask, BoundaryRowsAreClippedBeforeTraversal) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    constexpr int width = 8;
+    constexpr int height = 8;
+    const std::vector<unsigned char> rgb(width * height * 3, 100);
+    const auto mask = BuildSkyPixelMask(std::vector<float>(width * height, 0.0f), width, height);
+    std::uint64_t water_pixels = 1;
+    std::uint64_t band_pixels = 1;
+    AnalyzeFarLodBoundaryBandWater(rgb,
+                                   mask,
+                                   width,
+                                   height,
+                                   std::numeric_limits<int>::min(),
+                                   std::numeric_limits<int>::max(),
+                                   water_pixels,
+                                   band_pixels,
+                                   nullptr);
+    EXPECT_EQ(band_pixels, 64);
+    EXPECT_EQ(water_pixels, 0);
+    AnalyzeFarLodBoundaryBandWater(
+        rgb, mask, width, height, 9, 10, water_pixels, band_pixels, nullptr);
+    EXPECT_EQ(band_pixels, 0);
+    AnalyzeFarLodBoundaryBandWater(
+        rgb, mask, width, height, 7, 4, water_pixels, band_pixels, nullptr);
+    EXPECT_EQ(band_pixels, 0);
 }

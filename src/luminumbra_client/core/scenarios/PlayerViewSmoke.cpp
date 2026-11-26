@@ -62,10 +62,6 @@ constexpr double kPlayerViewMaxBelowHorizonSkyRatio = 0.005;
 constexpr std::uint64_t kPlayerViewMaxNearBlackClusters = 0;
 // Sim-side coverage range: the LOD0 near field (12 chunks).
 constexpr float kPlayerViewCoverageDistance = 192.0f;
-// Skybox signature at the pinned noon time of day (0.04): the horizon band
-// measures ~(21-24, 60-63, 99-102) in captures - strongly blue-dominant.
-// Terrain materials (grass/soil/stone/sand) are warm or grey and never
-// satisfy b >= r + 35.
 } // namespace
 
 Luminumbra::Vec3 PlayerViewEyePosition(Luminumbra::world::GameSession* game_session) {
@@ -191,9 +187,11 @@ ExtractCameraFrustumPlanes(const Luminumbra::Rendering::Camera& camera, int widt
 }
 
 PlayerViewPixelStats AnalyzePlayerViewPixels(const std::vector<unsigned char>& pixels,
+                                             const SkyPixelMask& sky_mask,
                                              int width,
                                              int height,
                                              int horizon_row_from_top) {
+    ValidateScenarioPixelBuffers(pixels, sky_mask, width, height);
     PlayerViewPixelStats stats;
     stats.width = width;
     stats.height = height;
@@ -218,11 +216,9 @@ PlayerViewPixelStats AnalyzePlayerViewPixels(const std::vector<unsigned char>& p
             continue;
         }
         for (int x = min_x; x < max_x; ++x) {
-            const std::size_t offset =
-                static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
             ++stats.below_horizon_pixels;
-            if (IsBelowHorizonSkyPixel(
-                    pixels[offset + 0u], pixels[offset + 1u], pixels[offset + 2u])) {
+            if (sky_mask.pixels[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                                static_cast<std::size_t>(x)] != 0) {
                 ++stats.below_horizon_sky_pixels;
             }
         }
@@ -388,6 +384,7 @@ void WritePlayerViewAnalysis(
 
     const nlohmann::json artifact = {
         {"schema", "luminumbra.player_view.v1"},
+        {"sky_classifier", "reversed_z_depth_water"},
         {"timestamp_utc", TimestampUtc()},
         {"scenario", "player_view_smoke"},
         {"world_preset", world_preset},
