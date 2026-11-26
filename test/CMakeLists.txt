@@ -2623,6 +2623,10 @@ set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tool
 add_test(NAME SimBudgetGateContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_sim_budget_gate.py")
 set_tests_properties(SimBudgetGateContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
+add_test(NAME RecoveryDurabilityEvidenceContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/persistence/test_recovery_durability_evidence.py")
+set_tests_properties(RecoveryDurabilityEvidenceContract PROPERTIES LABELS "persistence;tools" TIMEOUT 30)
 
 # GPU tracer micro-profile. Manual/GPU — needs a real GL context and a
 # hardware GPU (skips gracefully headless; writes the artifact but skips the perf

@@ -104,6 +104,7 @@ PYTHON_TESTS = (
     "tools/assets/test_acquire.py",
     "tools/audio/test_bank_validate.py",
     "tools/persistence/test_save_receipt.py",
+    "tools/persistence/test_recovery_durability_evidence.py",
     "tools/rendering/acceptance/test_scene_matrix.py",
 )
 PYTHON_MODULES = {
@@ -134,6 +135,7 @@ PYTHON_MODULES = {
     "tools/release/verify_release.py", "tools/release/validate_release_gates.py",
     "tools/assets/acquire.py",
     "tools/audio/bank_validate.py", "tools/persistence/save_receipt.py",
+    "tools/persistence/recovery_durability_evidence.py",
     "tools/rendering/acceptance/scene_matrix.py",
 }
 # blender-authoring.yml covers these explicit files on Linux and Windows.
