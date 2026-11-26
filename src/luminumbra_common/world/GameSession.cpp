@@ -2935,7 +2935,6 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             } else {
                 SettleWaterAuthority(defer_water_authority);
             }
-            m_regionalFieldView = nullptr;
             if (foliage_step) {
                 foliage_step->Commit(*this);
                 // Callbacks use the live registry. Publish first so they observe
@@ -2952,10 +2951,17 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 return i + 1;
             }
             UpdateRegionalWaterFromSimulation();
-            PublishRegionCompletedWork(defer_water_authority);
             // All tick consumers/callbacks have finished and staged decay is live.
             // Later hash/render consumers build fresh views of the published roster.
             luminumbra::ai::CleanupNewbornCarcasses(m_registry);
+            // Foliage callbacks and regional water can still refuse after their registry
+            // publication. Keep ambient authority staged until every consumer succeeds.
+            PublishRegionCompletedWork(defer_water_authority);
+            if (field_candidate) {
+                m_fieldPages.adopt_weather_state(*field_candidate);
+                m_fieldPages.adopt_scheduled_pages(std::move(*field_candidate));
+            }
+            m_regionalFieldView = nullptr;
         } catch (const std::exception& error) {
             if (!m_activeRegionsEnabled)
                 throw;
@@ -3736,13 +3742,13 @@ bool HasDueWeatherBoundary(RegionKey owner,
 } // namespace
 
 std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint64_t tick) {
+    m_regionalFieldActivationVisits = 0;
     m_regionalWeatherParticipating = false;
     m_regionalWeatherProjectionCount = 0;
     m_regionalWeatherScanCount = 0;
     m_regionalWeatherScheduleVisits = 0;
     m_regionalWeatherProjectionVisitCount = 0;
-    // Empty authority retains the legacy weather path, including its save bytes.
-    if (!m_activeRegionsEnabled || !m_worldSystem || !m_fieldPages.has_ambient())
+    if (!m_activeRegionsEnabled || !m_worldSystem)
         return std::nullopt;
     const auto& records = m_activeRegionLedger.records();
     const auto refresh_boundary = [this](RegionKey changed) {
@@ -3791,7 +3797,7 @@ std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint6
         }
         return false;
     }();
-    if (m_fieldPages.page_count() == 0 && !weather_due && !boundary_due)
+    if (due.empty() && m_fieldPages.page_count() == 0 && !weather_due && !boundary_due)
         return std::nullopt;
     std::set<RegionKey> page_owners(due.begin(), due.end());
     for (const auto& [shift, owners] : m_regionalAmbientOwners) {
@@ -3800,17 +3806,32 @@ std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint6
         }
     }
     const std::vector<RegionKey> page_participants(page_owners.begin(), page_owners.end());
-    const auto previous = m_fieldPages.page_count() == 0
-                              ? FieldPageState{}
-                              : m_fieldPages.scheduled_snapshot(page_participants);
-    if (previous.page_count() == 0 && !weather_due && !boundary_due)
+    const auto previous = m_fieldPages.scheduled_snapshot(page_participants);
+    if (due.empty() && previous.page_count() == 0 && !weather_due && !boundary_due)
         return std::nullopt;
     // The candidate holds only the participating pages, so a tick copies a bounded snapshot rather
     // than the whole store. The live state stays untouched even if a later consumer or work
     // publication fails; publication assigns the stepped pages back without allocating.
     auto next = previous;
     const auto seed = static_cast<std::uint64_t>(m_numericSeed);
-    const auto work = next.step_scheduled(records, due, seed, tick, &previous);
+    std::map<RegionKey, std::uint64_t> activation_work;
+    // The schedule bounds this pass. Each owner has at most 22 x 22 ambient cells;
+    // activation checks the combined live/staged page cap before allocating its nodes.
+    for (const auto owner : due) {
+        ++m_regionalFieldActivationVisits;
+        const auto found = records.find(owner);
+        if (found == records.end() || found->second.state == RegionState::Frozen)
+            continue;
+        const auto initialized = m_fieldPages.owned_initialized_cells(owner);
+        if (!next.activate_region(owner, seed, tick))
+            throw std::runtime_error("Regional ambient activation refused");
+        const auto added = next.owned_initialized_cells(owner) - initialized;
+        if (added != 0)
+            activation_work.emplace(owner, added);
+    }
+    auto work = next.step_scheduled(records, due, seed, tick, &previous);
+    for (const auto& [owner, updates] : activation_work)
+        work[owner] += updates;
     // A shared physical page can contain only frozen cells. It contributes no candidate work.
     if (work.empty() && !weather_due && !boundary_due)
         return std::nullopt;
@@ -3884,12 +3905,9 @@ void GameSession::PublishRegionConsumers(FieldPageState* fields,
                              : std::span<const std::pair<RegionKey, std::uint64_t>>{};
     const auto next_id =
         foliage ? foliage->registry.next_id() : m_activeRegionLedger.next_persistent_id();
-    // Regional water consumes the published foliage roster. Publish ages and IDs now,
-    // retaining all completed work for the single combined publication after water.
-    const auto completed = m_authorityProfile.regional_water
-                               ? std::span<const RegionWork>{}
-                               : std::span<const RegionWork>{m_regionCompletedWork};
-    if (!m_activeRegionLedger.prepare_energy_work(ages, completed, next_id)) {
+    // Publish ages and IDs for foliage callbacks and regional water, retaining completed
+    // work for the final combined publication with ambient authority after all consumers.
+    if (!m_activeRegionLedger.prepare_energy_work(ages, {}, next_id)) {
         throw std::runtime_error("Regional registers refused");
     }
     if (foliage) {
@@ -3916,29 +3934,26 @@ void GameSession::PublishRegionConsumers(FieldPageState* fields,
         energy->transaction.commit();
     }
     if (fields) {
-        m_fieldPages.adopt_weather_state(*fields);
         m_fieldPages.adopt_scent_state(*fields);
         if (fields->scent_capture_visits() != 0) {
             fields->reuse_scent_buffers(m_scentChangeBuffers);
         }
-        m_fieldPages.adopt_scheduled_pages(std::move(*fields));
     }
     if (std::exchange(m_scentRecenterPending, false)) {
         // Event callbacks can move the spawn after capture; project the committed candidate.
         RestoreRegionalScent();
     }
-    if (!m_authorityProfile.regional_water) {
-        m_regionCompletedWork.clear();
-    }
 }
 
 void GameSession::PublishRegionCompletedWork(bool defer_water_authority) {
-    if (!m_activeRegionsEnabled || !m_authorityProfile.regional_water) {
+    if (!m_activeRegionsEnabled) {
         return;
     }
-    // Consumers already published fields, energy ages and foliage IDs before callbacks.
+    // Consumers already published scent, foliage, energy ages and foliage IDs before callbacks.
     // Publish the combined totals exactly once, including this tick's water.
-    SettleWaterAuthority(defer_water_authority);
+    if (m_authorityProfile.regional_water) {
+        SettleWaterAuthority(defer_water_authority);
+    }
     if (m_regionFault) {
         throw std::runtime_error("Water authority settlement refused");
     }
@@ -4228,6 +4243,15 @@ void GameSession::StepRegionalWeather(FieldPageState* fields, std::uint64_t tick
             m_weatherSystem->RefreshRegionalWeather(tick, m_ambientFieldAnchor);
         return;
     }
+    if (!m_regionalFieldsBound) {
+        // First activation binds all three samplers to the borrowed candidate before any
+        // consumer advances. There is no live ambient authority to flatten or reindex here;
+        // AdvanceRegionalWeather indexes only participating owners. Fault recovery unbinds
+        // these queries and reconstructs presentation from the unchanged live authority.
+        BindRegionalFieldQueries();
+        if (m_weatherSystem)
+            m_weatherSystem->AdoptRegionalWeather(tick, m_ambientFieldAnchor, {}, {}, true);
+    }
     const auto work = AdvanceRegionalWeather(*fields, tick);
     if (m_weatherSystem) {
         m_weatherSystem->ResetRegionalProjectionWork();
@@ -4247,9 +4271,8 @@ std::map<RegionKey, std::uint64_t> GameSession::AdvanceRegionalWeather(FieldPage
     const std::set<RegionKey> scheduled_due(m_regionSchedule.due.begin(),
                                             m_regionSchedule.due.end());
     auto due_list = m_regionSchedule.due;
-    std::erase_if(due_list, [this](RegionKey owner) {
-        return !m_fieldPages.owns_weather(owner) &&
-               m_fieldPages.owned_initialized_cells(owner) == 0;
+    std::erase_if(due_list, [this, &fields](RegionKey owner) {
+        return !m_fieldPages.owns_weather(owner) && fields.owned_initialized_cells(owner) == 0;
     });
     std::sort(due_list.begin(), due_list.end());
     const std::set<RegionKey> due(due_list.begin(), due_list.end());

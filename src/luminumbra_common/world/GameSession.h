@@ -700,6 +700,10 @@ public:
     [[nodiscard]] std::size_t GetRegionalFieldCandidatePageCount() const {
         return m_regionalFieldView ? m_regionalFieldView->page_count() : 0;
     }
+    // Due owners inspected for activation this tick; never persisted or hashed.
+    [[nodiscard]] std::size_t GetRegionalFieldActivationVisits() const {
+        return m_regionalFieldActivationVisits;
+    }
     // Records copied from live owners during staging; never persisted or hashed.
     [[nodiscard]] std::size_t GetRegionalWeatherCandidateRecordCount() const {
         return m_regionalFieldView ? m_regionalFieldView->staged_weather_records() : 0;
@@ -969,8 +973,9 @@ private:
     [[nodiscard]] std::map<RegionKey, std::uint64_t> AdvanceRegionalWeather(FieldPageState& fields,
                                                                             std::uint64_t tick);
     void StepRegionalWeather(FieldPageState* fields, std::uint64_t tick);
-    // Query-only view of this tick's candidate, cleared before publication or fault recovery.
+    // Query-only view of this tick's candidate, cleared after publication or on fault recovery.
     const FieldPageState* m_regionalFieldView = nullptr;
+    std::size_t m_regionalFieldActivationVisits = 0;
     bool m_regionalFieldsBound = false;
     void UpdateRegionalWeatherBoundaryOwner(RegionKey owner, const FieldPageState& fields);
     std::map<std::uint8_t, std::set<RegionKey>> m_regionalWeatherBoundaryOwners;
