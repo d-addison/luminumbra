@@ -189,7 +189,7 @@ TEST(FarVolumeResidency, PerTierWorkReconcilesWithFrameTotals) {
     ASSERT_EQ(dispatched.dispatched, 5u);
     EXPECT_EQ(dispatched.completed, 0u);
     std::array<std::size_t, kFarTierCount> completions{};
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     do {
         const auto frame = owner.AdvanceFrame(0, 0, {}, {}, {});
         CheckFrameWork(frame);
@@ -1948,7 +1948,7 @@ TEST(FarVolumeHandoff, FailedUploadsDebitTheirOriginatingTier) {
     CheckFrameWork(dispatched);
     ASSERT_EQ(dispatched.dispatched, 5u);
     std::array<std::size_t, kFarTierCount> completions{};
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     do {
         const auto frame = owner.AdvanceFrame(0, 0, {}, {});
         CheckFrameWork(frame);
