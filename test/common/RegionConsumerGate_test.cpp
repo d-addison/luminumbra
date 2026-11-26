@@ -5121,3 +5121,63 @@ TEST(Decomposition, ElapsedDetachedTraversalStaysBoundedByCandidatePool) {
     EXPECT_EQ(AI::RunDecompositionStage(registry, 12, &admission, gate, empty, false, true).visited,
               0u);
 }
+
+TEST(RegionConsumerGate, ElapsedSecondaryPublicationIsBoundedAndRefusesTopologyRemoval) {
+    for (const unsigned unrelated : {0u, 1000u}) {
+        entt::registry registry;
+        for (unsigned index = 0; index < unrelated; ++index)
+            registry.emplace<C::TransformComponent>(registry.create());
+        const auto participant = registry.create();
+        registry.emplace<C::TransformComponent>(participant).position = {8, 0, 8};
+        registry.emplace<C::TerritoryComponent>(participant);
+        EXPECT_FALSE(F::FoliageRegistryStage::HasWork(registry));
+        EXPECT_TRUE(F::FoliageRegistryStage::HasWork(registry, true));
+        F::FoliageRegistryStage stage;
+        const W::ActiveRegionLedger allocator;
+        stage.Begin(registry, allocator, true);
+        EXPECT_LE(stage.entity_visits(), 2u);
+        stage.registry().remove<C::TerritoryComponent>(participant);
+        EXPECT_THROW(stage.PreparePublication(registry), std::runtime_error);
+        stage.Abort();
+        EXPECT_TRUE(registry.all_of<C::TerritoryComponent>(participant));
+        EXPECT_FALSE(registry.all_of<C::TerritoryBiasComponent>(participant));
+        stage.Begin(registry, 1, true);
+        const std::array<RegionKey, 1> due{{{0, 0}}};
+        const std::map<RegionKey, std::uint32_t> windows{{{0, 0}, 1}};
+        const RegionConsumerGate gate(stage.registry(), due, W::RegionElapsedTicks(windows));
+        luminumbra::ai::RunTerritoryOnTick(stage.registry(), 1, nullptr, &gate);
+        const auto before = stage.publication_entity_visits();
+        stage.PreparePublication(registry);
+        EXPECT_FALSE(registry.all_of<C::TerritoryBiasComponent>(participant));
+        stage.Commit(registry);
+        EXPECT_TRUE(registry.all_of<C::TerritoryBiasComponent>(participant));
+        EXPECT_EQ(registry.get<C::TerritoryComponent>(participant).established, 1u);
+        EXPECT_LE(stage.publication_entity_visits() - before, 8u);
+    }
+}
+
+TEST(RegionElapsedTicks, DueTimeBindingClipsPlantBirthsWithoutChangingLegacyAdmission) {
+    entt::registry registry;
+    const auto plant = Plant(registry, 8);
+    const std::array<RegionKey, 1> due{{{0, 0}}};
+    const std::map<RegionKey, std::uint32_t> windows{{{0, 0}, 8}};
+    const RegionConsumerGate legacy(registry, due, W::RegionElapsedTicks(windows));
+    const RegionConsumerGate elapsed(registry, due, W::RegionElapsedTicks(windows), 8);
+    for (const auto birth : {0ull, 1ull, 5ull, 8ull, 9ull}) {
+        registry.get<C::PlantGrowthComponent>(plant).planted_tick = birth;
+        EXPECT_TRUE(elapsed.Allows(plant));
+        EXPECT_EQ(legacy.ElapsedTicks(plant), 8u);
+        const auto expected =
+            birth > 8 ? 0u : static_cast<std::uint32_t>(std::min(8ull, 9ull - birth));
+        EXPECT_EQ(elapsed.ElapsedTicks(plant), expected);
+    }
+    registry.get<C::PlantGrowthComponent>(plant).planted_tick =
+        std::numeric_limits<std::uint64_t>::max();
+    const RegionConsumerGate maximum(
+        registry, due, W::RegionElapsedTicks(windows), std::numeric_limits<std::uint64_t>::max());
+    EXPECT_EQ(maximum.ElapsedTicks(plant), 1u);
+    const std::array<RegionKey, 0> empty{};
+    const RegionConsumerGate frozen(registry, empty, W::RegionElapsedTicks(windows), 8);
+    EXPECT_FALSE(frozen.Allows(plant));
+    EXPECT_EQ(frozen.ElapsedTicks(plant), 0u);
+}

@@ -458,6 +458,7 @@ add_executable(common_tests
     sim/crop_lifecycle_test.cpp
     sim/PlantReproductionContinuation_test.cpp
     sim/foliage_drift_integration_test.cpp
+    sim/RegionalCadenceIntegration_test.cpp
     sim/species_registry_test.cpp
     sim/movement_hardening_test.cpp
     sim/lifecycle_hardening_test.cpp
