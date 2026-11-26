@@ -26,6 +26,7 @@
 #include "core/EngineVersion.h"
 #include "core/Log.h"
 #include "core/Profiler.h"
+#include "core/StrictNumeric.h"
 #include "luminumbra_client/core/PresentationClock.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/LightingComponents.h"
@@ -378,13 +379,13 @@ bool RenderPipeline::startup(u32 screen_width,
     // startup; LUMIN_RENDER_SCALE overrides for an A/B. Clamped to
     // [0.5, 1.0] -- 1.0 is byte-identical (internal==output); < 1.0 renders the scene at the
     // internal extent and the taau/final-blit sampler upscales to output.
-    if (const auto value = Core::ReadEnvironment("LUMIN_RENDER_SCALE"); value && !value->empty()) {
-        const float s = std::strtof(value->c_str(), nullptr);
-        // The env knob WINS over the config-seeded set_render_scale for any PARSEABLE value:
+    if (const auto value = Core::ReadEnvironment("LUMIN_RENDER_SCALE")) {
+        float scale = 0.0f;
+        // A complete, finite positive override wins over the config-seeded set_render_scale:
         // clamp into [0.5,1.0] to match set_render_scale's clamp (so config=0.5 + env=2.0 -> 1.0,
-        // not a leaked 0.5). strtof returns 0.0 on garbage -> `s > 0.0f` rejects unparseable input.
-        if (s > 0.0f)
-            m_render_scale = std::clamp(s, 0.5f, 1.0f);
+        // not a leaked 0.5). Invalid input keeps the configured scale, matching main_client.
+        if (Core::ParseNumber(*value, scale) && scale > 0.0f)
+            m_render_scale = std::clamp(scale, 0.5f, 1.0f);
     }
     // Internal (scaled) render extent = round(output * scale); at 1.0, lround(N*1.0f)==N.
     m_internal_width = static_cast<u32>(std::lround(m_screen_width * m_render_scale));
@@ -6536,12 +6537,11 @@ void RenderPipeline::update_time_of_day(float deltaTime,
     // The LUMIN_MOON env read (parsed once) stays here as a client-config concern.
     static const float s_moon_env = [] {
         if (const auto value = Core::ReadEnvironment("LUMIN_MOON")) {
-            try {
-                return std::stof(*value);
-            } catch (...) {
-                // The static initializer bounds this diagnostic to once per process.
-                LUMINUMBRA_CORE_WARN("Invalid LUMIN_MOON; using configured illumination");
-            }
+            float illumination = -1.0f;
+            if (Core::ParseNumber(*value, illumination))
+                return illumination;
+            // The static initializer bounds this diagnostic to once per process.
+            LUMINUMBRA_CORE_WARN("Invalid LUMIN_MOON; using configured illumination");
         }
         return -1.0f;
     }();
