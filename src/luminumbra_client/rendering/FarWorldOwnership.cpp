@@ -1,6 +1,7 @@
 #include "FarWorldOwnership.h"
 
 #include "luminumbra/core/Types.h"
+#include "luminumbra_common/world/Chunk.h"
 
 #include <algorithm>
 #include <cmath>
@@ -16,6 +17,54 @@ bool Finite(const std::array<double, 3>& p) noexcept {
     return std::all_of(p.begin(), p.end(), [](double v) { return std::isfinite(v); });
 }
 } // namespace
+bool BuildFarWorldWaterSurfaceCells(std::span<const VoxelVertex> vertices,
+                                    std::span<const std::uint32_t> indices,
+                                    std::int32_t storage_y,
+                                    std::vector<std::int32_t>& output) {
+    // GenerateWaterMesh admits at most 32*32 quads. Bound both the input scan
+    // and interval storage before allocating; output uses the existing mask cap.
+    constexpr std::size_t max_quads = 32u * 32u;
+    if (vertices.size() > max_quads * 4 || indices.size() > max_quads * 6 ||
+        indices.size() % 3 != 0 || vertices.empty() != indices.empty())
+        return false;
+    std::vector<std::array<std::int32_t, 2>> intervals;
+    intervals.reserve(indices.size() / 3);
+    for (std::size_t index = 0; index < indices.size(); index += 3) {
+        std::int32_t minimum = std::numeric_limits<std::int32_t>::max();
+        std::int32_t maximum = std::numeric_limits<std::int32_t>::min();
+        for (std::size_t corner = 0; corner < 3; ++corner) {
+            const auto vertex = indices[index + corner];
+            if (vertex >= vertices.size())
+                return false;
+            const double cell =
+                static_cast<double>(storage_y) +
+                std::floor(static_cast<double>(vertices[vertex].position.y) / CHUNK_SIZE_Y);
+            if (!std::isfinite(cell) || cell < std::numeric_limits<std::int32_t>::min() ||
+                cell > std::numeric_limits<std::int32_t>::max())
+                return false;
+            minimum = std::min(minimum, static_cast<std::int32_t>(cell));
+            maximum = std::max(maximum, static_cast<std::int32_t>(cell));
+        }
+        intervals.push_back({minimum, maximum});
+    }
+    std::sort(intervals.begin(), intervals.end());
+    std::vector<std::int32_t> cells;
+    for (const auto& interval : intervals) {
+        const auto first = cells.empty() ? static_cast<std::int64_t>(interval[0])
+                                         : std::max(static_cast<std::int64_t>(interval[0]),
+                                                    static_cast<std::int64_t>(cells.back()) + 1);
+        const auto end = static_cast<std::int64_t>(interval[1]) + 1;
+        if (first >= end)
+            continue;
+        const auto count = static_cast<std::uint64_t>(end - first);
+        if (count > kFarWorldLiveCellLimit - cells.size())
+            return false;
+        for (auto cell = first; cell < end; ++cell)
+            cells.push_back(static_cast<std::int32_t>(cell));
+    }
+    output.swap(cells);
+    return true;
+}
 bool IsFarWorldLiveUploadCurrent(const FarWorldLiveUpload& upload) noexcept {
     return upload.valid_allocation && upload.uploaded_indices != 0 &&
            upload.snapshot_version == upload.uploaded_version;
@@ -109,16 +158,38 @@ bool FarWorldOwnership::Add(const FarWorldLiveUpload& upload) noexcept {
         return false;
     }
     ++candidates_;
-    const auto bits = (IsFarWorldLiveUploadCurrent(upload) ? kFarWorldTerrainReady : 0) |
-                      (IsFarWorldLiveWaterUploadCurrent(upload) ? kFarWorldWaterReady : 0);
-    if (bits == 0)
+    const bool terrain_ready = IsFarWorldLiveUploadCurrent(upload);
+    const bool water_ready = IsFarWorldLiveWaterUploadCurrent(upload);
+    if (!terrain_ready && !water_ready)
         return true;
-    if (count_ == limit_ || upload.cell.reserved != 0) {
+    if (upload.cell.reserved != 0 ||
+        (water_ready && (upload.water_surface_cells.empty() ||
+                         upload.water_surface_cells.size() > kFarWorldLiveCellLimit))) {
         failed_ = true;
         return false;
     }
-    cells_[count_] = upload.cell;
-    cells_[count_++].reserved = bits;
+    const auto terrain_index = count_;
+    if (terrain_ready) {
+        if (count_ == limit_) {
+            failed_ = true;
+            return false;
+        }
+        cells_[count_] = upload.cell;
+        cells_[count_++].reserved = kFarWorldTerrainReady;
+    }
+    if (water_ready) {
+        for (const auto surface_y : upload.water_surface_cells) {
+            if (terrain_ready && surface_y == upload.cell.y) {
+                cells_[terrain_index].reserved |= kFarWorldWaterReady;
+                continue;
+            }
+            if (count_ == limit_) {
+                failed_ = true;
+                return false;
+            }
+            cells_[count_++] = {upload.cell.x, surface_y, upload.cell.z, kFarWorldWaterReady};
+        }
+    }
     return true;
 }
 bool FarWorldOwnership::Finish() noexcept {

@@ -27,6 +27,7 @@
 #include "core/EngineVersion.h"
 #include "core/Log.h"
 #include "core/Profiler.h"
+#include "core/StrictNumeric.h"
 #include "luminumbra_client/core/PresentationClock.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/LightingComponents.h"
@@ -479,13 +480,13 @@ bool RenderPipeline::startup(u32 screen_width,
     // startup; LUMIN_RENDER_SCALE overrides for an A/B. Clamped to
     // [0.5, 1.0] -- 1.0 is byte-identical (internal==output); < 1.0 renders the scene at the
     // internal extent and the taau/final-blit sampler upscales to output.
-    if (const auto value = Core::ReadEnvironment("LUMIN_RENDER_SCALE"); value && !value->empty()) {
-        const float s = std::strtof(value->c_str(), nullptr);
-        // The env knob WINS over the config-seeded set_render_scale for any PARSEABLE value:
+    if (const auto value = Core::ReadEnvironment("LUMIN_RENDER_SCALE")) {
+        float scale = 0.0f;
+        // A complete, finite positive override wins over the config-seeded set_render_scale:
         // clamp into [0.5,1.0] to match set_render_scale's clamp (so config=0.5 + env=2.0 -> 1.0,
-        // not a leaked 0.5). strtof returns 0.0 on garbage -> `s > 0.0f` rejects unparseable input.
-        if (s > 0.0f)
-            m_render_scale = std::clamp(s, 0.5f, 1.0f);
+        // not a leaked 0.5). Invalid input keeps the configured scale, matching main_client.
+        if (Core::ParseNumber(*value, scale) && scale > 0.0f)
+            m_render_scale = std::clamp(scale, 0.5f, 1.0f);
     }
     // Internal (scaled) render extent = round(output * scale); at 1.0, lround(N*1.0f)==N.
     m_internal_width = static_cast<u32>(std::lround(m_screen_width * m_render_scale));
@@ -3653,6 +3654,8 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         gbuffer_input.far_selection = m_frame_far_selection;
         gbuffer_input.legacy_far = legacy_far_compatibility();
         if (m_frame_far_selection.effective == FarWorldMode::Ladder)
+            gbuffer_input.ladder_terrain_coverage = &m_far_world->TerrainCoverage();
+        if (m_frame_far_selection.effective == FarWorldMode::Ladder)
             gbuffer_input.submit_ladder = [this, &camera](const FarWorldPrepareDraw& prepare) {
                 return m_far_world->Submit(
                     {camera.Position.x, camera.Position.y, camera.Position.z}, prepare);
@@ -5499,6 +5502,13 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
         return;
     }
 
+    std::vector<std::int32_t> water_surface_cells;
+    if (ladder && !BuildFarWorldWaterSurfaceCells(
+                      payload.vertices, payload.indices, chunk.coords.y, water_surface_cells)) {
+        m_last_mesh_upload_stats.water_upload_failures++;
+        return;
+    }
+
     auto it = m_water_render_data.find(chunk.id);
     const bool version_reused =
         it != m_water_render_data.end() && it->second.mesh_version != payload.mesh_version;
@@ -5589,6 +5599,7 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
         m_render_registry.record_buffer_allocation(data.ebo_id, checked_sizes.index_bytes);
     }
     data.ladder_upload_version = ladder ? std::optional<u32>(payload.mesh_version) : std::nullopt;
+    data.water_surface_cells = std::move(water_surface_cells);
     data.element_count = index_count;
     data.mesh_version = payload.mesh_version;
     data.frames_since_inactive = 0;
@@ -5599,6 +5610,7 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
         it->second = data;
         previous.mesh_version = previous.element_count = previous.frames_since_inactive = 0;
         previous.ladder_upload_version.reset();
+        previous.water_surface_cells.clear();
         // At most kMaxFreeWaterRenderSlots spare GPU slots are retained.
         if (m_free_water_render_slots.size() < kMaxFreeWaterRenderSlots)
             m_free_water_render_slots.push_back(previous);
@@ -5716,6 +5728,7 @@ void RenderPipeline::unload_water_resources(ChunkID chunk_id) {
         data.element_count = 0;
         data.mesh_version = 0;
         data.ladder_upload_version.reset();
+        data.water_surface_cells.clear();
         data.frames_since_inactive = 0;
         if (m_free_water_render_slots.size() < kMaxFreeWaterRenderSlots) {
             m_free_water_render_slots.push_back(data);
@@ -6638,12 +6651,11 @@ void RenderPipeline::update_time_of_day(float deltaTime,
     // The LUMIN_MOON env read (parsed once) stays here as a client-config concern.
     static const float s_moon_env = [] {
         if (const auto value = Core::ReadEnvironment("LUMIN_MOON")) {
-            try {
-                return std::stof(*value);
-            } catch (...) {
-                // The static initializer bounds this diagnostic to once per process.
-                LUMINUMBRA_CORE_WARN("Invalid LUMIN_MOON; using configured illumination");
-            }
+            float illumination = -1.0f;
+            if (Core::ParseNumber(*value, illumination))
+                return illumination;
+            // The static initializer bounds this diagnostic to once per process.
+            LUMINUMBRA_CORE_WARN("Invalid LUMIN_MOON; using configured illumination");
         }
         return -1.0f;
     }();

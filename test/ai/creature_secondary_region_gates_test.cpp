@@ -4,6 +4,7 @@
 #include "luminumbra_common/ai/ScentDepositSystem.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/systems/FieldEmitterSystem.h"
+#include "luminumbra_common/systems/RegionElapsedTicks.h"
 #include "luminumbra_common/world/GameSession.h"
 
 #include <gtest/gtest.h>
@@ -13,6 +14,7 @@
 #include <bit>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <tuple>
 #include <vector>
 
@@ -360,6 +362,94 @@ TEST(CreatureSecondaryRegionGates, SessionForagingAndEmitterSourcesResumeWithThe
     EXPECT_NE(ForagerState(registry, actor), before);
     EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, 1u);
     EXPECT_GT(session.GetEnergyFieldState()->at_cell(20, 0), 0u);
+}
+
+TEST(RegionElapsedTicks, CapturedOwnerSurvivesMovementAndHandleReuse) {
+    entt::registry registry;
+    const auto admitted = Actor(registry);
+    const auto denied = Actor(registry, 513);
+    // Nonparticipants do not add work to capture or trigger an owner/world scan.
+    for (int index = 0; index < 128; ++index) {
+        (void)registry.create();
+    }
+    const std::array<W::RegionKey, 1> due{{{0, 0}}};
+    const std::map<W::RegionKey, std::uint32_t> windows{{{0, 0}, 65536}, {{1, 0}, 32}};
+    const W::RegionConsumerGate gate(registry, due, W::RegionElapsedTicks(windows));
+    A::CreatureTickAdmission admission;
+    admission.Capture(registry, gate);
+    EXPECT_EQ(admission.owner_visits(), 2u);
+    EXPECT_EQ(gate.owner_visits(), due.size() + 2u);
+    registry.get<C::TransformComponent>(admitted).position.x = 513;
+    registry.get<C::TransformComponent>(denied).position.x = 4;
+    EXPECT_TRUE(admission.Allows(admitted));
+    EXPECT_FALSE(admission.Allows(denied));
+    EXPECT_EQ(admission.ElapsedTicks(admitted), 65536u);
+    EXPECT_EQ(admission.ElapsedTicks(denied), 0u);
+    EXPECT_EQ(gate.ElapsedTicks(admitted), 0u);
+    EXPECT_EQ(gate.ElapsedTicks(denied), 65536u);
+
+    // Even without Forget, a replacement generation must not inherit either cached decision.
+    for (const auto retired : {admitted, denied}) {
+        registry.destroy(retired);
+        const auto replacement = Actor(registry, 513);
+        EXPECT_EQ(entt::to_entity(replacement), entt::to_entity(retired));
+        EXPECT_NE(replacement, retired);
+        EXPECT_TRUE(admission.Allows(replacement));
+        EXPECT_EQ(admission.ElapsedTicks(replacement), 1u);
+        admission.Forget(retired);
+        admission.Forget(retired); // Removal of an absent generation is harmless.
+        EXPECT_EQ(admission.ElapsedTicks(replacement), 1u);
+    }
+    // A fresh capture replaces every old decision and uses the new owner's current window.
+    const std::array<W::RegionKey, 1> next_due{{{1, 0}}};
+    const std::map<W::RegionKey, std::uint32_t> next_windows{{{1, 0}, 2}};
+    admission.Capture(
+        registry, W::RegionConsumerGate(registry, next_due, W::RegionElapsedTicks(next_windows)));
+    EXPECT_EQ(admission.owner_visits(), 2u);
+    for (const auto entity : registry.view<const C::CreatureComponent>()) {
+        EXPECT_TRUE(admission.Allows(entity));
+        EXPECT_EQ(admission.ElapsedTicks(entity), 2u);
+    }
+    registry.clear();
+    admission.Capture(registry, W::RegionConsumerGate(registry, {}));
+    EXPECT_EQ(admission.owner_visits(), 0u);
+}
+
+TEST(RegionElapsedTicks, NewbornCannotConsumePreBirthHistory) {
+    entt::registry registry;
+    const auto parent = Actor(registry);
+    const auto zero_window = Actor(registry, 513);
+    const std::array<W::RegionKey, 2> due{{{0, 0}, {1, 0}}};
+    const std::map<W::RegionKey, std::uint32_t> windows{{{0, 0}, 65536}, {{1, 0}, 0}};
+    A::CreatureTickAdmission admission;
+    admission.Capture(registry,
+                      W::RegionConsumerGate(registry, due, W::RegionElapsedTicks(windows)));
+    const auto newborn = Actor(registry);
+    const auto outside = Actor(registry, 1025);
+    const auto other = registry.create();
+    EXPECT_TRUE(admission.Allows(parent));
+    EXPECT_EQ(admission.ElapsedTicks(parent), 65536u);
+    EXPECT_TRUE(admission.Allows(zero_window));
+    EXPECT_EQ(admission.ElapsedTicks(zero_window), 0u);
+    for (const auto entity : {newborn, outside, other}) {
+        EXPECT_TRUE(admission.Allows(entity));
+        EXPECT_EQ(admission.ElapsedTicks(entity), 1u);
+    }
+    // On the next tick, newborns participate normally in the newly supplied owner window.
+    const std::map<W::RegionKey, std::uint32_t> next_windows{{{0, 0}, 1}, {{1, 0}, 1}};
+    admission.Capture(registry,
+                      W::RegionConsumerGate(registry, due, W::RegionElapsedTicks(next_windows)));
+    EXPECT_EQ(admission.ElapsedTicks(newborn), 1u);
+    EXPECT_FALSE(admission.Allows(outside));
+    EXPECT_EQ(admission.ElapsedTicks(outside), 0u);
+    admission.Forget(outside);
+    EXPECT_TRUE(admission.Allows(outside));
+    EXPECT_EQ(admission.ElapsedTicks(outside), 1u);
+    admission.Capture(registry, W::RegionConsumerGate{});
+    for (const auto entity : {parent, zero_window, newborn, outside, other}) {
+        EXPECT_TRUE(admission.Allows(entity));
+        EXPECT_EQ(admission.ElapsedTicks(entity), 1u);
+    }
 }
 
 TEST(CreatureSecondaryRegionGates, BirthsAndOtherEntityKindsRetainFullRateConventions) {
