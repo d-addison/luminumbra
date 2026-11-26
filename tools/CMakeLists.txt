@@ -1,5 +1,17 @@
 # tools/CMakeLists.txt
 
+# Read-only persisted-ledger evidence; no host or save lifecycle is started.
+add_executable(luminumbra_active_regions_dump active_regions_dump.cpp)
+target_include_directories(luminumbra_active_regions_dump PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(luminumbra_active_regions_dump PRIVATE luminumbra_common)
+target_compile_definitions(luminumbra_active_regions_dump PRIVATE
+    LUMINUMBRA_ACTIVE_REGIONS_DUMP_ENTRY)
+luminumbra_configure_first_party_target(luminumbra_active_regions_dump)
+luminumbra_pin_fp_determinism(luminumbra_active_regions_dump)
+if(MINGW)
+    target_link_options(luminumbra_active_regions_dump PRIVATE -municode)
+endif()
+
 option(LUMINUMBRA_BUILD_TOOLS "Build optional command-line content tools" OFF)
 if(LUMINUMBRA_BUILD_TOOLS)
     add_executable(lumpack lumpack/main.cpp lumpack/Lumpack.cpp)

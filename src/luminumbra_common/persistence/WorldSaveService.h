@@ -721,6 +721,15 @@ public:
                                     std::vector<std::string>* errors,
                                     const BoundPublicationStage* source_stage = nullptr,
                                     const BoundPublicationStage* retired_stage = nullptr);
+    // Complete a matching or newly published restoration before advancing rollback.
+    // Rebinds the recorded identity; Windows retries its writable-handle flush, POSIX
+    // repeats all four relevant parent barriers. Failure retains the recovery journal.
+    // Replay companions may retain other names; snapshot restorations require one link.
+    static bool complete_restoration(const std::filesystem::path& destination,
+                                     const ArtifactIdentity& expected,
+                                     const std::array<std::filesystem::path, 4>& parents,
+                                     std::vector<std::string>* errors,
+                                     unsigned max_links = 1);
     // Unlinks `path` when it exists (a missing file is success) and flushes the parent directory.
     // Fires "before-delete"/"after-delete".
     static bool durable_remove(const std::filesystem::path& path,

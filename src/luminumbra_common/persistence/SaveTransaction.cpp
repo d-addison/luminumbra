@@ -853,6 +853,17 @@ bool RollbackEntries(const fs::path& save_dir,
                                                            &retired_stage))
                     return false;
             }
+            // A prior rename may have succeeded before its flush failed. Matching bytes
+            // still require completion before any later (especially payload) entry changes.
+            if (previous_bytes &&
+                !WorldSaveService::complete_restoration(destination,
+                                                        current,
+                                                        {destination.parent_path(),
+                                                         save_dir,
+                                                         restored_stage.directory,
+                                                         retired_stage.directory},
+                                                        errors))
+                return false;
         }
         report_snapshot_step("rollback-entry", destination);
         if (!WorldSaveService::durable_flush_directory(

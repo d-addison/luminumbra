@@ -1,4 +1,6 @@
 #include "../fixtures/TerrainFixtureParams.h"
+#include "../support/ScopedAllocationObserver.h"
+#include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/world/ActivationResidencyIndex.h"
 #include <gtest/gtest.h>
@@ -6,10 +8,13 @@
 #include <algorithm>
 #include <array>
 #include <barrier>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <set>
 #include <thread>
@@ -159,6 +164,207 @@ void ExpectLifecycleStats(const SHIELD_WorldSystem& world) {
     EXPECT_EQ(stats.meshing_chunks, expected.meshing_chunks);
     EXPECT_EQ(world.get_streaming_telemetry_stats().pending_lod_chunks,
               expected.pending_lod_chunks);
+}
+
+struct NotificationGate {
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool entered = false;
+    bool released = false;
+
+    static void BlockAllocation(void* context) {
+        auto& gate = *static_cast<NotificationGate*>(context);
+        std::unique_lock lock(gate.mutex);
+        gate.entered = true;
+        gate.changed.notify_all();
+        gate.changed.wait(lock, [&gate] { return gate.released; });
+    }
+
+    bool wait_for_entry() {
+        std::unique_lock lock(mutex);
+        return changed.wait_for(lock, std::chrono::seconds(1), [this] { return entered; });
+    }
+
+    void release() {
+        const std::lock_guard lock(mutex);
+        released = true;
+        changed.notify_all();
+    }
+};
+
+TEST(ActivationResidencyIndex, DifferentOwnersTransitionWhileNotificationIsBlocked) {
+    // Cover different chunk IDs and identical coordinates in different worlds.
+    // Two cases, each with a one-second failure deadline; no scheduling sleeps.
+    for (const bool same_coords : {false, true}) {
+        SCOPED_TRACE(same_coords);
+        Chunk first(IVec3(0));
+        Chunk second(same_coords ? IVec3(0) : IVec3(1, 0, 0));
+        auto first_changes = std::make_shared<ChunkLifecycleChanges>();
+        auto second_changes = std::make_shared<ChunkLifecycleChanges>();
+        first.bind_lifecycle_changes(first_changes);
+        second.bind_lifecycle_changes(second_changes);
+        NotificationGate gate;
+        bool second_completed = false;
+        bool transitioned = false;
+        std::jthread first_worker([&] {
+            // The first queue insertion allocates while holding its notification
+            // locks. Intercept that allocation without a production test seam.
+            const Luminumbra::Test::ScopedAllocationObserver observer(
+                NotificationGate::BlockAllocation, &gate);
+            first.set_state(ChunkState::Loading);
+        });
+        const bool entered = gate.wait_for_entry();
+        if (!entered) {
+            gate.release();
+            FAIL() << "State notification did not reach the allocation gate";
+        }
+        std::jthread second_worker([&] {
+            transitioned = second.try_set_state(ChunkState::Unloaded, ChunkState::Loading);
+            const std::lock_guard lock(gate.mutex);
+            second_completed = true;
+            gate.changed.notify_all();
+        });
+        bool independent = false;
+        {
+            std::unique_lock lock(gate.mutex);
+            independent = gate.changed.wait_for(
+                lock, std::chrono::seconds(1), [&] { return second_completed; });
+        }
+        // Always release before joining or asserting, including on the old
+        // process-wide lock, where the second notification cannot complete.
+        gate.release();
+        first_worker.join();
+        second_worker.join();
+        EXPECT_TRUE(independent);
+        EXPECT_TRUE(transitioned);
+        std::unordered_set<ChunkID> pending;
+        first_changes->take(pending);
+        EXPECT_EQ(pending, std::unordered_set<ChunkID>{first.get_id()});
+        second_changes->take(pending);
+        EXPECT_EQ(pending, std::unordered_set<ChunkID>{second.get_id()});
+    }
+}
+
+TEST(ActivationResidencyIndex, StatePublicationReachesJobWaiterWithBoundedDeadline) {
+    // Chunk readiness waits on JobSystem completion, not the diagnostic queue.
+    // Cover completed jobs and a waiter started while notification is held.
+    for (const bool complete_first : {false, true}) {
+        SCOPED_TRACE(complete_first);
+        auto jobs = std::make_shared<JobSystem>();
+        jobs->startup(1);
+        auto chunk = std::make_shared<Chunk>(IVec3(0));
+        auto changes = std::make_shared<ChunkLifecycleChanges>();
+        chunk->bind_lifecycle_changes(changes);
+        auto gate = std::make_shared<NotificationGate>();
+        const auto handle = jobs->dispatch_batch({[chunk, gate] {
+            chunk->sdf_data = {42.0f};
+            const Luminumbra::Test::ScopedAllocationObserver observer(
+                NotificationGate::BlockAllocation, gate.get());
+            chunk->set_state(ChunkState::Ready);
+        }});
+        const bool entered = gate->wait_for_entry();
+        if (!entered) {
+            gate->release();
+            FAIL() << "State notification did not reach the allocation gate";
+        }
+        if (complete_first) {
+            gate->release();
+            // Shutdown drains the job without using the readiness wait under test.
+            jobs->shutdown();
+        }
+        struct WaitResult {
+            std::mutex mutex;
+            std::condition_variable changed;
+            bool started = false;
+            bool completed = false;
+            bool published = false;
+        };
+        auto result = std::make_shared<WaitResult>();
+        std::thread waiter([jobs, chunk, handle, result] {
+            {
+                const std::lock_guard lock(result->mutex);
+                result->started = true;
+                result->changed.notify_all();
+            }
+            jobs->wait(handle);
+            const bool published = chunk->get_state() == ChunkState::Ready &&
+                                   chunk->sdf_data == std::vector<float>{42.0f};
+            const std::lock_guard lock(result->mutex);
+            result->published = published;
+            result->completed = true;
+            result->changed.notify_all();
+        });
+        bool started = false;
+        {
+            std::unique_lock lock(result->mutex);
+            started = result->changed.wait_for(
+                lock, std::chrono::seconds(1), [&] { return result->started; });
+        }
+        gate->release();
+        bool completed = false;
+        bool published = false;
+        {
+            std::unique_lock lock(result->mutex);
+            completed = result->changed.wait_for(
+                lock, std::chrono::seconds(1), [&] { return result->completed; });
+            published = result->published;
+        }
+        if (completed) {
+            waiter.join();
+            jobs->shutdown();
+        } else {
+            // A lost wakeup fails within the deadline. Retained shared owners
+            // keep the blocked waiter and its pool valid until process exit.
+            waiter.detach();
+        }
+        ASSERT_TRUE(started);
+        ASSERT_TRUE(completed);
+        EXPECT_TRUE(published);
+        std::unordered_set<ChunkID> pending;
+        changes->take(pending);
+        EXPECT_EQ(pending, std::unordered_set<ChunkID>{chunk->get_id()});
+    }
+}
+
+TEST(ActivationResidencyIndex, UnbindingFencesInflightNotificationsAndAllowsOwnerExpiry) {
+    auto chunk = std::make_shared<Chunk>(IVec3(0));
+    auto changes = std::make_shared<ChunkLifecycleChanges>();
+    chunk->bind_lifecycle_changes(changes);
+    NotificationGate gate;
+    std::jthread writer([&] {
+        const Luminumbra::Test::ScopedAllocationObserver observer(NotificationGate::BlockAllocation,
+                                                                  &gate);
+        chunk->set_state(ChunkState::Ready);
+    });
+    const bool entered = gate.wait_for_entry();
+    if (!entered) {
+        gate.release();
+        FAIL() << "State notification did not reach the allocation gate";
+    }
+    std::unordered_set<ChunkID> pending;
+    std::jthread retiring([&] {
+        chunk->bind_lifecycle_changes(nullptr);
+        changes->take(pending);
+    });
+    gate.release();
+    writer.join();
+    retiring.join();
+    EXPECT_EQ(pending, std::unordered_set<ChunkID>{chunk->get_id()});
+    chunk->set_state(ChunkState::Idle);
+    changes->take(pending);
+    EXPECT_TRUE(pending.empty());
+    auto replacement = std::make_shared<ChunkLifecycleChanges>();
+    chunk->bind_lifecycle_changes(replacement);
+    chunk->set_state(ChunkState::Meshing);
+    replacement->take(pending);
+    EXPECT_EQ(pending, std::unordered_set<ChunkID>{chunk->get_id()});
+    const std::weak_ptr<ChunkLifecycleChanges> retired = replacement;
+    replacement.reset();
+    EXPECT_TRUE(retired.expired());
+    // A retained chunk may outlive its index, including after an explicit unbind.
+    chunk->set_state(ChunkState::Unloading);
+    chunk->bind_lifecycle_changes(nullptr);
+    EXPECT_EQ(chunk->get_state(), ChunkState::Unloading);
 }
 
 TEST(ActivationResidencyIndex, LifecycleTransitionsMatchCensusIncludingReplacementAndStaleWork) {

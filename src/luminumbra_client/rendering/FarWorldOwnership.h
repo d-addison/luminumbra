@@ -4,6 +4,11 @@
 
 #include <array>
 #include <span>
+#include <vector>
+
+namespace Luminumbra {
+struct VoxelVertex;
+}
 
 namespace Luminumbra::Rendering {
 
@@ -27,7 +32,15 @@ struct FarWorldLiveUpload {
     std::uint32_t water_snapshot_version = 0, water_uploaded_version = 0;
     std::uint64_t water_uploaded_indices = 0;
     bool water_valid_allocation = false, water_pass_eligible = false;
+    // Borrowed from the retained upload, consumed synchronously by Add.
+    std::span<const std::int32_t> water_surface_cells{};
 };
+// Build sorted, unique world Y cells from indexed triangle surfaces. XZ stays
+// within the storage column. Refusal leaves output unchanged; empty meshes clear it.
+bool BuildFarWorldWaterSurfaceCells(std::span<const VoxelVertex> vertices,
+                                    std::span<const std::uint32_t> indices,
+                                    std::int32_t storage_y,
+                                    std::vector<std::int32_t>& output);
 bool IsFarWorldLiveWaterUploadCurrent(const FarWorldLiveUpload& upload) noexcept;
 bool IsFarWorldLiveUploadCurrent(const FarWorldLiveUpload& upload) noexcept;
 bool FarWorldChunkCell(const std::array<double, 3>& position, FarWorldLiveCell& cell) noexcept;
