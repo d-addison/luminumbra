@@ -4,6 +4,7 @@
 #include "FarVolumeMemory.h"
 #include "FarWorldAuthorityChanges.h"
 #include "persistence/WorldSaveService.h"
+#include <array>
 #include <bitset>
 #include <cstdint>
 #include <memory>
@@ -74,7 +75,11 @@ public:
     // The pointer returned by capture() lasts until replacement, retirement or destruction.
     struct SourceCapture {
         std::uint64_t serial = 0;
+        // Bounding rectangle is diagnostic only. Coverage is the union of these
+        // at most kSlots requested windows; gaps never become captured authority.
         Persistence::WorldSaveService::AuthorityWindow window;
+        std::array<Persistence::WorldSaveService::AuthorityWindow, kSlots> windows{};
+        std::size_t window_count = 0;
         Images published;
         Persistence::WorldSaveService::AuthorityWindowResult committed;
         FarFrozenCaptureDeadline deadline{};
@@ -83,6 +88,12 @@ public:
         Error error = Error::None;
         std::uint64_t serving_serial = 0, target_serial = 0;
         bool active = false, queued = false, paused = false, latest_ready = false;
+    };
+    struct CaptureProgress {
+        std::uint64_t operations = 0, reads = 0, columns = 0, members = 0;
+        std::uint64_t compressed_bytes = 0, decoded_bytes = 0;
+        Persistence::WorldSaveService::AuthorityWindow last_window{};
+        std::uint64_t last_columns = 0, last_members = 0;
     };
     struct FrozenPolicy {
         std::uint64_t pristine_identity = 0;
@@ -162,6 +173,14 @@ public:
     bool request_capture(std::span<const Persistence::WorldSaveService::AuthorityWindow> windows);
     bool needs_capture_boundary() const;
     void pump_capture();
+    // One frame, at most budget assembly units. A unit copies the bounded
+    // published snapshot, performs one synchronous bounded read, inserts one
+    // evidence/record, or publishes one entry. Zero performs no work or aging.
+    std::uint64_t pump_capture(std::uint64_t budget);
+    // Cancel partial assembly, preserving the accepted source and successor.
+    void cancel_capture();
+    // Constant-size receipt for the current/last transaction; no source aliases.
+    CaptureProgress capture_progress() const;
     void fence_source_reads(bool paused);
     void invalidate_source();
     // Permanent owner-thread retirement. Cancels sampling before borrowed world
@@ -175,7 +194,7 @@ public:
     std::string_view capture_read_error() const;
     // Synchronous composition from the accepted owned source capture. The world
     // is used only for pristine terrain/base water under its sampling scope.
-    // The complete rectangular halo must lie in that capture's source window.
+    // The complete rectangular halo must lie in one requested source window.
     // Refusal preserves output and its pool charge; no mutable source is reread.
     FrozenResult compose_frozen(const Systems::SHIELD_WorldSystem& world,
                                 const FarVolumeRequest& request,
@@ -185,6 +204,9 @@ public:
                                 std::shared_ptr<const FarFrozenObservation>& output) const;
 
 private:
+    std::uint64_t pump_capture(std::uint64_t budget, bool defer_reads);
+    Error copy_published(std::span<const Persistence::WorldSaveService::AuthorityWindow> windows,
+                         Images& output);
     struct Impl;
     struct FrozenContext;
     struct FrozenComposition;
