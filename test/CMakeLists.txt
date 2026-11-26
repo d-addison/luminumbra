@@ -273,7 +273,11 @@ target_compile_definitions(net_sockets_transport_test PRIVATE LUMINUMBRA_ENABLE_
 target_link_libraries(net_sockets_transport_test PRIVATE gtest_main spdlog::spdlog)
 luminumbra_configure_first_party_target(net_sockets_transport_test)
 
+# Sole definition of the alternate authority-profile constructor, for tests only.
+set(_authority_profile_test_seam common/GameSessionAuthorityProfileTestSeam.cpp)
+
 add_executable(common_tests
+    ${_authority_profile_test_seam}
     ${MATERIAL_REGISTRY_TEST_SOURCES}
     common/StationDiscoveryArguments_test.cpp
     common/StationDiscovery_test.cpp
@@ -346,8 +350,6 @@ add_executable(common_tests
     # Snapshot cursor restoration and destination refusal cases are discovered
     # by common_tests for both active-region settings.
     common/GameSessionHeadlessWorld_test.cpp
-    # Sole definition of the test-only GameSession authority-profile constructor.
-    common/GameSessionAuthorityProfileTestSeam.cpp
     common/GameSessionPlantPersistence_test.cpp
     common/PlantTerrainCache_test.cpp
     common/RegionFixtureCapture_test.cpp
@@ -1777,6 +1779,7 @@ target_link_libraries(native_file_ownership_test PRIVATE gtest_main luminumbra_c
 # assert at static initialization, the instinct and loopback gates are called
 # from the gtest cases in network_state_hash_gate_test.cpp.
 add_executable(frontier_gates_test
+    ${_authority_profile_test_seam}
     common/RegionConsumerGate_test.cpp
     ai/creature_secondary_region_gates_test.cpp
     network/network_state_hash_gate_test.cpp
@@ -1854,6 +1857,7 @@ target_link_libraries(frontier_gates_test PRIVATE
 
 # Exercise the shipping server runner and the client's GameSession open paths.
 add_executable(world_open_refusal_test
+    ${_authority_profile_test_seam}
     persistence/world_open_refusal_test.cpp
     persistence/requested_subhash_test.cpp
     ../src/luminumbra_client/ui/core/UIHotReload.cpp

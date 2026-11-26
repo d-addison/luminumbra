@@ -115,7 +115,9 @@ class DurableFixture {
 public:
     explicit DurableFixture(bool durable, bool active_regions = false, bool high_res = true) {
         jobs.startup();
-        session = std::make_unique<GameSession>();
+        // Residency fixtures drive frame water explicitly, outside regional cadence.
+        session = std::make_unique<GameSession>(GameSession::AuthorityProfileOptions{},
+                                                GameSession::AuthorityProfileTestOnly{});
         session->SetActiveRegionsEnabled(active_regions);
         session->SetWaterHighResEnabled(high_res);
         session->SetJobSystem(&jobs);
@@ -1176,7 +1178,7 @@ TEST(WorldDurableResidency, ReloadRestartsUnsavedWaterBesidePersistedSleepCounte
         WorldSaveService::read_chunk(fx.session->GetWorldSaveDir(), unsaved->get_coords(), true);
     ASSERT_EQ(absent.status, WorldSaveService::ChunkReadStatus::Absent) << absent.error;
 
-    GameSession reloaded;
+    GameSession reloaded({}, GameSession::AuthorityProfileTestOnly{});
     reloaded.SetJobSystem(&fx.jobs);
     reloaded.SetRootPath(fx.root.root_string());
     reloaded.SetActiveRegionsEnabled(true);

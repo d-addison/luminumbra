@@ -131,7 +131,8 @@ bool NetSessionApplyStep(std::uint64_t /*tick*/,
     // then quiesce so the next scheduler decision observes the identical settled
     // state on both peers. The streaming anchor is the spawn point -- NOT the
     // client camera -- so render-side look can never alter the hashed world.
-    if (!ctx->session->SetHostSimulationAnchors({&ctx->spawn_anchor, 1}) ||
+    // This driver has the same zero-avatar roster as its CLI replay boot.
+    if (!ctx->session->SetHostSimulationAnchors({}) ||
         !ctx->session->PrepareSimulationCollisions(ctx->session->GetSimulationTickCount() + 1)) {
         return false; // No physics or session tick is consumed on refusal.
     }
@@ -398,7 +399,7 @@ bool NetworkedSessionDriver::StepAgreedTick() {
     for (auto* ctx : {&m_impl->host_ctx, &m_impl->client_ctx}) {
         const bool prepared =
             !ctx->session->GetRegionSchedulerFault() &&
-            ctx->session->SetHostSimulationAnchors({&ctx->spawn_anchor, 1}) &&
+            ctx->session->SetHostSimulationAnchors({}) &&
             ctx->session->PrepareSimulationCollisions(ctx->session->GetSimulationTickCount() + 1);
         if (ctx->session->GetRegionSchedulerFault()) {
             m_failure_reason = "region_preparation_fault";

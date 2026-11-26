@@ -296,6 +296,10 @@ class RegionAuthorityWiring(unittest.TestCase):
             text = path.read_text(encoding="utf-8", errors="replace")
             expected = 1 if rel == "test/CMakeLists.txt" else 0
             self.assertEqual(text.count(seam_name), expected, rel)
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        for target in ("common_tests", "frontier_gates_test", "world_open_refusal_test"):
+            sources = cmake.split("add_executable(" + target, 1)[1].split(")", 1)[0]
+            self.assertIn("${_authority_profile_test_seam}", sources, target)
 
     def test_regional_water_is_bound_to_enabled_production_authority(self):
         session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
@@ -696,8 +700,8 @@ class RegionAuthorityWiring(unittest.TestCase):
         # Uses are confined to construction, eviction, water and elapsed-consumer gates.
         # Config and save formats share the negotiated production selection;
         # the override object itself remains outside their encodings.
-        self.assertEqual(session.count("m_authorityProfile"), 19)
-        self.assertEqual(session.count("m_authorityProfile.regional_water"), 9)
+        self.assertEqual(session.count("m_authorityProfile"), 20)
+        self.assertEqual(session.count("m_authorityProfile.regional_water"), 10)
         self.assertEqual(session.count("residency_free_eviction"), 1)
         native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(
             encoding="utf-8")
@@ -955,7 +959,7 @@ class SimulationCollisionWiring(unittest.TestCase):
             encoding="utf-8")
         step = function(source, "bool NetworkedSessionDriver::StepAgreedTick(")
         prepare = step.index("PrepareSimulationCollisions(")
-        self.assertIn("SetHostSimulationAnchors({&ctx->spawn_anchor, 1})", step)
+        self.assertIn("SetHostSimulationAnchors({})", step)
         self.assertIn("&m_impl->host_ctx, &m_impl->client_ctx", step)
         self.assertLess(prepare, step.index("m_impl->host->PumpTick("))
         self.assertIn("return true;", step[prepare:step.index("m_impl->host->PumpTick(")])
@@ -2054,7 +2058,10 @@ class SimulationHostWiring(unittest.TestCase):
         self.assertIn("return RegionalWaterAnchors(m_replicatedSimulationAnchors, "
                       "m_activeRegionLedger.local_anchor());", anchors)
         publish_inputs = function(session, "bool GameSession::SetHostSimulationAnchors(")
-        self.assertIn("m_activeRegionLedger.set_local_anchor(anchors.front())", publish_inputs)
+        self.assertNotIn("m_activeRegionLedger.set_local_anchor", publish_inputs)
+        schedule = function(session, "void GameSession::RunRegionScheduler(")
+        self.assertIn("m_activeRegionLedger.set_local_anchor(m_replicatedSimulationAnchors->front())",
+                      schedule)
         prepare = function(session, "bool GameSession::PrepareSimulationCollisions(")
         self.assertIn("SimulationHostIntegrationEnabled() ? SimulationAnchors() : "
                       "std::span<const Vec3>{}", prepare)
@@ -2081,7 +2088,7 @@ class SimulationHostWiring(unittest.TestCase):
         self.assertIn("ActiveRegionsEnabled() && !m_session->SimulationHostIntegrationEnabled()", publish)
         for entry in ("bool NetSessionApplyStep(", "bool NetworkedSessionDriver::StepAgreedTick("):
             step = function(network, entry)
-            self.assertIn("SetHostSimulationAnchors({&ctx->spawn_anchor, 1})", step)
+            self.assertIn("SetHostSimulationAnchors({})", step)
             self.assertLess(step.index("SetHostSimulationAnchors("),
                             step.index("PrepareSimulationCollisions("))
         # Every legacy external rigid step is excluded from the fixed-tick profile.
@@ -2191,7 +2198,7 @@ class SimulationHostWiring(unittest.TestCase):
                 (0, "SimulationHostIntegrationEnabled() ? SimulationAnchors()",
                  "SimulationHostIntegrationEnabled() ? camera_anchors"),
                 (2, "anchors[count++] = avatar.position;", "anchors[count++] = camera.position;"),
-                (3, "SetHostSimulationAnchors({&ctx->spawn_anchor, 1})",
+                (3, "SetHostSimulationAnchors({})",
                  "SetHostSimulationAnchors({&camera.position, 1})"),
                 (4, "benchmark_v4 && g_camera &&\n                                !gameSession->SimulationHostIntegrationEnabled()",
                  "benchmark_v4 && g_camera")):

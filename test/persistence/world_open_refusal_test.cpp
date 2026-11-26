@@ -2256,6 +2256,8 @@ TEST_F(WorldOpenRefusal, ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock) {
     original.Session()->GetWorldSystem()->clear_world(original.Session()->GetPhysicsSystem());
     original.Session()->GetWorldSystem()->debug_set_streaming_radius_cap(1);
     ASSERT_TRUE(original.Session()->LoadWorldState());
+    // Direct session ticks use the runner's explicit zero-avatar roster too.
+    ASSERT_TRUE(original.Session()->SetHostSimulationAnchors({}));
     // A single runner tick must autosave at absolute tick 45, even though
     // this RunFixedTicks call has executed only one tick.
     for (int i = 0; i < 44; ++i)
@@ -7660,7 +7662,10 @@ TEST_F(WorldOpenRefusal, AvatarRestoreRefusesAfterFirstTickWithoutMutation) {
                 : R"({"sim":{"active_regions":{"enabled":false},"water_high_res":{"enabled":false}}})");
         Server::ServerWorldRunnerConfig config;
         config.root_path = RootString();
-        config.world_id = "fixture";
+        // Each mode starts from the same untouched legacy fixture. An off-mode
+        // shutdown can save stacked water, which is a different migration input.
+        config.world_id = regional ? "regional-avatar" : "legacy-avatar";
+        fs::copy(save, root / "worlds/saves" / config.world_id, fs::copy_options::recursive);
         config.surface_radius = 0;
         config.collision_radius = 0;
         config.test_streaming_radius_cap = 1;

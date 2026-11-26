@@ -2672,7 +2672,8 @@ TEST(RegionConsumerGate, SessionPhysicsFreezeResumesWithPlantsAndKeepsInactivePa
     jobs.startup(1);
     for (const bool active : {false, true}) {
         SCOPED_TRACE(active);
-        W::GameSession session;
+        // This oracle counts consumer steps without a host rigid-body frame reset.
+        W::GameSession session({}, W::GameSession::AuthorityProfileTestOnly{});
         session.SetActiveRegionsEnabled(active);
         session.SetRootPath(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT).generic_string() + '/');
         session.SetJobSystem(&jobs);
@@ -3326,7 +3327,8 @@ TEST(RegionConsumerGate, SessionReleasesResumingCapsulesBeforeFreezingAtBodyPool
 TEST(RegionConsumerGate, SessionDeniedAvatarStaysFrozenWithoutCapsuleAndRetriesOnLaterTicks) {
     Luminumbra::JobSystem jobs;
     jobs.startup(1);
-    W::GameSession session;
+    // Keep per-consumer counters cumulative across the scripted host frames.
+    W::GameSession session({}, W::GameSession::AuthorityProfileTestOnly{});
     session.SetActiveRegionsEnabled(true);
     session.SetRootPath(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT).generic_string() + '/');
     session.SetJobSystem(&jobs);

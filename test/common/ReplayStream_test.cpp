@@ -3674,7 +3674,10 @@ TEST_F(ReplayStreamTest, RegionalWaterRunsOncePerSimulationTick) {
     EXPECT_EQ(batched.ComputeChunkStateHash(), before);
     EXPECT_EQ(batched.GetWaterSystem()->regional_work(), work);
     const double dt = batched.GetSimulationClock().fixed_dt();
-    ASSERT_EQ(batched.TickSimulation(3 * dt), 3u);
+    // Session catch-up is capped at two ticks per frame. Exercise batching
+    // within that production cap so this oracle never asks the clock to drop time.
+    ASSERT_EQ(batched.TickSimulation(2 * dt), 2u);
+    ASSERT_EQ(batched.TickSimulation(dt), 1u);
     ASSERT_FALSE(batched.GetRegionSchedulerFault());
     for (int tick = 0; tick < 3; ++tick) {
         ASSERT_EQ(single.TickSimulation(dt), 1u);

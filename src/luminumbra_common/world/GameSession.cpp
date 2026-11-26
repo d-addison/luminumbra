@@ -93,6 +93,7 @@
 #include "../systems/PlantTerrainCache.h"
 #include "../systems/PollinationSystem.h" // Cross-pollination.
 #include "../systems/RegionalFoliage.h"
+#include "../systems/RegionalWater.h"
 #include "../systems/SHIELD_WorldSystem.h" // This includes TerrainGenParams
 #include "../systems/SoilNutrientSystem.h" // Soil-nutrient cycling.
 #include "../systems/WaterSystem.h"
@@ -368,6 +369,40 @@ bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
     auto* phys = m_physicsSystem.get();
     const auto* continuation = RestoredOwnerContinuation();
     const bool water_loaded_from_save = continuation || GetLastLoadedChunkCount() > 0;
+    const bool regional_boot = m_activeRegionsEnabled && m_authorityProfile.regional_water;
+    // Regional boot uses the shipping selector and cell budget, on a transient
+    // uncounted timeline. Only canonical columns participate; render layers
+    // continue to query those columns without acquiring their own water payloads.
+    ActiveRegionLedger boot_ledger;
+    std::uint64_t boot_tick = 0;
+    std::set<ChunkID> boot_water_columns;
+    const std::vector<Vec3> spawn_anchor{m_metadata.spawnPoint};
+    const auto& settle_anchors = anchors.empty() ? spawn_anchor : anchors;
+    const auto settle_water = [&] {
+        if (!regional_boot || !m_waterSystem)
+            return;
+        const auto schedule = boot_ledger.schedule(
+            WorldClock(++boot_tick), std::optional<std::span<const Vec3>>(settle_anchors));
+        const auto columns = Systems::RegionalWater::SelectColumns(settle_anchors, {}, boot_ledger);
+        boot_water_columns.insert(columns.ids.begin(),
+                                  columns.ids.begin() + static_cast<std::ptrdiff_t>(columns.size));
+        std::vector<RegionWork> completed;
+        m_waterSystem->UpdateRegionalFromSimulation(
+            m_registry, settle_anchors, boot_ledger, schedule, completed);
+        const auto& visits = m_waterSystem->regional_work().visits;
+        // At most 64 anchor rings and 256 sources (832 unique columns), as
+        // enforced by the regional executor before admission and allocation.
+        boot_water_columns.insert(visits.begin(), visits.end());
+    };
+    const auto water_snapshot = [&] {
+        if (!regional_boot || water_loaded_from_save)
+            return ws->snapshot_streamed_chunks();
+        std::vector<std::shared_ptr<Chunk>> columns;
+        columns.reserve(boot_water_columns.size());
+        for (const auto id : boot_water_columns)
+            columns.push_back(ws->inspect_water_column(Chunk::decode_id(id)));
+        return columns;
+    };
     const auto stream_once = [&] {
         if (anchors.empty()) {
             ws->update(
@@ -398,10 +433,13 @@ bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
         ws->SetWaterBootSettleMode(true);
         struct SettleModeGuard {
             Systems::SHIELD_WorldSystem& world;
+            Systems::WaterSystem* regional_water;
             ~SettleModeGuard() {
                 world.SetWaterBootSettleMode(false);
+                if (regional_water)
+                    regional_water->ResetRegionalTimeline();
             }
-        } settle_guard{*ws};
+        } settle_guard{*ws, regional_boot ? m_waterSystem.get() : nullptr};
         // 2a: init the full backlog (boot mode seeds ALL pending per update; the
         // loop tolerates late streamers). Bounded.
         constexpr int kInitSettleCap = 50;
@@ -411,9 +449,10 @@ bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
             if (stop.stop_requested())
                 return false;
             stream_once();
+            settle_water();
             uninited_now = 0;
-            for (const auto& c : ws->snapshot_streamed_chunks()) {
-                if (c && !c->has_water_sim.load(std::memory_order_acquire))
+            for (const auto& c : water_snapshot()) {
+                if (!c || !c->has_water_sim.load(std::memory_order_acquire))
                     ++uninited_now;
             }
             if (uninited_now == 0)
@@ -423,29 +462,35 @@ bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
         // fixed, continue non-timing observations exactly for the omitted suffix.
         // The synchronous loop keeps anchors, registry and configuration unchanged.
         constexpr int kPostInitSettleTicks = 240;
-        const std::vector<Vec3> spawn_anchor{m_metadata.spawnPoint};
-        const auto& settle_anchors = anchors.empty() ? spawn_anchor : anchors;
         for (int i = 0; i < kPostInitSettleTicks; ++i) {
             ++settle_iters;
             if (stop.stop_requested())
                 return false;
             stream_once();
+            settle_water();
             const auto skipped = static_cast<std::uint64_t>(kPostInitSettleTicks - i - 1);
             if (ws->TryCompleteBootWaterSettle(m_registry, settle_anchors, phys, skipped))
                 break;
         }
+        // Consume the final regional write's render invalidations before resetting
+        // its transient timeline. One additional streaming barrier, no water step.
+        if (regional_boot)
+            stream_once();
     }
     if (stop.stop_requested())
         return false;
     // Settle-exit summary: the heavy oracle asserts the settle CONTRACT —
-    // fresh boots leave zero uninitialized chunks; loaded boots skip the settle
+    // fresh boots initialize participating water; loaded boots skip the settle
     // (water paused, state preserved). awake > 0 is EXPECTED (the network flows
     // perpetually); reproducibility comes from the pause + persisted cursor.
     {
         std::size_t water_chunks = 0, awake = 0, uninited = 0;
-        for (const auto& c : ws->snapshot_streamed_chunks()) {
-            if (!c)
+        const auto chunks = water_snapshot();
+        for (const auto& c : chunks) {
+            if (!c) {
+                ++uninited;
                 continue;
+            }
             if (c->has_water_sim.load(std::memory_order_acquire)) {
                 ++water_chunks;
                 if (!c->is_water_sleeping.load(std::memory_order_relaxed))
@@ -460,7 +505,7 @@ bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
             water_chunks,
             awake,
             uninited,
-            ws->snapshot_streamed_chunks().size(),
+            chunks.size(),
             settle_iters,
             water_loaded_from_save ? " [loaded: water settle skipped, state preserved]" : "");
         stats.water_chunks = water_chunks;
@@ -469,7 +514,8 @@ bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
         stats.iterations = settle_iters;
         stats.water_settle_skipped = water_loaded_from_save;
     }
-    return true;
+    return !regional_boot || water_loaded_from_save ||
+           (stats.water_chunks > 0 && stats.uninited == 0);
 }
 
 struct GameSession::LoadedWorldState {
@@ -3760,6 +3806,14 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
         std::optional<std::set<RegionKey>> owned_regions;
         std::optional<Persistence::RegionDigestOperation> digest_operation;
         try {
+            // Publish the representative at the counted boundary, not during
+            // host preflight or restored boot. A refused preparation and a
+            // save/reopen checkpoint must retain the last committed anchor.
+            if (SimulationHostIntegrationEnabled() && m_replicatedSimulationAnchors &&
+                !m_replicatedSimulationAnchors->empty() &&
+                ActiveRegionLedger::valid_anchor(m_replicatedSimulationAnchors->front())) {
+                m_activeRegionLedger.set_local_anchor(m_replicatedSimulationAnchors->front());
+            }
             m_regionSchedule = m_activeRegionLedger.schedule(
                 m_worldClock,
                 anchors,
@@ -4757,11 +4811,6 @@ bool GameSession::SetHostSimulationAnchors(std::span<const Vec3> anchors) {
         m_replicatedSimulationAnchors->reserve(Systems::PhysicsSystem::kSimulationOwnerBudget);
     }
     m_replicatedSimulationAnchors->assign(anchors.begin(), anchors.end());
-    // The persisted representative must match walking input on every host.
-    // Empty replicated input keeps the last representative but suppresses it.
-    if (!anchors.empty()) {
-        m_activeRegionLedger.set_local_anchor(anchors.front());
-    }
     return true;
 }
 void GameSession::StepHostPhysics() {
@@ -4782,11 +4831,28 @@ bool GameSession::PrepareSimulationCollisions(std::uint64_t tick) {
     if (!m_activeRegionsEnabled) {
         return true;
     }
-    return (!SimulationHostIntegrationEnabled() || !m_regionFault) &&
-           (!m_physicsSystem ||
-            m_physicsSystem->prepare_simulation_collisions(
-                SimulationHostIntegrationEnabled() ? SimulationAnchors() : std::span<const Vec3>{},
-                tick));
+    if (SimulationHostIntegrationEnabled() && m_regionFault) {
+        return false;
+    }
+    if (!m_physicsSystem) {
+        return true;
+    }
+    const auto anchors =
+        SimulationHostIntegrationEnabled() ? SimulationAnchors() : std::span<const Vec3>{};
+    // The scheduler and water selector reject malformed replicated anchors
+    // individually. Collision admission must use the same valid subset. Fixed
+    // storage and a checked input cap bound this pass to 64 owners.
+    std::array<Vec3, Systems::PhysicsSystem::kSimulationOwnerBudget> valid{};
+    if (anchors.size() > valid.size()) {
+        return false;
+    }
+    std::size_t count = 0;
+    for (const auto& anchor : anchors) {
+        if (ActiveRegionLedger::valid_anchor(anchor)) {
+            valid[count++] = anchor;
+        }
+    }
+    return m_physicsSystem->prepare_simulation_collisions({valid.data(), count}, tick);
 }
 std::optional<Vec3> GameSession::DefaultSimulationSmokeAnchor() const {
     if (!m_worldSystem) {
@@ -6961,7 +7027,10 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     m_foliageStep.reset();
     m_plantTerrainCache.reset();
     m_lastLoadedChunkCount = 0;
-    if (m_activeRegionsEnabled && m_authorityProfile.regional_water) {
+    // Owner physics was restored above after clearing the previous world. A
+    // second clear would destroy its admitted collision horizon and BodyIDs.
+    if (m_activeRegionsEnabled && m_authorityProfile.regional_water &&
+        !m_restoredOwnerContinuation) {
         m_worldSystem->clear_world(m_physicsSystem.get());
     }
     m_fieldPages = std::move(saved.field_pages);
