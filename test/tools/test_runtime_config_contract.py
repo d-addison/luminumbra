@@ -65,6 +65,10 @@ class RuntimeConfigSourceContract(unittest.TestCase):
             "ui/components/common/Input.cpp": ("Core::ParseNumber(value,parsed)",),
             "ui/Rml_UIManager.cpp": ("Core::ParseNumber(v,st.tod)",
                                      "Core::ParseNumber(value,parsed)"),
+            "rendering/RenderPipeline.cpp": ("Core::ParseNumber(*value,scale)",
+                                              "Core::ParseNumber(*value,illumination)"),
+            "rendering/passes/LightingPass.cpp": ("Core::ParseNumber(*value,wrap_floor)",),
+            "debug/WorldGenViewer.cpp": ("Core::ParseNumber(m_seed_buf,m_seed)",),
             "main_client.cpp": (
                 "Luminumbra::Core::ParseNumber(volumetric_option,quality)",
                 "Luminumbra::Core::ParseNumber(cy,g_app.capture.fixed_cam_yaw)",
@@ -164,15 +168,36 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                       "LUMINUMBRA_CORE_WARN(", failure)
 
     def test_moon_override_diagnostics_stay_in_one_time_initializers(self):
-        for filename, initializer, fallback in (
-                ("rendering/passes/LightingPass.cpp", "staticconstfloats_moon_wrap_floor=", "0.25f"),
-                ("rendering/RenderPipeline.cpp", "staticconstfloats_moon_env=", "-1.0f")):
+        for filename, initializer, variable, fallback in (
+                ("rendering/passes/LightingPass.cpp", "staticconstfloats_moon_wrap_floor=",
+                 "wrap_floor", "0.25f"),
+                ("rendering/RenderPipeline.cpp", "staticconstfloats_moon_env=",
+                 "illumination", "-1.0f")):
             with self.subTest(filename=filename):
                 source = compact_cpp((ROOT / "src/luminumbra_client" / filename)
                                      .read_text(encoding="utf-8"))
                 body = cpp_block(source, initializer)
-                self.assertIn("LUMINUMBRA_CORE_WARN(", cpp_block(body, "catch(...)"))
+                self.assertIn(f"float{variable}={fallback};", body)
+                checked_return = f"if(Core::ParseNumber(*value,{variable}))return{variable};"
+                self.assertIn(checked_return, body)
+                self.assertLess(body.index(checked_return), body.index("LUMINUMBRA_CORE_WARN("))
                 self.assertTrue(body.endswith(f"return{fallback};}}"))
+
+    def test_render_scale_startup_requires_a_complete_positive_override(self):
+        source = compact_cpp((ROOT / "src/luminumbra_client/rendering/RenderPipeline.cpp")
+                             .read_text(encoding="utf-8"))
+        startup = cpp_block(source, "boolRenderPipeline::startup(")
+        override = cpp_block(startup, 'if(constautovalue=Core::ReadEnvironment("LUMIN_RENDER_SCALE"))')
+        self.assertEqual(override, "{floatscale=0.0f;"
+                         "if(Core::ParseNumber(*value,scale)&&scale>0.0f)"
+                         "m_render_scale=std::clamp(scale,0.5f,1.0f);}")
+
+    def test_worldgen_seed_input_marks_preview_dirty_only_after_checked_assignment(self):
+        source = compact_cpp((ROOT / "src/luminumbra_client/debug/WorldGenViewer.cpp")
+                             .read_text(encoding="utf-8"))
+        checked_input = ('if(ImGui::InputText("Seed",m_seed_buf,sizeof(m_seed_buf),'
+                         'ImGuiInputTextFlags_CharsDecimal)&&Core::ParseNumber(m_seed_buf,m_seed))')
+        self.assertEqual(cpp_block(source, checked_input), "{m_paramsChanged=true;}")
 
     def authority_capture_blocks(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
