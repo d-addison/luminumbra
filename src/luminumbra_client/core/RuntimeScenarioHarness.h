@@ -77,6 +77,26 @@ void ApplyWaterVisualCamera(Luminumbra::Rendering::Camera* camera,
 void ApplyWaterReflectionCamera(Luminumbra::Rendering::Camera* camera,
                                 const WaterVisualCameraTarget& target);
 
+// Bottom-up geometry evidence from the same completed frame as RGB. Reversed-Z
+// depth == 0 is clear sky; surviving transparent water fragments are non-sky.
+// Bounded to 4096 x 4096 pixels (16 MiB for the mask).
+struct SkyPixelMask {
+    int width = 0;
+    int height = 0;
+    std::vector<unsigned char> pixels;
+    bool valid_for(int image_width, int image_height) const;
+};
+
+SkyPixelMask BuildSkyPixelMask(const std::vector<float>& depth,
+                               int width,
+                               int height,
+                               const std::vector<unsigned char>& water_coverage = {});
+// Refuse incomplete or mismatched evidence rather than reporting zero defects.
+void ValidateScenarioPixelBuffers(const std::vector<unsigned char>& pixels,
+                                  const SkyPixelMask& sky_mask,
+                                  int width,
+                                  int height);
+
 struct ScreenshotPixelStats {
     int width = 0;
     int height = 0;
@@ -884,6 +904,7 @@ struct PlayerViewPixelStats {
 };
 
 PlayerViewPixelStats AnalyzePlayerViewPixels(const std::vector<unsigned char>& pixels,
+                                             const SkyPixelMask& sky_mask,
                                              int width,
                                              int height,
                                              int horizon_row_from_top);
@@ -965,6 +986,7 @@ bool ComputeFarLodBoundaryBandRows(Luminumbra::world::GameSession* game_session,
                                    int& out_bottom_row_from_top);
 
 FarLodBoundaryBandStats AnalyzeFarLodBoundaryBand(const std::vector<unsigned char>& pixels,
+                                                  const SkyPixelMask& sky_mask,
                                                   int width,
                                                   int height,
                                                   int band_top_row_from_top,
@@ -993,11 +1015,11 @@ struct FarLodHorizonSkySliverStats {
 // far-OFF intrusion pixel in their 3x3 neighborhood are cancelled (pixel-aligned
 // live geometry), so the result is far-attributable only. nullptr = raw far-ON.
 FarLodHorizonSkySliverStats
-AnalyzeFarLodHorizonSkySliver(const std::vector<unsigned char>& pixels,
+AnalyzeFarLodHorizonSkySliver(const SkyPixelMask& sky_mask,
                               int width,
                               int height,
                               int horizon_row_from_top,
-                              const std::vector<unsigned char>* cancel_baseline = nullptr);
+                              const SkyPixelMask* cancel_baseline = nullptr);
 
 struct FarLodHorizonStationCapture {
     FarLodHorizonStation station;
@@ -1070,6 +1092,7 @@ struct FarLodHorizonStationCapture {
 // ring ends); out_sand_flat_pixels (optional) counts sun-bright warm sand-flat
 // pixels (the sand-flat-brightness band). Pass nullptr to skip the sand count.
 void AnalyzeFarLodBoundaryBandWater(const std::vector<unsigned char>& pixels,
+                                    const SkyPixelMask& sky_mask,
                                     int width,
                                     int height,
                                     int band_top_row_from_top,
@@ -1315,6 +1338,7 @@ struct CreatureSliceComposition {
 // pixel coordinates (the projected creature position); pass valid=false-making
 // out-of-frame coordinates and the ROI metrics stay zero.
 CreatureSliceComposition AnalyzeCreatureSliceComposition(const std::vector<unsigned char>& pixels,
+                                                         const SkyPixelMask& sky_mask,
                                                          int width,
                                                          int height,
                                                          int creature_screen_x_from_left,
