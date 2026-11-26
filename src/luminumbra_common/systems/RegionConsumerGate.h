@@ -3,6 +3,7 @@
 #include "../components/CoreComponents.h"
 #include "../components/PlantComponents.h"
 #include "../world/ActiveRegionLedger.h"
+#include "RegionElapsedTicks.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -24,20 +25,29 @@ public:
         Legacy,
         Simulation
     };
+    struct Admission {
+        bool allowed;
+        std::uint32_t elapsed_ticks;
+    };
     RegionConsumerGate() = default;
     explicit RegionConsumerGate(PlantIdentity identity)
         : m_simulationIdentity(identity == PlantIdentity::Simulation) {}
-    RegionConsumerGate(const entt::registry& registry, std::span<const RegionKey> due)
+    RegionConsumerGate(const entt::registry& registry,
+                       std::span<const RegionKey> due,
+                       const RegionElapsedTicks& elapsed = {})
         : m_registry(&registry)
-        , m_due(due) {}
+        , m_due(due)
+        , m_elapsed(elapsed) {}
     RegionConsumerGate(const entt::registry& registry,
                        std::span<const RegionKey> due,
                        std::vector<std::uint64_t>& scratch,
-                       PlantIdentity identity = PlantIdentity::Legacy)
+                       PlantIdentity identity = PlantIdentity::Legacy,
+                       const RegionElapsedTicks& elapsed = {})
         : m_registry(&registry)
         , m_due(due)
         , m_scratch(&scratch)
-        , m_simulationIdentity(identity == PlantIdentity::Simulation) {}
+        , m_simulationIdentity(identity == PlantIdentity::Simulation)
+        , m_elapsed(elapsed) {}
 
     // Explicit candidate selection, independent of regional scheduling. Shipping
     // construction keeps the legacy identity/ordering path until activation.
@@ -55,20 +65,34 @@ public:
     }
 
     [[nodiscard]] bool Allows(entt::entity entity) const {
+        return AdmissionFor(entity).allowed;
+    }
+
+    // Elapsed windows are observational: a due owner with a zero window remains allowed
+    // for legacy consumers. Elapsed consumers must explicitly query the tick count.
+    [[nodiscard]] std::uint32_t ElapsedTicks(entt::entity entity) const {
+        return AdmissionFor(entity).elapsed_ticks;
+    }
+
+    // Resolve membership and elapsed ownership together, once, before creature movement.
+    [[nodiscard]] Admission AdmissionFor(entt::entity entity) const {
         if (!m_registry) {
-            return true;
+            return {true, 1};
         }
         if (const auto* owner =
                 m_registry->try_get<const Components::PlantRegionComponent>(entity)) {
-            return Contains({owner->owner_x, owner->owner_z});
+            return ForOwner({owner->owner_x, owner->owner_z});
         }
         const auto* transform = m_registry->try_get<const Components::TransformComponent>(entity);
-        return transform && AllowsPosition(transform->position);
+        return transform ? AtPosition(transform->position) : Admission{false, 0};
     }
 
     [[nodiscard]] bool AllowsPosition(const Vec3& position) const {
-        return !m_registry || (ActiveRegionLedger::valid_anchor(position) &&
-                               Contains(ActiveRegionLedger::region_at(position)));
+        return AtPosition(position).allowed;
+    }
+
+    [[nodiscard]] std::uint32_t ElapsedTicksAtPosition(const Vec3& position) const {
+        return AtPosition(position).elapsed_ticks;
     }
 
     // Observational work count only (membership builds plus lookups); never persisted or hashed.
@@ -77,6 +101,18 @@ public:
     }
 
 private:
+    [[nodiscard]] Admission AtPosition(const Vec3& position) const {
+        if (!m_registry) {
+            return {true, 1};
+        }
+        return ActiveRegionLedger::valid_anchor(position)
+                   ? ForOwner(ActiveRegionLedger::region_at(position))
+                   : Admission{false, 0};
+    }
+    [[nodiscard]] Admission ForOwner(RegionKey owner) const {
+        const bool allowed = Contains(owner);
+        return {allowed, allowed ? m_elapsed.ForOwner(owner) : 0};
+    }
     [[nodiscard]] bool Contains(RegionKey key) const {
         std::vector<std::uint64_t>& members = Members();
         ++m_ownerVisits;
@@ -104,6 +140,7 @@ private:
     std::span<const RegionKey> m_due;
     std::vector<std::uint64_t>* m_scratch = nullptr;
     bool m_simulationIdentity = false;
+    RegionElapsedTicks m_elapsed;
     mutable std::vector<entt::entity> m_plantIdentityScratch;
     mutable std::vector<std::uint64_t> m_owned;
     mutable bool m_built = false;

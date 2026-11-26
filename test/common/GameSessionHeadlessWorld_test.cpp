@@ -14020,10 +14020,123 @@ namespace {
 Luminumbra::World::FarWorldAuthorityProducer::CaptureClock SourceCaptureClock() {
     return {[](const void*) noexcept -> std::uint64_t { return 0; }, nullptr, 1};
 }
+Luminumbra::World::FarWorldAuthorityConfig CaptureBindingConfig() {
+    return {{512,
+             4u * 1024u * 1024u,
+             8192,
+             std::make_shared<Luminumbra::World::FarVolumeMemoryPool>(64u * 1024u * 1024u)},
+            {{64, 512, 1024, 8192, 4194304, 16777216, 4194304, 16777216, 131072},
+             4,
+             SourceCaptureClock()}};
+}
+void StartBindingCapture(GameSession& session, const GameSession::FarCaptureBinding& binding) {
+    const std::array<P::WorldSaveService::AuthorityWindow, 1> windows{{{-34, 34, -34, 34}}};
+    ASSERT_TRUE(binding.current());
+    ASSERT_TRUE(binding.producer->request_capture(windows));
+    session.PumpFarWorldAuthorityCapture();
+    session.PumpFarWorldAuthorityCapture();
+    ASSERT_TRUE(binding.producer->capture_status().latest_ready);
+    const Luminumbra::World::FarVolumeRequest request{{1, 0, 0}, {-16, 16}, 1};
+    const Luminumbra::World::FarWorldAuthorityProducer::FrozenPolicy policy{
+        1,
+        Luminumbra::World::FarCaveMode::BandLimited,
+        Luminumbra::World::FarVolumeNumericProfile::RawFloat,
+        4};
+    const Luminumbra::World::FarFrozenCaptureLimits limits{
+        1, 100'000, 2'000'000, 200'000, 32u * 1024u * 1024u};
+    ASSERT_TRUE(
+        binding.producer
+            ->start_frozen(
+                binding.world, request, policy, limits, CaptureBindingConfig().source.memory)
+            .ok());
+}
+struct CaptureTeardownTag {};
+struct CaptureTeardownProbe {
+    GameSession* session;
+    const GameSession::FarCaptureBinding& binding;
+    bool observed = false;
+    void Destroy(entt::registry&, entt::entity) {
+        observed = true;
+        EXPECT_FALSE(binding.current());
+        EXPECT_FALSE(binding.producer->frozen_active());
+        EXPECT_EQ(binding.world.get(), session->GetWorldSystem());
+        EXPECT_FALSE(binding.world->session_services_released());
+        EXPECT_NE(session->GetWaterSystem(), nullptr);
+        EXPECT_NE(session->GetPhysicsSystem(), nullptr);
+    }
+};
+enum class CaptureReplacement {
+    Destruction,
+    Load,
+    Create
+};
+void CheckBindingTeardown(CaptureReplacement replacement) {
+    HeadlessRoot root;
+    GameSession::FarCaptureBinding binding;
+    std::weak_ptr<const Luminumbra::Systems::SHIELD_WorldSystem> lifetime;
+    {
+        JobSystem jobs;
+        jobs.startup(1);
+        CaptureTeardownProbe probe{nullptr, binding, false};
+        auto session = std::make_unique<GameSession>();
+        probe.session = session.get();
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(false);
+        EXPECT_FALSE(session->AcquireFarWorldCaptureBinding().current());
+        ASSERT_TRUE(session->CreateWorld("Retained capture", "1337", "default"));
+        const auto config = CaptureBindingConfig();
+        std::string error;
+        ASSERT_TRUE(session->EnableFarWorldAuthorityProducer(config, error)) << error;
+        binding = session->AcquireFarWorldCaptureBinding();
+        ASSERT_TRUE(binding.current());
+        EXPECT_EQ(binding.world_revision, session->WorldRevision());
+        EXPECT_EQ(binding.world.get(), session->GetWorldSystem());
+        EXPECT_EQ(binding.producer.get(), session->GetFarWorldAuthorityProducer());
+        lifetime = binding.world;
+        ASSERT_NO_FATAL_FAILURE(StartBindingCapture(*session, binding));
+        session->GetRegistry()
+            .on_destroy<CaptureTeardownTag>()
+            .connect<&CaptureTeardownProbe::Destroy>(probe);
+        const auto entity = session->GetRegistry().create();
+        session->GetRegistry().emplace<CaptureTeardownTag>(entity);
+        const auto world_id = session->GetMetadata().worldId;
+        if (replacement == CaptureReplacement::Load) {
+            ASSERT_TRUE(session->LoadWorld(world_id));
+        } else if (replacement == CaptureReplacement::Create) {
+            ASSERT_TRUE(session->CreateWorld("Replacement capture", "1338", "default"));
+        } else {
+            session.reset();
+        }
+        EXPECT_TRUE(probe.observed);
+        EXPECT_FALSE(binding.current());
+        EXPECT_FALSE(binding.producer->frozen_active());
+        EXPECT_EQ(binding.producer->capture(), nullptr);
+        EXPECT_TRUE(binding.world->session_services_released());
+        if (session) {
+            EXPECT_GT(session->WorldRevision(), binding.world_revision);
+            EXPECT_FALSE(session->AcquireFarWorldCaptureBinding().current());
+            session->GetRegistry()
+                .on_destroy<CaptureTeardownTag>()
+                .disconnect<&CaptureTeardownProbe::Destroy>(probe);
+        }
+        session.reset();
+        jobs.shutdown();
+    }
+    // Real owners survive both the session's services and its borrowed job system.
+    EXPECT_FALSE(lifetime.expired());
+    std::shared_ptr<const Luminumbra::World::FarFrozenObservation> output;
+    EXPECT_EQ(binding.producer->pump_frozen(1, output).result.source,
+              Luminumbra::World::FarWorldAuthorityProducer::Error::AuthorityUnavailable);
+    binding = {};
+    EXPECT_TRUE(lifetime.expired());
+}
 void CheckSourceCaptureAdmissionFailures(GameSession& session,
                                          const Luminumbra::World::FarWorldAuthorityConfig& config) {
     auto* producer = session.GetFarWorldAuthorityProducer();
     ASSERT_NE(producer, nullptr);
+    const auto binding = session.AcquireFarWorldCaptureBinding();
+    ASSERT_TRUE(binding.current());
     std::string error;
     auto invalid = config;
     invalid.capture.deadline_frames = 0;
@@ -14049,8 +14162,128 @@ void CheckSourceCaptureAdmissionFailures(GameSession& session,
         EXPECT_EQ(invalid.source.memory->used(), 0u);
         EXPECT_EQ(session.GetFarWorldAuthorityProducer(), producer);
     }
+    EXPECT_TRUE(binding.current());
+    EXPECT_EQ(session.AcquireFarWorldCaptureBinding().epoch, binding.epoch);
 }
 } // namespace
+
+TEST(GameSessionHeadlessWorldTest, FarCaptureBindingInvalidatesBeforeWorldServices) {
+    ASSERT_NO_FATAL_FAILURE(CheckBindingTeardown(CaptureReplacement::Destruction));
+}
+
+TEST(GameSessionHeadlessWorldTest, LoadedWorldRetiresFarCaptureBindingBeforeWorldServices) {
+    ASSERT_NO_FATAL_FAILURE(CheckBindingTeardown(CaptureReplacement::Load));
+}
+
+TEST(GameSessionHeadlessWorldTest, CreatedWorldRetiresFarCaptureBindingBeforeWorldServices) {
+    ASSERT_NO_FATAL_FAILURE(CheckBindingTeardown(CaptureReplacement::Create));
+}
+
+namespace {
+enum class CaptureStateReplacement {
+    Direct,
+    Prepared,
+    InvalidSnapshot
+};
+void CheckCaptureStateReplacement(CaptureStateReplacement replacement) {
+    HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.CreateWorld("State capture", "1337", "default"));
+    std::string error;
+    ASSERT_TRUE(session.EnableFarWorldAuthorityProducer(CaptureBindingConfig(), error)) << error;
+    const auto binding = session.AcquireFarWorldCaptureBinding();
+    ASSERT_NO_FATAL_FAILURE(StartBindingCapture(session, binding));
+    if (replacement == CaptureStateReplacement::InvalidSnapshot) {
+        const auto corrupt = root.path() / "corrupt-capture-state";
+        ASSERT_TRUE(P::WorldSaveService::write_file_durably(corrupt / "world_info.json", "{"));
+        EXPECT_FALSE(session.LoadWorldStateFrom(corrupt));
+        EXPECT_GT(session.WorldRevision(), binding.world_revision);
+    } else if (replacement == CaptureStateReplacement::Prepared) {
+        const auto prepared = GameSession::PrepareWorldState(
+            session.CaptureWorldPreparationOptions(), session.GetWorldSaveDir());
+        ASSERT_TRUE(session.AdoptPreparedWorld(prepared));
+    } else {
+        ASSERT_TRUE(session.LoadWorldState());
+    }
+    EXPECT_FALSE(binding.current());
+    EXPECT_FALSE(binding.producer->frozen_active());
+    EXPECT_EQ(binding.producer->capture(), nullptr);
+    EXPECT_EQ(binding.world.get(), session.GetWorldSystem());
+    EXPECT_FALSE(session.AcquireFarWorldCaptureBinding().current());
+}
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, DirectStateLoadRetiresFarCaptureBinding) {
+    ASSERT_NO_FATAL_FAILURE(CheckCaptureStateReplacement(CaptureStateReplacement::Direct));
+}
+
+TEST(GameSessionHeadlessWorldTest, PreparedStateLoadRetiresFarCaptureBinding) {
+    ASSERT_NO_FATAL_FAILURE(CheckCaptureStateReplacement(CaptureStateReplacement::Prepared));
+}
+
+TEST(GameSessionHeadlessWorldTest, InvalidatedSnapshotRetiresFarCaptureBinding) {
+    ASSERT_NO_FATAL_FAILURE(CheckCaptureStateReplacement(CaptureStateReplacement::InvalidSnapshot));
+}
+
+TEST(GameSessionHeadlessWorldTest, FailedOpenPreservesFarCaptureBinding) {
+    HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Resumable capture", "1337", "default"));
+    const auto config = CaptureBindingConfig();
+    std::string error;
+    ASSERT_TRUE(session.EnableFarWorldAuthorityProducer(config, error)) << error;
+    const auto binding = session.AcquireFarWorldCaptureBinding();
+    bool refused_inside_tick = false;
+    session.GetSimulationEventBus().subscribe([&](const auto&) {
+        refused_inside_tick = true;
+        EXPECT_FALSE(session.AcquireFarWorldCaptureBinding().current());
+    });
+    session.GetSimulationEventBus().publish(1, "capture-binding", "");
+    EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    EXPECT_TRUE(refused_inside_tick);
+    EXPECT_EQ(session.AcquireFarWorldCaptureBinding().epoch, binding.epoch);
+    ASSERT_NO_FATAL_FAILURE(StartBindingCapture(session, binding));
+    const auto* source = binding.producer->capture();
+    session.FenceFarWorldAuthorityReads(true);
+    EXPECT_FALSE(session.LoadWorld("absent-capture-world"));
+    const auto resumed = session.AcquireFarWorldCaptureBinding();
+    EXPECT_TRUE(binding.current());
+    EXPECT_EQ(resumed.world_revision, binding.world_revision);
+    EXPECT_EQ(resumed.epoch, binding.epoch);
+    EXPECT_EQ(resumed.world, binding.world);
+    EXPECT_EQ(resumed.producer, binding.producer);
+    EXPECT_EQ(binding.producer->capture(), source);
+    EXPECT_TRUE(binding.producer->frozen_active());
+    EXPECT_TRUE(binding.producer->capture_status().paused);
+    session.FenceFarWorldAuthorityReads(false);
+    std::shared_ptr<const Luminumbra::World::FarFrozenObservation> output;
+    EXPECT_TRUE(binding.producer->pump_frozen(1, output).result.ok());
+    EXPECT_TRUE(binding.producer->frozen_active());
+    ASSERT_NO_FATAL_FAILURE(CheckSourceCaptureAdmissionFailures(session, config));
+    EXPECT_TRUE(binding.current());
+    EXPECT_TRUE(binding.producer->frozen_active());
+    EXPECT_EQ(binding.producer->capture(), source);
+    ASSERT_TRUE(session.EnableFarWorldAuthorityProducer(config, error)) << error;
+    const auto replacement = session.AcquireFarWorldCaptureBinding();
+    EXPECT_FALSE(binding.current());
+    EXPECT_FALSE(binding.producer->frozen_active());
+    EXPECT_TRUE(replacement.current());
+    EXPECT_FALSE(replacement.world->session_services_released());
+    EXPECT_GT(replacement.epoch, binding.epoch);
+    EXPECT_EQ(replacement.world_revision, binding.world_revision);
+    EXPECT_EQ(replacement.world, binding.world);
+    EXPECT_NE(replacement.producer, binding.producer);
+}
 
 TEST_P(SavedWorldPresetTest, InactiveSourceCapturePreservesSessionAcrossSaveAndOpenFences) {
     GameSession session;
@@ -14081,6 +14314,8 @@ TEST_P(SavedWorldPresetTest, InactiveSourceCapturePreservesSessionAcrossSaveAndO
     ASSERT_TRUE(session.EnableFarWorldAuthorityProducer(config, error)) << error;
     auto* producer = session.GetFarWorldAuthorityProducer();
     ASSERT_NE(producer, nullptr);
+    const auto binding = session.AcquireFarWorldCaptureBinding();
+    ASSERT_TRUE(binding.current());
     ASSERT_NO_FATAL_FAILURE(CheckSourceCaptureAdmissionFailures(session, config));
     const std::array<P::WorldSaveService::AuthorityWindow, 1> windows{{{0, 0, 0, 0}}};
     ASSERT_TRUE(producer->request_capture(windows));
@@ -14188,7 +14423,11 @@ TEST_P(SavedWorldPresetTest, InactiveSourceCapturePreservesSessionAcrossSaveAndO
     EXPECT_FALSE(session.EnableFarWorldAuthorityProducer(config, error));
     EXPECT_EQ(session.GetFarWorldAuthorityProducer(), producer);
     EXPECT_EQ(session.GetWorldSystem()->pending_publication_chunks(), pending);
+    EXPECT_TRUE(binding.current());
+    EXPECT_EQ(session.AcquireFarWorldCaptureBinding().epoch, binding.epoch);
+    EXPECT_EQ(session.WorldRevision(), binding.world_revision);
     ASSERT_TRUE(session.LoadWorld(session.GetMetadata().worldId));
+    EXPECT_FALSE(binding.current());
     EXPECT_EQ(session.GetFarWorldAuthorityProducer(), nullptr);
 }
 

@@ -31,6 +31,20 @@ struct UiInputOwnership {
 // No window/UI dependencies: the host updates explicit ownership within each event batch.
 class UiInputRouter {
 public:
+    // Holds live gameplay input across event polling and capture callbacks. Scopes
+    // may nest; releasing one restores the preceding hold without changing UI ownership.
+    class GameplayInputHold {
+    public:
+        GameplayInputHold(UiInputRouter& router, bool enabled);
+        ~GameplayInputHold();
+        GameplayInputHold(const GameplayInputHold&) = delete;
+        GameplayInputHold& operator=(const GameplayInputHold&) = delete;
+
+    private:
+        UiInputRouter& m_router;
+        bool m_previous;
+    };
+
     UiInputRouter();
     // Reserves two registrations for the legacy host and console. External scoped
     // contexts must be destroyed before this router.
@@ -55,5 +69,6 @@ private:
     std::set<int> m_consumedShortcutKeys;
     std::uint64_t m_seenRevision = 0;
     bool m_suppressCharacter = false;
+    bool m_gameplayInputHeld = false;
 };
 } // namespace Luminumbra::Client::App

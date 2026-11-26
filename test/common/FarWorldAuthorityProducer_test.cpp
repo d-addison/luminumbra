@@ -1254,6 +1254,95 @@ TEST_F(FarWorldSourceCaptureTest, MalformedVolatileCaptureRefusesBeforeReadingAn
     ASSERT_NE(producer.capture(), nullptr);
 }
 
+TEST(FarWorldAuthorityProducer, RetiredBindingRefusesBeforeSampling) {
+    const auto root = TestSupport::CreateUniqueTempDirectory("retired_capture_");
+    struct Cleanup {
+        const std::filesystem::path& path;
+        ~Cleanup() {
+            std::error_code error;
+            std::filesystem::remove_all(path, error);
+        }
+    } cleanup{root};
+    ASSERT_TRUE(Save{}.save_world(WorldStreamingState{}, root));
+    const Save::AuthorityReadLimits reads{
+        64, 512, 1024, 8192, 4194304, 16777216, 4194304, 16777216, 131072};
+    const Producer::CaptureLimits capture_limits{reads, 4, SourceCaptureClock()};
+    const std::array<Save::AuthorityWindow, 1> windows{{{-34, 34, -34, 34}}};
+    const Producer::FrozenPolicy policy{
+        1, World::FarCaveMode::BandLimited, World::FarVolumeNumericProfile::RawFloat, 4};
+    const World::FarVolumeRequest request{{1, 0, 0}, {-16, 16}, 1};
+    const auto pool = SourceMemory();
+    // Retire during committed-source assembly, while ready, and during sampling.
+    for (const unsigned phase : {0u, 1u, 2u}) {
+        SCOPED_TRACE(phase);
+        Producer producer({512, 4u * 1024u * 1024u, 8192, SourceMemory()});
+        std::string error;
+        ASSERT_TRUE(producer.configure_capture(capture_limits));
+        ASSERT_TRUE(producer.admit_saved_source(root, reads, error)) << error;
+        ASSERT_TRUE(producer.request_capture(windows));
+        producer.pump_capture();
+        ASSERT_TRUE(producer.capture_status().active);
+        if (phase != 0) {
+            producer.pump_capture();
+            ASSERT_TRUE(producer.capture_status().latest_ready);
+        }
+        auto world = std::make_shared<Systems::SHIELD_WorldSystem>(
+            nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+        const std::weak_ptr<const Systems::SHIELD_WorldSystem> lifetime = world;
+        World::FarFrozenCaptureWork work({100'000, 2'000'000, 200'000});
+        World::FarFrozenCaptureLimits limits{1, 100'000, 2'000'000, 200'000, 32u * 1024u * 1024u};
+        limits.work = &work;
+        if (phase == 2) {
+            ASSERT_TRUE(producer.start_frozen(world, request, policy, limits, pool).ok());
+            EXPECT_TRUE(producer.frozen_active());
+        }
+        producer.retire();
+        EXPECT_TRUE(producer.retired());
+        EXPECT_FALSE(producer.frozen_active());
+        EXPECT_EQ(producer.capture(), nullptr);
+        const auto attempts = pool->attempts();
+        std::shared_ptr<const World::FarFrozenObservation> output;
+        for (const std::uint64_t budget : {0u, 1u}) {
+            const auto refused = producer.pump_frozen(budget, output);
+            EXPECT_EQ(refused.result.source, Producer::Error::AuthorityUnavailable);
+            EXPECT_EQ(refused.work, 0u);
+            EXPECT_FALSE(output);
+        }
+        EXPECT_EQ(producer.start_frozen(world, request, policy, limits, pool).source,
+                  Producer::Error::AuthorityUnavailable);
+        EXPECT_EQ(producer.compose_frozen(*world, request, policy, limits, pool, output).source,
+                  Producer::Error::AuthorityUnavailable);
+        EXPECT_EQ(work.counts().height, 0u);
+        EXPECT_EQ(work.counts().density, 0u);
+        EXPECT_EQ(work.counts().water, 0u);
+        EXPECT_EQ(pool->attempts(), attempts);
+        producer.fence_source_reads(false);
+        producer.invalidate_source();
+        EXPECT_FALSE(producer.configure_capture(capture_limits));
+        EXPECT_FALSE(producer.admit_saved_source(root, reads, error));
+        EXPECT_FALSE(producer.refresh_saved_source(root, error));
+        EXPECT_FALSE(producer.request_capture(windows));
+        EXPECT_FALSE(producer.set_wanted(windows));
+        EXPECT_EQ(producer.read_committed(windows[0], reads).membership,
+                  Save::AuthorityMembership::Unavailable);
+        Producer::Images images;
+        EXPECT_EQ(producer.copy_published(windows[0], images),
+                  Producer::Error::AuthorityUnavailable);
+        EXPECT_TRUE(images.empty());
+        EXPECT_EQ(producer.tick().visited, 0u);
+        producer.pump_capture();
+        EXPECT_EQ(producer.capture_status().error, Producer::Error::AuthorityUnavailable);
+        EXPECT_FALSE(producer.capture_status().active);
+        EXPECT_FALSE(producer.capture_status().queued);
+        EXPECT_TRUE(producer.capture_status().paused);
+        EXPECT_FALSE(producer.capture_status().latest_ready);
+        producer.retire();
+        world.reset();
+        EXPECT_TRUE(lifetime.expired());
+        EXPECT_EQ(pool->used(), 0u);
+    }
+}
+
 class FarWorldFrozenComposeTest : public testing::Test {
 protected:
     std::filesystem::path root = TestSupport::CreateUniqueTempDirectory("frozen_compose_");

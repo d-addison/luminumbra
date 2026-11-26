@@ -63,6 +63,10 @@ public:
     bool AddLiveUpload(const FarWorldLiveUpload&);
     bool FinishLiveOwnership();
     FarWorldSubmitStats Submit(const std::array<double, 3>& camera, const FarWorldPrepareDraw&);
+    const FarWorldTerrainCoverage& TerrainCoverage() const {
+        CheckOwner();
+        return terrain_coverage_;
+    }
     const FarVolumeHandoff* Handoff() const;
     const FarWorldHandoffDiagnosticSnapshot& Diagnostic() const;
     // Wait only for accepted persistent cache writes; retain binding and render state.
@@ -90,6 +94,7 @@ private:
     std::optional<World::FarVolumeMemoryLease> charge_;
     std::optional<World::FarVolumeGpuLease> ownership_charge_;
     FarWorldOwnership ownership_;
+    FarWorldTerrainCoverage terrain_coverage_;
     std::unique_ptr<FarVolumeHandoff> handoff_;
     FarWorldHandoffDiagnosticSnapshot diagnostic_;
 };
