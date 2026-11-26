@@ -126,11 +126,12 @@ FieldPage* InitializedPage(PageMap& pages, const CellSlot& slot) {
     return &found->second;
 }
 
-std::size_t CountMissingPages(const PageMap& pages, const CellList& cells) {
+std::size_t CountMissingPages(const PageMap& pages, const PageMap& base, const CellList& cells) {
+    // An owner spans at most 3 x 3 pages, bounding this temporary set.
     std::set<FieldPageKey> missing;
     for (const auto& [cell_x, cell_z] : cells) {
         const CellSlot slot = CellSlotOf(cell_x, cell_z);
-        if (pages.find(slot.key) == pages.end()) {
+        if (!pages.contains(slot.key) && !base.contains(slot.key)) {
             missing.insert(slot.key);
         }
     }
@@ -541,9 +542,26 @@ std::size_t FieldPageState::owned_initialized_cells(RegionKey key) const {
 
 bool FieldPageState::activate_region(RegionKey key, std::uint64_t world_seed, std::uint64_t tick) {
     const CellList cells = cells_of_region(key);
-    const std::size_t missing = CountMissingPages(m_pages, cells);
-    if (m_pages.size() + missing > kMaxPages) {
+    const auto& base = m_activationBase ? m_activationBase->m_pages : m_pages;
+    const std::size_t missing = CountMissingPages(m_pages, base, cells);
+    if (base.size() > kMaxPages || m_activationNewPages > kMaxPages - base.size() ||
+        missing > kMaxPages - base.size() - m_activationNewPages) {
         return false;
+    }
+    // Preallocate at most nine page nodes before changing the candidate. Copy shared source
+    // pages so neither frozen masks nor initialized cells omitted by the snapshot are reseeded.
+    PageMap admitted;
+    for (const auto& [cell_x, cell_z] : cells) {
+        const auto slot = CellSlotOf(cell_x, cell_z);
+        if (m_pages.contains(slot.key) || admitted.contains(slot.key)) {
+            continue;
+        }
+        const auto found = base.find(slot.key);
+        admitted.emplace(slot.key, found == base.end() ? FieldPage{} : found->second);
+    }
+    m_pages.merge(admitted);
+    if (m_activationBase) {
+        m_activationNewPages += missing;
     }
     const std::uint64_t epoch = tick / kCadenceTicks;
     for (const auto& [cell_x, cell_z] : cells) {
@@ -551,7 +569,7 @@ bool FieldPageState::activate_region(RegionKey key, std::uint64_t world_seed, st
         if (InitializedPage(m_pages, slot) != nullptr) {
             continue;
         }
-        SeedCell(m_pages[slot.key], slot.index, cell_x, cell_z, world_seed, epoch);
+        SeedCell(m_pages.find(slot.key)->second, slot.index, cell_x, cell_z, world_seed, epoch);
     }
     return true;
 }
@@ -665,10 +683,35 @@ FieldPageState::step_scheduled(const std::map<RegionKey, ActiveRegionRecord>& re
 }
 
 void FieldPageState::adopt_scheduled_pages(FieldPageState&& staged) noexcept {
-    for (const auto& [key, page] : staged.m_pages) {
-        const auto found = m_pages.find(key);
-        if (found != m_pages.end())
-            found->second = page;
+    auto next = staged.m_pages.begin();
+    while (next != staged.m_pages.end()) {
+        const auto current = next++;
+        const auto found = m_pages.lower_bound(current->first);
+        if (found == m_pages.end() || found->first != current->first) {
+            m_pages.insert(found, staged.m_pages.extract(current));
+            continue;
+        }
+        auto& target = found->second;
+        const auto& page = current->second;
+        if (std::equal(
+                target.mask.begin(),
+                target.mask.end(),
+                page.mask.begin(),
+                [](std::uint64_t live, std::uint64_t update) { return (live & ~update) == 0; })) {
+            // Ordinary scheduled snapshots already contain every live bit on the page.
+            target = page;
+            continue;
+        }
+        for (std::size_t index = 0; index < FieldPage::kCells; ++index) {
+            if (CellBit(page, index)) {
+                for (std::size_t channel = 0; channel < page.cells.size(); ++channel) {
+                    target.cells[channel][index] = page.cells[channel][index];
+                }
+            }
+        }
+        for (std::size_t word = 0; word < page.mask.size(); ++word) {
+            target.mask[word] |= page.mask[word];
+        }
     }
 }
 
@@ -927,6 +970,7 @@ FieldPageState FieldPageState::scheduled_snapshot(std::span<const RegionKey> par
                 keys.insert({static_cast<std::int32_t>(px), static_cast<std::int32_t>(pz)});
     }
     FieldPageState snapshot;
+    snapshot.m_activationBase = this;
     for (const auto key : keys) {
         const auto page = m_pages.find(key);
         if (page != m_pages.end())
