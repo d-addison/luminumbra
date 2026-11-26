@@ -80,7 +80,7 @@ struct SnapshotIndex {
 };
 
 inline constexpr const char* kSnapshotIndexSchema = "luminumbra.snapshot.v1";
-inline constexpr const char* kJournalSchema = "luminumbra.journal.v4";
+inline constexpr const char* kJournalSchema = "luminumbra.journal.v5";
 inline constexpr std::size_t kMaxSnapshotMembers = 1'048'576;
 inline constexpr std::size_t kMaxSnapshotIndexBytes = 16u * 1024u * 1024u;
 inline constexpr const char* kSnapshotIndexRelativePath = "chunks/region/snapshot.json";
@@ -118,7 +118,7 @@ bool hash_file(const std::filesystem::path& path,
                std::vector<std::string>* errors,
                const std::stop_token& stop = {});
 
-// True when <save>/journal exists. Read-only; used by the catalog.
+// True when a journal or independent receipt carrier exists. Read-only; used by the catalog.
 bool journal_pending(const std::filesystem::path& save_dir);
 
 enum class RecoveryOutcome : std::uint8_t {
@@ -283,7 +283,8 @@ private:
 // Test hook: invoked at real publication sites ("journal-published", "before-replace",
 // "after-retire", "after-replace", "before-delete", "after-delete", "commit-point",
 // "journal-unlinked", "before-rollback", "rollback-entry", "publication-quarantined",
-// "retirement-quarantined").
+// "retirement-quarantined", "before-restoration-completion", "before-namespace-completion",
+// "receipt-recorded", "receipt-carrier-published", "before-receipt-retirement").
 using SnapshotStepHook = void (*)(const char* step, const std::filesystem::path& path);
 void set_snapshot_step_hook_for_testing(SnapshotStepHook hook);
 void report_snapshot_step(const char* step, const std::filesystem::path& path);
