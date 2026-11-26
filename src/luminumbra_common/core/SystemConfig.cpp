@@ -708,8 +708,14 @@ SimulationIdentityValues::SimulationIdentityValues() {
     }
 }
 
+std::uint32_t SimulationIdentityValues::EffectiveAuthorityRulesRevision() const {
+    return enabled[static_cast<std::size_t>(SysKey::SimActiveRegions)]
+               ? kRegionalActivationAuthorityRulesRevision
+               : kPreActivationAuthorityRulesRevision;
+}
+
 std::string SimulationIdentityValues::ComputeIdentity() const {
-    return ComputeIdentityForRevision(kAuthorityRulesRevision);
+    return ComputeIdentityForRevision(EffectiveAuthorityRulesRevision());
 }
 
 std::string SimulationIdentityValues::ComputeLegacyRevision3Identity() const {

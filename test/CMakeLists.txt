@@ -368,6 +368,7 @@ add_executable(common_tests
     common/WorldDurableResidency_test.cpp
     common/WaterDeterminism_test.cpp
     common/RegionalWater_test.cpp
+    common/RegionalWaterCadence_test.cpp
     common/WaterSeedInputs_test.cpp
     common/PlayerAvatar_test.cpp
     common/ReplicationProtocol_test.cpp

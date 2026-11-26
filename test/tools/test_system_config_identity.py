@@ -19,7 +19,10 @@ SHIPPED = json.loads((ROOT / "data/common/systems.json").read_text(encoding="utf
 
 def canonical_bytes(document, *, finite_hydrology=True, rain_scale_mm=25,
                     region_work_limit=(1 << 64) - 1, region_hold_ticks=30,
-                    region_reduced_shift=1, authority_rules_revision=8, calendar=None):
+                    region_reduced_shift=1, authority_rules_revision=None, calendar=None):
+    if authority_rules_revision is None:
+        active = document.get("sim", {}).get("active_regions", {}).get("enabled", True)
+        authority_rules_revision = 9 if active else 8
     result = bytearray(b"system-config:v3:" if authority_rules_revision == 3 else b"system-config:v4:")
     for key_id, key in enumerate(SCHEMA["keys"]):
         if key["section"] != "sim" and key["enum"] != "RenderCircadian":
@@ -109,7 +112,7 @@ class SystemConfigIdentityTest(unittest.TestCase):
                     document.setdefault("sim", {}).setdefault("active_regions", {})[
                         "enabled"] = regions
                     expected.extend(identity(document, authority_rules_revision=revision)
-                                    for revision in (3, 8))
+                                    for revision in (3, 9 if regions else 8))
                 self.assertEqual(re.findall(r'"([0-9a-f]{16})"', literals), expected)
 
     def test_cpp_frozen_session_vectors_match_independent_encoding(self):
@@ -123,7 +126,7 @@ class SystemConfigIdentityTest(unittest.TestCase):
                             {"region_work_limit": (1 << 64) - 2},
                             {"region_hold_ticks": 31}, {"region_reduced_shift": 2}):
                 expected.extend(identity(document, authority_rules_revision=revision, **options)
-                                for revision in (3, 8))
+                                for revision in (3, 9 if regions else 8))
         self.assertEqual(re.findall(r'"([0-9a-f]{16})"', table), expected)
 
     def test_literal_ctest_names_are_unique_in_each_registration_directory(self):
@@ -211,22 +214,45 @@ class SystemConfigIdentityTest(unittest.TestCase):
         self.assertEqual(identity(SHIPPED, authority_rules_revision=5), "35e233a89e8c87b1")
         self.assertEqual(identity(SHIPPED, authority_rules_revision=6), "b439df88e7c3623a")
         self.assertEqual(identity(SHIPPED, authority_rules_revision=7), "bf3da613768a50cb")
-        self.assertEqual(identity(SHIPPED), "45664f7615d96904")
+        self.assertEqual(identity(SHIPPED, authority_rules_revision=8), "45664f7615d96904")
+        self.assertEqual(identity(SHIPPED), "bf48b15682a969bd")
         self.assertEqual(canonical_bytes({}), canonical_bytes(SHIPPED))
 
     def test_authority_rules_revision_is_bound(self):
         self.assertEqual(len(canonical_bytes(SHIPPED, authority_rules_revision=3)), 297)
-        self.assertEqual(canonical_bytes(SHIPPED)[297:301], struct.pack("<I", 8))
+        self.assertEqual(canonical_bytes(SHIPPED)[297:301], struct.pack("<I", 9))
         self.assertNotEqual(identity(SHIPPED), identity(SHIPPED, authority_rules_revision=1))
         self.assertNotEqual(identity(SHIPPED), identity(SHIPPED, authority_rules_revision=2))
         header = (ROOT / "src/luminumbra_common/core/SystemConfig.h").read_text(encoding="utf-8")
-        self.assertIn("kAuthorityRulesRevision = 8;", header)
+        self.assertIn("kAuthorityRulesRevision = 9;", header)
         self.assertNotEqual(identity(SHIPPED), identity(SHIPPED, authority_rules_revision=5))
         self.assertNotEqual(identity(SHIPPED), identity(SHIPPED, authority_rules_revision=6))
         self.assertNotEqual(identity(SHIPPED), identity(SHIPPED, authority_rules_revision=7))
+        self.assertNotEqual(identity(SHIPPED), identity(SHIPPED, authority_rules_revision=8))
         # The previously admitted shipping rules must fail compatibility.
         self.assertNotEqual(identity(SHIPPED), "60ab3c242d54ce89")
         self.assertNotEqual(identity(SHIPPED), "2f2a9405252345a8")  # revision 4
+
+    def test_activation_revision_is_shared_by_identity_and_replay_capture(self):
+        header = (ROOT / "src/luminumbra_common/core/SystemConfig.h").read_text(encoding="utf-8")
+        source = (ROOT / "src/luminumbra_common/core/SystemConfig.cpp").read_text(encoding="utf-8")
+        replay = (ROOT / "src/luminumbra_common/replay/ReplayStream.cpp").read_text(encoding="utf-8")
+        self.assertRegex(header, r"kRegionalActivationAuthorityRulesRevision\s*=\s*kAuthorityRulesRevision;")
+        self.assertIn("kPreActivationAuthorityRulesRevision = 8;", header)
+        selector = source.split("SimulationIdentityValues::EffectiveAuthorityRulesRevision() const {", 1)[1].split("}", 1)[0]
+        self.assertRegex(selector, r"enabled\[static_cast<std::size_t>\(SysKey::SimActiveRegions\)\]\s*"
+                         r"\? kRegionalActivationAuthorityRulesRevision\s*:\s*kPreActivationAuthorityRulesRevision;")
+        self.assertIn("boot.authority_rules_revision = values.EffectiveAuthorityRulesRevision();", replay)
+
+    def test_activation_preserves_revision8_off_bytes_for_every_setting(self):
+        for name, config in applied_setting_variants():
+            with self.subTest(setting=name):
+                config.setdefault("sim", {}).setdefault("active_regions", {})["enabled"] = False
+                self.assertEqual(canonical_bytes(config),
+                                 canonical_bytes(config, authority_rules_revision=8))
+        disabled = {"sim": {"active_regions": {"enabled": False}}}
+        self.assertEqual(identity(disabled), "bafe22eabc5fc385")
+        self.assertEqual(canonical_bytes(disabled)[297:301], struct.pack("<I", 8))
 
     def test_revision5_profile_pins_are_independently_encoded(self):
         historical = json.loads((ROOT / "test/fixtures/historical-defaults-off.json").read_text(encoding="utf-8"))
@@ -236,7 +262,7 @@ class SystemConfigIdentityTest(unittest.TestCase):
         self.assertEqual(canonical_bytes(SHIPPED, authority_rules_revision=3)[17:],
                          canonical_bytes(SHIPPED, authority_rules_revision=5)[17:297])
         source = (ROOT / "src/luminumbra_common/core/SystemConfig.cpp").read_text(encoding="utf-8")
-        self.assertIn("return ComputeIdentityForRevision(kAuthorityRulesRevision);", source)
+        self.assertIn("return ComputeIdentityForRevision(EffectiveAuthorityRulesRevision());", source)
         self.assertIn("return ComputeIdentityForRevision(kLegacyAuthorityRulesRevision);", source)
         self.assertIn("integer(revision, 32);", source)
         self.assertNotIn("water_scheduler_cursor", source)
