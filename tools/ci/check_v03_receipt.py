@@ -19,6 +19,12 @@ Each required section yields one
 check whose id is the section name. Sections not in REQUIRED_SECTIONS yield an "unknown_section:<name>"
 check that is always unevaluated, so they never make the overall verdict pass.
 
+Schema "luminumbra.v03_acceptance.v2" requires release "v0.3.2", a full candidate
+revision and a far_budget section. Evaluation also requires an independently
+supplied owner budget approval and expected revision. Use --require-version
+v0.3.2 to refuse a legacy receipt at a v0.3.2 gate. The native v1 driver remains
+available for historical receipts; it does not qualify v0.3.2.
+
 Exit codes: 0 pass, 1 fail, 2 invalid input, 3 unevaluated.
 """
 
@@ -30,6 +36,7 @@ import sys
 from pathlib import Path, PureWindowsPath
 
 INPUT_SCHEMA = "luminumbra.v03_acceptance.v1"
+INPUT_SCHEMA_V032 = "luminumbra.v03_acceptance.v2"
 VERDICT_SCHEMA = "luminumbra.v03_acceptance_verdict.v1"
 REQUIRED_SECTIONS = (
     "render_qualification",
@@ -286,7 +293,34 @@ def _overall(checks: list) -> str:
     return PASS
 
 
-def evaluate(receipt, receipt_dir=None) -> dict:
+def _budget_tools():
+    # Resolve sibling modules explicitly for python -I, including callers whose
+    # working directory is outside the checkout.
+    directory = str(Path(__file__).resolve().parents[1] / "perf")
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    import far_budget
+    return far_budget
+
+
+def _check_budget(receipt, evidence_root, approval, expected_revision):
+    section = receipt["sections"].get("far_budget")
+    if section is None:
+        return _result("far_budget", FAIL, "required budget evidence absent")
+    result = _check_section("far_budget", section, evidence_root)
+    if result["verdict"] != PASS:
+        return result
+    try:
+        if receipt.get("release") != "v0.3.2" or receipt.get("revision") != expected_revision:
+            raise ValueError("v0.3.2 release or expected candidate revision mismatch")
+        _budget_tools().qualify_receipt(section, evidence_root, approval, expected_revision)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError, RuntimeError) as error:
+        return _result("far_budget", FAIL, "budget evidence refused: " + str(error))
+    return _result("far_budget", PASS, "complete budget evidence matches independently approved candidate")
+
+
+def evaluate(receipt, receipt_dir=None, *, budget_approval=None, expected_revision=None,
+             require_version=None) -> dict:
     """Return the verdict dict for a parsed receipt.
 
     Raises InputError when the receipt is not an object with the right schema
@@ -296,8 +330,14 @@ def evaluate(receipt, receipt_dir=None) -> dict:
     """
     if not isinstance(receipt, dict):
         raise InputError("malformed receipt: top level is not a JSON object")
-    if receipt.get("schema") != INPUT_SCHEMA:
+    schema = receipt.get("schema")
+    if schema not in (INPUT_SCHEMA, INPUT_SCHEMA_V032):
         raise InputError(f"unsupported receipt schema: {receipt.get('schema')!r}")
+    versioned_gate = (require_version is not None or expected_revision is not None or
+                      budget_approval is not None or receipt.get("release") == "v0.3.2")
+    if ((require_version is not None and require_version != "v0.3.2") or
+            (versioned_gate and schema != INPUT_SCHEMA_V032)):
+        raise InputError("v0.3.2 requires a version 2 receipt; v1 cannot qualify this release")
     if "revision" in receipt and not isinstance(receipt["revision"], str):
         raise InputError("malformed receipt: revision must be a string")
     sections = receipt.get("sections")
@@ -330,8 +370,12 @@ def evaluate(receipt, receipt_dir=None) -> dict:
             checks.append(_result(name, UNEVALUATED, "section absent"))
         else:
             checks.append(_check_section(name, sections[name], evidence_root))
+    required = REQUIRED_SECTIONS
+    if schema == INPUT_SCHEMA_V032:
+        checks.append(_check_budget(receipt, evidence_root, budget_approval, expected_revision))
+        required = (*required, "far_budget")
     for name in sorted(sections):
-        if name not in REQUIRED_SECTIONS:
+        if name not in required:
             checks.append(
                 _result(
                     f"unknown_section:{name}",
@@ -345,8 +389,10 @@ def evaluate(receipt, receipt_dir=None) -> dict:
 def load_receipt(path) -> object:
     """Read and parse the receipt file; structural checks happen in evaluate."""
     try:
-        with open(path, "r", encoding="utf-8") as handle:
-            return json.load(handle)
+        budget = _budget_tools()
+        selected = Path(path).absolute()
+        return budget.decode(budget.fixture_paths.read_bytes(
+            selected.parent, selected, limit=budget.MAX_INDEX_BYTES))
     except OSError as error:
         raise InputError(f"cannot read receipt {path}: {error}") from error
     except ValueError as error:
@@ -363,13 +409,24 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Check a v0.3 acceptance receipt.")
     parser.add_argument("receipt")
     parser.add_argument("--verdict-out")
+    parser.add_argument("--require-version", choices=("v0.3.2",))
+    parser.add_argument("--expected-revision", help="Full candidate commit, supplied independently of the receipt")
+    parser.add_argument("--budget-approval", type=Path, help="Independently owner-reviewed budget approval JSON")
     try:
         args = parser.parse_args(argv)
     except SystemExit as error:
         return error.code if isinstance(error.code, int) else EXIT_INVALID
     try:
-        verdict = evaluate(load_receipt(args.receipt), Path(args.receipt).absolute().parent)
-    except InputError as error:
+        approval = None
+        if args.budget_approval is not None:
+            budget = _budget_tools()
+            selected = args.budget_approval.absolute()
+            approval = budget.decode(budget.fixture_paths.read_bytes(
+                selected.parent, selected, limit=budget.MAX_MATRIX_BYTES))
+        verdict = evaluate(load_receipt(args.receipt), Path(args.receipt).absolute().parent,
+                           budget_approval=approval, expected_revision=args.expected_revision,
+                           require_version=args.require_version)
+    except (InputError, OSError, ValueError, RuntimeError) as error:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_INVALID
     if args.verdict_out is not None:

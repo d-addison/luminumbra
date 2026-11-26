@@ -3040,6 +3040,11 @@ add_test(NAME FarBudgetPython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/perf/test_far_budget.py)
 add_test(NAME FarBudgetRunnerPython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/perf/test_run_far_budget.py)
+add_test(NAME FarBudgetReceiptPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/ci/test_check_v03_receipt.py
+    FarBudgetReceiptContract.test_missing_budget_evidence_cannot_pass
+    FarBudgetReceiptContract.test_profile_or_revision_mismatch_fails
+    FarBudgetReceiptContract.test_single_failed_cell_blocks_acceptance)
 add_test(NAME ContainmentLinkClosurePython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_containment_link_closure.py)
 add_test(NAME AsanShardContractPython COMMAND "${Python3_EXECUTABLE}" -I -B
