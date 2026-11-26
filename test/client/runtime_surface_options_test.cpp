@@ -1,4 +1,5 @@
 #include "../support/UniqueTempPath.h"
+#include "app/GraphicsSessionOverrides.h"
 #include "core/RuntimeScenarioConfig.h"
 #include "core/StrictNumeric.h"
 #include "core/TimelapseVista.h"
@@ -8,9 +9,11 @@
 #include <cmath>
 #include <filesystem>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -132,6 +135,93 @@ TEST(StrictNumericParsing, ValidNumbersMatchPreviousConversionsIncludingSignsAnd
     EXPECT_EQ(count, std::numeric_limits<uint64_t>::max());
     ASSERT_TRUE(ParseNumber("+12", count));
     EXPECT_EQ(count, 12u);
+}
+
+TEST(StrictNumericParsing, RenderScaleOverrideKeepsSettingsOnFailureAndClampsValidValues) {
+    for (const std::string text :
+         {"0.5junk", "nan", "inf", "-inf", "", " 0.5", "0.5 ", "1e9999", "1e-9999"}) {
+        SCOPED_TRACE(text);
+        float scale = 0.0f;
+        EXPECT_FALSE(ParseNumber(text, scale));
+        EXPECT_EQ(scale, 0.0f);
+        EXPECT_TRUE(Luminumbra::Client::GraphicsSessionOverrides("", scale, std::nullopt).empty());
+    }
+    for (const std::string text : {"0", "-0", "-0.5"}) {
+        float scale = 1.0f;
+        ASSERT_TRUE(ParseNumber(text, scale));
+        EXPECT_TRUE(Luminumbra::Client::GraphicsSessionOverrides("", scale, std::nullopt).empty());
+    }
+    struct ScaleCase {
+        const char* text;
+        double expected;
+    };
+    constexpr ScaleCase cases[] = {
+        {"0.25", 0.5}, {"0.5", 0.5}, {"+0.75", 0.75}, {"1", 1.0}, {"2", 1.0}, {"0x1p-1", 0.5}};
+    for (const auto& test_case : cases) {
+        float scale = 0.0f;
+        ASSERT_TRUE(ParseNumber(test_case.text, scale));
+        const auto overrides =
+            Luminumbra::Client::GraphicsSessionOverrides("", scale, std::nullopt);
+        ASSERT_EQ(overrides.count("render_scale"), 1u);
+        const auto* actual_scale = std::get_if<double>(&overrides.at("render_scale"));
+        ASSERT_NE(actual_scale, nullptr);
+        EXPECT_EQ(*actual_scale, test_case.expected);
+    }
+}
+
+TEST(StrictNumericParsing, MoonOverridesKeepTheirFallbacksOnFailureAndAcceptFiniteValues) {
+    for (const std::string text : {"0.5junk",
+                                   "nan",
+                                   "NaN(payload)",
+                                   "inf",
+                                   "-inf",
+                                   "",
+                                   " 0.5",
+                                   "0.5 ",
+                                   "1e9999",
+                                   "1e-9999"}) {
+        SCOPED_TRACE(text);
+        float illumination = -1.0f; // Select the configured illumination.
+        float wrap_floor = 0.25f;
+        EXPECT_FALSE(ParseNumber(text, illumination));
+        EXPECT_FALSE(ParseNumber(text, wrap_floor));
+        EXPECT_EQ(illumination, -1.0f);
+        EXPECT_EQ(wrap_floor, 0.25f);
+    }
+    for (const std::string text : {"0", "0.5", "+0.75", "1", "2", "-1", "0x1p-1"}) {
+        SCOPED_TRACE(text);
+        float illumination = -1.0f;
+        float wrap_floor = 0.25f;
+        ASSERT_TRUE(ParseNumber(text, illumination));
+        ASSERT_TRUE(ParseNumber(text, wrap_floor));
+        EXPECT_EQ(illumination, std::stof(text));
+        EXPECT_EQ(wrap_floor, std::stof(text));
+    }
+}
+
+TEST(StrictNumericParsing, WorldGenSeedKeepsPreviousSeedOnFailureAndAcceptsIntBoundaries) {
+    for (const std::string text : {"2147483648",
+                                   "-2147483649",
+                                   "9999999999999999999999",
+                                   "0.5junk",
+                                   "1337junk",
+                                   "nan",
+                                   "inf",
+                                   "",
+                                   "+",
+                                   "-",
+                                   " 12",
+                                   "12 ",
+                                   "1.5"}) {
+        int seed = 1337;
+        EXPECT_FALSE(ParseNumber(text, seed)) << text;
+        EXPECT_EQ(seed, 1337) << text;
+    }
+    for (const std::string text : {"0", "42", "+42", "-42", "2147483647", "-2147483648"}) {
+        int seed = 1337;
+        ASSERT_TRUE(ParseNumber(text, seed)) << text;
+        EXPECT_EQ(seed, std::stoi(text));
+    }
 }
 
 TEST(RuntimeSurfaceOptionsTest, StrictScalarOptionsKeepTheirExistingFallbacksAndClamps) {
