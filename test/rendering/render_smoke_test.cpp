@@ -14,6 +14,7 @@
 #include "luminumbra_client/rendering/FarLodSystem.h"
 #include "luminumbra_client/rendering/FarVolumeGlBackend.h"
 #include "luminumbra_client/rendering/FarWorldDepthBias.h"
+#include "luminumbra_client/rendering/FarWorldRenderer.h"
 #include "luminumbra_client/rendering/Mesh.h"
 #include "luminumbra_client/rendering/PassShaderLayouts.h"
 #include "luminumbra_client/rendering/RenderGraph.h"
@@ -8402,6 +8403,50 @@ struct TreeSubmissionCapture {
     }
 };
 
+class TreeTerrainSupport {
+public:
+    explicit TreeTerrainSupport(int support_state)
+        : state_(support_state) {
+        record_.identity.key = {5, 0, 0};
+        record_.request.span = {-256, 256};
+        record_.horizontal_outer_clip_meters = 16384;
+        record_.terrain_indices = state_ == 7 ? 0 : 3;
+        // Retained Ladder coverage cannot authorize Legacy or far-OFF trees.
+        if (state_ == 5)
+            coverage_.RecordSubmitted(record_);
+    }
+    void Bind(Luminumbra::Rendering::GBufferPassInput& input,
+              Luminumbra::Rendering::SubmittedLiveTerrain& support) {
+        support.clear();
+        input.ladder_terrain_coverage = state_ >= 5 ? &coverage_ : nullptr;
+        input.submit_ladder = [this](const Luminumbra::Rendering::FarWorldPrepareDraw&) {
+            coverage_.Begin({0, 0, 0});
+            if (state_ != 6)
+                coverage_.RecordSubmitted(record_);
+            if (state_ == 8)
+                coverage_.Clear();
+            return Luminumbra::Rendering::FarWorldSubmitStats{};
+        };
+        input.resident_live_terrain = nullptr;
+        input.submitted_live_terrain = nullptr;
+        if (state_ > 0 && state_ < 5)
+            input.resident_live_terrain = &support;
+        if (state_ >= 2 && state_ < 5)
+            support.add_origin({192, 0, 0});
+        if (state_ == 3) {
+            input.resident_live_terrain = nullptr;
+            input.submitted_live_terrain = &support;
+        }
+        if (state_ == 4)
+            support.clear();
+    }
+
+private:
+    const int state_;
+    Luminumbra::Rendering::FarWorldTerrainCoverage coverage_;
+    Luminumbra::Rendering::FarVolumeDrawRecord record_{};
+};
+
 TEST(RenderSmokeTest, RefusedTreeImpostorsSubmitAvailableMeshLods) {
     using namespace Luminumbra::Rendering;
     HiddenGlContext context;
@@ -8544,26 +8589,14 @@ TEST(RenderSmokeTest, RefusedTreeImpostorsSubmitAvailableMeshLods) {
             ctx.far_world_ladder = mode == FarWorldMode::Ladder;
             // Null, empty and retired support all require meshes. Confirmed support
             // uses one leaf representative, folding in bark and trunk, in either mode.
-            for (const int support_state : {0, 1, 2, 3, 4}) {
-                support.clear();
-                input.resident_live_terrain = nullptr;
-                input.submitted_live_terrain = nullptr;
-                if (support_state != 0) {
-                    input.resident_live_terrain = &support;
-                }
-                if (support_state >= 2) {
-                    support.add_origin({192, 0, 0});
-                }
-                if (support_state == 3) {
-                    input.resident_live_terrain = nullptr;
-                    input.submitted_live_terrain = &support;
-                }
-                if (support_state == 4) {
-                    support.clear();
-                }
-                const bool confirmed = support_state == 2 || support_state == 3;
+            for (const int support_state : {0, 1, 2, 3, 4, 5, 6, 7, 8}) {
+                TreeTerrainSupport terrain_support(support_state);
+                terrain_support.Bind(input, support);
                 for (const bool submit : {false, true}) {
                     input.far_selection.submit = submit;
+                    const bool confirmed =
+                        support_state == 2 || support_state == 3 ||
+                        (mode == FarWorldMode::Ladder && support_state == 5 && submit);
                     // Warm normally, then verify frozen reuse without loading meshes.
                     for (const bool replay : {false, true}) {
                         ctx.frozen_replay = replay;
@@ -8585,6 +8618,10 @@ TEST(RenderSmokeTest, RefusedTreeImpostorsSubmitAvailableMeshLods) {
                 }
             }
         }
+        input.ladder_terrain_coverage = nullptr;
+        input.submit_ladder = [](const FarWorldPrepareDraw&) {
+            return FarWorldSubmitStats{};
+        };
         ctx.frozen_replay = false;
         entities.clear();
         (void)pass.execute(ctx, entities, input); // Invalidate the population cache.

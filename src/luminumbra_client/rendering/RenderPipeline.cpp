@@ -3549,6 +3549,8 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         gbuffer_input.far_selection = m_frame_far_selection;
         gbuffer_input.legacy_far = legacy_far_compatibility();
         if (m_frame_far_selection.effective == FarWorldMode::Ladder)
+            gbuffer_input.ladder_terrain_coverage = &m_far_world->TerrainCoverage();
+        if (m_frame_far_selection.effective == FarWorldMode::Ladder)
             gbuffer_input.submit_ladder = [this, &camera](const FarWorldPrepareDraw& prepare) {
                 return m_far_world->Submit(
                     {camera.Position.x, camera.Position.y, camera.Position.z}, prepare);
