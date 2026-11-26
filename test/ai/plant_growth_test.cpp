@@ -12,11 +12,13 @@
 #include "luminumbra_common/persistence/PlantPersistence.h"
 #include "luminumbra_common/systems/FarmingSystem.h"
 #include "luminumbra_common/systems/IrrigationSystem.h"
+#include "luminumbra_common/systems/PlantCoarse.h"
 #include "luminumbra_common/systems/PlantGrowthSystem.h"
 #include "luminumbra_common/systems/SoilNutrientSystem.h"
 
 #include <array>
 #include <functional>
+#include <map>
 #include <vector>
 
 namespace {
@@ -477,8 +479,6 @@ TEST(PlantGrowth, IrrigationMoistensCellForGrowth) {
     EXPECT_GT(moistNear, moistFar) << "irrigation raises moisture near the water source";
 }
 
-#include "luminumbra_common/systems/PlantCoarse.h"
-
 TEST(PlantCoarseGrowth, MatchesIndependentExistingSingleTickConsumer) {
     namespace C = Luminumbra::Components;
     using namespace luminumbra::foliage;
@@ -563,4 +563,373 @@ TEST(PlantCoarseGrowth, VaryingInputsStayWithinOneStageForCadencesThrough64Ticks
                 F::AdvancePlantGrowthCoarse(coarse, genome, current, 0, k, k);
                 EXPECT_LE(std::abs(static_cast<int>(coarse.stage) - static_cast<int>(g.stage)), 1);
             }
+}
+
+namespace {
+void ExpectSamePlantGrowth(const C::PlantGrowthComponent& actual,
+                           const C::PlantGrowthComponent& expected) {
+    EXPECT_EQ(actual.species_id, expected.species_id);
+    EXPECT_EQ(actual.stage, expected.stage);
+    EXPECT_EQ(actual.quality, expected.quality);
+    EXPECT_EQ(actual.growth_points, expected.growth_points);
+    EXPECT_EQ(actual.stress_points, expected.stress_points);
+    EXPECT_EQ(actual.tended, expected.tended);
+    EXPECT_EQ(actual.planted_tick, expected.planted_tick);
+    EXPECT_EQ(actual.last_tick, expected.last_tick);
+}
+
+void ExpectSamePlants(entt::registry& actual, entt::registry& expected) {
+    for (const auto entity : actual.view<C::PlantGrowthComponent>()) {
+        ExpectSamePlantGrowth(actual.get<C::PlantGrowthComponent>(entity),
+                              expected.get<C::PlantGrowthComponent>(entity));
+        const auto& owner = actual.get<C::PlantRegionComponent>(entity);
+        const auto& expected_owner = expected.get<C::PlantRegionComponent>(entity);
+        EXPECT_EQ(owner.persistent_id, expected_owner.persistent_id);
+        EXPECT_EQ(owner.owner_x, expected_owner.owner_x);
+        EXPECT_EQ(owner.owner_z, expected_owner.owner_z);
+        EXPECT_EQ(owner.region_stamp, expected_owner.region_stamp);
+    }
+}
+
+void AddGrowthOwners(entt::registry& registry) {
+    for (const auto entity : registry.view<C::PlantGrowthComponent>()) {
+        const auto index = static_cast<std::uint32_t>(entt::to_integral(entity));
+        registry.emplace<C::PlantRegionComponent>(
+            entity,
+            C::PlantRegionComponent{
+                .persistent_id = 100u - index, .owner_x = 0, .owner_z = 0, .region_stamp = 10});
+        registry.emplace<C::SimulationIdentityComponent>(
+            entity, C::SimulationIdentityComponent{.id = 100u - index});
+        auto& growth = registry.get<C::PlantGrowthComponent>(entity);
+        growth.planted_tick = 3;
+        growth.last_tick = 10;
+        growth.tended = index == 0 ? 255 : 1;
+        if (index != 0)
+            registry.emplace<C::PlantHealthComponent>(entity).infection = 437;
+    }
+}
+} // namespace
+
+TEST(PlantCoarseGrowth, RegionalWindowsMatchSingleTicksAtCadenceBoundaries) {
+    const std::array windows{1u,
+                             7u,
+                             8u,
+                             9u,
+                             31u,
+                             32u,
+                             33u,
+                             63u,
+                             64u,
+                             65u,
+                             255u,
+                             256u,
+                             257u,
+                             35999u,
+                             36000u,
+                             36001u,
+                             65536u};
+    for (const auto elapsed : windows) {
+        SCOPED_TRACE(elapsed);
+        entt::registry regional;
+        entt::registry oracle;
+        for (auto* registry : {&regional, &oracle}) {
+            SpawnPlants(*registry, 2, 2024);
+            AddGrowthOwners(*registry);
+        }
+        const std::array<Luminumbra::world::RegionKey, 1> due{{{0, 0}}};
+        const std::map<Luminumbra::world::RegionKey, std::uint32_t> windows_by_owner{
+            {{0, 0}, elapsed}};
+        const Luminumbra::world::RegionElapsedTicks context(windows_by_owner);
+        const Luminumbra::world::RegionConsumerGate gate(regional, due, context);
+        std::vector<entt::entity> entities;
+        std::vector<float> sampled_positions;
+        const auto due_tick = 10u + elapsed;
+        // This captures the due-time input once, including across the split at 36,000.
+        const auto sample = [&](const C::TransformComponent& transform) {
+            sampled_positions.push_back(transform.position.x);
+            auto env = EnvAt(transform);
+            env.light = static_cast<float>(due_tick % 5) * 0.2f;
+            return env;
+        };
+        int advanced = 0;
+        for (std::uint32_t step = 1; step <= elapsed; ++step) {
+            advanced +=
+                F::RunPlantGrowthSystemOnTick(oracle,
+                                              10u + step,
+                                              [&](const C::TransformComponent& transform) {
+                                                  auto env = EnvAt(transform);
+                                                  env.light =
+                                                      static_cast<float>(due_tick % 5) * 0.2f;
+                                                  return env;
+                                              })
+                    .advanced;
+        }
+        const auto stats =
+            F::RunRegionalPlantGrowthOnTick(regional, due_tick, sample, gate, entities);
+        EXPECT_EQ(stats.updated, 2);
+        EXPECT_EQ(stats.advanced, advanced);
+        EXPECT_EQ(sampled_positions, (std::vector<float>{0.0f, 7.0f}));
+        EXPECT_EQ(gate.owner_visits(), 5u); // one membership build, two queries per plant
+        ExpectSamePlants(regional, oracle);
+    }
+}
+
+TEST(PlantCoarseGrowth, SplitWindowPreservesWrapTendingAndStageCrossings) {
+    for (const auto elapsed : {36001u, 65536u}) {
+        SCOPED_TRACE(elapsed);
+        entt::registry whole;
+        entt::registry split;
+        entt::registry oracle;
+        for (auto* registry : {&whole, &split, &oracle}) {
+            SpawnPlants(*registry, 3, 2024);
+            AddGrowthOwners(*registry);
+            for (const auto entity : registry->view<C::PlantGrowthComponent>()) {
+                const auto index = static_cast<std::uint32_t>(entt::to_integral(entity));
+                auto& growth = registry->get<C::PlantGrowthComponent>(entity);
+                growth.growth_points = index == 0 ? 0xFFFFFFE0u : 999u;
+                growth.stress_points = index == 2 ? 0xFFFFFFFEu : 49u;
+                registry->get<C::PlantGenomeComponent>(entity).genes.fill(0.6f);
+            }
+        }
+        const F::PlantEnvSample env{0.3f, 0.1f, 0.7f, 0.9f};
+        const auto sample = [&](const auto&) {
+            return env;
+        };
+        int oracle_advanced = 0;
+        for (std::uint32_t step = 1; step <= elapsed; ++step)
+            oracle_advanced += F::RunPlantGrowthSystemOnTick(oracle, 10u + step, sample).advanced;
+        const std::array<Luminumbra::world::RegionKey, 1> due{{{0, 0}}};
+        std::vector<std::uint64_t> membership;
+        std::vector<entt::entity> entities;
+        const auto advance = [&](entt::registry& registry,
+                                 std::uint32_t window,
+                                 std::uint64_t tick) {
+            const std::map<Luminumbra::world::RegionKey, std::uint32_t> windows{{{0, 0}, window}};
+            const Luminumbra::world::RegionElapsedTicks context(windows);
+            const Luminumbra::world::RegionConsumerGate gate(
+                registry,
+                due,
+                membership,
+                Luminumbra::world::RegionConsumerGate::PlantIdentity::Simulation,
+                context);
+            int samples = 0;
+            const auto stats = F::RunRegionalPlantGrowthOnTick(
+                registry,
+                tick,
+                [&](const C::TransformComponent& transform) {
+                    // Simulation identities reverse handle order.
+                    EXPECT_EQ(transform.position.x, static_cast<float>((2 - samples) * 7));
+                    ++samples;
+                    return env;
+                },
+                gate,
+                entities);
+            EXPECT_EQ(samples, 3);
+            EXPECT_EQ(stats.updated, 3);
+            return stats.advanced;
+        };
+        EXPECT_EQ(advance(whole, elapsed, 10u + elapsed), oracle_advanced);
+        const auto first = advance(split, 32768, 32778);
+        EXPECT_EQ(first + advance(split, elapsed - 32768, 10u + elapsed), oracle_advanced);
+        ExpectSamePlants(whole, oracle);
+        ExpectSamePlants(split, oracle);
+        for (const auto entity : whole.view<C::PlantGrowthComponent>())
+            EXPECT_EQ(whole.get<C::PlantGrowthComponent>(entity).tended, 0u);
+    }
+}
+
+TEST(PlantCoarseGrowth, ZeroWindowDoesNotSampleOrStamp) {
+    entt::registry registry;
+    SpawnPlants(registry, 3, 2024);
+    AddGrowthOwners(registry);
+    std::vector<C::PlantGrowthComponent> before(3);
+    for (const auto entity : registry.view<C::PlantGrowthComponent>()) {
+        const auto index = static_cast<std::uint32_t>(entt::to_integral(entity));
+        registry.get<C::PlantRegionComponent>(entity).owner_x = static_cast<std::int32_t>(index);
+        before[index] = registry.get<C::PlantGrowthComponent>(entity);
+        registry.remove<C::SimulationIdentityComponent>(entity);
+        registry.emplace_or_replace<C::PlantHealthComponent>(entity).infection = 1001;
+    }
+    registry.emplace<C::PlantTag>(registry.create()); // incomplete participant
+    const std::array<Luminumbra::world::RegionKey, 2> due{{{0, 0}, {2, 0}}};
+    // Owner 0 has an explicit zero, owner 1 is frozen, owner 2 has no window.
+    const std::map<Luminumbra::world::RegionKey, std::uint32_t> windows{{{0, 0}, 0}, {{1, 0}, 8}};
+    const Luminumbra::world::RegionElapsedTicks context(windows);
+    std::vector<std::uint64_t> membership;
+    const Luminumbra::world::RegionConsumerGate gate(
+        registry,
+        due,
+        membership,
+        Luminumbra::world::RegionConsumerGate::PlantIdentity::Simulation,
+        context);
+    std::vector<entt::entity> entities;
+    int samples = 0;
+    const auto sample = [&](const auto&) {
+        ++samples;
+        return F::PlantEnvSample{};
+    };
+    const auto stats = F::RunRegionalPlantGrowthOnTick(registry, 100, sample, gate, entities);
+    EXPECT_EQ(stats.updated, 0);
+    EXPECT_EQ(stats.advanced, 0);
+    EXPECT_EQ(samples, 0);
+    EXPECT_TRUE(entities.empty());
+    const auto null_sample =
+        static_cast<F::PlantEnvSample (*)(const C::TransformComponent&)>(nullptr);
+    EXPECT_EQ(F::RunRegionalPlantGrowthOnTick(registry, 100, null_sample, gate, entities).updated,
+              0);
+    const F::EnvSampler empty_sample;
+    EXPECT_EQ(F::RunRegionalPlantGrowthOnTick(registry, 100, empty_sample, gate, entities).updated,
+              0);
+    for (const auto entity : registry.view<C::PlantGrowthComponent>()) {
+        ExpectSamePlantGrowth(registry.get<C::PlantGrowthComponent>(entity),
+                              before[static_cast<std::size_t>(entt::to_integral(entity))]);
+        EXPECT_EQ(registry.get<C::PlantRegionComponent>(entity).region_stamp, 10u);
+    }
+}
+
+TEST(PlantCoarseGrowth, RegionalRefusalsLeavePlantsUnchanged) {
+    for (const auto elapsed : {65537u, 0xFFFFFFFFu, 1u}) {
+        SCOPED_TRACE(elapsed);
+        entt::registry registry;
+        SpawnPlants(registry, 2, 2024);
+        AddGrowthOwners(registry);
+        // The component view visits the valid plant first. A late refusal must
+        // still leave both plants unchanged, before any sampler call.
+        registry.get<C::PlantRegionComponent>(entt::entity{0}).owner_x = 1;
+        if (elapsed == 1)
+            registry.emplace<C::PlantHealthComponent>(entt::entity{0}).infection = 1001;
+        const std::array<Luminumbra::world::RegionKey, 2> due{{{0, 0}, {1, 0}}};
+        const std::map<Luminumbra::world::RegionKey, std::uint32_t> windows{{{0, 0}, 1},
+                                                                            {{1, 0}, elapsed}};
+        const Luminumbra::world::RegionElapsedTicks context(windows);
+        const Luminumbra::world::RegionConsumerGate gate(registry, due, context);
+        std::vector<entt::entity> entities;
+        int samples = 0;
+        EXPECT_THROW(F::RunRegionalPlantGrowthOnTick(
+                         registry,
+                         70000,
+                         [&](const auto&) {
+                             ++samples;
+                             return F::PlantEnvSample{};
+                         },
+                         gate,
+                         entities),
+                     std::invalid_argument);
+        EXPECT_EQ(samples, 0);
+        for (const auto entity : registry.view<C::PlantGrowthComponent>()) {
+            const auto& growth = registry.get<C::PlantGrowthComponent>(entity);
+            EXPECT_EQ(growth.last_tick, 10u);
+            EXPECT_EQ(growth.growth_points, 0u);
+            EXPECT_EQ(growth.stress_points, 0u);
+            EXPECT_EQ(growth.tended, entt::to_integral(entity) == 0 ? 255u : 1u);
+            EXPECT_EQ(registry.get<C::PlantRegionComponent>(entity).region_stamp, 10u);
+        }
+    }
+}
+
+TEST(PlantCoarseGrowth, RegionalLegacyAdmissionAndSamplerFailures) {
+    entt::registry registry;
+    SpawnPlants(registry, 1, 2024);
+    const auto entity = entt::entity{0};
+    const auto before = registry.get<C::PlantGrowthComponent>(entity);
+    const Luminumbra::world::RegionConsumerGate gate;
+    std::vector<entt::entity> entities;
+    const auto null_sample =
+        static_cast<F::PlantEnvSample (*)(const C::TransformComponent&)>(nullptr);
+    EXPECT_THROW(F::RunRegionalPlantGrowthOnTick(registry, 1, null_sample, gate, entities),
+                 std::bad_function_call);
+    const F::EnvSampler empty_sample;
+    EXPECT_THROW(F::RunRegionalPlantGrowthOnTick(registry, 1, empty_sample, gate, entities),
+                 std::bad_function_call);
+    EXPECT_THROW(
+        F::RunRegionalPlantGrowthOnTick(registry, 1, EnvAt, gate, gate.PlantIdentityScratch()),
+        std::invalid_argument);
+    ExpectSamePlantGrowth(registry.get<C::PlantGrowthComponent>(entity), before);
+    struct Sampler {
+        Sampler() = default;
+        Sampler(const Sampler&) = delete;
+        Sampler& operator=(const Sampler&) = delete;
+        explicit operator bool() const {
+            return false;
+        }
+        F::PlantEnvSample operator()(const C::TransformComponent& transform) const {
+            return EnvAt(transform);
+        }
+    };
+    const Sampler sample;
+    const auto stats = F::RunRegionalPlantGrowthOnTick(registry, 1, sample, gate, entities);
+    EXPECT_EQ(stats.updated, 1);
+    EXPECT_EQ(registry.get<C::PlantGrowthComponent>(entity).last_tick, 1u);
+    entt::registry oracle;
+    SpawnPlants(oracle, 1, 2024);
+    F::RunPlantGrowthSystemOnTick(oracle, 1, EnvAt);
+    F::RunPlantGrowthSystemOnTick(oracle, 2, EnvAt);
+    EXPECT_EQ(F::RunRegionalPlantGrowthOnTick(registry, 2, &EnvAt, gate, entities).updated, 1);
+    ExpectSamePlantGrowth(registry.get<C::PlantGrowthComponent>(entity),
+                          oracle.get<C::PlantGrowthComponent>(entity));
+
+    entt::registry empty;
+    EXPECT_EQ(F::RunRegionalPlantGrowthOnTick(empty, 1, null_sample, gate, entities).updated, 0);
+    const Luminumbra::world::RegionConsumerGate identity_gate(
+        Luminumbra::world::RegionConsumerGate::PlantIdentity::Simulation);
+    const auto admitted = registry.get<C::PlantGrowthComponent>(entity);
+    EXPECT_THROW(F::RunRegionalPlantGrowthOnTick(registry, 2, sample, identity_gate, entities),
+                 std::runtime_error);
+    ExpectSamePlantGrowth(registry.get<C::PlantGrowthComponent>(entity), admitted);
+}
+
+TEST(PlantCoarseGrowth, RegionalOwnerWindowsVisitOnlyParticipatingPlants) {
+    entt::registry registry;
+    SpawnPlants(registry, 4, 2024);
+    AddGrowthOwners(registry);
+    for (const auto entity : registry.view<C::PlantGrowthComponent>()) {
+        const auto index = static_cast<std::uint32_t>(entt::to_integral(entity));
+        registry.get<C::PlantRegionComponent>(entity).owner_x = static_cast<std::int32_t>(index);
+    }
+    // Captured ownership takes precedence over position for plant 0; plant 1
+    // exercises transform-based admission in owner 1 without a persistent owner.
+    registry.get<C::TransformComponent>(entt::entity{0}).position.x = 8192.0f;
+    registry.get<C::TransformComponent>(entt::entity{1}).position.x = 512.0f;
+    registry.remove<C::PlantRegionComponent>(entt::entity{1});
+    registry.get<C::PlantHealthComponent>(entt::entity{1}).infection = C::kDiseaseUnitScale;
+    for (int index = 0; index < 64; ++index)
+        registry.emplace<C::TransformComponent>(registry.create());
+    const std::array<Luminumbra::world::RegionKey, 3> due{{{0, 0}, {1, 0}, {3, 0}}};
+    const std::map<Luminumbra::world::RegionKey, std::uint32_t> windows{
+        {{0, 0}, 8}, {{1, 0}, 32}, {{2, 0}, 64}, {{3, 0}, 0}};
+    const Luminumbra::world::RegionElapsedTicks context(windows);
+    const Luminumbra::world::RegionConsumerGate gate(registry, due, context);
+    std::vector<entt::entity> entities;
+    std::vector<float> positions;
+    const F::EnvSampler sample = [&](const C::TransformComponent& transform) {
+        positions.push_back(transform.position.x);
+        return EnvAt(transform);
+    };
+    auto first_expected = registry.get<C::PlantGrowthComponent>(entt::entity{0});
+    auto second_expected = registry.get<C::PlantGrowthComponent>(entt::entity{1});
+    const auto first_env = EnvAt(registry.get<C::TransformComponent>(entt::entity{0}));
+    const auto second_env = EnvAt(registry.get<C::TransformComponent>(entt::entity{1}));
+    F::AdvancePlantGrowthCoarse(first_expected,
+                                registry.get<C::PlantGenomeComponent>(entt::entity{0}),
+                                first_env,
+                                0,
+                                8,
+                                100);
+    F::AdvancePlantGrowthCoarse(second_expected,
+                                registry.get<C::PlantGenomeComponent>(entt::entity{1}),
+                                second_env,
+                                C::kDiseaseUnitScale,
+                                32,
+                                100);
+    const auto stats = F::RunRegionalPlantGrowthOnTick(registry, 100, sample, gate, entities);
+    EXPECT_EQ(stats.updated, 2);
+    EXPECT_EQ(positions, (std::vector<float>{8192.0f, 512.0f}));
+    EXPECT_EQ(gate.owner_visits(), 9u); // three due owners, four admissions, two elapsed reads
+    ExpectSamePlantGrowth(registry.get<C::PlantGrowthComponent>(entt::entity{0}), first_expected);
+    ExpectSamePlantGrowth(registry.get<C::PlantGrowthComponent>(entt::entity{1}), second_expected);
+    for (const auto entity : {entt::entity{2}, entt::entity{3}}) {
+        EXPECT_EQ(registry.get<C::PlantGrowthComponent>(entity).last_tick, 10u);
+        EXPECT_EQ(registry.get<C::PlantGrowthComponent>(entity).growth_points, 0u);
+        EXPECT_EQ(registry.get<C::PlantRegionComponent>(entity).region_stamp, 10u);
+    }
 }
