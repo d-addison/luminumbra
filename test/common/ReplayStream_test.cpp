@@ -3077,7 +3077,7 @@ TEST(AuthorityBootDescriptor, MaximumSizeRoundtripAndLittleEndianLayout) {
     std::string error;
     ASSERT_TRUE(Luminumbra::world::EncodeAuthorityBootDescriptor(original, bytes, error));
     ASSERT_EQ(bytes.size(), AuthorityBoot::kMaxEncodedBytes);
-    const std::vector<std::uint8_t> prefix{'A',  'U',  'B',  'D', 1, 0, 8, 0, 0, 0, 0x98,
+    const std::vector<std::uint8_t> prefix{'A',  'U',  'B',  'D', 1, 0, 9, 0, 0, 0, 0x98,
                                            0xba, 0xdc, 0xfe, 0,   0, 0, 0, 0, 1, 0, 0};
     EXPECT_TRUE(std::equal(prefix.begin(), prefix.end(), bytes.begin()));
     const std::vector<std::uint8_t> suffix{8, 7, 6, 5, 4, 3, 2, 1, 7, 0, 0, 0, 1, 1, 1, 1};
@@ -3499,6 +3499,65 @@ TEST_F(ReplayStreamTest, EffectiveConfigIdentityRefusesDifferentRulesBeforePlayb
     EXPECT_FALSE(replay::ConfigurationMatches(unbound, "", MakeHeader().preset_content_hash));
     EXPECT_FALSE(replay::ConfigurationMatches(
         unbound, MakeHeader().system_config_identity, MakeHeader().preset_content_hash));
+}
+
+TEST_F(ReplayStreamTest, AmbientActivationRefusesPreviousEnabledReplayBeforePlayback) {
+    for (const bool regions : {false, true}) {
+        for (const auto version :
+             {replay::kLrec1Version, replay::kLrec1BootVersion, replay::kLrec1WeatherVersion}) {
+            SCOPED_TRACE(::testing::Message() << "regions=" << regions << " version=" << version);
+            Luminumbra::world::GameSession session;
+            session.SetActiveRegionsEnabled(regions);
+            std::string previous = regions ? "45664f7615d96904" : "bafe22eabc5fc385";
+            auto header = MakeHeader();
+            header.version = version;
+            if (version == replay::kLrec1WeatherVersion) {
+                const Luminumbra::Systems::WeatherSchedule schedule{
+                    .phases = {{0, Luminumbra::Systems::WeatherCategory::Clear, 0, 0}},
+                    .strike_tick = std::nullopt};
+                ASSERT_TRUE(session.SetWeatherSchedule(schedule));
+                header.weather_schedule = schedule.canonical_bytes();
+                previous = std::string(Luminumbra::Systems::WeatherSchedule::kIdentityPrefix) +
+                           replay::Fnv1a64Hex(previous + header.weather_schedule);
+            }
+            header.system_config_identity = previous;
+            if (version == replay::kLrec1BootVersion) {
+                header.authority_boot =
+                    replay::CaptureReplayBoot(session, 424242, session.GetRenderCalendar());
+                EXPECT_EQ(header.authority_boot->authority_rules_revision, regions ? 9u : 8u);
+                // Retain a valid historical descriptor: parsing is independent of admission.
+                header.authority_boot->authority_rules_revision = 8;
+                header.authority_boot->system_config_identity = previous;
+            }
+            replay::ReplayWriter writer;
+            ASSERT_TRUE(writer.Open(m_path, header));
+            writer.RecordInput(1, {9});
+            ASSERT_TRUE(writer.Finalize(1));
+            const auto contents = replay::ReadReplay(m_path);
+            ASSERT_TRUE(contents.has_value());
+            if (!contents)
+                return;
+            EXPECT_FALSE(contents->truncated);
+            EXPECT_TRUE(contents->trailer_present);
+            EXPECT_EQ(contents->header.system_config_identity, previous);
+            EXPECT_EQ(replay::ConfigurationMatches(contents->header,
+                                                   session.SystemConfigIdentity(),
+                                                   header.preset_content_hash),
+                      !regions);
+            // The refused input remains unconsumed; no simulation has advanced.
+            ASSERT_EQ(contents->inputs.size(), 1u);
+            EXPECT_EQ(contents->inputs.front().tick, 1u);
+            EXPECT_EQ(session.GetSimulationTickCount(), 0u);
+            auto matching = contents->header;
+            matching.system_config_identity = session.SystemConfigIdentity();
+            if (matching.authority_boot) {
+                matching.authority_boot =
+                    replay::CaptureReplayBoot(session, 424242, session.GetRenderCalendar());
+            }
+            EXPECT_TRUE(replay::ConfigurationMatches(
+                matching, session.SystemConfigIdentity(), header.preset_content_hash));
+        }
+    }
 }
 
 TEST_F(ReplayStreamTest, LegacyHeaderWithoutConfigIdentityIsRejected) {
