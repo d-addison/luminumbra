@@ -63,9 +63,9 @@ def artifact():
     return data
 
 
-def budget_artifact():
+def budget_artifact(data=None):
     """Synthetic complete cold phase followed by the existing timing window."""
-    data = artifact()
+    data = artifact() if data is None else data
     tiers = [dict(tier=index, current_coverage=True, wanted=1, covering=1, settled=1,
                   pending=0, building=0, ready=0, draws=1, indices=3, draw_refusals=0,
                   memory=dict(limit=1000, cpu_bytes=10, gpu_bytes=20, total_bytes=30,
@@ -74,9 +74,11 @@ def budget_artifact():
                             uploaded=1, upload_bytes=20, successful_upload_bytes=20,
                             rejected=0, evicted=0)) for index in range(1, 6)]
     rows = []
-    for frame in range(1, 7):
-        rows.append(dict(render_frame=frame, timing_frame=frame - 1 if frame >= 3 else None,
-                         phase='measured' if frame >= 3 else 'cold_or_settling',
+    timings = [None, None] + [sample['frame'] for sample in data['frame_samples']
+                             if any(timer['issued'] for timer in sample['passes'].values())]
+    for frame, timing in enumerate(timings, 1):
+        rows.append(dict(render_frame=frame, timing_frame=timing,
+                         phase='measured' if timing is not None else 'cold_or_settling',
                          elapsed_ms=frame * 10, render_wall_ms=10, event=0,
                          world_epoch=1, target_serial=1, target_cohort='42',
                          content_identity='43', bake_generation=0, accepted=True,
@@ -100,7 +102,78 @@ def args(**overrides):
     return argparse.Namespace(**result)
 
 
+def refresh_pass_statistics(data):
+    values = [row['gpu_pass_sum_ms'] for row in data['frame_samples']]
+    summary = perf.summarize(values, 'ms')
+    data['distribution']['gpu_pass_sum_ms'].update({key: summary[key] for key in contract.STATS})
+    data['avg']['gpu_pass_sum_ms'] = sum(values) / len(values)
+    for name in contract.PASSES:
+        data['avg_ms'][name] = sum(row['passes'][name]['ms'] or 0
+                                   for row in data['frame_samples']) / len(values)
+    data['avg_ms']['total'] = data['avg']['gpu_pass_sum_ms']
+
+
 class RenderContractTests(unittest.TestCase):
+    def test_far_budget_no_world_frames_require_complete_timer_identity(self):
+        for stages in ((), contract.GPU_STAGES):
+            data = budget_artifact()
+            for sample in data['frame_samples']:
+                sample['passes'] = {name: dict(issued=False, ms=None)
+                                    for name in contract.PASSES + stages}
+            data['far_budget']['frames'] = data['far_budget']['frames'][:2]
+            contract.validate_far_budget(data, required=True)
+            partial = copy.deepcopy(data['frame_samples'][0]['passes'])
+            del partial['gbuffer']
+            unknown = dict(data['frame_samples'][0]['passes'])
+            unknown['unknown'] = unknown.pop('gbuffer')
+            for passes in (None, {}, partial, unknown):
+                broken = copy.deepcopy(data)
+                broken['frame_samples'][0]['passes'] = passes
+                with self.subTest(stages=stages, passes=passes):
+                    with self.assertRaisesRegex(ValueError, 'scene timer coverage'):
+                        contract.validate_far_budget(broken)
+            for timer in (None, {}, dict(issued=False), dict(issued=0, ms=None),
+                           dict(issued=False, ms=1)):
+                broken = copy.deepcopy(data)
+                broken['frame_samples'][0]['passes']['gbuffer'] = timer
+                with self.subTest(stages=stages, timer=timer):
+                    with self.assertRaisesRegex(ValueError, 'scene timer status'):
+                        contract.validate_far_budget(broken)
+            broken = copy.deepcopy(data)
+            broken['frame_samples'][1]['frame'] = broken['frame_samples'][0]['frame']
+            with self.assertRaisesRegex(ValueError, 'duplicate.*timing samples'):
+                contract.validate_far_budget(broken)
+            broken = copy.deepcopy(data)
+            broken['frame_samples'] = []
+            with self.assertRaisesRegex(ValueError, 'missing.*timing samples'):
+                contract.validate_far_budget(broken)
+
+    def test_far_budget_without_pass_identity_still_requires_all_joins(self):
+        data = budget_artifact()
+        data['far_world'] = far_capture()['far_world']
+        del data['frame_samples']
+        contract.validate_far_budget(data)
+        data['far_budget']['frames'][-1].update(timing_frame=None, phase='cold_or_settling')
+        with self.assertRaisesRegex(ValueError, 'missing far budget timing frames'):
+            contract.validate_far_budget(data)
+        for far_world in (None, {}, []):
+            data['far_world'] = far_world
+            with self.subTest(far_world=far_world):
+                with self.assertRaisesRegex(ValueError, 'missing.*timing samples'):
+                    contract.validate_far_budget(data)
+
+    def test_far_budget_issued_scene_pass_still_requires_its_join(self):
+        for name in contract.PASSES + contract.GPU_STAGES:
+            data = budget_artifact()
+            sample = data['frame_samples'][-1]
+            sample['passes'] = {key: dict(issued=False, ms=None)
+                                for key in contract.PASSES + contract.GPU_STAGES}
+            sample['passes'][name] = dict(issued=True, ms=1)
+            data['far_budget']['frames'][-1].update(timing_frame=None, phase='cold_or_settling')
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, 'missing far budget timing frames'):
+                    contract.validate(data, QUALIFIED)
+
     def test_far_budget_cold_phase_includes_streaming_and_preserves_baseline(self):
         data = budget_artifact()
         self.assertEqual(contract.validate(data, QUALIFIED, far_budget=True)['verdict'], 'PASS')
@@ -1559,6 +1632,50 @@ class ScriptedWorkloadTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'warmup/presentation offset differs'):
             capture.validate(candidate, args(traversal=script, reference_capture=path))
 
+    def menu_budget_capture(self):
+        script = self.scripts['menu_entry']
+        data = workload_artifact('menu_entry', script)
+        for sample, observation in zip(data['frame_samples'], data['workload']['observations']):
+            if observation['ui_document'] in ('pause', 'settings', 'main_menu'):
+                sample['passes'] = {name: dict(issued=False, ms=None) for name in contract.PASSES}
+                sample['gpu_pass_sum_ms'] = 0.0
+        refresh_pass_statistics(data)
+        return budget_artifact(data)
+
+    def test_far_budget_menu_entry_span_without_world_renders_validates(self):
+        data = self.menu_budget_capture()
+        menu_frames = {row['frame'] for row in data['workload']['observations']
+                       if row['state'] == 'main_menu'}
+        self.assertTrue(menu_frames)
+        self.assertFalse(menu_frames & {row['timing_frame'] for row in data['far_budget']['frames']})
+        before = copy.deepcopy(data)
+        for required in (False, True):
+            with self.subTest(required=required):
+                self.assertEqual(contract.validate(data, QUALIFIED, traversal=self.scripts['menu_entry'],
+                                                   far_budget=required)['verdict'], 'PASS')
+        self.assertEqual(data, before)
+
+    def test_far_budget_menu_frame_cannot_claim_a_world_render(self):
+        for document in ('pause', 'settings', 'main_menu'):
+            broken = budget_artifact(workload_artifact('menu_entry', self.scripts['menu_entry']))
+            index = next(i for i, row in enumerate(broken['workload']['observations'])
+                         if row['ui_document'] == document)
+            # Keep the budget render and join, but identify the originating
+            # menu frame honestly as having issued no world-render passes.
+            sample = broken['frame_samples'][index]
+            sample['passes'] = {name: dict(issued=False, ms=None) for name in contract.PASSES}
+            sample['gpu_pass_sum_ms'] = 0.0
+            refresh_pass_statistics(broken)
+            with self.subTest(document=document):
+                with self.assertRaisesRegex(ValueError, 'no originating sample'):
+                    contract.validate(broken, QUALIFIED, traversal=self.scripts['menu_entry'])
+
+    def test_far_budget_menu_span_cannot_excuse_a_missing_world_join(self):
+        data = self.menu_budget_capture()
+        data['far_budget']['frames'][-1].update(timing_frame=None, phase='cold_or_settling')
+        with self.assertRaisesRegex(ValueError, 'missing far budget timing frames'):
+            contract.validate(data, QUALIFIED, traversal=self.scripts['menu_entry'])
+
     def test_menu_only_frames_can_have_no_scene_passes(self):
         script = self.scripts['menu_entry']
         data = workload_artifact('menu_entry', script)
@@ -1567,30 +1684,20 @@ class ScriptedWorkloadTests(unittest.TestCase):
             row['passes'] = {name: dict(issued=False, ms=None) for name in contract.PASSES}
             row['gpu_pass_sum_ms'] = 0.0
 
-        def refresh_pass_statistics():
-            values = [row['gpu_pass_sum_ms'] for row in data['frame_samples']]
-            summary = perf.summarize(values, 'ms')
-            data['distribution']['gpu_pass_sum_ms'].update({key: summary[key] for key in contract.STATS})
-            data['avg']['gpu_pass_sum_ms'] = sum(values) / len(values)
-            for name in contract.PASSES:
-                data['avg_ms'][name] = sum(row['passes'][name]['ms'] or 0
-                                           for row in data['frame_samples']) / len(values)
-            data['avg_ms']['total'] = data['avg']['gpu_pass_sum_ms']
-
         documents = set()
         for sample, observation in zip(data['frame_samples'], data['workload']['observations']):
             if observation['ui_document'] in ('pause', 'settings', 'main_menu'):
                 documents.add(observation['ui_document'])
                 clear_passes(sample)
         self.assertEqual(documents, {'pause', 'settings', 'main_menu'})
-        refresh_pass_statistics()
+        refresh_pass_statistics(data)
         self.assertEqual(capture.validate(data, args(traversal=script))['verdict'], 'PASS')
         self.assertEqual(len(data['frame_samples']), data['frames'])
         # Gameplay still requires scene timers, including gameplay in this script.
         index = next(i for i, row in enumerate(data['workload']['observations'])
                      if row['ui_document'] == 'hud')
         clear_passes(data['frame_samples'][index])
-        refresh_pass_statistics()
+        refresh_pass_statistics(data)
         with self.assertRaisesRegex(ValueError, 'no render pass timers issued'):
             capture.validate(data, args(traversal=script))
 

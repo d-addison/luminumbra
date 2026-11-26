@@ -6635,10 +6635,10 @@ int main(int argc, char* argv[]) {
                          .benchmark = !g_app.capture.render_benchmark_path.empty(),
                          .headless = hidden_window || g_windowState.mode == WindowMode::Headless,
                          .test_harness = sky_test_harness});
+                    const auto scene_budget_begin = begin_budget_frame();
                     renderPipeline.set_diagnostic_capture_armed(
                         !g_rb_active ||
                         g_app.benchmark.measuredFrames == g_app.capture.render_benchmark_frames);
-                    const auto scene_budget_begin = begin_budget_frame();
                     renderPipeline.render_frame(
                         gameSession->GetRegistry(),
                         *gameSession->GetWorldSystem(),
