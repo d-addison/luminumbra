@@ -124,14 +124,13 @@ struct PersistenceStatus {
 
 class GameSession {
 public:
-    // Dormant caller contract for tests; never configured, serialized or hashed.
+    // Test overrides for individual authority consumers. Production selects the
+    // negotiated regional profile; these overrides are never shipping settings.
     struct AuthorityProfileOptions {
-        // Slice I will bind this predicate to its negotiated authority revision.
+        // Residency eviction remains separate from regional cadence activation.
         bool residency_free_eviction = false;
-        // Dormant until negotiated authority enables fixed-tick water ownership.
         bool regional_water = false;
         bool simulation_host_integration = false;
-        // Dormant elapsed foliage integration; activation binds negotiated authority later.
         bool elapsed_consumers = false;
     };
 
@@ -144,8 +143,8 @@ public:
     // Link boundary: this constructor is DEFINED only in
     // test/common/GameSessionAuthorityProfileTestSeam.cpp, which is compiled into test
     // executables and never into a src/ library. A runtime, client, server or replay
-    // binary that names it fails to link, so nothing can opt in before slice I ties
-    // the option to negotiated identity.
+    // binary that names it fails to link. Only the default production profile is
+    // negotiated; partial profiles remain confined to regression tests.
     GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTestOnly);
     explicit GameSession(const OwnerContinuationOptions& options);
     // Internal owner-thread binding. The roster outlives the session; capture occurs
@@ -848,7 +847,7 @@ public:
     std::filesystem::path GetSaveRootPath() const;
 
 private:
-    // Advances opt-in regional water for one fixed tick; a no-op when it is dormant.
+    // Advances regional water for one fixed tick; a no-op with active regions off.
     void UpdateRegionalWaterFromSimulation();
     struct AuthorityProfileTag {};
     // The single real constructor; the default and the test-only constructors delegate here.

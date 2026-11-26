@@ -1964,7 +1964,13 @@ std::uint64_t GameSession::GetEcologyScheduleTraceHash() const {
 }
 
 GameSession::GameSession()
-    : GameSession(AuthorityProfileOptions{}, AuthorityProfileTag{}) {}
+    : GameSession(AuthorityProfileOptions{.regional_water = true,
+                                          .simulation_host_integration = true,
+                                          .elapsed_consumers = true},
+                  AuthorityProfileTag{}) {
+    static_assert(
+        luminumbra::core::SimulationIdentityValues::kRegionalActivationAuthorityRulesRevision == 9);
+}
 
 // The public test-only opt-in constructor is deliberately NOT defined in src/
 // (see GameSession.h); its only definition is the test seam source.

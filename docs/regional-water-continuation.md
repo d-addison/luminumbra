@@ -1,9 +1,9 @@
 # Regional water continuation
 
-Regional water continuation is available through the test-only authority profile.
-Shipping clients, servers and replays retain their existing water policy; enabling
-`sim.active_regions` alone does not activate the profile. Native qualification and
-production activation remain pending.
+Enabled `sim.active_regions` configurations select elapsed foliage consumers,
+fixed-tick regional water and shared simulation-host integration in production.
+Clients, servers and replays use the same profile under authority revision 9.
+Native qualification remains pending for v0.3.2 (in preparation).
 
 ## Planning and execution
 
@@ -78,10 +78,23 @@ the current region admission gates. Irrigation seam exchange samples prior-state
 flux and applies paired transfers limited by current donor moisture and recipient
 capacity, preserving their combined quantity.
 
-This integration keeps authority revision 8 and adds no world, water, foliage,
-field or authority hash content. It adds no save, replay, checkpoint, Hello or
-configuration fields. Flag-off simulation and serialization keep their existing
-bytes. The parameterised 3,600-tick budget parity coverage retains its existing
+This integration reuses the shared authority revision 9 for enabled active
+regions. The canonical configuration hash appends ASCII `regional-cadence:v1:`
+after the calendar only for that enabled profile. Enabled defaults now identify
+as `c1cfd4e42aa58f8d`; the earlier revision-9 enabled identity
+`bf48b15682a969bd` and revision-8 enabled identity `45664f7615d96904` refuse
+peer and replay admission before advancement. Off configurations retain revision
+8, identity `bafe22eabc5fc385` and their existing bytes. Existing replay envelopes,
+checkpoints and Hello fields carry the changed enabled identity without a codec
+change. World, water, foliage and field state projections are unchanged.
+
+Historical saves continue through the existing validated readers, not a historical
+simulation lane: admitted saves resume under the current enabled rules. Existing
+owner stamps, field sections, water grids, Q32 debt and cursors supply continuation;
+no new durable state or save version is introduced. Invalid continuation still
+refuses before adoption. Water resumes at the restored clock without catch-up.
+The explicitly disabled path retains the legacy consumers and water policy.
+The parameterised 3,600-tick budget parity coverage retains its existing
 three passes per region mode; it is not duplicated in sanitizer shards.
 
 The added diffusion regression compares measured and unmeasured solver evolution
