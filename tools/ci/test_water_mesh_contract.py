@@ -137,8 +137,22 @@ class WaterPreparationContract(unittest.TestCase):
                                    1)[1].split("void RenderPipeline::", 1)[0]
             self.assertIn("copy_lighting_color_to_opaque_texture", stage)
         capture = source("src/luminumbra_client/core/ScenarioRunnerCapture.cpp")
+        capture = capture.split("void ScenarioRunnerImpl::captureWaterVisual(", 1)[1]
+        capture = capture.split("void ScenarioRunnerImpl::", 1)[0]
         probe = capture.split("SampleCausticsTextureDelta(", 1)[0]
-        self.assertIn("render_pass_stats.water_draws > 0", probe.rsplit("if (", 1)[1])
+        producer_guard = "if (!water_visual_capture_written && render_pass_stats.water_draws > 0 &&"
+        self.assertIn(producer_guard, probe)
+        guarded_probe = probe.split(producer_guard, 1)[1]
+        self.assertEqual(guarded_probe.count("{") - guarded_probe.count("}"), 1)
+        self.assertIn("ReadScenarioSkyMask(", guarded_probe)
+        self.assertIn("if (!sky_mask.valid_for(sample_width, sample_height))", guarded_probe)
+        refusal = guarded_probe.split("if (!sky_mask.valid_for(sample_width, sample_height))", 1)[1]
+        refusal = refusal.split("}", 1)[0]
+        self.assertIn('refuseScenarioCapture("scenario_geometry_readback_unavailable")', refusal)
+        self.assertIn("return;", refusal)
+        self.assertIn("SampleBackbufferWaterLuminance(", guarded_probe)
+        self.assertLess(guarded_probe.index("ReadScenarioSkyMask("),
+                        guarded_probe.index("SampleBackbufferWaterLuminance("))
         terrain = source("src/luminumbra_client/rendering/TerrainCoverageCapture.cpp")
         terrain = terrain.split("bool RenderPipeline::capture_terrain_coverage(", 1)[1]
         self.assertIn("!m_terrain_coverage_enabled", terrain)

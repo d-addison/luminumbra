@@ -11359,9 +11359,31 @@ TEST(RenderSmokeTest, BackbufferWriterPreservesPixelsAndRefusesInvalidOrIncomple
     ASSERT_TRUE(WritePixelBufferPpm(reference, 2, 2, pixels));
     ScreenshotPixelStats stats;
     LodHolePixelStats hole_stats;
-    ASSERT_TRUE(WriteBackbufferPpm(temporary.Path(), 2, 2, &stats, &hole_stats));
+    const auto mask = BuildSkyPixelMask(std::vector<float>(4u, 0.5f), 2, 2);
+    const auto missing_path = directory / "missing-mask.ppm";
+    stats.width = 123;
+    hole_stats.height = 456;
+    EXPECT_FALSE(WriteBackbufferPpm(missing_path, 2, 2, &stats, &hole_stats));
+    EXPECT_FALSE(WriteBackbufferPpm(missing_path, 2, 2, &stats));
+    EXPECT_FALSE(WriteBackbufferPpm(missing_path, 2, 2, nullptr, &hole_stats));
+    const SkyPixelMask missing;
+    EXPECT_FALSE(WriteBackbufferPpm(missing_path, 2, 2, &stats, &hole_stats, &missing));
+    EXPECT_FALSE(WriteBackbufferPpm(missing_path, 1, 2, &stats, &hole_stats, &mask));
+    EXPECT_FALSE(fs::exists(missing_path));
+    EXPECT_EQ(stats.width, 123);
+    EXPECT_EQ(hole_stats.height, 456);
+    EXPECT_FALSE(WriteBackbufferPpm(directory, 2, 2, &stats, &hole_stats, &mask));
+    EXPECT_EQ(stats.width, 123);
+    EXPECT_EQ(hole_stats.height, 456);
+    ASSERT_TRUE(WriteBackbufferPpm(temporary.Path(), 2, 2, &stats, &hole_stats, &mask));
     EXPECT_EQ(ReadTextFile(temporary.Path()), ReadTextFile(reference));
     EXPECT_EQ(stats.width, 2);
+    EXPECT_EQ(hole_stats.height, 2);
+    stats.width = 123;
+    ASSERT_TRUE(WriteBackbufferPpm(temporary.Path(), 2, 2, &stats, nullptr, &mask));
+    EXPECT_EQ(stats.width, 2);
+    hole_stats.height = 456;
+    ASSERT_TRUE(WriteBackbufferPpm(temporary.Path(), 2, 2, nullptr, &hole_stats, &mask));
     EXPECT_EQ(hole_stats.height, 2);
     EXPECT_FALSE(WriteBackbufferPpm(directory, 2, 2));
     EXPECT_FALSE(WriteBackbufferPpm(temporary.Path() / "child.ppm", 2, 2));
@@ -12570,4 +12592,213 @@ TEST(ScenarioGeometryMask, BoundaryRowsAreClippedBeforeTraversal) {
     AnalyzeFarLodBoundaryBandWater(
         rgb, mask, width, height, 7, 4, water_pixels, band_pixels, nullptr);
     EXPECT_EQ(band_pixels, 0);
+}
+
+namespace {
+std::vector<unsigned char>
+SolidScenarioColour(int width, int height, const std::array<unsigned char, 3>& colour) {
+    std::vector<unsigned char> rgb(static_cast<std::size_t>(width) *
+                                   static_cast<std::size_t>(height) * 3u);
+    for (std::size_t index = 0; index < rgb.size(); ++index) {
+        rgb[index] = colour[index % 3u];
+    }
+    return rgb;
+}
+} // namespace
+
+TEST(ScenarioGeometryMask, LodVoidBucketsAndSeamClustersUseCoverageForEveryColour) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    constexpr int width = 128;
+    constexpr int height = 128;
+    const auto geometry =
+        BuildSkyPixelMask(std::vector<float>(width * height, 0.5f), width, height);
+    std::vector<float> depth(width * height, 0.5f);
+    // One connected 64-pixel seam, below every area budget but above the
+    // unchanged 12-pixel cluster minimum. Upper sky and edge sky stay outside ROI.
+    for (int row = 0; row < 64; ++row) {
+        depth[static_cast<std::size_t>(row) * width + width / 2] = 0.0f;
+    }
+    const auto seam = BuildSkyPixelMask(depth, width, height);
+    const auto missing_ground =
+        BuildSkyPixelMask(std::vector<float>(width * height, 0.0f), width, height);
+    for (const auto colour : {std::array<unsigned char, 3>{0, 0, 0},
+                              std::array<unsigned char, 3>{10, 20, 35},
+                              std::array<unsigned char, 3>{60, 80, 100},
+                              std::array<unsigned char, 3>{220, 160, 80}}) {
+        const auto rgb = SolidScenarioColour(width, height, colour);
+        const auto intact = AnalyzeLodHolePixels(rgb, geometry, width, height);
+        EXPECT_EQ(intact.dark_void_pixels, 0);
+        EXPECT_EQ(intact.near_black_pixels, 0);
+        EXPECT_EQ(intact.background_blue_pixels, 0);
+        EXPECT_EQ(intact.near_black_cluster_count, 0);
+        EXPECT_EQ(AnalyzePlayerViewPixels(rgb, geometry, width, height, 2).void_cluster_count, 0);
+        EXPECT_EQ(AnalyzeFarLodBoundaryBand(rgb, geometry, width, height, 4, height - 1)
+                      .void_cluster_count,
+                  0);
+        EXPECT_EQ(AnalyzePlayerViewPixels(rgb, seam, width, height, 2).void_cluster_count, 1);
+        EXPECT_EQ(
+            AnalyzeFarLodBoundaryBand(rgb, seam, width, height, 4, height - 1).void_cluster_count,
+            1);
+        const auto cracked = AnalyzeLodHolePixels(rgb, seam, width, height);
+        EXPECT_EQ(cracked.dark_void_pixels, 64);
+        EXPECT_EQ(cracked.near_black_pixels, 64);
+        EXPECT_EQ(cracked.background_blue_pixels, 64);
+        EXPECT_LT(cracked.near_black_ratio, 0.0065);
+        EXPECT_EQ(cracked.largest_near_black_cluster_px, 64);
+        EXPECT_EQ(cracked.near_black_cluster_count, 1);
+        const auto absent = AnalyzeLodHolePixels(rgb, missing_ground, width, height);
+        EXPECT_GT(absent.dark_void_ratio, 0.020);
+        EXPECT_GT(absent.near_black_ratio, 0.0065);
+        EXPECT_GT(absent.background_blue_ratio, 0.025);
+    }
+    // Preserve 8-connectivity and the cluster size boundary, including ROI clipping.
+    std::fill(depth.begin(), depth.end(), 0.5f);
+    for (int row = 0; row < 12; ++row) {
+        depth[static_cast<std::size_t>(row) * width + 32u + static_cast<std::size_t>(row)] = 0.0f;
+    }
+    depth[static_cast<std::size_t>(height - 1) * width + 32] = 0.0f;
+    depth[0] = 0.0f;
+    const auto rgb = SolidScenarioColour(width, height, {220, 160, 80});
+    const auto diagonal =
+        AnalyzeLodHolePixels(rgb, BuildSkyPixelMask(depth, width, height), width, height);
+    EXPECT_EQ(diagonal.dark_void_pixels, 12);
+    EXPECT_EQ(diagonal.near_black_cluster_count, 1);
+    depth[11 * width + 43] = 0.5f;
+    const auto speck =
+        AnalyzeLodHolePixels(rgb, BuildSkyPixelMask(depth, width, height), width, height);
+    EXPECT_EQ(speck.largest_near_black_cluster_px, 11);
+    EXPECT_EQ(speck.near_black_cluster_count, 0);
+}
+
+TEST(ScenarioGeometryMask, MaterialAppearanceAndHeatmapRequireNonSkyEvidence) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    constexpr int width = 128;
+    constexpr int height = 128;
+    const auto geometry =
+        BuildSkyPixelMask(std::vector<float>(width * height, 0.5f), width, height);
+    const auto sky = BuildSkyPixelMask(std::vector<float>(width * height, 0.0f), width, height);
+    for (const auto colour : {std::array<unsigned char, 3>{67, 67, 39},
+                              std::array<unsigned char, 3>{16, 24, 11},
+                              std::array<unsigned char, 3>{100, 100, 100},
+                              std::array<unsigned char, 3>{41, 30, 25},
+                              std::array<unsigned char, 3>{50, 70, 90}}) {
+        const auto rgb = SolidScenarioColour(width, height, colour);
+        const auto real = AnalyzeMaterialPixels(rgb, geometry, width, height);
+        const auto backdrop = AnalyzeMaterialPixels(rgb, sky, width, height);
+        EXPECT_GT(real.roi_pixels, 0);
+        EXPECT_GT(real.rim_roi_pixels, 0);
+        EXPECT_EQ(backdrop.roi_pixels, real.roi_pixels);
+        EXPECT_EQ(backdrop.rim_roi_pixels, real.rim_roi_pixels);
+        EXPECT_EQ(backdrop.other_pixels, backdrop.roi_pixels);
+        EXPECT_EQ(backdrop.sand_pixels + backdrop.grass_pixels + backdrop.grey_fallback_pixels +
+                      backdrop.water_like_pixels + backdrop.stone_pixels + backdrop.soil_pixels,
+                  0);
+        if (colour[0] == 67) {
+            EXPECT_EQ(real.sand_pixels, real.roi_pixels);
+            EXPECT_GT(real.sand_ratio, 0.02);
+        } else if (colour[0] == 16) {
+            EXPECT_EQ(real.grass_pixels, real.roi_pixels);
+            EXPECT_GT(real.grass_ratio, 0.25);
+        } else if (colour[0] == 100) {
+            // A real fallback defect must still breach the unchanged failure ceiling.
+            EXPECT_EQ(real.grey_fallback_pixels, real.roi_pixels);
+            EXPECT_GT(real.grey_fallback_ratio, 0.125);
+            EXPECT_EQ(real.stone_pixels, real.rim_roi_pixels);
+        } else if (colour[0] == 41) {
+            EXPECT_EQ(real.soil_pixels, real.rim_roi_pixels);
+        } else {
+            EXPECT_EQ(real.water_like_pixels, real.roi_pixels);
+        }
+        const auto real_heatmap = BuildMaterialHeatmap(rgb, geometry, width, height);
+        const auto sky_heatmap = BuildMaterialHeatmap(rgb, sky, width, height);
+        const auto center = static_cast<std::size_t>(height / 2 * width + width / 2) * 3u;
+        EXPECT_NE(real_heatmap[center], sky_heatmap[center]);
+        EXPECT_EQ(sky_heatmap[center], sky_heatmap[center + 1u]);
+        EXPECT_EQ(sky_heatmap[center], sky_heatmap[center + 2u]);
+    }
+}
+
+TEST(ScenarioGeometryMask, WaterSamplesExcludeSkyAndKeepWaterCoverageAndAppearance) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    constexpr int width = 128;
+    constexpr int height = 128;
+    const std::vector<float> depth(width * height, 0.0f);
+    const auto sky = BuildSkyPixelMask(depth, width, height);
+    const auto water =
+        BuildSkyPixelMask(depth, width, height, std::vector<unsigned char>(width * height, 255));
+    const auto geometry =
+        BuildSkyPixelMask(std::vector<float>(width * height, 0.5f), width, height);
+    const auto rgb = SolidScenarioColour(width, height, {50, 70, 90});
+    for (const auto* mask : {&sky, &water, &geometry}) {
+        const bool covered = mask != &sky;
+        const auto stats = AnalyzeScreenshotPixels(rgb, *mask, width, height);
+        EXPECT_GT(stats.roi_pixels, 0);
+        EXPECT_EQ(stats.water_like_pixels, covered ? stats.roi_pixels : 0);
+        EXPECT_EQ(stats.bright_sky_like_pixels, covered ? 0 : stats.roi_pixels);
+        const auto reflection = AnalyzeWaterReflection(rgb, *mask, width, height, {50, 70, 90});
+        EXPECT_GT(reflection.upper_roi_pixels, 0);
+        EXPECT_EQ(reflection.upper_roi_water_pixels, covered ? reflection.upper_roi_pixels : 0);
+        EXPECT_DOUBLE_EQ(reflection.sky_correlation, covered ? 1.0 : 0.0);
+        const auto sample = AnalyzeWaterLuminance(rgb, *mask, width, height, 2.0);
+        EXPECT_EQ(sample.water_pixels, stats.water_like_pixels);
+        EXPECT_DOUBLE_EQ(sample.elapsed_seconds, 2.0);
+        EXPECT_NEAR(sample.water_mean_luminance, covered ? 66.3 : 0.0, 0.000001);
+        const auto dry_rgb = SolidScenarioColour(width, height, {100, 80, 20});
+        EXPECT_EQ(AnalyzeScreenshotPixels(dry_rgb, *mask, width, height).water_like_pixels, 0);
+        EXPECT_EQ(AnalyzeWaterLuminance(dry_rgb, *mask, width, height, 2).water_pixels, 0);
+        EXPECT_EQ(AnalyzeWaterReflection(dry_rgb, *mask, width, height, {50, 70, 90})
+                      .upper_roi_water_pixels,
+                  0);
+    }
+    for (const auto colour :
+         {std::array<unsigned char, 3>{0, 0, 0}, std::array<unsigned char, 3>{220, 160, 80}}) {
+        const auto coloured_sky = SolidScenarioColour(width, height, colour);
+        EXPECT_GT(AnalyzeScreenshotPixels(coloured_sky, sky, width, height).bright_sky_like_pixels,
+                  0);
+        EXPECT_EQ(
+            AnalyzeScreenshotPixels(coloured_sky, geometry, width, height).bright_sky_like_pixels,
+            0);
+    }
+}
+
+TEST(ScenarioGeometryMask, RemainingClassifiersRefusePartialMismatchedAndMissingEvidence) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    constexpr int width = 8;
+    constexpr int height = 8;
+    const auto rgb = SolidScenarioColour(width, height, {50, 70, 90});
+    const auto mask = BuildSkyPixelMask(std::vector<float>(width * height, 0.5f), width, height);
+    auto resized = mask;
+    resized.width = height / 2;
+    auto partial = mask;
+    partial.pixels.pop_back();
+    const SkyPixelMask missing;
+    for (const auto* invalid : std::array<const SkyPixelMask*, 3>{&missing, &resized, &partial}) {
+        EXPECT_THROW(AnalyzeLodHolePixels(rgb, *invalid, width, height), std::invalid_argument);
+        EXPECT_THROW(AnalyzeMaterialPixels(rgb, *invalid, width, height), std::invalid_argument);
+        EXPECT_THROW(BuildMaterialHeatmap(rgb, *invalid, width, height), std::invalid_argument);
+        EXPECT_THROW(AnalyzeScreenshotPixels(rgb, *invalid, width, height), std::invalid_argument);
+        EXPECT_THROW(AnalyzeWaterReflection(rgb, *invalid, width, height, {}),
+                     std::invalid_argument);
+        EXPECT_THROW(AnalyzeWaterLuminance(rgb, *invalid, width, height, 0), std::invalid_argument);
+        EXPECT_THROW(SampleBackbufferWaterLuminance(*invalid, width, height, 0),
+                     std::invalid_argument);
+    }
+}
+
+TEST(ScenarioGeometryMask, RemainingClassifiersRefusePartialColourEvidence) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    constexpr int width = 8;
+    constexpr int height = 8;
+    const auto rgb = SolidScenarioColour(width, height, {50, 70, 90});
+    const auto mask = BuildSkyPixelMask(std::vector<float>(width * height, 0.5f), width, height);
+    for (const auto size : {std::size_t{0}, rgb.size() - 1u, rgb.size() + 1u}) {
+        const std::vector<unsigned char> bad_rgb(size);
+        EXPECT_THROW(AnalyzeLodHolePixels(bad_rgb, mask, width, height), std::invalid_argument);
+        EXPECT_THROW(AnalyzeMaterialPixels(bad_rgb, mask, width, height), std::invalid_argument);
+        EXPECT_THROW(BuildMaterialHeatmap(bad_rgb, mask, width, height), std::invalid_argument);
+        EXPECT_THROW(AnalyzeScreenshotPixels(bad_rgb, mask, width, height), std::invalid_argument);
+        EXPECT_THROW(AnalyzeWaterReflection(bad_rgb, mask, width, height, {}),
+                     std::invalid_argument);
+        EXPECT_THROW(AnalyzeWaterLuminance(bad_rgb, mask, width, height, 0), std::invalid_argument);
+    }
 }
