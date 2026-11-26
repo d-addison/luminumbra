@@ -30,6 +30,27 @@ def read_source(path):
     return without_comments((ROOT / path).read_text(encoding="utf-8"))
 
 
+class NamedFnvBasisContract(unittest.TestCase):
+    def test_named_digest_sites_do_not_reintroduce_the_truncated_literal(self):
+        # These migrated domains retain explicit seed choices, including their test mirrors.
+        paths = (
+            "src/luminumbra_server/ServerWorldRunner.cpp",
+            "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+            "test/net/net_soak_over_the_wire_test.cpp",
+            "test/common/replication_scale_test.cpp",
+            "test/common/WaterDeterminism_test.cpp",
+            "test/client/world_dressing_test.cpp",
+            "test/common/WaterSeedInputs_test.cpp",
+            "test/common/PlantProcgen_test.cpp",
+            "test/sim/photo_mode_test.cpp",
+        )
+        literal = re.compile(rb"(?<![0-9])1469598103934665603(?![0-9])")
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertIsNone(literal.search((ROOT / path).read_bytes()),
+                                  "Use the named historical or standard basis")
+
+
 class ReplaySourceContract(unittest.TestCase):
     def test_automatic_region_trace_uses_shared_encoder_and_pair_publication(self):
         stream = read_source("src/luminumbra_common/replay/ReplayStream.cpp")

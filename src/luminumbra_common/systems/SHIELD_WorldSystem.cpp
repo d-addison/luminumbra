@@ -1,5 +1,6 @@
 #include "SHIELD_WorldSystem.h"
 #include "../core/FilesystemPath.h"
+#include "../core/IntegerPrimitives.h"
 #include "../core/JobWatchdog.h" // opt-in named-phase wedge reporter for unbounded waits
 #include "../core/Log.h"
 #include "../core/WaterSeedInputs.h"
@@ -5040,7 +5041,7 @@ SHIELD_WorldSystem::WaterStateHash SHIELD_WorldSystem::debug_water_state_hash() 
     std::sort(ids.begin(), ids.end());
     WaterStateHash out;
     out.water_chunks = ids.size();
-    std::uint64_t h = 1469598103934665603ull;
+    std::uint64_t h = Luminumbra::Core::kFnv1a64HistoricalBasis;
     auto mix = [&h](std::uint64_t v) {
         h ^= v;
         h *= 1099511628211ull;

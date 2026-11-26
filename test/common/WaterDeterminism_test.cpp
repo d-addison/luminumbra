@@ -41,6 +41,7 @@
 #include <nlohmann/json.hpp>
 
 #include "luminumbra_common/components/CoreComponents.h" // water-source: TransformComponent
+#include "luminumbra_common/core/IntegerPrimitives.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"    // sim.water_high_res gate
 #include "luminumbra_common/core/WaterComponents.h" // water-source: FlowingWaterSourceComponent
@@ -1086,7 +1087,7 @@ TEST(WaterDeterminism, LegacyUpdateAndCheckedInteriorHaveIdenticalDepthFluxAndHa
             const auto result =
                 WaterKernels::StepInterior(*b, kernel_world, {.rain_mm = 3, .evap_mm = 2});
             ASSERT_TRUE(result.applied);
-            std::uint64_t trajectory = 1469598103934665603ull;
+            std::uint64_t trajectory = Luminumbra::Core::kFnv1a64HistoricalBasis;
             for (const auto* values : {&b->water_depth_mm, &b->water_bed_mm, &b->water_edge_flux}) {
                 for (const auto value : *values) {
                     trajectory ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(value));
