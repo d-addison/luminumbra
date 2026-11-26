@@ -1020,10 +1020,16 @@ class UploadBudgetWiring(unittest.TestCase):
         tests = read(ROOT / "test/rendering/render_smoke_test.cpp")
         regression = body(tests, "TEST(RenderSmokeTest, RefusedTreeImpostorsSubmitAvailableMeshLods)")
         for required in ("FarWorldMode::Legacy", "FarWorldMode::Ladder", "highest_lod",
-                         "capture.mesh_draws", "capture.impostor_draws", "support.clear()",
-                         "input.resident_live_terrain = &support", "input.submitted_live_terrain = &support",
+                         "capture.mesh_draws", "capture.impostor_draws",
+                         "TreeTerrainSupport terrain_support(support_state)",
+                         "terrain_support.Bind(input, support)",
                          "fs::create_directories", 'partial << "LM"', "ctx.frozen_replay = replay"):
             self.assertIn(required, regression)
+        support = body(tests, "class TreeTerrainSupport")
+        for required in ("support.clear()", "input.resident_live_terrain = &support",
+                         "input.submitted_live_terrain = &support",
+                         "coverage_.RecordSubmitted(record_)", "coverage_.Clear()"):
+            self.assertIn(required, support)
 
     def test_cold_far_supported_frame_prepares_frozen_mesh_fallback(self):
         source = read(RENDERING / "passes/GBufferPass.cpp")
@@ -1255,11 +1261,23 @@ class UploadBudgetWiring(unittest.TestCase):
                        "for (const std::size_t propIndex : candidates)")
         far_support = compact(collect[collect.index("const bool far_terrain_resident"):
                                       collect.index("const auto submission")])
-        self.assertIn("input.far_selection.effective == FarWorldMode::Legacy", far_support)
+        self.assertIn("input.far_selection.effective == FarWorldMode::Legacy ?", far_support)
         self.assertIn("input.legacy_far &&", far_support)
         self.assertIn("input.legacy_far->terrain_resident_at(cp.position)", far_support)
+        self.assertIn(": input.ladder_terrain_coverage &&", far_support)
+        self.assertIn("input.ladder_terrain_coverage->Covers(", far_support)
+        self.assertIn("{cp.position.x, cp.position.y, cp.position.z}", far_support)
         pipeline = read(RENDERING / "RenderPipeline.cpp")
         self.assertIn("gbuffer_input.legacy_far = legacy_far_compatibility();", pipeline)
+        self.assertIn("gbuffer_input.ladder_terrain_coverage = &m_far_world->TerrainCoverage();",
+                      pipeline)
+        for filename, signature in (
+                ("FarWorldRenderer.cpp", "FarWorldSubmitStats FarWorldRenderer::Submit("),
+                ("FarWorldHandoffRenderer.cpp", "FarWorldSubmitStats FarWorldHandoffRenderer::Submit(")):
+            submit = body(read(RENDERING / filename), signature)
+            self.assertIn("terrain_coverage_.Begin(camera)", submit)
+            self.assertLess(submit.index("DrawFarVolumeGpu("),
+                            submit.index("terrain_coverage_.RecordSubmitted(record)"))
         tests = read(ROOT / "test/rendering/render_smoke_test.cpp")
         regression = body(tests, "TEST(RenderSmokeTest, LadderImpostorsRequireConfirmedTerrainCoverage)")
         for required in ("ASSERT_EQ(ladder.effective, FarWorldMode::Ladder)",

@@ -35,6 +35,76 @@
 namespace Luminumbra::Rendering {
 using namespace World;
 
+void FarWorldTerrainCoverage::Clear() noexcept {
+    for (auto& tier : entries_)
+        for (auto& entry : tier)
+            entry.present = false;
+}
+
+void FarWorldTerrainCoverage::Begin(const std::array<double, 3>& camera) noexcept {
+    Clear();
+    camera_ = camera;
+}
+
+void FarWorldTerrainCoverage::RecordSubmitted(const FarVolumeDrawRecord& record) noexcept {
+    const auto& key = record.identity.key;
+    if (key.tier == 0 || key.tier > World::kFarTierCount || record.terrain_indices == 0)
+        return;
+    const auto edge = World::kFarTierTable[key.tier - 1].tile_edge_meters;
+    const auto offset_x = static_cast<double>(key.tx) * edge - camera_[0];
+    const auto offset_z = static_cast<double>(key.tz) * edge - camera_[2];
+    const auto distance_x = std::max({offset_x, -offset_x - edge, 0.0});
+    const auto distance_z = std::max({offset_z, -offset_z - edge, 0.0});
+    if (std::hypot(distance_x, distance_z) > record.horizontal_outer_clip_meters)
+        return;
+    entries_[key.tier - 1][Slot(key.tx, key.tz)] = {
+        key, record.request.span, record.arrival, record.horizontal_outer_clip_meters, true};
+}
+
+bool FarWorldTerrainCoverage::Covers(const std::array<double, 3>& position) const noexcept {
+    for (const auto coordinate : position)
+        if (!std::isfinite(coordinate) ||
+            std::abs(coordinate) > World::kFarVolumeExactCoordinateLimitMeters)
+            return false;
+    const std::array relative{
+        position[0] - camera_[0], position[1] - camera_[1], position[2] - camera_[2]};
+    // Coordinates are bounded before arithmetic. Match the fragment's squared
+    // distance comparisons once per tree, without a square root per tier.
+    const double horizontal_squared = relative[0] * relative[0] + relative[2] * relative[2];
+    const double spatial_squared = horizontal_squared + relative[1] * relative[1];
+    if (!std::isfinite(spatial_squared) ||
+        spatial_squared < kFarWorldInnerRadiusMeters * kFarWorldInnerRadiusMeters)
+        return false;
+    for (std::size_t tier = 0; tier < World::kFarTierCount; ++tier) {
+        const auto edge = World::kFarTierTable[tier].tile_edge_meters;
+        const auto tile_x = static_cast<std::int64_t>(std::floor(position[0] / edge));
+        const auto tile_z = static_cast<std::int64_t>(std::floor(position[2] / edge));
+        const auto& entry = entries_[tier][Slot(tile_x, tile_z)];
+        if (!entry.present || entry.key.tx != tile_x || entry.key.tz != tile_z ||
+            position[1] < static_cast<double>(entry.span.min_y) ||
+            position[1] > static_cast<double>(entry.span.max_y) || !(entry.outer_radius > 0) ||
+            horizontal_squared > entry.outer_radius * entry.outer_radius)
+            continue;
+        const std::array local{
+            static_cast<float>(position[0] - static_cast<double>(tile_x) * edge),
+            static_cast<float>(position[1] - static_cast<double>(entry.span.min_y)),
+            static_cast<float>(position[2] - static_cast<double>(tile_z) * edge)};
+        if (!FarWorldArrivalReplaces(entry.arrival,
+                                     static_cast<float>(edge),
+                                     local,
+                                     entry.span.min_y,
+                                     relative[0],
+                                     relative[2]))
+            return true;
+    }
+    return false;
+}
+
+std::size_t FarWorldTerrainCoverage::Slot(std::int64_t tile_x, std::int64_t tile_z) noexcept {
+    return static_cast<std::size_t>((static_cast<std::uint64_t>(tile_x) & 7u) +
+                                    8u * (static_cast<std::uint64_t>(tile_z) & 7u));
+}
+
 FarWorldSelection SelectFarWorld(FarWorldMode requested,
                                  FarWorldPurpose purpose,
                                  FarWorldRefusal prerequisite,
@@ -342,6 +412,7 @@ const FarWorldHandoffDiagnosticSnapshot* FarWorldRenderer::SessionDiagnostic() c
 }
 void FarWorldRenderer::BeginLiveOwnership(std::uint64_t frame, std::size_t limit) {
     CheckOwner();
+    terrain_coverage_.Clear();
     if (session_) {
         session_->BeginLiveOwnership(frame, limit);
     } else {
@@ -576,6 +647,7 @@ bool FarWorldRenderer::AdvanceFrame(std::uint64_t frame,
         (advanced_frame_ && frame <= *advanced_frame_))
         return false;
     advanced_frame_ = frame;
+    terrain_coverage_.Clear();
     for (auto& tier : diagnostic_tiers_) {
         tier.resident.submitted_water_indices = 0;
         tier.draws = 0;
@@ -726,9 +798,12 @@ bool MakeFarWorldDrawCommand(const FarVolumeDrawRecord& record,
 FarWorldSubmitStats FarWorldRenderer::Submit(const std::array<double, 3>& camera,
                                              const FarWorldPrepareDraw& prepare) {
     CheckOwner();
+    terrain_coverage_.Begin(camera);
     FarWorldSubmitStats stats;
     if (session_) {
         if (stopping_ || Selection(FarWorldPurpose::World).effective != FarWorldMode::Ladder) {
+            // Empty preparation clears delegated confirmation without drawing.
+            (void)session_->Submit(camera, {});
             return stats;
         }
         submitting_ = true;
@@ -803,6 +878,7 @@ FarWorldSubmitStats FarWorldRenderer::Submit(const std::array<double, 3>& camera
                     return;
                 }
                 tier_stats.resident.submitted_water_indices += record.water_indices;
+                v.owner.terrain_coverage_.RecordSubmitted(record);
                 ++v.stats.draws;
                 ++tier_stats.draws;
                 tier_stats.indices += static_cast<std::size_t>(command.index_count);
@@ -906,7 +982,13 @@ void FarWorldRenderer::CaptureDiagnostic(FarWorldSelection selection,
     }
 }
 
+const FarWorldTerrainCoverage& FarWorldRenderer::TerrainCoverage() const {
+    CheckOwner();
+    return session_ ? session_->TerrainCoverage() : terrain_coverage_;
+}
+
 void FarWorldRenderer::Drain() {
+    terrain_coverage_.Clear();
     stopping_ = true;
     // Stop submission and unbind before any queue mutation or GPU retirement.
     // Drawing restores the caller's bindings, but retirement also handles a
