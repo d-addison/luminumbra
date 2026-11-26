@@ -2633,6 +2633,9 @@ add_test(NAME SimBudgetNeutralityContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py"
         SimBudgetNeutralityTests)
 set_tests_properties(SimBudgetNeutralityContract PROPERTIES LABELS "simulation;tools" TIMEOUT 5)
+add_test(NAME SimBudgetReportContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_report_sim_budget.py")
+set_tests_properties(SimBudgetReportContract PROPERTIES LABELS "simulation;tools" TIMEOUT 5)
 add_test(NAME SimBudgetGateContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_sim_budget_gate.py")
 set_tests_properties(SimBudgetGateContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
