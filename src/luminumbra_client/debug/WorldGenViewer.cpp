@@ -1,7 +1,9 @@
 #include "debug/WorldGenViewer.h"
 #include "core/Log.h"
+#include "core/StrictNumeric.h"
 #include "luminumbra_common/world/LayerGraph.h"
 #include "rendering/RenderPipeline.h"
+#include <cstddef>
 #include <glm/glm.hpp>
 #include <imgui.h>
 #include <nlohmann/json.hpp>
@@ -18,8 +20,9 @@ WorldGenViewer::WorldGenViewer() {
     m_params = Systems::TerrainGenParams();
     snprintf(m_seed_buf, sizeof(m_seed_buf), "%d", m_seed);
 
-    // Prepare pixel buffer and OpenGL texture for the preview
-    m_pixelBuffer.resize(m_textureSize * m_textureSize * 3);
+    // The fixed 512x512 RGB preview contains at most 786432 bytes.
+    m_pixelBuffer.resize(static_cast<std::size_t>(m_textureSize) *
+                         static_cast<std::size_t>(m_textureSize) * 3u);
     glGenTextures(1, &m_textureID);
     glBindTexture(GL_TEXTURE_2D, m_textureID);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -75,8 +78,8 @@ void WorldGenViewer::DrawContents(Systems::SHIELD_WorldSystem* main_world_system
     // --- Parameter Section ---
     if (ImGui::CollapsingHeader("Generator Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (ImGui::InputText(
-                "Seed", m_seed_buf, sizeof(m_seed_buf), ImGuiInputTextFlags_CharsDecimal)) {
-            m_seed = std::atoi(m_seed_buf);
+                "Seed", m_seed_buf, sizeof(m_seed_buf), ImGuiInputTextFlags_CharsDecimal) &&
+            Core::ParseNumber(m_seed_buf, m_seed)) {
             m_paramsChanged = true;
         }
 
@@ -259,7 +262,7 @@ void WorldGenViewer::RegenerateTexture() {
             }
 
             // Write to the pixel buffer
-            int index = (y * m_textureSize + x) * 3;
+            const auto index = static_cast<std::size_t>((y * m_textureSize + x) * 3);
             m_pixelBuffer[index] = r;
             m_pixelBuffer[index + 1] = g;
             m_pixelBuffer[index + 2] = b;

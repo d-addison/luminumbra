@@ -1,8 +1,10 @@
 #include "../support/UniqueTempPath.h"
+#include "app/UiInputRouter.h"
 #include "core/RuntimeScenarioConfig.h"
 #include "luminumbra_common/ai/CreatureBrainSystem.h"
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
+#include "rendering/Camera.h"
 #include "rendering/TemporalSweep.h"
 
 #include <gtest/gtest.h>
@@ -522,6 +524,153 @@ struct RuntimeBackend {
     Fault fault = Fault::None;
     std::optional<TemporalSequenceStep> completed;
 };
+
+// Exercise the same public routing gates used by key callbacks, held-key
+// polling, mouse look and scroll, without a window or graphics context.
+struct LiveSweepInput {
+    Luminumbra::Client::App::UiInputRouter router;
+    Camera camera;
+
+    LiveSweepInput() {
+        router.SetOwnership({.in_world = true});
+    }
+    void inject() {
+        using Luminumbra::Client::App::KeyRoute;
+        if (router.Key(87, 1, false, false) == KeyRoute::Gameplay)
+            camera.ProcessKeyboard(FORWARD, 0.25f);
+        router.Key(68, 1, false, false);
+        if (router.GameplayKeyAllowed(68))
+            camera.ProcessKeyboard(RIGHT, 0.25f);
+        if (router.GameplayMouseAllowed()) {
+            camera.ProcessMouseMovement(40.0f, 20.0f);
+            camera.ProcessMouseScroll(2.0f);
+        }
+    }
+    void expect_scenario_pose() const {
+        EXPECT_EQ(camera.Position, glm::vec3(12.0f, 23.0f, 34.0f));
+        EXPECT_FLOAT_EQ(camera.Yaw, -90.0f);
+        EXPECT_FLOAT_EQ(camera.Pitch, -10.0f);
+        EXPECT_FLOAT_EQ(camera.Zoom, 75.0f);
+    }
+    void set_scenario_pose() {
+        camera.Position = glm::vec3(12.0f, 23.0f, 34.0f);
+        camera.Yaw = -90.0f;
+        camera.Pitch = -10.0f;
+        camera.Zoom = 75.0f;
+        camera.updateCameraVectors();
+    }
+    void expect_live_input_restored() {
+        EXPECT_TRUE(router.GameplayAllowed());
+        EXPECT_TRUE(router.GameplayMouseAllowed());
+        // Keys pressed during a hold stay quarantined until released.
+        EXPECT_FALSE(router.GameplayKeyAllowed(87));
+        EXPECT_FALSE(router.GameplayKeyAllowed(68));
+        router.Key(87, 0, false, false);
+        router.Key(68, 0, false, false);
+        EXPECT_TRUE(router.GameplayKeyAllowed(68));
+        inject();
+        EXPECT_NE(camera.Position, glm::vec3(12.0f, 23.0f, 34.0f));
+        EXPECT_FLOAT_EQ(camera.Yaw, -86.0f);
+        EXPECT_FLOAT_EQ(camera.Pitch, -8.0f);
+        EXPECT_FLOAT_EQ(camera.Zoom, 45.0f);
+    }
+};
+
+struct InputInjectingSweepBackend : RuntimeBackend {
+    LiveSweepInput& live;
+    InputInjectingSweepBackend(const TemporalAuditPlan& plan, LiveSweepInput& input)
+        : RuntimeBackend(plan)
+        , live(input) {}
+    bool render_completed(const TemporalSequenceStep& step,
+                          const CaptureFeaturePolicy& policy,
+                          const WorldSweepAngle& angle,
+                          bool& ready) {
+        live.inject();
+        live.expect_scenario_pose();
+        return RuntimeBackend::render_completed(step, policy, angle, ready);
+    }
+};
+
+TEST(TemporalSweepRuntime, LiveCameraInputIsHeldAcrossSweepAndRestoredAfterEveryExit) {
+    using Hold = Luminumbra::Client::App::UiInputRouter::GameplayInputHold;
+    const auto plan = Plan();
+    for (const auto fault : {RuntimeBackend::Fault::None,
+                             RuntimeBackend::Fault::Begin,
+                             RuntimeBackend::Fault::Simulation,
+                             RuntimeBackend::Fault::WeatherTick,
+                             RuntimeBackend::Fault::WeatherRender,
+                             RuntimeBackend::Fault::Render,
+                             RuntimeBackend::Fault::NotReady,
+                             RuntimeBackend::Fault::Capture,
+                             RuntimeBackend::Fault::EmptyCapture,
+                             RuntimeBackend::Fault::Publish,
+                             RuntimeBackend::Fault::EmptyPublish}) {
+        SCOPED_TRACE(static_cast<int>(fault));
+        LiveSweepInput live;
+        InputInjectingSweepBackend backend(plan, live);
+        backend.fault = fault;
+        const auto refusal = [&] {
+            const Hold hold(live.router, true);
+            // Authored poses remain writable while live camera input is held.
+            live.set_scenario_pose();
+            live.inject();
+            live.expect_scenario_pose();
+            return Harness::RunWorldVisualTemporalSweep(plan, Budget(plan), backend);
+        }();
+        EXPECT_EQ(refusal.empty(), fault == RuntimeBackend::Fault::None);
+        if (fault == RuntimeBackend::Fault::None) {
+            EXPECT_EQ(backend.subject.captures.size(), plan.frames.size());
+            EXPECT_GT(backend.subject.renders, 1U);
+        }
+        live.expect_scenario_pose();
+        live.expect_live_input_restored();
+    }
+}
+
+TEST(TemporalSweepRuntime, InputHoldNestingDisabledScopesAndExceptionsPreserveOwnership) {
+    using Hold = Luminumbra::Client::App::UiInputRouter::GameplayInputHold;
+    LiveSweepInput live;
+    const auto revision = live.router.Revision();
+    {
+        const Hold disabled(live.router, false);
+        EXPECT_TRUE(live.router.GameplayAllowed());
+    }
+    EXPECT_EQ(live.router.Revision(), revision);
+    using Luminumbra::Client::App::KeyRoute;
+    EXPECT_EQ(live.router.Key(87, 1, false, false), KeyRoute::Gameplay);
+    EXPECT_THROW(
+        [&] {
+            const Hold outer(live.router, true);
+            // RefreshInputOwnership observes this edge and clears queued actions.
+            EXPECT_TRUE(live.router.SetOwnership({.in_world = true}));
+            EXPECT_TRUE(live.router.Contexts().KeyQuarantined(87));
+            live.set_scenario_pose();
+            for (const bool enabled : {false, true}) {
+                const Hold inner(live.router, enabled);
+                live.inject();
+                live.expect_scenario_pose();
+                EXPECT_FALSE(live.router.GameplayAllowed());
+            }
+            EXPECT_FALSE(live.router.GameplayAllowed());
+            // UI/focus refreshes must not release the capture hold.
+            live.router.SetOwnership({.in_world = true, .window_focused = false});
+            live.router.SetOwnership({.in_world = true});
+            live.inject();
+            live.expect_scenario_pose();
+            EXPECT_FALSE(live.router.WorldShortcutsAllowed());
+            EXPECT_EQ(live.router.Key(87, 1, true, true), KeyRoute::Ignore);
+            for (const int key : {-1, 512})
+                EXPECT_EQ(live.router.Key(key, 1, false, false), KeyRoute::Ignore);
+            throw std::runtime_error("capture failed");
+        }(),
+        std::runtime_error);
+    EXPECT_TRUE(live.router.SetOwnership({.in_world = true}));
+    live.expect_live_input_restored();
+    live.router.SetOwnership({.in_world = true, .rml_interaction = true});
+    { const Hold hold(live.router, true); }
+    EXPECT_EQ(live.router.Owner(), Luminumbra::Client::App::InputOwner::RmlUi);
+    EXPECT_FALSE(live.router.GameplayAllowed());
+}
 
 // Compile-only mutation oracles for the runtime ordering and sticky failure gates.
 struct RuntimeWireProbe {
