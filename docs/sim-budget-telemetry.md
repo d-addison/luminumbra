@@ -201,7 +201,7 @@ Build the existing `perf` preset, then run from the repository:
 ```sh
 python3 tools/perf/capture_sim_budget.py \
   --binary build/perf/bin/luminumbra_server_app \
-  --evidence-dir build/campaign-archives-20260907/slice-A3/before
+  --evidence-dir ../sim-budget-captures/before
 ```
 
 Repeat with another named directory after simulation work. The default workload
@@ -210,6 +210,17 @@ mountains and archipelago, with the existing ecology and planted rosters and
 `--no-audio`. The script fails on missing binaries, existing output directories,
 server errors, invalid artifacts or vacuous plant/creature/scent/field work.
 It retains partial evidence on failure and does not publish a success manifest.
+Add `--check-neutrality` to also run a telemetry-off smoke counterpart immediately
+after each preset's traced capture. This opt-in mode requires an evidence directory
+outside the checkout. The counterpart uses the same executable, root, preset,
+seed, rosters, tick count, radii and 30-tick autosave cadence; only `--sim-budget`
+and the artifact output argument differ. Both counterpart world hashes must match
+the traced hash, both artifacts must report exactly two complete smoke runs and
+identical effective simulation gates, and the disabled artifact must omit
+`sim_budget` entirely. Successful process exits and smoke verdicts are required.
+The traced artifact still passes every population, field-path, per-tick work
+and replay check. Fixture identities are checked again after all requested runs.
+The default invocation continues to capture only telemetry-on evidence.
 The committed shipping-default work-budget baseline and CI capture use 600 ticks
 instead. To check or re-pin that baseline, pass `--ticks 600 --seed 1337 --radius 1
 --collision-radius 1` explicitly and follow the
@@ -230,7 +241,13 @@ are populated starting worlds, not an enforced constant entity population.
 
 Each directory contains `<preset>.json` (the smoke artifact), `<preset>.log`
 (diagnostic stdout/stderr) and, only after all captures validate, `capture.json`.
-The latter is a new UTF-8 JSON evidence record with schema
+With `--check-neutrality`, it also retains `<preset>-telemetry-off.json` and
+`<preset>-telemetry-off.log`. Each manifest run then has an optional `telemetry_off`
+object containing the counterpart's relative `artifact` and exact `command`,
+using the existing manifest schema. Its presence in a successful manifest records
+that the neutrality checks passed; absence does not establish neutrality.
+Failures retain artifacts and diagnostics and prevent success-manifest publication.
+The manifest is a UTF-8 JSON evidence record with schema
 `luminumbra.sim_budget_capture.v1` and required keys `revision`, `source_dirty`,
 `binary_sha256`, `fixture_hash`,
 `seed`, `ticks`, `surface_radius`, `collision_radius`, and `runs`. Each run has
@@ -280,7 +297,14 @@ mutually exclusive wind/weather stage coverage and exact field work totals,
 starting plant/creature counts, and ordinary save bytes (including plants,
 metadata and clock) across a telemetry toggle at the same tick. Active regions
 intentionally changes the simulation; equality is required across telemetry
-settings, not across active-regions settings. `SimBudgetCaptureContract` runs
-seven Python command and refusal tests, including both field paths, refusal
-of mixed coverage, and wrongly typed or malformed world hashes. Discovered totals, the measured delta against current devel,
+settings, not across active-regions settings. That parity test pins historical
+terrain and disables other simulation gates. The opt-in shipping-workload capture
+supplements it by exercising current shipping gates on all three presets; it does
+not replace the historical test's two active-region modes.
+`SimBudgetNeutralityContract` runs four mocked-launch Python tests on tiny synthetic
+artifacts, covering command equality, hash/gate mismatch, disabled telemetry
+refusal and failure publication ordering without an engine launch.
+`SimBudgetCaptureContract` runs Python command and refusal tests, including both
+field paths, refusal of mixed coverage, and wrongly typed or malformed world hashes.
+Discovered totals, the measured delta against current devel,
 execution results and qualification limitations are in the campaign receipt.
