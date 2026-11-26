@@ -17,6 +17,7 @@
 // land_water) still prove real water was exercised.
 #include "../fixtures/TerrainFixtureParams.h"
 #include "../support/UniqueTempPath.h"
+#include "../support/WaterSchedulerFixture.h"
 #include "../support/WorldgenTestData.h"
 
 #include <gtest/gtest.h>
@@ -31,6 +32,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -45,8 +47,10 @@
 #include "luminumbra_common/core/SystemConfig.h"    // sim.water_high_res gate
 #include "luminumbra_common/core/WaterComponents.h" // water-source: FlowingWaterSourceComponent
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
+#include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/GameSession.h"
 
@@ -1033,6 +1037,700 @@ TEST(WaterDeterminism, HighResWaterMatchesMediumPhysicsPerSimPass) {
 // The common test target enumerates this translation unit explicitly. Keep the cadence regression
 // in its contract-owned source file while compiling it through the existing Water test unit.
 #include "water_sim_cadence_test.cpp"
+
+namespace {
+
+class BootSettleReferenceControl {
+public:
+    explicit BootSettleReferenceControl(const char* value) {
+        if (const char* previous = std::getenv(kName))
+            previous_ = previous;
+        Set(value);
+    }
+    ~BootSettleReferenceControl() {
+        Set(previous_ ? previous_->c_str() : nullptr);
+    }
+    BootSettleReferenceControl(const BootSettleReferenceControl&) = delete;
+    BootSettleReferenceControl& operator=(const BootSettleReferenceControl&) = delete;
+
+private:
+    static constexpr const char* kName = "LUMINUMBRA_TEST_FORCE_FULL_BOOT_WATER_SETTLE";
+    static void Set(const char* value) {
+#ifdef _WIN32
+        EXPECT_EQ(_putenv_s(kName, value ? value : ""), 0);
+#else
+        EXPECT_EQ(value ? setenv(kName, value, 1) : unsetenv(kName), 0);
+#endif
+    }
+    std::optional<std::string> previous_;
+};
+
+// All non-timing water/streaming counters touched by boot, including internal ring/phase
+// through the const diagnostic. The fixture has no unrelated runtime subsystems.
+nlohmann::json BootSettleDiagnostics(const Luminumbra::Systems::SHIELD_WorldSystem& world,
+                                     const Luminumbra::Systems::WaterSystem& water) {
+    const auto& budget = world.get_last_streaming_budget_stats();
+    const auto& telemetry = world.get_streaming_telemetry_stats();
+    const auto& index = world.activation_index_counters();
+    const auto& columns = world.water_column_mesh_work();
+    const auto renderable = world.renderable_view_work();
+    const auto& seed = water.dbg_seed_attribution();
+    return {{"budget",
+             {budget.update_interval_frames,
+              budget.requested_render_radius,
+              budget.target_render_radius,
+              budget.generation_budget,
+              budget.meshing_budget,
+              budget.max_active_chunks_budget,
+              budget.active_chunks_before,
+              budget.active_chunks_after,
+              budget.ready_chunks,
+              budget.renderable_chunks,
+              budget.idle_chunks,
+              budget.loading_chunks,
+              budget.meshing_chunks,
+              budget.target_surface_columns,
+              budget.generation_candidates,
+              budget.surface_generation_candidates,
+              budget.vertical_generation_candidates,
+              budget.scheduled_generation,
+              budget.surface_generation_scheduled,
+              budget.vertical_generation_scheduled,
+              budget.deferred_generation,
+              budget.meshing_candidates,
+              budget.scheduled_meshing,
+              budget.submitted_meshing,
+              budget.deferred_meshing,
+              budget.unloaded_chunks,
+              budget.generation_job_active,
+              budget.meshing_job_active}},
+            {"telemetry",
+             {telemetry.peak_queue_depth,
+              telemetry.peak_meshing_candidates,
+              telemetry.cumulative_scheduled_meshing,
+              telemetry.cumulative_deferred_meshing,
+              telemetry.max_deferred_age_frames,
+              telemetry.last_queue_depth,
+              telemetry.generation_batches,
+              telemetry.meshing_batches,
+              telemetry.pending_lod_chunks,
+              telemetry.promotion_pending,
+              telemetry.settled_queue_depth,
+              telemetry.frames_observed}},
+            {"index",
+             {index.lifecycle_chunk_visits,
+              index.lifecycle_snapshots,
+              index.span_cache_hits,
+              index.span_cache_misses,
+              index.columns_scanned,
+              index.water_owner_visits,
+              index.index_updates}},
+            {"work",
+             {columns.pending_visits,
+              columns.owner_visits,
+              renderable.rebuilds,
+              renderable.chunk_visits,
+              renderable.allocations,
+              world.snapshot_copies(),
+              world.last_meshing_snapshot_bytes(),
+              world.far_lod_capture_input_items(),
+              world.region_digest_input_items(),
+              world.water_authority_input_items(),
+              world.pending_publication_chunks(),
+              world.debug_dirty_generation()}},
+            {"water",
+             {water.debug_sources_seen(),
+              water.debug_source_injected_mm(),
+              water.dbg_awake_water_chunks(),
+              water.dbg_cells_simmed(),
+              water.cells_stepped_last_update(),
+              water.grid_candidates_visited_last_update(),
+              water.dbg_last_source_mm(),
+              water.dbg_last_sink_mm(),
+              water.dbg_mass_ok(),
+              water.dbg_seam_wet_pairs(),
+              water.GetSimWindowCursor(),
+              water.water_epoch(),
+              seed.precomputed_columns,
+              seed.fallback_columns,
+              seed.stale_columns}},
+            {"bookkeeping", world.boot_settle_bookkeeping()}};
+}
+
+struct BootSettleWorld {
+    explicit BootSettleWorld(int seed, int resolution = 8)
+        : world(nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), seed)
+        , water(nullptr, &world)
+        , chunk(Luminumbra::TestSupport::SchedulerChunk(0, resolution)) {
+        world.SetWaterSystem(&water);
+        water.SetSimResolution(resolution);
+        water.SetHydrology(true, 0, 0);
+        water.SetBootSettleMode(true);
+        // Radius-zero synthetic world: one already published column, no streaming anchors.
+        // Uniform water reaches sleep at pass 120 without meshing or collision work.
+        std::fill(chunk->water_depth_mm.begin(), chunk->water_depth_mm.end(), 1000);
+        chunk->set_state(Luminumbra::ChunkState::Ready);
+        chunk->current_lod.store(0);
+        chunk->water_mesh_generated.store(true);
+        EXPECT_TRUE(world.adopt_streamed_chunk(chunk));
+        EXPECT_TRUE(state.insert_chunk(chunk));
+    }
+    void Source(float rate, bool resident = true) {
+        const auto entity = registry.create();
+        auto& transform = registry.emplace<Luminumbra::Components::TransformComponent>(entity);
+        transform.position = resident ? Vec3(1.0f) : Vec3(1024.0f);
+        registry.emplace<Luminumbra::Components::FlowingWaterSourceComponent>(entity).flow_rate =
+            rate;
+    }
+    void Step() {
+        world.update(registry, std::vector<Vec3>{}, nullptr);
+        world.wait_for_streaming_jobs();
+    }
+    bool Continue(std::uint64_t skipped) {
+        return world.TryCompleteBootWaterSettle(registry, {}, nullptr, skipped);
+    }
+    SHIELD_WorldSystem world;
+    Luminumbra::Systems::WaterSystem water;
+    std::shared_ptr<Luminumbra::Chunk> chunk;
+    entt::registry registry;
+    Luminumbra::WorldStreamingState state;
+};
+
+} // namespace
+
+TEST(WaterDeterminism, BootEarlyStopMatchesForcedFullBytesHashesAndNonTimingDiagnostics) {
+    using namespace Luminumbra;
+    for (const int seed : {1337, 777}) {
+        for (const int resolution : {8, 16}) {
+            for (const int source_case : {0, 1, 2, 3, 4}) {
+                SCOPED_TRACE(seed);
+                SCOPED_TRACE(resolution);
+                SCOPED_TRACE(source_case);
+                BootSettleWorld early(seed, resolution), full(seed, resolution);
+                for (auto* fixture : {&early, &full}) {
+                    if (source_case == 1)
+                        fixture->Source(0.0f);
+                    if (source_case == 2)
+                        fixture->Source(40.0f, false);
+                    if (source_case == 3)
+                        fixture->Source(-1.0f);
+                    if (source_case == 4)
+                        fixture->Source(0.00001f);
+                }
+                int early_passes = 0;
+                std::array<std::uint64_t, 3> early_columns{}, full_columns{};
+                {
+                    const BootSettleReferenceControl control("0");
+                    const WaterAttribution::FrameScope attribution(true);
+                    for (int pass = 1; pass <= 240; ++pass) {
+                        early.Step();
+                        ++early_passes;
+                        const auto visits = early.world.authority_snapshot_resident_visits();
+                        if (early.Continue(static_cast<std::uint64_t>(240 - pass))) {
+                            EXPECT_EQ(early.world.authority_snapshot_resident_visits(), visits);
+                            break;
+                        }
+                        EXPECT_EQ(early.world.authority_snapshot_resident_visits(), visits);
+                    }
+                    const auto& observed = attribution.snapshot();
+                    early_columns = {observed.precomputed_columns,
+                                     observed.fallback_columns,
+                                     observed.stale_columns};
+                }
+                int full_passes = 0;
+                {
+                    const BootSettleReferenceControl control("1");
+                    const WaterAttribution::FrameScope attribution(true);
+                    for (int pass = 1; pass <= 240; ++pass) {
+                        full.Step();
+                        ++full_passes;
+                        ASSERT_FALSE(full.Continue(static_cast<std::uint64_t>(240 - pass)));
+                    }
+                    const auto& observed = attribution.snapshot();
+                    full_columns = {observed.precomputed_columns,
+                                    observed.fallback_columns,
+                                    observed.stale_columns};
+                }
+                EXPECT_EQ(early_passes, 120); // First stopping pass is one-based.
+                EXPECT_EQ(full_passes, 240);
+                EXPECT_LT(early_passes, full_passes);
+                EXPECT_EQ(early_columns, full_columns);
+                EXPECT_EQ(Persistence::SerializeWorldStreamingStateSnapshotJson(early.state, true),
+                          Persistence::SerializeWorldStreamingStateSnapshotJson(full.state, true));
+                const auto early_hash = Persistence::CaptureAuthorityHashes(early.state, 0);
+                const auto full_hash = Persistence::CaptureAuthorityHashes(full.state, 0);
+                if (!early_hash.capture) {
+                    FAIL() << "Authority hash capture refused";
+                }
+                if (!full_hash.capture) {
+                    FAIL() << "Authority hash capture refused";
+                }
+                EXPECT_EQ(early_hash.capture->sub.water, full_hash.capture->sub.water);
+                EXPECT_EQ(early_hash.capture->chunk, full_hash.capture->chunk);
+                EXPECT_EQ(BootSettleDiagnostics(early.world, early.water),
+                          BootSettleDiagnostics(full.world, full.water));
+                EXPECT_EQ(early.chunk->authority_hash_revision(),
+                          full.chunk->authority_hash_revision());
+                // Continue through two activation periods and the complete telemetry ring.
+                for (int tail = 0; tail < 9; ++tail) {
+                    early.Step();
+                    full.Step();
+                    EXPECT_EQ(BootSettleDiagnostics(early.world, early.water),
+                              BootSettleDiagnostics(full.world, full.water));
+                }
+            }
+        }
+    }
+}
+
+TEST(WaterDeterminism, BootSessionSmallRadiusMatchesForcedFullPreparation) {
+    using namespace Luminumbra;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const int seed : {1337, 777}) {
+        SCOPED_TRACE(seed);
+        GameSession early, full;
+        for (auto* session : {&early, &full}) {
+            session->SetActiveRegionsEnabled(false);
+            session->SetAetherStateEnabled(false);
+            session->SetWaterHighResEnabled(false);
+            session->SetFiniteHydrologyEnabled(true);
+            session->SetWeatherRainEnabled(false);
+            session->SetWeatherEventsEnabled(false);
+            session->SetJobSystem(&jobs);
+            session->SetRootPath(root.root_string());
+            ASSERT_TRUE(session->CreateWorld("BootWaterStop", std::to_string(seed), "default"));
+            auto params = Luminumbra::Test::SyntheticTerrainParams();
+            params.base_amplitude = 0.0f;
+            params.peaks_amplitude = 0.0f;
+            params.height_offset = 100.0f;
+            params.caves_enabled = false;
+            auto* world = session->GetWorldSystem();
+            world->set_params(params);
+            world->debug_set_streaming_radius_cap(1);
+            world->SetWaterHydrology(true, 0, 0);
+            session->SetSpawnPoint(Vec3(0.0f, 102.0f, 0.0f));
+            ASSERT_TRUE(world->EnsureSurfaceReadyNear(
+                session->GetMetadata().spawnPoint, session->GetPhysicsSystem(), 0, 0));
+        }
+        GameSession::BootSettleStats early_stats, full_stats;
+        {
+            const BootSettleReferenceControl control("0");
+            ASSERT_TRUE(early.SettleInitialSimulation({}, early_stats));
+        }
+        {
+            const BootSettleReferenceControl control("1");
+            ASSERT_TRUE(full.SettleInitialSimulation({}, full_stats));
+        }
+        EXPECT_TRUE(early_stats.contract_ok());
+        EXPECT_EQ(early_stats.awake, 0u);
+        EXPECT_EQ(full_stats.iterations, 241); // One backlog-init pass plus the full suffix.
+        EXPECT_LT(early_stats.iterations, full_stats.iterations);
+        RecordProperty("seed_" + std::to_string(seed) + "_first_post_init_pass",
+                       early_stats.iterations - 1);
+        WorldStreamingState early_state, full_state;
+        for (const auto& chunk : early.GetWorldSystem()->snapshot_streamed_chunks())
+            ASSERT_TRUE(early_state.insert_chunk(chunk));
+        for (const auto& chunk : full.GetWorldSystem()->snapshot_streamed_chunks())
+            ASSERT_TRUE(full_state.insert_chunk(chunk));
+        EXPECT_EQ(Persistence::SerializeWorldStreamingStateSnapshotJson(early_state, true),
+                  Persistence::SerializeWorldStreamingStateSnapshotJson(full_state, true));
+        const auto early_hash = Persistence::CaptureAuthorityHashes(early_state, 0);
+        const auto full_hash = Persistence::CaptureAuthorityHashes(full_state, 0);
+        if (!early_hash.capture) {
+            FAIL() << "Authority hash capture refused";
+        }
+        if (!full_hash.capture) {
+            FAIL() << "Authority hash capture refused";
+        }
+        EXPECT_EQ(early_hash.capture->sub.water, full_hash.capture->sub.water);
+        EXPECT_EQ(early_hash.capture->chunk, full_hash.capture->chunk);
+        EXPECT_EQ(BootSettleDiagnostics(*early.GetWorldSystem(), *early.GetWaterSystem()),
+                  BootSettleDiagnostics(*full.GetWorldSystem(), *full.GetWaterSystem()));
+    }
+    jobs.shutdown();
+}
+
+TEST(WaterDeterminism, BootPositiveResidentSourceFallsBackEvenWhenSaturated) {
+    using namespace Luminumbra;
+    const BootSettleReferenceControl control("0");
+    for (const int seed : {1337, 777}) {
+        BootSettleWorld fixture(seed);
+        fixture.Source(40.0f);
+        std::fill(fixture.chunk->water_depth_mm.begin(),
+                  fixture.chunk->water_depth_mm.end(),
+                  std::numeric_limits<std::int32_t>::max());
+        fixture.chunk->is_water_sleeping.store(true);
+        fixture.chunk->ticks_below_threshold = 120;
+        // Saturation accepts zero mm but is still a positive injection attempt and wakes water.
+        EXPECT_EQ(fixture.water.debug_sources_seen(), 0);
+        fixture.Step();
+        EXPECT_EQ(fixture.water.debug_source_injected_mm(), 0);
+        EXPECT_FALSE(fixture.Continue(239));
+        // The calm kernel can put saturated water straight back to sleep. A sleep-only
+        // predicate would incorrectly omit the next source wake and saved counter change.
+        EXPECT_TRUE(fixture.chunk->is_water_sleeping.load());
+        for (int pass = 1; pass < 240; ++pass) {
+            fixture.Step();
+            EXPECT_FALSE(fixture.Continue(static_cast<std::uint64_t>(240 - pass - 1)));
+        }
+        EXPECT_EQ(fixture.world.get_streaming_telemetry_stats().frames_observed, 240u);
+        EXPECT_EQ(fixture.water.debug_sources_seen(), 240);
+        EXPECT_EQ(fixture.chunk->ticks_below_threshold, 360);
+    }
+}
+
+TEST(WaterDeterminism, BootContinuationRefusalsLeaveDiagnosticsAndBytesUnchanged) {
+    using namespace Luminumbra;
+    const BootSettleReferenceControl control("0");
+    const Systems::WeatherSystem weather(1337);
+    Systems::PhysicsSystem physics;
+    // Each case starts from a proven sleeping pass. Failure cannot partially advance bookkeeping.
+    for (int refusal = 0; refusal < 20; ++refusal) {
+        SCOPED_TRACE(refusal);
+        BootSettleWorld fixture(1337);
+        fixture.chunk->is_water_sleeping.store(true);
+        fixture.chunk->ticks_below_threshold = 120;
+        fixture.Step();
+        fixture.Step(); // Drain the initial adoption/remeshing diagnostics as well as publication.
+        ASSERT_TRUE(fixture.Continue(1));
+        if (refusal == 0)
+            fixture.chunk->is_water_sleeping.store(false);
+        if (refusal == 1)
+            fixture.water.SetSimResolution(16);
+        if (refusal == 2)
+            fixture.chunk->water_depth_mm.pop_back();
+        if (refusal == 3)
+            fixture.water.SetHydrology(true, 1, 0);
+        if (refusal == 4)
+            fixture.water.SetBootPaused(true);
+        if (refusal == 5)
+            fixture.water.SetBootSettleMode(false);
+        if (refusal == 6)
+            fixture.water.retain_mesh_invalidation(fixture.chunk->get_id());
+        if (refusal == 7)
+            fixture.Source(std::numeric_limits<float>::quiet_NaN());
+        if (refusal == 8) {
+            fixture.Source(0.0f);
+            auto view = fixture.registry.view<Components::TransformComponent>();
+            view.get<Components::TransformComponent>(*view.begin()).position.x =
+                std::numeric_limits<float>::infinity();
+        }
+        if (refusal == 11)
+            fixture.chunk->has_water_sim.store(false);
+        if (refusal == 12)
+            fixture.chunk->water_edge_flux.pop_back();
+        if (refusal == 13)
+            fixture.water.SetWeatherRain(&weather, 1);
+        if (refusal == 14)
+            fixture.water.SetRegionalScheduling(true);
+        if (refusal == 17)
+            fixture.chunk->pending_lod.store(0);
+        if (refusal == 18)
+            fixture.chunk->set_state(ChunkState::Loading);
+        const auto before = BootSettleDiagnostics(fixture.world, fixture.water);
+        const auto bytes =
+            Persistence::SerializeWorldStreamingStateSnapshotJson(fixture.state, true);
+        const auto suffix = refusal == 9 ? 0u : (refusal == 10 ? 241u : 120u);
+        if (refusal == 15) {
+            EXPECT_FALSE(fixture.world.TryCompleteBootWaterSettle(
+                fixture.registry, {Vec3(1.0f)}, nullptr, suffix));
+        } else if (refusal == 16) {
+            EXPECT_FALSE(
+                fixture.world.TryCompleteBootWaterSettle(fixture.registry, {}, &physics, suffix));
+        } else if (refusal == 19) {
+            const TestSupport::SchedulerChunks other_map{{fixture.chunk->get_id(), fixture.chunk}};
+            EXPECT_FALSE(
+                fixture.water.TryContinueSleepingBootPasses(fixture.registry, other_map, suffix));
+        } else {
+            EXPECT_FALSE(fixture.Continue(suffix));
+        }
+        EXPECT_EQ(BootSettleDiagnostics(fixture.world, fixture.water), before);
+        EXPECT_EQ(Persistence::SerializeWorldStreamingStateSnapshotJson(fixture.state, true),
+                  bytes);
+    }
+}
+
+TEST(WaterDeterminism, BootEmptyContinuationMatchesShortAndWrappedHistorySuffixes) {
+    using namespace Luminumbra;
+    const BootSettleReferenceControl control("0");
+    // Every ring origin and suffix length through two complete rings, including an empty world.
+    for (int prefix = 1; prefix <= 8; ++prefix) {
+        for (std::uint64_t suffix = 1; suffix <= 17; ++suffix) {
+            SHIELD_WorldSystem early(
+                nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 777);
+            SHIELD_WorldSystem full(
+                nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 777);
+            Systems::WaterSystem early_water(nullptr, &early), full_water(nullptr, &full);
+            early.SetWaterSystem(&early_water);
+            full.SetWaterSystem(&full_water);
+            early_water.SetBootSettleMode(true);
+            full_water.SetBootSettleMode(true);
+            entt::registry registry;
+            for (int pass = 0; pass < prefix; ++pass) {
+                early.update(registry, std::vector<Vec3>{}, nullptr);
+                full.update(registry, std::vector<Vec3>{}, nullptr);
+            }
+            EXPECT_TRUE(early.TryCompleteBootWaterSettle(registry, {}, nullptr, suffix));
+            for (std::uint64_t pass = 0; pass < suffix; ++pass)
+                full.update(registry, std::vector<Vec3>{}, nullptr);
+            EXPECT_EQ(BootSettleDiagnostics(early, early_water),
+                      BootSettleDiagnostics(full, full_water));
+        }
+    }
+}
+
+TEST(WaterDeterminism, BootQueueHistoryRetainsUnwrittenPendingDepths) {
+    const BootSettleReferenceControl control("0");
+    // Seed a nonzero queue slot through real future-due publication, then prove
+    // short suffixes preserve untouched slots at every cursor phase.
+    for (int prefix = 2; prefix <= 9; ++prefix) {
+        for (std::uint64_t suffix = 1; suffix <= 8; ++suffix) {
+            BootSettleWorld early(777), full(777);
+            for (auto* fixture : {&early, &full}) {
+                fixture->chunk->is_water_sleeping.store(true);
+                fixture->chunk->ticks_below_threshold = 120;
+                fixture->world.begin_tick(0);
+                fixture->world.update(fixture->registry, std::vector<Vec3>{}, nullptr);
+                ASSERT_GT(fixture->world.pending_publication_chunks(), 0u);
+                fixture->world.wait_for_streaming_jobs();
+                for (int pass = 1; pass < prefix; ++pass)
+                    fixture->Step();
+            }
+            if (prefix <= 8) {
+                const auto history = early.world.boot_settle_bookkeeping();
+                ASSERT_NE(std::count(history.begin(), history.begin() + 8, std::size_t{0}), 8);
+            }
+            ASSERT_TRUE(early.Continue(suffix));
+            for (std::uint64_t pass = 0; pass < suffix; ++pass)
+                full.Step();
+            EXPECT_EQ(BootSettleDiagnostics(early.world, early.water),
+                      BootSettleDiagnostics(full.world, full.water));
+        }
+    }
+}
+
+TEST(WaterDeterminism, BootEmptyContinuationPreservesLegacyLatestCounters) {
+    const BootSettleReferenceControl control("0");
+    BootSettleWorld early(1337), full(1337);
+    for (auto* fixture : {&early, &full}) {
+        fixture->Source(0.0f);
+        fixture->Step();
+        ASSERT_GT(fixture->water.dbg_cells_simmed(), 0u);
+        fixture->world.clear_world(nullptr);
+        fixture->Step();
+        // Empty-map updates intentionally retain the old legacy simulation counters.
+        ASSERT_GT(fixture->water.dbg_cells_simmed(), 0u);
+    }
+    ASSERT_TRUE(early.Continue(17));
+    for (int pass = 0; pass < 17; ++pass)
+        full.Step();
+    EXPECT_EQ(BootSettleDiagnostics(early.world, early.water),
+              BootSettleDiagnostics(full.world, full.water));
+    EXPECT_EQ(early.water.debug_sources_seen(), 1);
+}
+
+TEST(WaterDeterminism, BootForcedFullControlRequiresExactOne) {
+    using namespace Luminumbra;
+    for (const char* value : {static_cast<const char*>(nullptr), "", "0", "1", "10"}) {
+        const BootSettleReferenceControl control(value);
+        SHIELD_WorldSystem world(
+            nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+        Systems::WaterSystem water(nullptr, &world);
+        world.SetWaterSystem(&water);
+        water.SetBootSettleMode(true);
+        entt::registry registry;
+        world.update(registry, std::vector<Vec3>{}, nullptr);
+        world.wait_for_streaming_jobs();
+        EXPECT_EQ(world.TryCompleteBootWaterSettle(registry, {}, nullptr, 1),
+                  value == nullptr || std::string(value) != "1");
+    }
+}
+
+TEST(WaterDeterminism, BootPendingPublicationRefusesUntilACompleteSleepingPass) {
+    const BootSettleReferenceControl control("0");
+    BootSettleWorld fixture(777);
+    fixture.chunk->is_water_sleeping.store(true);
+    fixture.chunk->ticks_below_threshold = 120;
+    fixture.world.begin_tick(0);
+    // Future-due publication stays pending even though synchronous workers have finished.
+    fixture.world.update(fixture.registry, std::vector<Vec3>{}, nullptr);
+    ASSERT_GT(fixture.world.pending_publication_chunks(), 0u);
+    const auto before = BootSettleDiagnostics(fixture.world, fixture.water);
+    EXPECT_FALSE(fixture.Continue(120));
+    EXPECT_EQ(BootSettleDiagnostics(fixture.world, fixture.water), before);
+    fixture.world.wait_for_streaming_jobs();
+    fixture.Step();
+    EXPECT_TRUE(fixture.Continue(120));
+}
+
+TEST(WaterDeterminism, BootUnchangedDepthAndMomentumStillAdvanceSavedSleepState) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Systems;
+    for (const int seed : {1337, 777}) {
+        for (const int resolution : {8, 16}) {
+            SCOPED_TRACE(seed);
+            SCOPED_TRACE(resolution);
+            SHIELD_WorldSystem world(nullptr, nullptr, TerrainGenParams{}, seed);
+            WaterSystem water(nullptr, &world);
+            water.SetSimResolution(resolution);
+            water.SetHydrology(true, 0, 0);
+            water.SetBootSettleMode(true);
+            auto chunk = TestSupport::SchedulerChunk(0, resolution);
+            std::fill(chunk->water_depth_mm.begin(), chunk->water_depth_mm.end(), 1000);
+            ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+            const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> chunks{
+                {chunk->get_id(), chunk}};
+            entt::registry registry;
+            const auto initial_depth = chunk->water_depth_mm;
+            const auto initial_flux = chunk->water_edge_flux;
+            water.update(registry, chunks);
+            EXPECT_EQ(chunk->water_depth_mm, initial_depth);
+            EXPECT_EQ(chunk->water_edge_flux, initial_flux);
+            ASSERT_EQ(chunk->ticks_below_threshold, 1);
+            ASSERT_FALSE(chunk->is_water_sleeping.load());
+            bool strict_water_valid = false;
+            const auto first_record =
+                Persistence::SerializeChunkRecordPayloadJson(*chunk, &strict_water_valid);
+            ASSERT_TRUE(strict_water_valid);
+
+            // One initialized column, at most 256 cells, for the original 240-pass budget.
+            // No exchanged water is not an identity while persisted calm counters advance.
+            int first_sleep_pass = 0;
+            for (int pass = 1; pass < 240; ++pass) {
+                water.update(registry, chunks);
+                EXPECT_EQ(chunk->water_depth_mm, initial_depth);
+                EXPECT_EQ(chunk->water_edge_flux, initial_flux);
+                if (first_sleep_pass == 0 && chunk->is_water_sleeping.load()) {
+                    first_sleep_pass = pass + 1;
+                    // The pass that puts the chunk to sleep still reports its simulation work.
+                    EXPECT_EQ(water.dbg_awake_water_chunks(), 1u);
+                    EXPECT_EQ(water.dbg_cells_simmed(),
+                              static_cast<std::size_t>(resolution * resolution));
+                } else if (first_sleep_pass != 0) {
+                    EXPECT_EQ(water.dbg_awake_water_chunks(), 0u);
+                    EXPECT_EQ(water.dbg_cells_simmed(), 0u);
+                }
+            }
+            EXPECT_EQ(first_sleep_pass, 120);
+            EXPECT_EQ(chunk->ticks_below_threshold, 120);
+            EXPECT_TRUE(chunk->is_water_sleeping.load());
+            const auto full_record =
+                Persistence::SerializeChunkRecordPayloadJson(*chunk, &strict_water_valid);
+            ASSERT_TRUE(strict_water_valid);
+            EXPECT_NE(full_record, first_record);
+
+            // This is an identity only on the chunk payload; update diagnostics are separate.
+            WorldStreamingState state;
+            ASSERT_TRUE(state.insert_chunk(chunk));
+            const auto before = Persistence::CaptureAuthorityHashes(state, 0);
+            if (!before.capture) {
+                FAIL() << "Authority hash capture refused";
+            }
+            const auto water_revision = chunk->water_revision();
+            const auto invalidation_version = chunk->water_mesh_invalidation_version;
+            water.update(registry, chunks);
+            EXPECT_EQ(Persistence::SerializeChunkRecordPayloadJson(*chunk), full_record);
+            const auto after = Persistence::CaptureAuthorityHashes(state, 0);
+            if (!after.capture) {
+                FAIL() << "Authority hash capture refused";
+            }
+            EXPECT_EQ(after.capture->sub.water, before.capture->sub.water);
+            EXPECT_EQ(chunk->water_revision(), water_revision);
+            EXPECT_EQ(chunk->water_mesh_invalidation_version, invalidation_version);
+        }
+    }
+}
+
+TEST(WaterDeterminism, BootSleepingPassPreservesBytesButAccumulatesSourceDiagnostics) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Systems;
+    // Three source cases: absent, zero-rate resident, positive-rate nonresident.
+    // Each world has one sleeping 8x8 column and executes exactly two passes.
+    for (const int seed : {1337, 777}) {
+        for (const int source_case : {0, 1, 2}) {
+            SCOPED_TRACE(seed);
+            SCOPED_TRACE(source_case);
+            SHIELD_WorldSystem world(nullptr, nullptr, TerrainGenParams{}, seed);
+            WaterSystem water(nullptr, &world);
+            world.SetWaterSystem(&water);
+            water.SetSimResolution(8);
+            water.SetHydrology(true, 0, 0);
+            water.SetBootSettleMode(true);
+            auto chunk = TestSupport::SchedulerChunk(0, 8);
+            std::fill(chunk->water_depth_mm.begin(), chunk->water_depth_mm.end(), 1000);
+            chunk->ticks_below_threshold = 120;
+            chunk->is_water_sleeping.store(true);
+            ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+            const TestSupport::SchedulerChunks chunks{{chunk->get_id(), chunk}};
+            entt::registry registry;
+            if (source_case != 0) {
+                const auto entity = registry.create();
+                auto& transform = registry.emplace<Components::TransformComponent>(entity);
+                transform.position = source_case == 1 ? Vec3(1.0f) : Vec3(1024.0f);
+                auto& source = registry.emplace<Components::FlowingWaterSourceComponent>(entity);
+                source.flow_rate = source_case == 1 ? 0.0f : 40.0f;
+            }
+            const auto payload = Persistence::SerializeChunkRecordPayloadJson(*chunk);
+            WorldStreamingState state;
+            ASSERT_TRUE(state.insert_chunk(chunk));
+            const auto before = Persistence::CaptureAuthorityHashes(state, 0);
+            if (!before.capture) {
+                FAIL() << "Authority hash capture refused";
+            }
+            const WaterAttribution::FrameScope attribution(true);
+            water.update(registry, chunks);
+            const auto first = water.dbg_seed_attribution();
+            const std::int64_t observations_per_pass = source_case == 0 ? 0 : 1;
+            EXPECT_EQ(world.debug_water_sources_seen(), observations_per_pass);
+            water.update(registry, chunks);
+            const auto& second = water.dbg_seed_attribution();
+            EXPECT_EQ(world.debug_water_sources_seen(), 2 * observations_per_pass);
+            EXPECT_EQ(world.debug_water_source_injected_mm(), 0);
+            EXPECT_EQ(Persistence::SerializeChunkRecordPayloadJson(*chunk), payload);
+            const auto after = Persistence::CaptureAuthorityHashes(state, 0);
+            if (!after.capture) {
+                FAIL() << "Authority hash capture refused";
+            }
+            EXPECT_EQ(after.capture->sub.water, before.capture->sub.water);
+            EXPECT_EQ(water.dbg_cells_simmed(), 0u);
+            // Check the actual measured contributions without asserting elapsed-time bounds.
+            // A sleeping pass still records each phase into an enclosing diagnostic scope.
+            const auto& accumulated = attribution.snapshot();
+            EXPECT_EQ(accumulated.selection_ms, first.selection_ms + second.selection_ms);
+            EXPECT_EQ(accumulated.seed_inputs_ms, first.seed_inputs_ms + second.seed_inputs_ms);
+            EXPECT_EQ(accumulated.initialization_ms,
+                      first.initialization_ms + second.initialization_ms);
+            EXPECT_EQ(accumulated.sim_ms, first.sim_ms + second.sim_ms);
+            EXPECT_EQ(accumulated.seam_ms, first.seam_ms + second.seam_ms);
+            EXPECT_EQ(accumulated.bookkeeping_ms, first.bookkeeping_ms + second.bookkeeping_ms);
+        }
+    }
+}
+
+TEST(WaterDeterminism, BootQuiescentStreamingPassStillObservesFrames) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Systems;
+    // Empty anchors prevent activation work; an empty resident set prevents mesh work.
+    // Cross two four-update activation periods and the eight-entry telemetry ring.
+    for (const int seed : {1337, 777}) {
+        SCOPED_TRACE(seed);
+        SHIELD_WorldSystem world(nullptr, nullptr, TerrainGenParams{}, seed);
+        entt::registry registry;
+        for (std::uint64_t pass = 1; pass <= 12; ++pass) {
+            world.update(registry, std::vector<Vec3>{}, nullptr);
+            world.wait_for_streaming_jobs();
+            const auto& telemetry = world.get_streaming_telemetry_stats();
+            ASSERT_TRUE(telemetry.quiescent());
+            EXPECT_EQ(telemetry.frames_observed, pass);
+            EXPECT_EQ(telemetry.cumulative_scheduled_meshing, 0u);
+            EXPECT_EQ(telemetry.cumulative_deferred_meshing, 0u);
+            EXPECT_EQ(world.pending_publication_chunks(), 0u);
+            EXPECT_TRUE(world.snapshot_streamed_chunks().empty());
+        }
+    }
+}
 
 TEST(WaterDeterminism, LegacyUpdateAndCheckedInteriorHaveIdenticalDepthFluxAndHashes) {
     using namespace Luminumbra;
