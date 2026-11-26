@@ -7,7 +7,7 @@
 #include "app/InputCallbacks.h"
 
 #include "core/Log.h"
-#include "core/RuntimeScenarioConfig.h" // GL debug counters + window-mode helpers
+#include "core/RuntimeScenarioConfig.h" // window-mode helpers
 #include "luminumbra_common/core/SystemConfig.h"
 #include "player/PlayerController.h"
 #include "rendering/Camera.h"
@@ -15,14 +15,13 @@
 #include "ui/Rml_UIManager.h"
 
 #include <algorithm>
-#include <atomic>
 #include <backends/imgui_impl_glfw.h>
 #include <cstddef>
 #include <imgui.h>
 
 namespace Luminumbra::Client::App {
 
-// GL debug counters + the window-mode helpers the callbacks use live in the
+// The window-mode helpers the callbacks use live in the
 // scenario-harness namespace, exactly as main_client.cpp consumed them.
 using namespace Luminumbra::Client::ScenarioHarness;
 
@@ -83,6 +82,7 @@ void RefreshInputOwnership(GLFWwindow* window) {
     ownership.imgui_mouse = imgui && ImGui::GetIO().WantCaptureMouse;
     if (b.router->SetOwnership(ownership)) {
         app.interactions = {};
+        app.input.firstMouse = true;
         if (auto* player = b.playerController->get())
             player->ClearQueuedLiveInput();
     }
@@ -386,39 +386,6 @@ void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
 
 void GLFWErrorCallback(int error, const char* description) {
     LUMINUMBRA_CORE_ERROR("GLFW Error ({0}): {1}", error, description);
-}
-
-void GLAPIENTRY GLDebugMessageCallback(GLenum source,
-                                       GLenum type,
-                                       GLuint id,
-                                       GLenum severity,
-                                       GLsizei length,
-                                       const GLchar* message,
-                                       const void* userParam) {
-    (void)source;
-    (void)length;
-    (void)userParam;
-    if (id == 131169 || id == 131185 || id == 131218 || id == 131204)
-        return;
-    auto& counters = GetGLDebugRuntimeCounters();
-    counters.messages.fetch_add(1, std::memory_order_relaxed);
-    const bool is_error = type == GL_DEBUG_TYPE_ERROR || severity == GL_DEBUG_SEVERITY_HIGH;
-    if (is_error) {
-        counters.errors.fetch_add(1, std::memory_order_relaxed);
-        LUMINUMBRA_CORE_ERROR("OpenGL: {0}", message);
-        return;
-    }
-
-    switch (severity) {
-        case GL_DEBUG_SEVERITY_NOTIFICATION:
-            counters.notifications.fetch_add(1, std::memory_order_relaxed);
-            LUMINUMBRA_CORE_TRACE("OpenGL: {0}", message);
-            break;
-        default:
-            counters.warnings.fetch_add(1, std::memory_order_relaxed);
-            LUMINUMBRA_CORE_WARN("OpenGL: {0}", message);
-            break;
-    }
 }
 
 } // namespace Luminumbra::Client::App

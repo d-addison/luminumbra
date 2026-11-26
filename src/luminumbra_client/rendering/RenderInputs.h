@@ -27,6 +27,7 @@ struct StaticDrawSnapshot;
 class RenderView;
 class FarLodSystem; // far-LOD region meshes drawn with the GBuffer pass's own shader
 class SubmittedLiveTerrain;
+class FarWorldTerrainCoverage;
 
 // ----------------------------------------------------------------------------
 // GBuffer (T11) — non-ctx inputs for the deferred geometry pass.
@@ -53,6 +54,8 @@ struct GBufferPassInput {
     FarWorldSelection far_selection;
     FarLodSystem* legacy_far = nullptr; // effective Legacy compatibility only
     FarWorldSubmitFn submit_ladder;
+    // Render-thread owner storage, refreshed by submit_ladder before trees collect.
+    const FarWorldTerrainCoverage* ladder_terrain_coverage = nullptr;
 
     // Root path for resolving on-disk LOD mesh variants (procgen tree palette).
     std::filesystem::path root_path;
