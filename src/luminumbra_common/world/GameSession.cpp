@@ -5555,21 +5555,23 @@ GameSession::FarCaptureBinding GameSession::AcquireFarWorldCaptureBinding() cons
     }
     return {m_farWorldAuthorityProducer, m_worldSystem, m_worldRevision, m_farWorldBindingEpoch};
 }
-void GameSession::PumpFarWorldAuthorityCapture() {
+bool GameSession::PumpFarWorldAuthorityCapture(bool prepare_only) {
     if (!m_farWorldAuthorityProducer || !m_worldUsable || !IsSimulationTickBoundary()) {
-        return;
+        return false;
     }
     if (m_farWorldAuthorityProducer->capture_status().paused) {
-        m_farWorldAuthorityProducer->pump_capture();
-        return;
+        if (!prepare_only)
+            m_farWorldAuthorityProducer->pump_capture();
+        return false;
     }
     if (m_farWorldSourceNeedsRefresh) {
         if (Persistence::SaveTransaction::active_for(GetWorldSaveDir())) {
             const bool paused = m_farWorldAuthorityProducer->capture_status().paused;
             FenceFarWorldAuthorityReads(true);
-            m_farWorldAuthorityProducer->pump_capture();
+            if (!prepare_only)
+                m_farWorldAuthorityProducer->pump_capture();
             FenceFarWorldAuthorityReads(paused);
-            return;
+            return false;
         }
         std::string error;
         bool refreshed = false;
@@ -5580,16 +5582,18 @@ void GameSession::PumpFarWorldAuthorityCapture() {
             });
         } catch (const std::exception& failure) {
             LUMINUMBRA_CORE_ERROR("Source refresh refused: {}", failure.what());
-            return;
+            return true;
         }
         if (!refreshed) {
-            return;
+            return true;
         }
         m_farWorldSourceNeedsRefresh = false;
     }
     if (m_farWorldAuthorityProducer->needs_capture_boundary()) {
         m_worldSystem->quiesce_streaming_jobs_for_save();
     }
+    if (prepare_only)
+        return true;
     if (m_farWorldAuthorityProducer->capture_status().active) {
         // Only an active capture reads committed bytes. Keep idle pumps and
         // published-memory capture on the owner without per-frame job allocation.
@@ -5618,6 +5622,7 @@ void GameSession::PumpFarWorldAuthorityCapture() {
     } else {
         m_farWorldAuthorityProducer->pump_capture();
     }
+    return true;
 }
 void GameSession::FenceFarWorldAuthorityReads(bool paused) {
     if (m_farWorldAuthorityProducer) {

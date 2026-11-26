@@ -2534,6 +2534,45 @@ int main(int argc, char* argv[]) {
     // systems.json defaults to Ladder; enabled:false explicitly requests Legacy.
     renderPipeline.set_far_world_mode(Luminumbra::Rendering::RequestedFarWorldMode(
         g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder)));
+    // Diagnostics-only measurement opt-in; reuses the existing command-line
+    // flag parser and never adds a persisted setting or changes the default.
+    if (HasCommandLineFlag(argc, argv, "--far-ladder-diagnostics") &&
+        g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder)) {
+        const Luminumbra::Rendering::RenderPipeline::FarSessionHost far_session_host{
+            .context = gameSession.get(),
+            .ready =
+                [](void* context, const Luminumbra::Systems::SHIELD_WorldSystem& world) {
+                    auto* session = static_cast<Luminumbra::world::GameSession*>(context);
+                    return session->GetWorldSystem() == &world &&
+                           session->IsSimulationTickBoundary();
+                },
+            .attach =
+                [](void* context,
+                   const Luminumbra::World::FarWorldAuthorityConfig& config,
+                   std::string& error,
+                   std::shared_ptr<Luminumbra::World::FarWorldAuthorityProducer>& producer,
+                   std::shared_ptr<const Luminumbra::Systems::SHIELD_WorldSystem>& world) {
+                    auto& session = *static_cast<Luminumbra::world::GameSession*>(context);
+                    if (!session.EnableFarWorldAuthorityProducer(config, error))
+                        return false;
+                    const auto binding = session.AcquireFarWorldCaptureBinding();
+                    producer = binding.producer;
+                    world = binding.world;
+                    return binding.current();
+                },
+            .prepare =
+                [](void* context) {
+                    return static_cast<Luminumbra::world::GameSession*>(context)
+                        ->PumpFarWorldAuthorityCapture(
+                            /*prepare_only=*/true);
+                },
+            .fence =
+                [](void* context, bool paused) {
+                    static_cast<Luminumbra::world::GameSession*>(context)
+                        ->FenceFarWorldAuthorityReads(paused);
+                }};
+        renderPipeline.enable_far_ladder_diagnostics(jobSystem, far_session_host);
+    }
     std::optional<Luminumbra::Rendering::FarWorldReportingState> previous_far_report;
     const auto report_far_transition = [&] {
         using namespace Luminumbra::Rendering;
@@ -2800,6 +2839,7 @@ int main(int argc, char* argv[]) {
 
     auto entry_world_revision = gameSession->WorldRevision();
     auto finish_world_replacement = [&]() {
+        renderPipeline.resume_far_world_readers();
         // An open can refuse before adoption. Preserve the still-live world's visuals/results.
         if (gameSession->WorldRevision() != entry_world_revision) {
             release_player_controller();
@@ -2808,6 +2848,7 @@ int main(int argc, char* argv[]) {
     };
     std::string world_entry_error;
     auto refuse_world_entry = [&](const std::string& fallback, bool use_world_error = true) {
+        renderPipeline.resume_far_world_readers();
         const auto& detail = gameSession->GetWorldOpenError();
         const std::string error = !use_world_error || detail.empty() ? fallback : detail;
         world_entry_error = error;

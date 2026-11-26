@@ -11,6 +11,7 @@
 #include "../../include/luminumbra/core/Types.h"
 #include "FarWorldRenderer.h"
 #include "FarWorldReplay.h"
+#include "FarWorldSessionLimits.h"
 #include "FrameBufferObject.h" // FrameBufferObject (extracted)
 #include "GBuffer.h"           // GBuffer (extracted)
 #include "GraphicsRuntimeConfig.h"
@@ -63,6 +64,31 @@ class SHIELD_WorldSystem;
 struct TerrainGenParams;
 } // namespace Luminumbra::Systems
 namespace Luminumbra::Rendering {
+// Diagnostics and measurement only, enabled by --far-ladder-diagnostics.
+// These generous finite ceilings are not production values. Production approval
+// follows native measurement. The caller retains the monotone clock context.
+inline FarWorldSessionQualificationLimits
+FarWorldDiagnosticsSessionLimits(std::uint64_t (*now)(const void*) noexcept,
+                                 const void* context = nullptr) noexcept {
+    FarWorldSessionQualificationLimits limits;
+    limits.rendering = FarWorldDevelopmentLimits();
+    limits.source = {512, 4u * 1024u * 1024u, 300'000, {}};
+    constexpr std::uint64_t aggregate_bytes = 8ull * 1024ull * 1024ull * 1024ull;
+    limits.capture = {
+        {512, 512, 1024, 8192, 4194304, aggregate_bytes, 4194304, aggregate_bytes, 131072},
+        32'768,
+        {now, context, 3'600'000}};
+    limits.sampling = {1, 400'000, 20'000'000, 400'000, 64u * 1024u * 1024u};
+    limits.transaction_samples = {64'000'000, 1'200'000'000, 80'000'000};
+    limits.tiles = 512;
+    limits.planning_operations = 32'000'000;
+    limits.admission_operations = 1'000'000'000;
+    limits.operations_per_pump = 32'768;
+    limits.ticks_per_second = 1000;
+    limits.refresh_ticks = 3'600'000;
+    limits.refresh_frames = 65'536;
+    return limits;
+}
 struct StaticDrawSnapshot;
 class DiagnosticFrameCapture;
 
@@ -1033,6 +1059,24 @@ public:
     // Internal, non-persisted request. Normal worlds retain a typed refusal until
     // immutable committed authority is available. Fixtures bind explicitly.
     void set_far_world_mode(FarWorldMode requested);
+    // Owner-boundary bridge supplied by the client, keeping game/session types
+    // outside the renderer. Callbacks run once per frame/boundary, never per item.
+    // Context and jobs outlive world rendering; attachment returns owning handles.
+    struct FarSessionHost {
+        void* context = nullptr;
+        bool (*ready)(void*, const Systems::SHIELD_WorldSystem&) = nullptr;
+        bool (*attach)(void*,
+                       const World::FarWorldAuthorityConfig&,
+                       std::string&,
+                       std::shared_ptr<World::FarWorldAuthorityProducer>&,
+                       std::shared_ptr<const Systems::SHIELD_WorldSystem>&) = nullptr;
+        bool (*prepare)(void*) = nullptr;
+        void (*fence)(void*, bool) = nullptr;
+    };
+    // Explicit --far-ladder-diagnostics only. No controller, producer, storage
+    // or capture pumps exist without this call.
+    void enable_far_ladder_diagnostics(JobSystem& jobs, const FarSessionHost& host);
+    void resume_far_world_readers();
     // Startup/world-entry policy; runtime changes first reset history via
     // set_far_world_mode. Returns the resolved request for caller diagnostics.
     FarWorldCavePolicy set_far_world_cave_policy(std::optional<World::FarCaveMode> requested);
@@ -1615,7 +1659,11 @@ private:
     // Inventory includes compatibility stores retained across selection changes,
     // using values published by the Legacy branch rather than Ladder reading its counters.
     std::size_t m_legacy_far_resident_bytes = 0, m_legacy_far_vertex_arrays = 0;
+    struct FarSessionDiagnostics;
+    void prepare_far_session_diagnostics(Systems::SHIELD_WorldSystem& world_system,
+                                         const Camera& camera);
     std::unique_ptr<FarWorldRenderer> m_far_world;
+    std::unique_ptr<FarSessionDiagnostics> m_far_session_diagnostics;
     FarWorldSelection m_frame_far_selection;
     std::uint64_t m_far_world_frame = 0;
     bool m_far_world_preview = false;

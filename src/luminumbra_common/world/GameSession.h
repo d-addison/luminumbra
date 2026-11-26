@@ -291,7 +291,10 @@ public:
     // Owner-thread acquisition at a simulation boundary. Both pointers own their
     // objects; pass them together with epoch to retained session capture.
     FarCaptureBinding AcquireFarWorldCaptureBinding() const;
-    void PumpFarWorldAuthorityCapture();
+    // Boundary-only mode refreshes saved authority and fences worker publication;
+    // an attached render controller then exclusively owns incremental capture.
+    // False means reads remain fenced by an enclosing save or paused owner.
+    bool PumpFarWorldAuthorityCapture(bool prepare_only = false);
     void FenceFarWorldAuthorityReads(bool paused);
 
     // Save current persistent state and metadata, including captured spawn changes.

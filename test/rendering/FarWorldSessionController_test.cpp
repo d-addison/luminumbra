@@ -1,13 +1,20 @@
 #include "../fixtures/TerrainFixtureParams.h"
 #include "../support/UniqueTempPath.h"
 #include "core/JobSystem.h"
+#include "core/Log.h"
+#include "core/LogDispatcherSink.h"
 #include "luminumbra_client/rendering/FarWorldHandoffDiagnostics.h"
 #include "luminumbra_client/rendering/FarWorldSessionController.h"
+#include "luminumbra_client/rendering/RenderPipeline.h"
 #include "world/WorldStreamingState.h"
 #include <array>
+#include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <limits>
+#include <mutex>
+#include <string_view>
 
 namespace {
 using namespace Luminumbra;
@@ -180,6 +187,269 @@ protected:
                                    0);
     }
 };
+
+TEST_F(FarWorldSessionController, DiagnosticsProfileIsCompleteAndFinite) {
+    const auto profile = FarWorldDiagnosticsSessionLimits(limits.capture.clock.now, this);
+    EXPECT_TRUE(profile.Complete());
+    EXPECT_FALSE(FarWorldDiagnosticsSessionLimits(nullptr).Complete());
+    const auto& read = profile.capture.read;
+    for (const auto value : {std::uint64_t(profile.source.index_records),
+                             profile.source.copy_bytes,
+                             profile.source.query_columns,
+                             read.members,
+                             read.records,
+                             read.headers,
+                             read.probes,
+                             read.compressed_member_bytes,
+                             read.compressed_total_bytes,
+                             read.decoded_member_bytes,
+                             read.decoded_total_bytes,
+                             read.control_bytes,
+                             std::uint64_t(profile.capture.deadline_frames),
+                             profile.capture.clock.max_ticks,
+                             std::uint64_t(profile.sampling.max_regions),
+                             profile.sampling.max_height_samples,
+                             profile.sampling.max_density_samples,
+                             profile.sampling.max_water_samples,
+                             profile.sampling.max_bytes,
+                             profile.transaction_samples.height,
+                             profile.transaction_samples.density,
+                             profile.transaction_samples.water,
+                             std::uint64_t(profile.tiles),
+                             profile.planning_operations,
+                             profile.admission_operations,
+                             profile.operations_per_pump,
+                             profile.refresh_ticks,
+                             profile.ticks_per_second,
+                             std::uint64_t(profile.refresh_frames)}) {
+        EXPECT_GT(value, 0u);
+        EXPECT_LT(value, std::numeric_limits<std::uint64_t>::max());
+    }
+    EXPECT_EQ(profile.source.query_columns, 300'000u);
+    EXPECT_EQ(profile.source.copy_bytes, 4u * 1024u * 1024u);
+    EXPECT_EQ(profile.source.index_records, 512u);
+    EXPECT_EQ(read.members, 512u);
+    EXPECT_EQ(read.records, 512u);
+    EXPECT_EQ(read.headers, 1024u);
+    EXPECT_EQ(read.probes, 8192u);
+    EXPECT_EQ(read.compressed_member_bytes, 4u * 1024u * 1024u);
+    EXPECT_EQ(read.decoded_member_bytes, 4u * 1024u * 1024u);
+    EXPECT_EQ(read.control_bytes, 128u * 1024u);
+    EXPECT_EQ(profile.tiles, 512u);
+    EXPECT_EQ(profile.operations_per_pump, 32'768u);
+    EXPECT_EQ(profile.ticks_per_second, 1000u);
+    EXPECT_GE(profile.transaction_samples.height, 4ull * 10'171'800);
+    EXPECT_GE(profile.transaction_samples.density, 4ull * 261'945'504);
+    EXPECT_GE(profile.transaction_samples.water, 4ull * 16'474'560);
+    EXPECT_GE(profile.planning_operations, 4ull * 4'058'282);
+    EXPECT_GE(profile.admission_operations, 4ull * 204'655'998);
+    EXPECT_GE(read.compressed_total_bytes, 4ull * 90 * 1024 * 1024);
+    EXPECT_GE(read.decoded_total_bytes, 4ull * 90 * 1024 * 1024);
+    EXPECT_GE(profile.refresh_frames, 4u * 6371);
+    EXPECT_GE(profile.capture.deadline_frames, 4u * 6371);
+    EXPECT_GE(profile.capture.clock.max_ticks, 4ull * 2000);
+    EXPECT_GE(profile.refresh_ticks, 4ull * 30'000);
+    EXPECT_FALSE(profile.source.memory);
+    EXPECT_EQ(profile.sampling.work, nullptr);
+    EXPECT_EQ(profile.sampling.deadline.now, nullptr);
+    const auto rendering = FarWorldDevelopmentLimits();
+    EXPECT_TRUE(profile.rendering.Complete());
+    EXPECT_EQ(profile.rendering.budgets.bytes, rendering.budgets.bytes);
+    EXPECT_EQ(profile.rendering.residency.entry_slots, rendering.residency.entry_slots);
+    EXPECT_EQ(profile.rendering.frame.builds, rendering.frame.builds);
+    EXPECT_EQ(profile.rendering.frame.uploads, rendering.frame.uploads);
+    EXPECT_EQ(profile.rendering.frame.upload_bytes, rendering.frame.upload_bytes);
+    const auto finite = [](auto actual, auto expected) {
+        EXPECT_EQ(actual, expected);
+        EXPECT_GT(actual, 0);
+        EXPECT_LT(actual, std::numeric_limits<decltype(actual)>::max());
+    };
+    finite(profile.rendering.max_fixture_bytes, rendering.max_fixture_bytes);
+    finite(profile.rendering.build_headroom_bytes, rendering.build_headroom_bytes);
+    for (std::size_t tier = 0; tier < kFarTierCount; ++tier) {
+        const auto& actual = profile.rendering.residency.queues[tier];
+        const auto& expected = rendering.residency.queues[tier];
+        finite(profile.rendering.budgets.bytes[tier], rendering.budgets.bytes[tier]);
+        finite(profile.rendering.residency.entry_slots[tier],
+               rendering.residency.entry_slots[tier]);
+        finite(actual.descriptor_slots, expected.descriptor_slots);
+        finite(actual.result_slots, expected.result_slots);
+        finite(actual.max_converted_bytes, expected.max_converted_bytes);
+        finite(actual.compilation.authority.max_height_samples,
+               expected.compilation.authority.max_height_samples);
+        finite(actual.compilation.authority.max_density_samples,
+               expected.compilation.authority.max_density_samples);
+        finite(actual.compilation.generation.max_candidate_bricks,
+               expected.compilation.generation.max_candidate_bricks);
+        finite(actual.compilation.generation.max_surface_bricks,
+               expected.compilation.generation.max_surface_bricks);
+        finite(actual.compilation.mesh.max_cells, expected.compilation.mesh.max_cells);
+        finite(actual.compilation.mesh.max_sample_evaluations,
+               expected.compilation.mesh.max_sample_evaluations);
+        finite(actual.compilation.mesh.max_vertices, expected.compilation.mesh.max_vertices);
+        finite(actual.compilation.mesh.max_indices, expected.compilation.mesh.max_indices);
+    }
+    EXPECT_TRUE(std::isfinite(profile.rendering.spans.min_y));
+    EXPECT_TRUE(std::isfinite(profile.rendering.spans.max_y));
+    EXPECT_TRUE(std::isfinite(profile.rendering.spans.max_extent_meters));
+    EXPECT_EQ(profile.rendering.spans.min_y, rendering.spans.min_y);
+    EXPECT_EQ(profile.rendering.spans.max_y, rendering.spans.max_y);
+    EXPECT_EQ(profile.rendering.spans.max_extent_meters, rendering.spans.max_extent_meters);
+    controller.Cancel();
+    EXPECT_EQ(controller.Configure(jobs, 1, policy, profile), FarWorldRefusal::None);
+    EXPECT_TRUE(controller.SourceConfig().source.memory);
+}
+
+TEST_F(FarWorldSessionController, SavedBindingBecomesEffectiveLadder) {
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+    ASSERT_NO_FATAL_FAILURE(Admit());
+    ASSERT_NO_FATAL_FAILURE(FinishBuild());
+    EXPECT_EQ(controller.phase(), Controller::Phase::Complete);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Ladder);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::Preview).effective, FarWorldMode::Legacy);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::OffscreenPreview).effective,
+              FarWorldMode::Legacy);
+    renderer.SetRequested(FarWorldMode::Legacy);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+}
+
+TEST_F(FarWorldSessionController, FailedOpenResumesAndSuccessfulSwapCancels) {
+    ASSERT_TRUE(controller.Request(keys));
+    ASSERT_EQ(controller.Pump(++frame), Controller::Phase::Planning);
+    const auto* source = producer->capture();
+    const auto serial = producer->capture_status().serving_serial;
+    producer->fence_source_reads(true);
+    // The host suspends controller pumps during a fallible open. Refusal resumes
+    // the same binding before the next render; it does not cancel accepted state.
+    EXPECT_EQ(controller.phase(), Controller::Phase::Planning);
+    producer->fence_source_reads(false);
+    ASSERT_NO_FATAL_FAILURE(Admit());
+    EXPECT_EQ(producer->capture(), source);
+    EXPECT_EQ(producer->capture_status().serving_serial, serial);
+    ASSERT_NO_FATAL_FAILURE(FinishBuild());
+    ASSERT_TRUE(controller.Request(keys));
+    ASSERT_EQ(controller.Pump(++frame), Controller::Phase::Planning);
+    ASSERT_EQ(controller.Pump(++frame), Controller::Phase::Planning);
+    ASSERT_TRUE(producer->frozen_active());
+    producer->retire(); // successful session adoption retires the previous epoch
+    controller.Cancel();
+    renderer.PrepareWorldSwap();
+    EXPECT_FALSE(producer->frozen_active());
+    EXPECT_EQ(producer->capture(), nullptr);
+    EXPECT_EQ(controller.phase(), Controller::Phase::Idle);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+    EXPECT_EQ(renderer.SessionDiagnostic(), nullptr);
+}
+
+class RefreshReceipt final : public spdlog::sinks::base_sink<std::mutex> {
+public:
+    // A separate scoped attachment below owns the sink; this class only stores
+    // a bounded terminal line and count, never the complete logging stream.
+    std::string line;
+    unsigned receipts = 0;
+
+private:
+    void sink_it_(const spdlog::details::log_msg& message) override {
+        const std::string_view text(message.payload.data(), message.payload.size());
+        if (text.starts_with("Far ladder diagnostics refresh:") && text.size() <= 2048) {
+            line.assign(text);
+            ++receipts;
+        }
+    }
+    void flush_() override {}
+};
+
+TEST_F(FarWorldSessionController, DiagnosticsReceiptsCoverCompletionRefusalAndCancellation) {
+    const auto sink = std::make_shared<RefreshReceipt>();
+    Log::GetDispatcherSink()->Attach(sink);
+    struct Detach {
+        const std::shared_ptr<RefreshReceipt>& sink;
+        ~Detach() {
+            Log::GetDispatcherSink()->Detach(sink);
+        }
+    } detach{sink};
+    ASSERT_NO_FATAL_FAILURE(ConfigureSource());
+    ASSERT_NO_FATAL_FAILURE(Admit());
+    EXPECT_EQ(sink->receipts, 0u);
+    ASSERT_NO_FATAL_FAILURE(FinishBuild());
+    EXPECT_EQ(sink->receipts, 1u);
+    for (const auto* field : {"reads=1 ",
+                              "columns=",
+                              "members=324 ",
+                              "compressed_bytes=",
+                              "decoded_bytes=",
+                              "source_ops=",
+                              "planning_ops=",
+                              "admission_ops=",
+                              "height_samples=",
+                              "density_samples=",
+                              "water_samples=",
+                              "source_frames=1 ",
+                              "preparation_frames=",
+                              "elapsed_ticks=",
+                              "refusal=None ",
+                              "source_error=0 capture_error=0"})
+        EXPECT_NE(sink->line.find(field), std::string::npos) << field;
+    controller.Pump(++frame);
+    EXPECT_EQ(sink->receipts, 1u);
+    limits.transaction_samples.water = 1;
+    ASSERT_NO_FATAL_FAILURE(ConfigureSource());
+    ASSERT_TRUE(controller.Request(keys));
+    ASSERT_EQ(controller.Pump(++frame), Controller::Phase::Planning);
+    ASSERT_EQ(controller.Pump(++frame), Controller::Phase::Refused);
+    EXPECT_EQ(sink->receipts, 2u);
+    EXPECT_NE(sink->line.find("refusal=AdmissionFailed"), std::string::npos);
+    EXPECT_NE(sink->line.find("water_samples=1 "), std::string::npos);
+    controller.Pump(++frame);
+    EXPECT_EQ(sink->receipts, 2u);
+    ASSERT_NO_FATAL_FAILURE(ConfigureSource());
+    ASSERT_TRUE(controller.Request(keys));
+    ASSERT_EQ(controller.Pump(++frame), Controller::Phase::Planning);
+    controller.Cancel();
+    EXPECT_EQ(sink->receipts, 3u);
+    EXPECT_NE(sink->line.find("refusal=ImmutableAuthorityUnavailable"), std::string::npos);
+    // A new transaction that refuses before creating its sampler must not
+    // report the previous transaction's samples.
+    limits.transaction_samples.water = 2'000'000;
+    ASSERT_NO_FATAL_FAILURE(ConfigureSource());
+    ASSERT_NO_FATAL_FAILURE(Admit());
+    ASSERT_NO_FATAL_FAILURE(FinishBuild());
+    ASSERT_EQ(sink->receipts, 4u);
+    ticks = std::numeric_limits<std::uint64_t>::max() - limits.refresh_ticks + 1;
+    ASSERT_TRUE(controller.Request(keys));
+    EXPECT_EQ(controller.Pump(++frame), Controller::Phase::Refused);
+    EXPECT_EQ(sink->receipts, 5u);
+    EXPECT_NE(sink->line.find("source_ops=0 planning_ops=0 admission_ops=0 "), std::string::npos);
+    EXPECT_NE(sink->line.find("height_samples=0 density_samples=0 water_samples=0 "),
+              std::string::npos);
+}
+
+TEST_F(FarWorldSessionController, InvalidatedSavedSourceRefusesWithExactFailure) {
+    producer->invalidate_source();
+    ASSERT_TRUE(controller.Request(keys));
+    EXPECT_EQ(controller.Pump(++frame), Controller::Phase::Refused);
+    EXPECT_EQ(controller.failure().source, Producer::Error::AuthorityUnavailable);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+    EXPECT_EQ(producer->capture_progress().reads, 0u);
+    EXPECT_FALSE(producer->capture_status().active);
+}
+
+TEST_F(FarWorldSessionController, RefusedReadRetainsAttemptAndByteMeasurements) {
+    const auto path = Save::region_file_path(root, 0, 0);
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream output(path, std::ios::binary);
+    output << "partial";
+    output.close();
+    ASSERT_TRUE(output);
+    ASSERT_TRUE(controller.Request(keys));
+    ASSERT_EQ(controller.Pump(++frame), Controller::Phase::Refused);
+    EXPECT_EQ(controller.failure().source, Producer::Error::CommittedReadRefused);
+    EXPECT_EQ(producer->capture_progress().reads, 1u);
+    EXPECT_GT(controller.work().source_read_bytes, 0u);
+    EXPECT_EQ(controller.work().source_read_bytes, producer->capture_progress().compressed_bytes);
+    EXPECT_EQ(controller.work().source_decode_work, producer->capture_progress().decoded_bytes);
+    EXPECT_EQ(producer->capture(), nullptr);
+}
 
 TEST_F(FarWorldSessionController, FixtureWindowsReadAndOversizedWindowKeepsExactFailure) {
     // Cover the initial window and both successor directions under the
