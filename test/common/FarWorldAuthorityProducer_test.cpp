@@ -48,6 +48,27 @@ Producer::Images Copy(Producer& producer) {
     return images;
 }
 
+TEST(FarWorldAuthorityProducer, SourceWindowsRefuseInvalidCoordinatesWithoutReplacingOutput) {
+    Save::AuthorityWindow window{7, 8, 9, 10};
+    for (const World::FarVolumeTileKey key :
+         {World::FarVolumeTileKey{0, 0, 0},
+          World::FarVolumeTileKey{6, 0, 0},
+          World::FarVolumeTileKey{1, std::numeric_limits<std::int64_t>::max(), 0},
+          World::FarVolumeTileKey{1, 0, std::numeric_limits<std::int64_t>::min()},
+          World::FarVolumeTileKey{5, 1023, 0}}) {
+        EXPECT_FALSE(Producer::source_window(key, window));
+        EXPECT_EQ(window.min_chunk_x, 7);
+        EXPECT_EQ(window.max_chunk_x, 8);
+        EXPECT_EQ(window.min_chunk_z, 9);
+        EXPECT_EQ(window.max_chunk_z, 10);
+    }
+    ASSERT_TRUE(Producer::source_window({1, -1, -1}, window));
+    EXPECT_EQ(window.min_chunk_x, -33);
+    EXPECT_EQ(window.max_chunk_x, 0);
+    EXPECT_EQ(window.min_chunk_z, -33);
+    EXPECT_EQ(window.max_chunk_z, 0);
+}
+
 TEST(FarWorldAuthorityProducer, ControlsRequireAdmissionAndReleaseOnConstructionFailure) {
     auto limits = Limits();
     limits.memory.reset();
@@ -1310,6 +1331,13 @@ TEST(FarWorldAuthorityProducer, RetiredBindingRefusesBeforeSampling) {
         }
         EXPECT_EQ(producer.start_frozen(world, request, policy, limits, pool).source,
                   Producer::Error::AuthorityUnavailable);
+        EXPECT_EQ(producer.start_coverage(world, {request.key, {}}, policy, limits).source,
+                  Producer::Error::AuthorityUnavailable);
+        auto coverage = request;
+        const auto refused_coverage = producer.pump_coverage(1, coverage);
+        EXPECT_EQ(refused_coverage.result.source, Producer::Error::AuthorityUnavailable);
+        EXPECT_EQ(refused_coverage.work, 0u);
+        EXPECT_EQ(coverage, request);
         EXPECT_EQ(producer.compose_frozen(*world, request, policy, limits, pool, output).source,
                   Producer::Error::AuthorityUnavailable);
         EXPECT_EQ(work.counts().height, 0u);

@@ -300,6 +300,7 @@ add_executable(common_tests
     common/FarLodStore_test.cpp
     common/FarVolumeWorld_test.cpp
     common/FarWorldAuthorityProducer_test.cpp
+    common/FarWorldCapturePlan_test.cpp
     common/FarFrozenObservation_test.cpp
     common/FarVolumeRuntime_test.cpp
     common/FarVolumeTierMemory_test.cpp
