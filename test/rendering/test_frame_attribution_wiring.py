@@ -5810,5 +5810,46 @@ class PassCallerStateContract(unittest.TestCase):
             self.assertLess(gbuffer.index(call), gbuffer.index("StaticDrawPass::CallerState authored_caller"))
 
 
+class ScenarioGeometryMaskWiringTests(unittest.TestCase):
+    def test_sky_clear_value_does_not_erase_finite_geometry(self):
+        harness = read(CLIENT / "core/RuntimeScenarioHarness.cpp")
+        classifier = compact(block(harness, "SkyPixelMask BuildSkyPixelMask("))
+        self.assertIn("depth[index] == 0.0f", classifier)
+        self.assertIn("water_coverage[index] == 0", classifier)
+        self.assertIn("!std::isfinite(value)", classifier)
+        self.assertIn("depth.size() != count", classifier)
+        self.assertNotIn("PixelLuminance", classifier)
+        self.assertNotIn("IsBelowHorizonSkyPixel", harness)
+
+    def test_capture_reads_matching_depth_before_colour_and_replay(self):
+        capture = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
+        reader = block(capture, "SkyPixelMask ReadScenarioSkyMask(")
+        self.assertIn("DiagnosticGlSource source", reader)
+        self.assertIn("DiagnosticAov::Depth", reader)
+        self.assertLess(reader.index("DiagnosticReadbackBudget("), reader.index("std::vector<float> depth"))
+        self.assertIn("pipeline.internal_width()", reader)
+        self.assertIn("pipeline.internal_height()", reader)
+        self.assertIn("water.valid()", reader)
+        for method in ("capturePlayerView", "captureFarLodHorizon", "captureCreatureSlice"):
+            body = block(capture, "void ScenarioRunnerImpl::" + method + "(")
+            self.assertLess(body.index("ReadScenarioSkyMask("), body.index("glReadPixels("))
+            self.assertIn('refuseScenarioCapture("scenario_geometry_readback_unavailable")', body)
+        paired = block(capture, "void ScenarioRunnerImpl::captureFarLodHorizon(")
+        self.assertLess(paired.index("ReadScenarioSkyMask("), paired.index("render_far_world_off_pair("))
+        self.assertIn("&off_mask", paired)
+        self.assertNotIn("off_pixels", paired)
+
+    def test_producers_identify_geometry_and_water_replay_uses_active_program(self):
+        for filename in ("PlayerViewSmoke", "FarLodHorizonSmoke", "CreatureSliceSmoke"):
+            source = read(CLIENT / ("core/scenarios/" + filename + ".cpp"))
+            self.assertIn('{"sky_classifier", "reversed_z_depth_water"}', source)
+        water = read(CLIENT / "rendering/passes/WaterPass.cpp")
+        replay = block(water, "void WaterPass::capture_visibility(")
+        self.assertIn("glGetIntegerv(GL_CURRENT_PROGRAM, &visibility_program)", replay)
+        self.assertIn('glGetUniformLocation(static_cast<GLuint>(visibility_program), "u_model")', replay)
+        self.assertIn("glUniformMatrix4fv(model_location", replay)
+        self.assertNotIn('m_water_shader->setMat4("u_model"', replay)
+
+
 if __name__ == "__main__":
     unittest.main()
