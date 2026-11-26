@@ -50,6 +50,7 @@
 #include "../simulation/DeterministicUniformGrid.h"
 
 #include "RegionConsumerGate.h"
+#include "RegionalPlantTicks.h"
 
 namespace luminumbra::foliage {
 
@@ -208,23 +209,21 @@ CollectPollinationParticipants(entt::registry& reg,
     return ents;
 }
 
-// Advance pollination by one fixed tick. Pure function of registry state + the tick
-// (the RNG seed). Returns telemetry counts. `wind_xz` biases donor reach (defaults
-// to still air). `world_seed` lets distinct worlds diverge.
-inline PollinationStats
-RunPollinationOnTick(entt::registry& reg,
-                     std::uint64_t tick,
-                     ::Luminumbra::Vec2 wind_xz = ::Luminumbra::Vec2(0.0f),
-                     std::uint64_t world_seed = 0,
-                     float mutation_frac = kPollinationMutationFrac,
-                     const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
+namespace pollination_detail {
+
+inline PollinationStats Run(entt::registry& reg,
+                            std::span<const entt::entity> ents,
+                            std::uint64_t tick,
+                            const ::Luminumbra::Vec2& wind_xz,
+                            std::uint64_t world_seed,
+                            float mutation_frac,
+                            const ::Luminumbra::world::RegionConsumerGate& gate) {
     PollinationStats stats;
     auto view = reg.view<Comp::PollinationTag,
                          Comp::PlantGenomeComponent,
                          Comp::PlantGrowthComponent,
                          Comp::TransformComponent,
                          Comp::PollinationComponent>();
-    const auto ents = CollectPollinationParticipants(reg, gate);
     if (ents.empty()) {
         return stats;
     }
@@ -365,6 +364,46 @@ RunPollinationOnTick(entt::registry& reg,
     }
 
     return stats;
+}
+
+} // namespace pollination_detail
+
+// Legacy one-tick entry point deliberately ignores elapsed windows.
+inline PollinationStats
+RunPollinationOnTick(entt::registry& reg,
+                     std::uint64_t tick,
+                     ::Luminumbra::Vec2 wind_xz = ::Luminumbra::Vec2(0.0f),
+                     std::uint64_t world_seed = 0,
+                     float mutation_frac = kPollinationMutationFrac,
+                     const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
+    const auto participants = CollectPollinationParticipants(reg, gate);
+    return pollination_detail::Run(
+        reg, participants, tick, wind_xz, world_seed, mutation_frac, gate);
+}
+
+// Sample wind/genomes/stages at due time. At each chronological virtual tick both
+// donor and receiver must have an overlapping, nonzero owner window and be born.
+// Each crossing uses that virtual tick for RNG and last_pollen_tick, increments
+// crosses once (saturating), and contributes one event to the returned totals.
+inline PollinationStats
+RunPollinationRegional(entt::registry& reg,
+                       std::uint64_t due_tick,
+                       const ::Luminumbra::world::RegionConsumerGate& gate,
+                       ::Luminumbra::Vec2 wind_xz = ::Luminumbra::Vec2(0.0f),
+                       std::uint64_t world_seed = 0,
+                       float mutation_frac = kPollinationMutationFrac) {
+    const auto participants = CollectPollinationParticipants(reg, gate);
+    plant_elapsed_detail::RegionalPlantTicks schedule(reg, participants, gate, due_tick);
+    PollinationStats total;
+    schedule.Run([&](std::span<const entt::entity> active, std::uint64_t tick, std::uint32_t) {
+        const auto stats =
+            pollination_detail::Run(reg, active, tick, wind_xz, world_seed, mutation_frac, gate);
+        plant_elapsed_detail::AddCount(total.considered, stats.considered);
+        plant_elapsed_detail::AddCount(total.donors, stats.donors);
+        plant_elapsed_detail::AddCount(total.crossed, stats.crossed);
+        total.candidate_tests += stats.candidate_tests;
+    });
+    return total;
 }
 
 } // namespace luminumbra::foliage

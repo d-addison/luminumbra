@@ -6,7 +6,11 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <limits>
+#include <map>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -239,6 +243,151 @@ TEST(PlantDisease, CandidateEmptyAndNonParticipantRostersAreNoOps) {
     EXPECT_EQ(stats.died, 0);
     registry.clear();
     EXPECT_EQ(RunPlantDiseaseOnTick<true>(registry, 2).considered, 0);
+    EXPECT_EQ(luminumbra::foliage::RunPlantDiseaseRegional<true>(registry, 2, {}).considered, 0);
+}
+
+TEST(PlantDisease, RegionalElapsedPreservesIntegerThresholdsAndFrozenNeighbors) {
+    namespace F = luminumbra::foliage;
+    namespace W = Luminumbra::world;
+    for (const bool stable_identity : {false, true}) {
+        SCOPED_TRACE(stable_identity);
+        entt::registry regional, reference;
+        const std::array owners{
+            W::RegionKey{-1, -1}, W::RegionKey{0, -1}, W::RegionKey{-1, 0}, W::RegionKey{0, 0}};
+        std::array<entt::entity, 7> entities{};
+        for (auto* registry : {&regional, &reference}) {
+            entities[0] = spawnPlant(*registry, -1, -1, DState::Infected, 999, 0);
+            entities[1] = spawnPlant(*registry, 1, -1, DState::Healthy, 490, 1);
+            entities[2] = spawnPlant(*registry, -1, 1, DState::Infected, 900, 0);
+            entities[3] = spawnPlant(*registry, 1, 1, DState::Infected, 499, 0);
+            entities[4] = spawnPlant(*registry, -100, -100, DState::Infected, 1000, 900);
+            entities[5] = spawnPlant(*registry, -120, -100, DState::Infected, 1000, 0);
+            entities[6] = spawnPlant(*registry, 1, -1, DState::Healthy, 490, 0);
+            registry->emplace<Comp::PlantGrowthComponent>(entities[6]).planted_tick = 195;
+            if (registry == &reference)
+                registry->remove<Comp::PlantTag>(entities[6]);
+            for (std::size_t index = 0; index < entities.size(); ++index) {
+                const auto owner = owners[index == 6 ? 1 : (index < 4 ? index : 0)];
+                registry->emplace<Comp::PlantRegionComponent>(
+                    entities[index], Comp::PlantRegionComponent{index + 1u, owner.x, owner.z, 0u});
+                registry->emplace<Comp::SimulationIdentityComponent>(entities[index], index + 1u);
+            }
+            registry->get<Comp::PlantHealthComponent>(entities[4]).infected_ticks = 89;
+            registry->get<Comp::PlantHealthComponent>(entities[5]).infected_ticks = 89;
+        }
+        const std::array due{owners[0], owners[1], owners[3]};
+        const std::map<W::RegionKey, std::uint32_t> windows{
+            {owners[0], 120}, {owners[1], 118}, {owners[2], 120}, {owners[3], 0}};
+        const W::RegionConsumerGate gate(regional, due, W::RegionElapsedTicks(windows));
+        const auto result = stable_identity ? F::RunPlantDiseaseRegional<true>(regional, 200, gate)
+                                            : F::RunPlantDiseaseRegional(regional, 200, gate);
+        F::PlantDiseaseStats expected;
+        for (std::uint64_t tick = 81; tick <= 200; ++tick) {
+            if (tick == 195)
+                reference.emplace<Comp::PlantTag>(entities[6]);
+            std::vector<W::RegionKey> active{owners[0]};
+            if (tick >= 83)
+                active.push_back(owners[1]);
+            const W::RegionConsumerGate step_gate(reference, active);
+            const auto step = stable_identity
+                                  ? RunPlantDiseaseOnTick<true>(reference, tick, 0, step_gate)
+                                  : RunPlantDiseaseOnTick(reference, tick, 0, step_gate);
+            expected.considered += step.considered;
+            expected.infected += step.infected;
+            expected.new_infections += step.new_infections;
+            expected.recovered += step.recovered;
+            expected.died += step.died;
+        }
+        EXPECT_EQ(result.considered, expected.considered);
+        EXPECT_EQ(result.infected, expected.infected);
+        EXPECT_EQ(result.new_infections, expected.new_infections);
+        EXPECT_EQ(result.recovered, expected.recovered);
+        EXPECT_EQ(result.died, expected.died);
+        EXPECT_EQ(result.new_infections, 1);
+        EXPECT_EQ(result.recovered, 1);
+        EXPECT_EQ(result.died, 3);
+        for (const auto entity : entities) {
+            const auto& actual = regional.get<Comp::PlantHealthComponent>(entity);
+            const auto& oracle = reference.get<Comp::PlantHealthComponent>(entity);
+            EXPECT_EQ(actual.infection, oracle.infection);
+            EXPECT_EQ(actual.resistance, oracle.resistance);
+            EXPECT_EQ(actual.state, oracle.state);
+            EXPECT_EQ(actual.infected_ticks, oracle.infected_ticks);
+        }
+        EXPECT_EQ(regional.get<Comp::PlantHealthComponent>(entities[2]).infection, 900u);
+        EXPECT_EQ(regional.get<Comp::PlantHealthComponent>(entities[3]).infection, 499u);
+        EXPECT_EQ(regional.get<Comp::PlantHealthComponent>(entities[4]).resistance, 1000u);
+        // This late-born target has only frozen/zero-window infectious neighbours.
+        EXPECT_TRUE(isState(regional, entities[6], DState::Healthy));
+        EXPECT_EQ(regional.get<Comp::PlantHealthComponent>(entities[6]).infection, 442u);
+        // Seven membership queries and six elapsed queries, plus the three-owner build.
+        EXPECT_EQ(gate.owner_visits(), 16u);
+    }
+}
+
+TEST(PlantDisease, RegionalZeroBoundsBirthAndSaturatedDuration) {
+    namespace F = luminumbra::foliage;
+    namespace W = Luminumbra::world;
+    for (const std::uint32_t elapsed : {0u, 1u, 36001u, 65536u, 65537u}) {
+        SCOPED_TRACE(elapsed);
+        entt::registry registry;
+        const auto entity = spawnPlant(registry, 100, 100, DState::Infected, 900, 0);
+        registry.get<Comp::PlantHealthComponent>(entity).infected_ticks =
+            std::numeric_limits<std::uint32_t>::max();
+        const std::array due{W::RegionKey{0, 0}};
+        const std::map<W::RegionKey, std::uint32_t> windows{{due[0], elapsed}};
+        const W::RegionConsumerGate gate(registry, due, W::RegionElapsedTicks(windows));
+        if (elapsed > 65536) {
+            EXPECT_THROW(F::RunPlantDiseaseRegional(registry, 65536, gate), std::invalid_argument);
+            EXPECT_TRUE(isState(registry, entity, DState::Infected));
+            EXPECT_EQ(registry.get<Comp::PlantHealthComponent>(entity).infection, 900u);
+        } else {
+            const auto result = F::RunPlantDiseaseRegional(registry, 65536, gate);
+            EXPECT_EQ(result.considered, static_cast<int>(elapsed));
+            EXPECT_EQ(result.died, elapsed == 0 ? 0 : 1);
+            EXPECT_EQ(registry.get<Comp::PlantHealthComponent>(entity).infected_ticks,
+                      std::numeric_limits<std::uint32_t>::max());
+            EXPECT_TRUE(isState(registry, entity, elapsed == 0 ? DState::Infected : DState::Dead));
+        }
+    }
+    entt::registry registry;
+    const auto entity = spawnPlant(registry, 100, 100, DState::Infected, 900, 0);
+    registry.emplace<Comp::PlantGrowthComponent>(entity).planted_tick = 100;
+    const std::array due{W::RegionKey{0, 0}};
+    std::map<W::RegionKey, std::uint32_t> windows{{due[0], 3}};
+    const W::RegionConsumerGate gate(registry, due, W::RegionElapsedTicks(windows));
+    EXPECT_THROW(F::RunPlantDiseaseRegional(registry, 1, gate), std::invalid_argument);
+    EXPECT_EQ(registry.get<Comp::PlantHealthComponent>(entity).infected_ticks, 0u);
+    EXPECT_EQ(F::RunPlantDiseaseRegional(registry, 99, gate).considered, 0);
+    EXPECT_EQ(F::RunPlantDiseaseRegional(registry, 100, gate).considered, 1);
+    EXPECT_EQ(registry.get<Comp::PlantHealthComponent>(entity).infected_ticks, 1u);
+    windows[due[0]] = 0;
+    EXPECT_EQ(F::RunPlantDiseaseRegional(registry, 101, gate).considered, 0);
+    EXPECT_EQ(RunPlantDiseaseOnTick(registry, 101, 0, gate).considered, 1);
+    EXPECT_EQ(registry.get<Comp::PlantHealthComponent>(entity).infected_ticks, 2u);
+}
+
+TEST(PlantDisease, RegionalInvalidIdentityRefusesBeforeHealthChanges) {
+    namespace F = luminumbra::foliage;
+    for (const int failure : {0, 1, 2, 3}) {
+        entt::registry registry;
+        const auto first = spawnPlant(registry, 100, 100, DState::Infected, 900, 0);
+        const auto second = spawnPlant(registry, 101, 100, DState::Healthy, 490, 0);
+        registry.emplace<Comp::SimulationIdentityComponent>(first, 1u);
+        if (failure != 0) {
+            registry.emplace<Comp::SimulationIdentityComponent>(
+                second,
+                failure == 1
+                    ? 0u
+                    : (failure == 2 ? 1u
+                                    : Luminumbra::world::ActiveRegionLedger::kPersistentIdLimit));
+        }
+        EXPECT_THROW(F::RunPlantDiseaseRegional<true>(registry, 100, {}), std::logic_error);
+        EXPECT_EQ(registry.get<Comp::PlantHealthComponent>(first).infected_ticks, 0u);
+        EXPECT_EQ(registry.get<Comp::PlantHealthComponent>(first).infection, 900u);
+        EXPECT_EQ(registry.get<Comp::PlantHealthComponent>(second).infection, 490u);
+        EXPECT_TRUE(isState(registry, second, DState::Healthy));
+    }
 }
 
 } // namespace
