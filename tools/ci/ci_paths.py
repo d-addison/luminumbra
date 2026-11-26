@@ -88,6 +88,7 @@ PYTHON_TESTS = (
     "tools/perf/test_perf.py",
     "tools/perf/test_plan_qualification.py",
     "tools/perf/test_prepare_server_comparison.py",
+    "tools/perf/test_regional_admission_report.py",
     "tools/perf/test_render_budget.py",
     "tools/perf/test_render_contract.py",
     "tools/perf/test_render_runner_evidence.py",
@@ -128,6 +129,7 @@ PYTHON_MODULES = {
     "tools/perf/propose_sim_budgets.py", "tools/perf/sim_budget_compare.py",
     "tools/perf/sim_budget_io.py", "tools/perf/render_budget.py",
     "tools/perf/fixture_paths.py",
+    "tools/perf/regional_admission_report.py",
     "tools/perf/inspect_terrain_aovs.py", "tools/perf/validate_foliage_evidence.py",
     "tools/perf/validate_render_capture.py",
     "tools/release/generate_sbom.py", "tools/release/validate_sbom.py",
@@ -291,6 +293,7 @@ def needs_python(path: str) -> bool:
                         "src/luminumbra_client/rendering/passes/WaterPass.cpp",
                         "src/luminumbra_client/rendering/passes/WaterPass.h"}
             or path == "tools/gates/baselines/diagnostic-rois.json"
+            or path == "tools/perf/fixtures/regional-admission-workloads.json"
             or path == "vendor/rmlui/rmlui-6.1-source.json"
             or path == "cmake/rmlui_source.cmake" or path.startswith("cmake/patches/rmlui-"))
 
