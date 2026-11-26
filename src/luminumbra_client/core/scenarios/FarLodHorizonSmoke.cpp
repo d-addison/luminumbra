@@ -48,6 +48,7 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <system_error>
 #include <utility>
 
@@ -135,18 +136,6 @@ constexpr int kFarLodHorizonMaxFarAttributableSliverPx = 64;
 // otherwise fuse with a detached streak into one span and defeat the far-OFF
 // cancellation. ~2% of the observed 360-row sky band.
 constexpr int kFarLodHorizonSliverHorizonGuardPx = 8;
-// -#45: a far-ON dark pixel counts as a far-ATTRIBUTABLE terrain streak only
-// when the paired far-OFF pixel was substantially BRIGHTER — i.e. far-LOD drew
-// solid terrain where the baseline showed sky. Far-LOD's aerial perspective
-// nudges distant CLOUD pixels a few luma darker (measured 1-19, median ~4, off
-// luma ~92), which crosses the hard luma<90 terrain threshold and — fused with a
-// legitimate near-horizon far peak in the same column — manufactures a phantom
-// ~700px span. A genuine far-render streak is dark terrain (luma ~70) over bright
-// sky/cloud (>=130), a delta of 60-180; requiring a minimum sky-to-terrain delta
-// kills the benign atmospheric shifts while keeping full sensitivity to a real
-// streak. (Render is unchanged — this is an analysis-only robustness guard, like
-// the 3x3 jitter dilation and the horizon guard band above.)
-constexpr int kFarLodHorizonFarAttribMinSkyDeltaLuma = 32;
 
 bool ProjectWorldPointToScreenRow(const Luminumbra::Rendering::Camera& camera,
                                   int width,
@@ -252,10 +241,12 @@ bool ComputeFarLodBoundaryBandRows(Luminumbra::world::GameSession* game_session,
 }
 
 FarLodBoundaryBandStats AnalyzeFarLodBoundaryBand(const std::vector<unsigned char>& pixels,
+                                                  const SkyPixelMask& sky_mask,
                                                   int width,
                                                   int height,
                                                   int band_top_row_from_top,
                                                   int band_bottom_row_from_top) {
+    ValidateScenarioPixelBuffers(pixels, sky_mask, width, height);
     FarLodBoundaryBandStats stats;
     stats.band_top_row_from_top = band_top_row_from_top;
     stats.band_bottom_row_from_top = band_bottom_row_from_top;
@@ -281,7 +272,7 @@ FarLodBoundaryBandStats AnalyzeFarLodBoundaryBand(const std::vector<unsigned cha
             const std::size_t offset =
                 static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
             ++stats.band_pixels;
-            if (IsBelowHorizonSkyPixel(pixels[offset], pixels[offset + 1u], pixels[offset + 2u])) {
+            if (sky_mask.pixels[offset / 3u] != 0) {
                 ++stats.band_sky_pixels;
             }
             if (pixels[offset] <= 2u && pixels[offset + 1u] <= 2u && pixels[offset + 2u] <= 2u) {
@@ -340,97 +331,52 @@ FarLodBoundaryBandStats AnalyzeFarLodBoundaryBand(const std::vector<unsigned cha
 }
 
 // cancel_baseline, when non-null, is the PAIRED
-// far-OFF render of the IDENTICAL camera/frame as `pixels` (the far-ON frame).
-// Both buffers are pixel-aligned, so the legitimate LIVE mountain/island peak
+// far-OFF render of the IDENTICAL camera/frame as `sky_mask` (the far-ON frame).
+// Both masks are pixel-aligned, so the legitimate LIVE mountain/island peak
 // silhouettes and diagonal live-geometry slivers rasterize to the same pixels
 // in both; an ON-frame terrain-intrusion pixel is therefore counted only when
 // the baseline has NO intrusion pixel in its 3x3 neighborhood (the dilation
 // absorbs sub-pixel rasterization jitter between the two renders). What
 // survives is far-ATTRIBUTABLE only - a streak present solely with far-LOD on.
 // Passing nullptr disables cancellation (raw far-ON measurement).
-FarLodHorizonSkySliverStats
-AnalyzeFarLodHorizonSkySliver(const std::vector<unsigned char>& pixels,
-                              int width,
-                              int height,
-                              int horizon_row_from_top,
-                              const std::vector<unsigned char>* cancel_baseline) {
+FarLodHorizonSkySliverStats AnalyzeFarLodHorizonSkySliver(const SkyPixelMask& sky_mask,
+                                                          int width,
+                                                          int height,
+                                                          int horizon_row_from_top,
+                                                          const SkyPixelMask* cancel_baseline) {
     FarLodHorizonSkySliverStats stats;
+    if (!sky_mask.valid_for(width, height) ||
+        (cancel_baseline != nullptr && !cancel_baseline->valid_for(width, height))) {
+        throw std::invalid_argument("Sliver geometry evidence must match");
+    }
     stats.sky_bottom_row_from_top = std::clamp(horizon_row_from_top, 0, std::max(0, height - 1));
-    if (width <= 0 || height <= 0 || horizon_row_from_top <= 1 ||
-        pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u) {
+    if (horizon_row_from_top <= 1) {
         return stats;
     }
-
-    const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
-    // glReadPixels rows are bottom-up; sky rows are those ABOVE (numerically
-    // smaller from-top than) the horizon row. The UPPER sky here is the bright
-    // blue-grey skybox, not the hazy near-horizon band IsBelowHorizonSkyPixel
-    // classifies. A degenerate far-mesh sliver seen edge-on draws as a DARK,
-    // narrow terrain-colored streak against that bright sky. So in the sky band
-    // a "terrain intrusion" pixel is one that is markedly darker than skybox
-    // brightness (a terrain/unlit fragment), detected by a luminance floor.
-    // Edge columns are ignored (the frame border legitimately shows near terrain
-    // rising above the horizon).
+    // Finite-depth geometry is an intrusion regardless of colour or cloud brightness.
     const int min_x = width / 64;
     const int max_x = width - min_x;
-    const int sky_band_rows = horizon_row_from_top; // rows [0, horizon)
-    // Skybox at the pinned noon time is bright (luma > ~120); terrain/unlit
-    // sliver fragments are dark (the observed defect measured ~(10,14,8)).
-    const auto is_terrain_intrusion = [](unsigned char r, unsigned char g, unsigned char b) {
-        const int luma =
-            (static_cast<int>(r) * 30 + static_cast<int>(g) * 59 + static_cast<int>(b) * 11) / 100;
-        return luma < 90;
-    };
-
-    // only honor the cancellation baseline when it
-    // is the paired full-resolution far-OFF buffer; a wrong-sized or absent
-    // buffer leaves the raw far-ON measurement untouched.
-    const bool use_cancel_baseline =
-        cancel_baseline != nullptr &&
-        cancel_baseline->size() ==
-            static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u;
-    // True when the far-OFF baseline has an intrusion pixel anywhere in the 3x3
-    // neighborhood (in the same bottom-up buffer coordinates, clamped to bounds)
-    // of (x, y) - i.e. the same live geometry is present in the far-OFF frame, so
-    // the matching far-ON pixel is not far-attributable and must be treated as
-    // sky. The 3x3 dilation absorbs sub-pixel rasterization jitter.
+    const int sky_band_rows = stats.sky_bottom_row_from_top; // rows [0, horizon)
+    const bool use_cancel_baseline = cancel_baseline != nullptr;
+    // Cancel live geometry in the paired frame with the existing 3x3 jitter dilation.
     const auto baseline_cancels = [&](int x, int y) {
         if (!use_cancel_baseline) {
             return false;
         }
-        const std::vector<unsigned char>& base = *cancel_baseline;
+        const auto& base = cancel_baseline->pixels;
         for (int dy = -1; dy <= 1; ++dy) {
             const int ny = std::clamp(y + dy, 0, height - 1);
             for (int dx = -1; dx <= 1; ++dx) {
                 const int nx = std::clamp(x + dx, 0, width - 1);
                 const std::size_t boffset =
-                    static_cast<std::size_t>(ny) * row_stride + static_cast<std::size_t>(nx) * 3u;
-                if (is_terrain_intrusion(base[boffset], base[boffset + 1u], base[boffset + 2u])) {
+                    static_cast<std::size_t>(ny) * static_cast<std::size_t>(width) +
+                    static_cast<std::size_t>(nx);
+                if (base[boffset] == 0) {
                     return true;
                 }
             }
         }
         return false;
-    };
-
-    // -#45: a far-ON dark pixel is far-ATTRIBUTABLE only when the paired
-    // far-OFF pixel at (x, y) was substantially BRIGHTER — far-LOD drew solid
-    // terrain where the baseline showed sky/cloud. A small ON/OFF delta is the
-    // aerial-perspective shift on a distant cloud crossing the luma<90 threshold,
-    // not a terrain streak. Without a baseline (raw measurement) every dark pixel
-    // qualifies (conservative). See kFarLodHorizonFarAttribMinSkyDeltaLuma.
-    const auto far_attributable_terrain = [&](int x, int y, int on_luma) {
-        if (!use_cancel_baseline) {
-            return true;
-        }
-        const std::vector<unsigned char>& base = *cancel_baseline;
-        const std::size_t boffset =
-            static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
-        const int off_luma =
-            (static_cast<int>(base[boffset]) * 30 + static_cast<int>(base[boffset + 1u]) * 59 +
-             static_cast<int>(base[boffset + 2u]) * 11) /
-            100;
-        return (off_luma - on_luma) >= kFarLodHorizonFarAttribMinSkyDeltaLuma;
     };
 
     // Per-column vertical SPAN of terrain-intrusion pixels within the sky band
@@ -458,14 +404,9 @@ AnalyzeFarLodHorizonSkySliver(const std::vector<unsigned char>& pixels,
         int last = -1;
         for (int y_from_top = 0; y_from_top < sliver_scan_rows; ++y_from_top) {
             const int y = height - 1 - y_from_top; // to bottom-up buffer row
-            const std::size_t offset =
-                static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
-            const int on_luma = (static_cast<int>(pixels[offset]) * 30 +
-                                 static_cast<int>(pixels[offset + 1u]) * 59 +
-                                 static_cast<int>(pixels[offset + 2u]) * 11) /
-                                100;
-            if (on_luma < 90 && !baseline_cancels(x, y) &&
-                far_attributable_terrain(x, y, on_luma)) {
+            const auto pixel_index = static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                                     static_cast<std::size_t>(x);
+            if (sky_mask.pixels[pixel_index] == 0 && !baseline_cancels(x, y)) {
                 if (first < 0)
                     first = y_from_top;
                 last = y_from_top;
@@ -537,6 +478,7 @@ AnalyzeFarLodHorizonSkySliver(const std::vector<unsigned char>& pixels,
 // band separate them), so a single band ROI yields independent water + sand
 // fractions. Render-only analysis; no world_hash / tile-byte input.
 void AnalyzeFarLodBoundaryBandWater(const std::vector<unsigned char>& pixels,
+                                    const SkyPixelMask& sky_mask,
                                     int width,
                                     int height,
                                     int band_top_row_from_top,
@@ -544,6 +486,7 @@ void AnalyzeFarLodBoundaryBandWater(const std::vector<unsigned char>& pixels,
                                     std::uint64_t& out_water_pixels,
                                     std::uint64_t& out_band_pixels,
                                     std::uint64_t* out_sand_flat_pixels) {
+    ValidateScenarioPixelBuffers(pixels, sky_mask, width, height);
     out_water_pixels = 0;
     out_band_pixels = 0;
     if (out_sand_flat_pixels) {
@@ -573,7 +516,8 @@ void AnalyzeFarLodBoundaryBandWater(const std::vector<unsigned char>& pixels,
     const auto is_sand_flat_bright = [](int r, int g, int b) {
         return r >= 234 && g >= 226 && b >= 210 && r >= b - 12;
     };
-    for (int y_from_top = band_top_row_from_top; y_from_top <= band_bottom_row_from_top;
+    for (int y_from_top = std::max(0, band_top_row_from_top);
+         y_from_top <= std::min(height - 1, band_bottom_row_from_top);
          ++y_from_top) {
         if (y_from_top < 0 || y_from_top >= height) {
             continue;
@@ -586,10 +530,11 @@ void AnalyzeFarLodBoundaryBandWater(const std::vector<unsigned char>& pixels,
             const int g = pixels[offset + 1u];
             const int b = pixels[offset + 2u];
             ++out_band_pixels;
-            if (is_far_water(r, g, b)) {
+            if (sky_mask.pixels[offset / 3u] == 0 && is_far_water(r, g, b)) {
                 ++out_water_pixels;
             }
-            if (out_sand_flat_pixels && is_sand_flat_bright(r, g, b)) {
+            if (out_sand_flat_pixels && sky_mask.pixels[offset / 3u] == 0 &&
+                is_sand_flat_bright(r, g, b)) {
                 ++*out_sand_flat_pixels;
             }
         }
@@ -817,6 +762,7 @@ WriteLegacyFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
 
     const nlohmann::json artifact = {
         {"schema", "luminumbra.farlod_horizon.v1"},
+        {"sky_classifier", "reversed_z_depth_water"},
         {"timestamp_utc", TimestampUtc()},
         {"scenario", "farlod_horizon_smoke"},
         {"world_preset", world_preset},

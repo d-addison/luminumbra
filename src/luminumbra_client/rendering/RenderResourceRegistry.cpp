@@ -70,21 +70,33 @@ std::size_t target_bytes(const RenderbufferDesc& desc) {
     return RenderResourceRegistry::texture_allocation_bytes(texture);
 }
 
+bool valid_texture_extent(const TextureDesc& desc) {
+    const auto maximum = static_cast<u32>(std::numeric_limits<GLsizei>::max());
+    return desc.width != 0 && desc.height != 0 && desc.layers != 0 && desc.width <= maximum &&
+           desc.height <= maximum && desc.layers <= maximum && desc.depth <= maximum &&
+           (desc.depth == 0 || desc.layers == 1) &&
+           RenderResourceRegistry::texture_allocation_bytes(desc) !=
+               std::numeric_limits<std::size_t>::max();
+}
+
 bool allocate_texture_storage(u32 gl_id, const TextureDesc& desc) {
+    if (!valid_texture_extent(desc))
+        return false;
     // GL error state is global and sticky: drain any pre-existing flag so the
     // post-allocation check reflects THIS allocation only (init runs right
     // after other GL setup that may have left a flag set — otherwise the first
     // create_texture would false-fail on a stale error).
     while (glGetError() != GL_NO_ERROR) {}
-    const GLenum target = desc.layers > 1 ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
+    const GLenum target =
+        desc.depth != 0 ? GL_TEXTURE_3D : (desc.layers > 1 ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D);
     glBindTexture(target, gl_id);
-    if (desc.layers > 1) {
+    if (desc.depth != 0 || desc.layers > 1) {
         glTexImage3D(target,
                      0,
                      static_cast<GLint>(desc.internal_format),
                      static_cast<GLsizei>(desc.width),
                      static_cast<GLsizei>(desc.height),
-                     static_cast<GLsizei>(desc.layers),
+                     static_cast<GLsizei>(desc.depth != 0 ? desc.depth : desc.layers),
                      0,
                      static_cast<GLenum>(desc.format),
                      static_cast<GLenum>(desc.type),
@@ -108,6 +120,8 @@ bool allocate_texture_storage(u32 gl_id, const TextureDesc& desc) {
         glTexParameteri(target, GL_TEXTURE_WRAP_S, static_cast<GLint>(desc.wrap_s));
     if (desc.wrap_t != 0)
         glTexParameteri(target, GL_TEXTURE_WRAP_T, static_cast<GLint>(desc.wrap_t));
+    if (desc.wrap_r != 0 && desc.depth != 0)
+        glTexParameteri(target, GL_TEXTURE_WRAP_R, static_cast<GLint>(desc.wrap_r));
     if (desc.depth_compare) {
         glTexParameteri(target, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
         glTexParameteri(target, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
@@ -127,6 +141,8 @@ std::size_t RenderResourceRegistry::texture_allocation_bytes(const TextureDesc& 
         return 0;
     }
     const auto maximum = std::numeric_limits<std::size_t>::max();
+    if (desc.depth != 0 && desc.layers != 1)
+        return maximum;
     const auto texel_bytes = format_bytes(desc.internal_format);
     if (texel_bytes == maximum) {
         return maximum;
@@ -134,18 +150,21 @@ std::size_t RenderResourceRegistry::texture_allocation_bytes(const TextureDesc& 
     std::size_t total = 0;
     u32 width = desc.width;
     u32 height = desc.height;
-    // A u32 extent has at most 32 mip levels; array layers never shrink.
+    u32 slices = desc.depth != 0 ? desc.depth : desc.layers;
+    // A u32 extent has at most 32 mip levels; volume depth shrinks, array layers do not.
     for (u32 mip = 0; mip < std::min(mip_levels, 32u); ++mip) {
-        if (static_cast<std::size_t>(width) > maximum / height / desc.layers / texel_bytes) {
+        if (static_cast<std::size_t>(width) > maximum / height / slices / texel_bytes) {
             return maximum;
         }
         total = add_allocation_bytes(
-            total, static_cast<std::size_t>(width) * height * desc.layers * texel_bytes);
-        if (width == 1 && height == 1) {
+            total, static_cast<std::size_t>(width) * height * slices * texel_bytes);
+        if (width == 1 && height == 1 && (desc.depth == 0 || slices == 1)) {
             break;
         }
         width = std::max(1u, width / 2u);
         height = std::max(1u, height / 2u);
+        if (desc.depth != 0)
+            slices = std::max(1u, slices / 2u);
     }
     return total;
 }
@@ -257,7 +276,10 @@ bool RenderResourceRegistry::replace_targets(std::span<const TargetExtent> exten
         const auto buffer = m_owned_renderbuffers.find(key);
         if (texture == m_owned_textures.end() && buffer == m_owned_renderbuffers.end())
             return false;
-        const auto layers = texture == m_owned_textures.end() ? 1u : texture->second.desc.layers;
+        const auto layers = texture == m_owned_textures.end()
+                                ? 1u
+                                : (texture->second.desc.depth != 0 ? texture->second.desc.depth
+                                                                   : texture->second.desc.layers);
         if (layers == 0 || layers > static_cast<u32>(std::numeric_limits<GLsizei>::max()) ||
             static_cast<std::size_t>(e.width) >
                 std::numeric_limits<std::size_t>::max() / e.height / layers / 16u)
@@ -324,7 +346,7 @@ TextureHandle RenderResourceRegistry::create_texture(std::string_view name,
         LUMINUMBRA_CORE_ERROR("RenderResourceRegistry: owned texture '{}' already exists", key);
         return TextureHandle{};
     }
-    if (desc.width == 0 || desc.height == 0 || desc.internal_format == 0) {
+    if (!valid_texture_extent(desc) || desc.internal_format == 0) {
         LUMINUMBRA_CORE_ERROR("RenderResourceRegistry: invalid desc for owned texture '{}'", key);
         return TextureHandle{};
     }
@@ -391,7 +413,7 @@ bool RenderResourceRegistry::attach_fbo(OwnedFbo& fbo_entry) {
         const auto tex_it = m_owned_textures.find(attachment.texture_name);
         if (tex_it != m_owned_textures.end()) {
             const OwnedTexture& tex = tex_it->second;
-            if (tex.desc.layers > 1) {
+            if (tex.desc.depth != 0 || tex.desc.layers > 1) {
                 // Layered attachment (e.g. the cascaded shadow atlas).
                 glFramebufferTexture(
                     GL_FRAMEBUFFER, static_cast<GLenum>(attachment.attachment_point), tex.gl_id, 0);
@@ -463,15 +485,17 @@ bool RenderResourceRegistry::resize_texture(std::string_view name, u32 new_width
         return false;
     }
     OwnedTexture& owned = it->second;
-    owned.desc.width = new_width;
-    owned.desc.height = new_height;
+    auto replacement_desc = owned.desc;
+    replacement_desc.width = new_width;
+    replacement_desc.height = new_height;
     // Recreate storage in place (same GL name — attachments referencing the id
     // still need re-attachment because glTexImage respecifies the storage, and
     // completeness must be re-verified at the new size).
-    if (!allocate_texture_storage(owned.gl_id, owned.desc)) {
+    if (!allocate_texture_storage(owned.gl_id, replacement_desc)) {
         LUMINUMBRA_CORE_ERROR("RenderResourceRegistry: resize storage failed for '{}'", it->first);
         return false;
     }
+    owned.desc = replacement_desc;
     owned.allocation_bytes = texture_allocation_bytes(owned.desc);
     bool ok = true;
     for (auto& [fbo_name, fbo_entry] : m_owned_fbos) {
