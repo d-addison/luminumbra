@@ -5223,6 +5223,33 @@ TEST(GameSessionHeadlessWorldTest, DormantEvictionProfileDoesNotAffectDisabledRe
     }
 }
 
+constexpr RegionKey kIdleRetentionStormOwner{0, -1};
+
+void AddIdleRetentionStormExpectation(const GameSession& session,
+                                      ActiveRegionLedger& expected,
+                                      FieldPageState& expected_fields) {
+    const auto& storms = session.GetWeatherSystem()->StormCells();
+    ASSERT_EQ(storms.size(), 1u);
+    const auto& storm = storms.front();
+    ASSERT_EQ(ActiveRegionLedger::region_at({storm.center_world.x, 0, storm.center_world.y}),
+              kIdleRetentionStormOwner);
+    ASSERT_EQ(storm.spawn_tick, 107910u);
+    ASSERT_EQ(storm.seed_salt, 3815961434u);
+    ASSERT_EQ(storm.lifetime_ticks, 240u);
+    ASSERT_EQ(expected.tick(), 108000u);
+    // First activation adopts live procedural storm owners after scheduling. The
+    // new record starts now without waking, editing, or changing existing owners.
+    // Build the typed expectation independently of the owner-adoption implementation.
+    auto& records = const_cast<std::map<RegionKey, ActiveRegionRecord>&>(expected.records());
+    ASSERT_TRUE(records
+                    .emplace(kIdleRetentionStormOwner,
+                             ActiveRegionRecord{.first_active = expected.tick(),
+                                                .last_ticked = expected.tick()})
+                    .second);
+    // A weather clock stands in for the storm's ownership in the retention oracle.
+    ASSERT_TRUE(expected_fields.set_weather_age(kIdleRetentionStormOwner, 0));
+}
+
 TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAllResidentOwnership) {
     using Luminumbra::world::ActiveRegionLedger;
     using Luminumbra::world::RegionKey;
@@ -5295,6 +5322,7 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAllResidentOwnersh
             return std::find(owned_keys.begin(), owned_keys.end(), key) != owned_keys.end();
         });
     FieldPageState expected_fields;
+    ASSERT_NO_FATAL_FAILURE(AddIdleRetentionStormExpectation(session, expected, expected_fields));
     PublishExpectedAmbientWork(expected,
                                StepExpectedQuietAmbient(expected_fields,
                                                         expected,
@@ -5306,7 +5334,9 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAllResidentOwnersh
     EXPECT_EQ(session.GetRegionSchedule(), expected_schedule);
     EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), expected.canonical_bytes());
     EXPECT_EQ(session.GetActiveRegionLedger().encode(), expected.encode());
-    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), owned_keys.size());
+    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), owned_keys.size() + 1);
+    ASSERT_EQ(session.GetFieldPages().storms().size(), 1u);
+    EXPECT_EQ(session.GetFieldPages().storms().front().active_age, 89u);
     for (const auto key : owned_keys) {
         EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(key));
     }
@@ -5322,18 +5352,22 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAllResidentOwnersh
             return expected_fields.owns_region(key) || key == resident || key == pristine ||
                    key == loading || key == pristine_loading;
         });
-    PublishExpectedAmbientWork(
-        expected,
-        StepExpectedQuietAmbient(expected_fields,
-                                 expected,
-                                 next_schedule.due,
-                                 ActiveRegionLedger::kIdleEvictionTicks + 1));
+    auto next_work = StepExpectedQuietAmbient(
+        expected_fields, expected, next_schedule.due, ActiveRegionLedger::kIdleEvictionTicks + 1);
+    // The adopted storm advances to age 90 and emits one strike into its own
+    // region. Both operations add work beyond the ambient cells and weather clock.
+    next_work[kIdleRetentionStormOwner] += 2;
+    PublishExpectedAmbientWork(expected, next_work);
     ASSERT_EQ(session.TickSimulation(dt), 1u);
     ASSERT_FALSE(session.GetRegionSchedulerFault());
     EXPECT_EQ(session.GetRegionSchedule(), next_schedule);
     EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), expected.canonical_bytes());
     EXPECT_EQ(session.GetActiveRegionLedger().encode(), expected.encode());
-    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), owned_keys.size());
+    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), owned_keys.size() + 1);
+    ASSERT_EQ(session.GetFieldPages().storms().size(), 1u);
+    EXPECT_EQ(session.GetFieldPages().storms().front().active_age, 90u);
+    ASSERT_EQ(session.GetFieldPages().strikes().size(), 1u);
+    EXPECT_EQ(session.GetFieldPages().strikes().front().owner, kIdleRetentionStormOwner);
     for (const auto key : owned_keys) {
         EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(key));
     }
@@ -5454,6 +5488,7 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionUsesWorkRegardlessOfStreamedResi
             return std::find(owned_keys.begin(), owned_keys.end(), key) != owned_keys.end();
         });
     FieldPageState expected_fields;
+    ASSERT_NO_FATAL_FAILURE(AddIdleRetentionStormExpectation(session, expected, expected_fields));
     PublishExpectedAmbientWork(expected,
                                StepExpectedQuietAmbient(expected_fields,
                                                         expected,
@@ -5473,7 +5508,9 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionUsesWorkRegardlessOfStreamedResi
     EXPECT_EQ(session.GetRegionSchedule(), expected_schedule);
     EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), expected.canonical_bytes());
     EXPECT_EQ(session.GetActiveRegionLedger().encode(), expected.encode());
-    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), owned_keys.size() + 3);
+    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), owned_keys.size() + 4);
+    ASSERT_EQ(session.GetFieldPages().storms().size(), 1u);
+    EXPECT_EQ(session.GetFieldPages().storms().front().active_age, 89u);
     for (const auto key : owned_keys) {
         EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(key));
     }
@@ -5493,12 +5530,12 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionUsesWorkRegardlessOfStreamedResi
                           [&expected_fields, plant_owner](RegionKey key) {
                               return expected_fields.owns_region(key) || key == plant_owner;
                           });
-    PublishExpectedAmbientWork(
-        expected,
-        StepExpectedQuietAmbient(expected_fields,
-                                 expected,
-                                 next_schedule.due,
-                                 ActiveRegionLedger::kIdleEvictionTicks + 1));
+    auto next_work = StepExpectedQuietAmbient(
+        expected_fields, expected, next_schedule.due, ActiveRegionLedger::kIdleEvictionTicks + 1);
+    // First activation also retains the procedural storm owner independently of
+    // streamed residency; its next tick advances the storm and emits one strike.
+    next_work[kIdleRetentionStormOwner] += 2;
+    PublishExpectedAmbientWork(expected, next_work);
     for (auto* current : {&session, &peer}) {
         ASSERT_EQ(current->TickSimulation(dt), 1u);
         ASSERT_FALSE(current->GetRegionSchedulerFault());
@@ -5512,7 +5549,11 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionUsesWorkRegardlessOfStreamedResi
     EXPECT_EQ(session.GetRegionSchedule(), next_schedule);
     EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), expected.canonical_bytes());
     EXPECT_EQ(session.GetActiveRegionLedger().encode(), expected.encode());
-    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), owned_keys.size() + 3);
+    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), owned_keys.size() + 4);
+    ASSERT_EQ(session.GetFieldPages().storms().size(), 1u);
+    EXPECT_EQ(session.GetFieldPages().storms().front().active_age, 90u);
+    ASSERT_EQ(session.GetFieldPages().strikes().size(), 1u);
+    EXPECT_EQ(session.GetFieldPages().strikes().front().owner, kIdleRetentionStormOwner);
     for (const auto key : owned_keys) {
         EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(key));
     }
