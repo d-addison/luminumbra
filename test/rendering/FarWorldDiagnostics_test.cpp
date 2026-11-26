@@ -44,6 +44,248 @@ using namespace Luminumbra::Rendering;
 using namespace Luminumbra::World;
 static_assert(std::is_trivially_copyable_v<FarWorldDiagnosticSnapshot>);
 
+void FillSessionManifest(FarWorldHandoffDiagnosticSnapshot& input) {
+    input.captured = true;
+    input.frame = 23;
+    input.state.world_epoch = 12;
+    input.state.committed_generation = input.state.serving_committed_generation = 9;
+    input.state.serving_serial = input.state.target_serial = 7;
+    input.tile_count = 2;
+    for (std::size_t i = 0; i < input.tile_count; ++i) {
+        auto& slot = input.tiles[i];
+        slot.key = {5, -2 + static_cast<std::int64_t>(i), 3};
+        auto& value = slot.observation;
+        auto& target = value.target.emplace();
+        target.identity = {12, 42 + i, 0, slot.key, 7, 1};
+        ASSERT_TRUE(ToFarVolumeTileKey(slot.key, target.intent.key));
+        target.intent.extra_span = FarVolumeCoverageSpan{-512, 128};
+        value.target_built = {target.intent.key, {-512, 256}, 42 + i};
+        value.target_coverage = {FarTileState::Empty, true, true};
+        value.target_eligibility = FarVolumeEligibility::Settled;
+        value.target_water_complete = value.target_water_known_dry = true;
+    }
+}
+
+void ProjectSessionManifest(const FarWorldHandoffDiagnosticSnapshot& input,
+                            FarWorldDiagnosticSnapshot& output,
+                            FarVolumeNumericProfile numeric = FarVolumeNumericProfile::RawFloat) {
+    output.Reset();
+    output.captured = output.advanced = true;
+    output.frame = input.frame;
+    output.world_epoch = input.state.world_epoch;
+    output.selection = {
+        FarWorldMode::Ladder, FarWorldMode::Ladder, FarWorldRefusal::None, true, true};
+    ProjectFarWorldSessionDiagnostic(input, numeric, output);
+}
+
+TEST(FarWorldDiagnostics, SessionBenchmarkPreservesPublicationMetadata) {
+    using namespace Luminumbra::Client::Measurement;
+    auto input = std::make_unique<FarWorldHandoffDiagnosticSnapshot>();
+    auto output = std::make_unique<FarWorldDiagnosticSnapshot>();
+    FillSessionManifest(*input);
+    ProjectSessionManifest(*input, *output);
+    ASSERT_TRUE(FarWorldReportState(*output).coverage_settled);
+    ASSERT_NE(output->manifest_fingerprint, 0u);
+    output->source_failure.source = FarWorldAuthorityProducer::Error::SourceReadExpired;
+    EXPECT_FALSE(FarWorldReportState(*output).coverage_settled);
+    output->source_failure = {};
+    output->source_failure.capture = FarFrozenCaptureError::DeadlineExceeded;
+    EXPECT_FALSE(FarWorldReportState(*output).coverage_settled);
+    output->source_failure = {};
+    --output->serving_committed_generation;
+    EXPECT_FALSE(FarWorldReportState(*output).coverage_settled);
+    // An older serving cohort remains observable but cannot qualify as current.
+    input->state.serving_serial = 6;
+    input->state.serving_committed_generation = 8;
+    ProjectSessionManifest(*input, *output);
+    output->source_failure = {FarWorldAuthorityProducer::Error::SourceReadExpired,
+                              FarFrozenCaptureError::DeadlineExceeded};
+    output->refresh_work = FarWorldRefreshWork{11, 12, 13, 14, 15, 16, 1.25};
+    const auto diagnostic_work = FarWorldDiagnosticJson(*output)["refresh_work"];
+    EXPECT_FALSE(FarWorldReportState(*output).coverage_settled);
+    SampleRing ring(2);
+    capture_far_world_authority(ring.append(23).far_world, *output, false);
+    output->refresh_work.reset();
+    capture_far_world_authority(ring.append(24).far_world, *output, false);
+    nlohmann::json report;
+    add_far_world_reporting(report, ring);
+    const auto parsed = nlohmann::json::parse(report.dump());
+    const auto& row = parsed["far_world"]["frames"][0];
+    EXPECT_EQ(row["authority_kind"], "session");
+    EXPECT_EQ(row["content_identity"], "0");
+    EXPECT_EQ(row["manifest_fingerprint"], std::to_string(output->manifest_fingerprint));
+    EXPECT_EQ(row["world_epoch"], 12);
+    EXPECT_EQ(row["committed_generation"], 9);
+    EXPECT_EQ(row["serving_committed_generation"], 8);
+    EXPECT_EQ(row["serving_serial"], 6);
+    EXPECT_EQ(row["target_serial"], 7);
+    EXPECT_EQ(row["latest_target_ready"], true);
+    EXPECT_EQ(row["source_error"], static_cast<int>(output->source_failure.source));
+    EXPECT_EQ(row["capture_error"], static_cast<int>(output->source_failure.capture));
+    EXPECT_EQ(row["refresh_work"], diagnostic_work);
+    EXPECT_EQ(row["refresh_work"],
+              (nlohmann::json{{"source_read_bytes", 11},
+                              {"source_copied_bytes", 12},
+                              {"source_decode_work", 13},
+                              {"capture_work", 14},
+                              {"admission_work", 15},
+                              {"admission_height_observations", 16},
+                              {"source_ms", 1.25}}));
+    EXPECT_TRUE(parsed["far_world"]["frames"][1]["refresh_work"].is_null());
+    const auto diagnostic = FarWorldDiagnosticJson(*output);
+    EXPECT_EQ(diagnostic["manifest_fingerprint"], output->manifest_fingerprint);
+    EXPECT_EQ(diagnostic["committed_generation"], 9);
+    EXPECT_EQ(diagnostic["serving_committed_generation"], 8);
+    FillSessionManifest(*input);
+    ProjectSessionManifest(*input, *output);
+    auto& pending = ring.at(24).far_world;
+    pending.coverage_settled = true;
+    capture_far_world_authority(pending, *output, true);
+    EXPECT_FALSE(pending.latest_target_ready);
+    EXPECT_FALSE(pending.coverage_settled);
+    output->authority_kind = FarWorldAuthorityKind::Fixture;
+    output->content_identity = 42;
+    pending.coverage_settled = true;
+    capture_far_world_authority(pending, *output, true);
+    EXPECT_TRUE(pending.coverage_settled);
+    EXPECT_EQ(pending.content_identity, 42u);
+}
+
+TEST(FarWorldDiagnostics, SessionManifestIdentityIsOrderIndependent) {
+    auto input = std::make_unique<FarWorldHandoffDiagnosticSnapshot>();
+    auto output = std::make_unique<FarWorldDiagnosticSnapshot>();
+    FillSessionManifest(*input);
+    ProjectSessionManifest(*input, *output);
+    const auto fingerprint = output->manifest_fingerprint;
+    ASSERT_NE(fingerprint, 0u);
+    EXPECT_EQ(output->content_identity, 0u);
+    EXPECT_EQ(output->tiles[0].accepted_content_identity, 42u);
+    EXPECT_EQ(output->tiles[1].accepted_content_identity, 43u);
+    std::swap(input->tiles[0], input->tiles[1]);
+    ProjectSessionManifest(*input, *output);
+    EXPECT_EQ(output->manifest_fingerprint, fingerprint);
+    // Every admitted identity, requested/resolved span and policy participates.
+    for (int control = 0; control < 14; ++control) {
+        FillSessionManifest(*input);
+        auto& value = input->tiles[0].observation;
+        ASSERT_TRUE(value.target);
+        auto& target = *value.target;
+        switch (control) {
+            case 0:
+                ++target.identity.content_hash;
+                break;
+            case 1:
+                ++target.identity.span_generation;
+                break;
+            case 2:
+                ++target.identity.bake_generation;
+                break;
+            case 3:
+                ++target.identity.world_epoch;
+                break;
+            case 4:
+                ++target.identity.key.tx;
+                break;
+            case 5:
+                ++target.identity.key.tz;
+                break;
+            case 6:
+                ++target.identity.cave_policy;
+                break;
+            case 7:
+                target.intent.extra_span = FarVolumeCoverageSpan{-768, 128};
+                break;
+            case 8:
+                target.intent.extra_span.reset();
+                break;
+            case 9:
+                value.target_built.span.min_y -= 256;
+                break;
+            case 10:
+                value.target_built.span.max_y += 256;
+                break;
+            case 11:
+                ++value.target_built.field_identity;
+                break;
+            case 12:
+                ++input->state.committed_generation;
+                break;
+            case 13:
+                ++input->state.target_serial;
+                break;
+        }
+        ProjectSessionManifest(*input, *output);
+        EXPECT_NE(output->manifest_fingerprint, fingerprint) << control;
+    }
+    FillSessionManifest(*input);
+    ProjectSessionManifest(*input, *output, FarVolumeNumericProfile::LegacySigned16);
+    EXPECT_NE(output->manifest_fingerprint, fingerprint);
+    FillSessionManifest(*input);
+    ASSERT_TRUE(input->tiles[0].observation.target);
+    input->tiles[0].observation.target->intent.extra_span = FarVolumeCoverageSpan{0.0f, 128};
+    ProjectSessionManifest(*input, *output);
+    const auto zero_fingerprint = output->manifest_fingerprint;
+    input->tiles[0].observation.target->intent.extra_span = FarVolumeCoverageSpan{-0.0f, 128};
+    ProjectSessionManifest(*input, *output);
+    EXPECT_EQ(output->manifest_fingerprint, zero_fingerprint);
+}
+
+TEST(FarWorldDiagnostics, SessionManifestRefusesUnavailableAndIncompleteEvidence) {
+    auto input = std::make_unique<FarWorldHandoffDiagnosticSnapshot>();
+    auto output = std::make_unique<FarWorldDiagnosticSnapshot>();
+    for (int control = 0; control < 13; ++control) {
+        input->Reset();
+        FillSessionManifest(*input);
+        switch (control) {
+            case 0:
+                input->tile_count = 0;
+                break;
+            case 1:
+                input->tile_count = input->tiles.size() + 1;
+                break;
+            case 2:
+                input->complete = false;
+                break;
+            case 3:
+                input->captured = false;
+                break;
+            case 4:
+                input->state.target_serial = 0;
+                break;
+            case 5:
+                input->tiles[0].observation.target_water_complete = false;
+                break;
+            case 6:
+                input->tiles[0].observation.target_coverage.current = false;
+                break;
+            case 7:
+                input->tiles[0].observation.target.reset();
+                input->tiles[1].observation.target.reset();
+                break;
+            case 8:
+                input->tiles[0].observation.target_built.span = {};
+                break;
+            case 9:
+                input->draw_count = input->draws.size() + 1;
+                break;
+            case 10:
+                ASSERT_TRUE(input->tiles[0].observation.target);
+                input->tiles[0].observation.target->identity.content_hash = 0;
+                break;
+            case 11:
+                ASSERT_TRUE(input->tiles[0].observation.target);
+                input->tiles[0].observation.target->intent.extra_span =
+                    FarVolumeCoverageSpan{std::numeric_limits<float>::quiet_NaN(), 128};
+                break;
+            case 12:
+                input->tiles[0].observation.target_coverage.span_ok = false;
+                break;
+        }
+        ProjectSessionManifest(*input, *output);
+        EXPECT_EQ(output->manifest_fingerprint, 0u) << control;
+    }
+}
+
 TEST(RenderBenchmarkOverrides, WorkloadAssignmentsDoNotConsumeSuccessorsOrHideOverrides) {
     for (const char* option : {"--render-benchmark",
                                "--render-benchmark-schema",

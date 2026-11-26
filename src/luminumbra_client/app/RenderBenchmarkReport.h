@@ -2,6 +2,7 @@
 
 #include "RenderMeasurement.h"
 #include "RenderWorkload.h"
+#include "luminumbra_client/rendering/FarWorldDiagnostics.h"
 #include "luminumbra_common/core/Environment.h"
 #include <filesystem>
 #include <fstream>
@@ -12,6 +13,54 @@ namespace Luminumbra::Client::Measurement {
 
 inline nlohmann::json optional_value(const std::optional<double>& value) {
     return value ? nlohmann::json(*value) : nlohmann::json(nullptr);
+}
+
+// Constant-size capture shared by every benchmark schema; no JSON or tile copies.
+inline void capture_far_world_authority(FarFrameSample& sample,
+                                        const Rendering::FarWorldDiagnosticSnapshot& snapshot,
+                                        bool admission_pending) {
+    sample.content_identity = snapshot.content_identity;
+    sample.authority_kind = snapshot.authority_kind == Rendering::FarWorldAuthorityKind::Session
+                                ? "session"
+                                : "fixture";
+    sample.world_epoch = snapshot.world_epoch;
+    sample.committed_generation = snapshot.bake_generation;
+    sample.serving_committed_generation = snapshot.serving_committed_generation;
+    sample.serving_serial = snapshot.serving_serial;
+    sample.target_serial = snapshot.target_serial;
+    sample.manifest_fingerprint = snapshot.manifest_fingerprint;
+    sample.latest_target_ready = snapshot.latest_target_ready;
+    // A newer candidate remains private during admission. The old admitted target
+    // may still cover, but cannot stand in for the pending refresh in a baseline.
+    if (snapshot.authority_kind == Rendering::FarWorldAuthorityKind::Session && admission_pending) {
+        sample.latest_target_ready = false;
+        sample.coverage_settled = false;
+    }
+    sample.source_error = static_cast<int>(snapshot.source_failure.source);
+    sample.capture_error = static_cast<int>(snapshot.source_failure.capture);
+    sample.refresh_work.reset();
+    if (snapshot.refresh_work) {
+        const auto& work = *snapshot.refresh_work;
+        sample.refresh_work = FarFrameSample::RefreshWork{work.source_read_bytes,
+                                                          work.source_copied_bytes,
+                                                          work.source_decode_work,
+                                                          work.capture_work,
+                                                          work.admission_work,
+                                                          work.admission_height_observations,
+                                                          work.source_ms};
+    }
+}
+
+inline nlohmann::json refresh_work_json(const std::optional<FarFrameSample::RefreshWork>& work) {
+    if (!work)
+        return nullptr;
+    return {{"source_read_bytes", work->source_read_bytes},
+            {"source_copied_bytes", work->source_copied_bytes},
+            {"source_decode_work", work->source_decode_work},
+            {"capture_work", work->capture_work},
+            {"admission_work", work->admission_work},
+            {"admission_height_observations", work->admission_height_observations},
+            {"source_ms", work->source_ms}};
 }
 
 inline void add_far_world_reporting(nlohmann::json& report, SampleRing& ring) {
@@ -41,6 +90,17 @@ inline void add_far_world_reporting(nlohmann::json& report, SampleRing& ring) {
                {"meshing_outstanding", far_state.meshing_outstanding},
                {"terrain_uploads_pending", far_state.terrain_uploads_pending}}},
              {"content_identity", std::to_string(far_state.content_identity)},
+             {"authority_kind", far_state.authority_kind},
+             {"world_epoch", far_state.world_epoch},
+             {"committed_generation", far_state.committed_generation},
+             {"serving_committed_generation", far_state.serving_committed_generation},
+             {"serving_serial", far_state.serving_serial},
+             {"target_serial", far_state.target_serial},
+             {"manifest_fingerprint", std::to_string(far_state.manifest_fingerprint)},
+             {"latest_target_ready", far_state.latest_target_ready},
+             {"source_error", far_state.source_error},
+             {"capture_error", far_state.capture_error},
+             {"refresh_work", refresh_work_json(far_state.refresh_work)},
              {"settings",
               {{"gns_compiled", far_state.gns_compiled},
                {"active_regions", far_state.active_regions},

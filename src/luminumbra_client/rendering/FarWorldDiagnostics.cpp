@@ -1,10 +1,90 @@
 #include "FarWorldDiagnostics.h"
 #include "FarWorldHandoffDiagnostics.h"
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <nlohmann/json.hpp>
 
 namespace Luminumbra::Rendering {
+namespace {
+// Explicit little-endian FNV-1a words; no object bytes or implementation-defined hash.
+void ManifestWord(std::uint64_t& hash, std::uint64_t word) noexcept {
+    for (unsigned byte = 0; byte < 8; ++byte) {
+        hash = (hash ^ (word & 255)) * 1099511628211ULL;
+        word >>= 8;
+    }
+}
+struct ManifestFold {
+    std::uint64_t sum = 0, mixed = 0;
+    bool valid = true;
+    void Add(const FarWorldTileDiagnostic& tile) noexcept {
+        const auto& id = tile.desired;
+        valid = valid && id.content_hash != 0 && tile.has_pair &&
+                World::IsFarTileCovering(tile.coverage) &&
+                tile.request.span.min_y < tile.request.span.max_y;
+        std::uint64_t hash = 14695981039346656037ULL;
+        for (const auto word : {id.world_epoch,
+                                id.content_hash,
+                                std::uint64_t(id.cave_policy),
+                                std::uint64_t(id.key.tier),
+                                std::uint64_t(id.key.tx),
+                                std::uint64_t(id.key.tz),
+                                id.bake_generation,
+                                id.span_generation,
+                                std::uint64_t(tile.numeric),
+                                std::uint64_t(tile.intent.key.tier),
+                                std::uint64_t(tile.intent.key.x),
+                                std::uint64_t(tile.intent.key.z),
+                                std::uint64_t(tile.intent.extra_span.has_value()),
+                                std::uint64_t(tile.request.key.tier),
+                                std::uint64_t(tile.request.key.x),
+                                std::uint64_t(tile.request.key.z),
+                                tile.request.field_identity,
+                                std::uint64_t(tile.request.span.min_y),
+                                std::uint64_t(tile.request.span.max_y)}) {
+            ManifestWord(hash, word);
+        }
+        if (tile.intent.extra_span) {
+            for (const float value :
+                 {tile.intent.extra_span->min_y, tile.intent.extra_span->max_y}) {
+                valid = valid && std::isfinite(value);
+                // Canonicalize signed zero; all other finite floats keep their exact bits.
+                ManifestWord(hash, std::bit_cast<std::uint32_t>(value == 0 ? 0.0f : value));
+            }
+        }
+        // Canonical multiset fold: unsigned sum and rotated XOR are order independent.
+        sum += hash;
+        mixed ^= std::rotl(hash, 23);
+    }
+    std::uint64_t Finish(const FarWorldDiagnosticSnapshot& snapshot) const noexcept {
+        if (!valid || !snapshot.complete || !snapshot.tile_count || !snapshot.latest_target_ready)
+            return 0;
+        std::uint64_t hash = 14695981039346656037ULL;
+        // Domain/version word is specific to this diagnostic manifest, not a tile fingerprint.
+        for (const auto word : {std::uint64_t{0x46574d414e494601},
+                                snapshot.world_epoch,
+                                snapshot.bake_generation,
+                                snapshot.target_serial,
+                                std::uint64_t(snapshot.numeric),
+                                std::uint64_t(snapshot.tile_count),
+                                sum,
+                                mixed})
+            ManifestWord(hash, word);
+        return hash == 0 ? 1 : hash;
+    }
+};
+nlohmann::json FarWorldRefreshWorkJson(const std::optional<FarWorldRefreshWork>& work) {
+    if (!work)
+        return nullptr;
+    return {{"source_read_bytes", work->source_read_bytes},
+            {"source_copied_bytes", work->source_copied_bytes},
+            {"source_decode_work", work->source_decode_work},
+            {"capture_work", work->capture_work},
+            {"admission_work", work->admission_work},
+            {"admission_height_observations", work->admission_height_observations},
+            {"source_ms", work->source_ms}};
+}
+} // namespace
 FarWorldRefusal
 FarWorldProducerRefusal(const World::FarWorldAuthorityProducer::FrozenResult& result) noexcept {
     using E = World::FarWorldAuthorityProducer::Error;
@@ -59,6 +139,7 @@ void ProjectFarWorldSessionDiagnostic(const FarWorldHandoffDiagnosticSnapshot& i
     out.numeric = numeric;
     out.bake_generation = in.state.committed_generation;
     out.serving_serial = in.state.serving_serial;
+    out.serving_committed_generation = in.state.serving_committed_generation;
     out.target_serial = in.state.target_serial;
     out.latest_target_ready = in.tile_count <= in.tiles.size() && FarWorldHandoffTargetReady(in);
     out.advanced = out.advanced && in.frame == out.frame;
@@ -80,6 +161,7 @@ void ProjectFarWorldSessionDiagnostic(const FarWorldHandoffDiagnosticSnapshot& i
         }
     }
     out.tile_count = 0;
+    ManifestFold manifest;
     out.tiers = {};
     for (std::size_t i = 0; i < out.tiers.size(); ++i) {
         out.tiers[i].resident.memory = in.memory[i];
@@ -113,6 +195,7 @@ void ProjectFarWorldSessionDiagnostic(const FarWorldHandoffDiagnosticSnapshot& i
         tile.water_known_dry = value.target_water_known_dry;
         tile.terrain_indices = value.target_terrain_indices;
         tile.water_indices = value.target_water_indices;
+        manifest.Add(tile);
         auto& counters = out.tiers[tier - 1].resident;
         ++counters.wanted;
         switch (tile.eligibility) {
@@ -152,6 +235,7 @@ void ProjectFarWorldSessionDiagnostic(const FarWorldHandoffDiagnosticSnapshot& i
             }
         }
     }
+    out.manifest_fingerprint = manifest.Finish(out);
     for (std::size_t i = 0; i < std::min(in.draw_count, in.draws.size()); ++i) {
         const auto& draw = in.draws[i];
         if (submitted && draw.submitted && draw.identity.key.tier >= 1 &&
@@ -210,6 +294,10 @@ FarWorldReportingState FarWorldReportState(const FarWorldDiagnosticSnapshot& s,
         result.coverage_settled && remaining == 0 &&
         (s.authority_kind == FarWorldAuthorityKind::Fixture ||
          (s.latest_target_ready && s.target_serial != 0 && s.serving_serial == s.target_serial));
+    if (s.authority_kind == FarWorldAuthorityKind::Session) {
+        result.coverage_settled = result.coverage_settled && s.source_failure.ok() &&
+                                  s.serving_committed_generation == s.bake_generation;
+    }
     return result;
 }
 
@@ -345,6 +433,10 @@ nlohmann::json FarWorldDiagnosticJson(const FarWorldDiagnosticSnapshot& s) {
              s.authority_kind == FarWorldAuthorityKind::Session ? "session" : "fixture"},
             {"serving_serial", s.serving_serial},
             {"target_serial", s.target_serial},
+            {"committed_generation", s.bake_generation},
+            {"serving_committed_generation", s.serving_committed_generation},
+            {"manifest_fingerprint", s.manifest_fingerprint},
+            {"refresh_work", FarWorldRefreshWorkJson(s.refresh_work)},
             {"submitted_water_indices", s.submitted_water_indices},
             {"latest_target_ready", s.latest_target_ready},
             {"source_error", static_cast<int>(s.source_failure.source)},
