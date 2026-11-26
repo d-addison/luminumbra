@@ -40,6 +40,21 @@ def run_block(workflow: str, step: str) -> str:
 
 
 class PathGateTests(unittest.TestCase):
+    def test_deferred_evidence_is_registered_in_every_python_entrypoint(self):
+        path = "tools/perf/test_capture_deferred_stack.py"
+        self.assertEqual(gate.python_test_commands(ROOT).count((path,)), 1)
+        for source in (path, "tools/perf/capture_deferred_stack.py"):
+            self.assertTrue(gate.needs_python(source))
+            self.assertTrue(gate.needs_cpp(source))
+        tools_cmake = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
+        test_cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn('NAME DeferredStackEvidenceSmoke', tools_cmake)
+        self.assertIn('perf/test_capture_deferred_stack.py', tools_cmake)
+        self.assertIn('add_test(NAME DeferredStackEvidenceContract', test_cmake)
+        self.assertIn('${CMAKE_SOURCE_DIR}/' + path, test_cmake)
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn('python3 -B tools/ci/ci_paths.py python-tests', workflow)
+
     def test_fixture_refusal_suite_is_in_standalone_plan(self):
         path = "tools/perf/test_prepare_server_comparison.py"
         self.assertEqual(gate.python_test_commands(ROOT).count((path,)), 1)
