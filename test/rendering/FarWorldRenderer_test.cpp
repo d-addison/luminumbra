@@ -565,6 +565,110 @@ TEST(FarWorldRenderer, UploadedDrawMetadataAndSynchronousBorrowing) {
     EXPECT_EQ(owner.State().draws, 1u);
 }
 
+TEST(FarWorldRenderer, ConfirmedTerrainCoverageRestoresTreeImpostors) {
+    Owner owner;
+    const auto& coverage = owner.Renderer().TerrainCoverage();
+    const auto confirmed = [&] {
+        return coverage.Covers({200, 0, 0});
+    };
+    EXPECT_FALSE(confirmed());
+    ASSERT_TRUE(owner.WaitSettled(Request()));
+    EXPECT_FALSE(confirmed()); // Resident but unconfirmed.
+    owner.Renderer().BeginLiveOwnership(owner.Frame());
+    ASSERT_TRUE(owner.Renderer().FinishLiveOwnership());
+    const auto prepare = [](const auto&) {
+        return true;
+    };
+    ASSERT_EQ(owner.Renderer().Submit({0, 0, 0}, prepare).draws, 1u);
+    EXPECT_TRUE(confirmed());
+    owner.State().fail_draw = true;
+    EXPECT_EQ(owner.Renderer().Submit({0, 0, 0}, prepare).draws, 0u);
+    EXPECT_FALSE(confirmed());
+    owner.State().fail_draw = false;
+    ASSERT_EQ(owner.Renderer().Submit({0, 0, 0}, prepare).draws, 1u);
+    EXPECT_EQ(owner.Renderer().Submit({0, 0, 0}, [](const auto&) { return false; }).draws, 0u);
+    EXPECT_FALSE(confirmed());
+    EXPECT_THROW(owner.Renderer().Submit({0, 0, 0},
+                                         [](const FarWorldDrawCommand&) -> bool {
+                                             throw std::runtime_error("prepare failed");
+                                         }),
+                 std::runtime_error);
+    EXPECT_FALSE(confirmed());
+    ASSERT_EQ(owner.Renderer().Submit({0, 0, 0}, prepare).draws, 1u);
+    EXPECT_EQ(owner.Renderer().Submit({0, 0, 0}, {}).draws, 0u);
+    EXPECT_FALSE(confirmed());
+    ASSERT_EQ(owner.Renderer().Submit({0, 0, 0}, prepare).draws, 1u);
+    owner.Renderer().BeginLiveOwnership(owner.Frame() + 1);
+    EXPECT_FALSE(confirmed());
+    EXPECT_EQ(owner.Renderer().Submit({0, 0, 0}, prepare).draws, 0u);
+    EXPECT_FALSE(confirmed());
+    owner.Renderer().BeginLiveOwnership(owner.Frame());
+    ASSERT_TRUE(owner.Renderer().FinishLiveOwnership());
+    ASSERT_EQ(owner.Renderer().Submit({0, 0, 0}, prepare).draws, 1u);
+    owner.Renderer().PrepareWorldSwap();
+    EXPECT_FALSE(confirmed());
+}
+
+TEST(FarWorldTerrainCoverage, BoundedLookupRefusesMissingClippedReplacedAndEmptyTerrain) {
+    FarWorldTerrainCoverage coverage;
+    FarVolumeDrawRecord record;
+    record.identity.key = {1, 0, 0};
+    record.request.span = {-16, 16};
+    record.horizontal_outer_clip_meters = 1024;
+    record.terrain_indices = 3;
+    coverage.Begin({0, 0, 0});
+    EXPECT_FALSE(coverage.Covers({200, 0, 0}));
+    coverage.RecordSubmitted(record);
+    EXPECT_TRUE(coverage.Covers({200, -16, 0}));
+    EXPECT_TRUE(coverage.Covers({200, 16, 0}));
+    EXPECT_FALSE(coverage.Covers({200, -17, 0}));
+    EXPECT_FALSE(coverage.Covers({200, 17, 0}));
+    EXPECT_FALSE(coverage.Covers({175, 0, 0}));
+    EXPECT_TRUE(coverage.Covers({176, 0, 0}));
+    EXPECT_FALSE(coverage.Covers({512, 0, 0})); // Half-open tile boundary.
+    EXPECT_FALSE(coverage.Covers({200, std::numeric_limits<double>::quiet_NaN(), 0}));
+    EXPECT_FALSE(coverage.Covers({std::numeric_limits<double>::infinity(), 0, 0}));
+    EXPECT_FALSE(coverage.Covers({1e38, 0, 0}));
+    record.arrival = {true, 1024, {{{-16, 16}, {-16, 16}, {-16, 16}, {-16, 16}}}};
+    coverage.RecordSubmitted(record);
+    EXPECT_FALSE(coverage.Covers({200, 0, 0})); // Finer terrain owns this fragment.
+    record.arrival.children[0] = {-8, 8};
+    coverage.RecordSubmitted(record);
+    EXPECT_TRUE(coverage.Covers({200, 12, 0})); // Coarse span still owns higher terrain.
+    record.arrival.finer_outer_radius_meters = 180;
+    coverage.RecordSubmitted(record);
+    EXPECT_TRUE(coverage.Covers({200, 0, 0})); // Outside the finer clip.
+    record.arrival.eligible = false;
+    record.identity.key = {1, -1, -1};
+    coverage.RecordSubmitted(record);
+    EXPECT_TRUE(coverage.Covers({-200, 0, -200}));
+    coverage.Begin({-2000, 0, -2000});
+    coverage.RecordSubmitted(record);
+    EXPECT_FALSE(coverage.Covers({-200, 0, -200})); // Outside horizontal clip.
+    coverage.Begin({0, 0, 0});
+    record.terrain_indices = 0;
+    coverage.RecordSubmitted(record);
+    EXPECT_FALSE(coverage.Covers({-200, 0, -200})); // Empty/water-only pair.
+    record.terrain_indices = 3;
+    record.identity.key = {0, 0, 0};
+    coverage.RecordSubmitted(record);
+    record.identity.key.tier = 6;
+    coverage.RecordSubmitted(record);
+    EXPECT_FALSE(coverage.Covers({200, 0, 0}));
+    record.identity.key = {1, 0, 0};
+    coverage.RecordSubmitted(record);
+    record.identity.key.tx = 8; // Off-window manifest draws cannot overwrite visible coverage.
+    coverage.RecordSubmitted(record);
+    EXPECT_TRUE(coverage.Covers({200, 0, 0}));
+    EXPECT_FALSE(coverage.Covers({4296, 0, 0}));
+    coverage.Clear();
+    EXPECT_FALSE(coverage.Covers({200, 0, 0}));
+    coverage.Begin({0, std::numeric_limits<double>::quiet_NaN(), 0});
+    record.identity.key = {1, 0, 0};
+    coverage.RecordSubmitted(record);
+    EXPECT_FALSE(coverage.Covers({200, 0, 0}));
+}
+
 TEST(FarWorldRenderer, SaveFencePreservesBindingOwnershipAndDraws) {
     Owner owner;
     ASSERT_TRUE(owner.WaitSettled(Request()));
@@ -2034,6 +2138,64 @@ TEST(FarWorldHandoffRenderer, SaveFencePreservesBindingOwnershipAndDraws) {
     jobs.shutdown();
 }
 
+TEST(FarWorldHandoffRenderer, ConfirmedServingTerrainCoverageRestoresTreeImpostors) {
+    JobSystem jobs;
+    jobs.startup(1);
+    DriverState state;
+    state.fixture_released = true;
+    FarWorldHandoffRenderer renderer;
+    renderer.InstallBackend(std::make_unique<Driver>(state));
+    ASSERT_TRUE(renderer.Bind(jobs,
+                              1,
+                              FarCaveMode::BandLimited,
+                              FarVolumeNumericProfile::RawFloat,
+                              RendererHandoffBudgets(),
+                              RendererHandoffLimits()));
+    const auto& coverage = renderer.TerrainCoverage();
+    const auto confirmed = [&] {
+        return coverage.Covers({200, 0, 0});
+    };
+    EXPECT_FALSE(confirmed());
+    const std::array inputs{RendererHandoffInput(renderer, {5, 0, 0}, 1, true)};
+    ASSERT_TRUE(renderer.StageTarget(RendererHandoffManifest(1, inputs)));
+    EXPECT_FALSE(confirmed());
+    std::uint64_t frame = 0;
+    ASSERT_TRUE(RendererHandoffWait([&] {
+        renderer.AdvanceFrame(++frame, {0, 0, 0}, {1, 1, 16ULL * 1024 * 1024});
+        return renderer.Handoff()->State().serving_serial == 1;
+    }));
+    EXPECT_FALSE(confirmed());
+    renderer.BeginLiveOwnership(frame);
+    ASSERT_TRUE(renderer.FinishLiveOwnership());
+    const auto prepare = [](const auto&) {
+        return true;
+    };
+    ASSERT_EQ(renderer.Submit({0, 0, 0}, prepare).draws, 1u);
+    EXPECT_TRUE(confirmed());
+    state.fail_draw = true;
+    EXPECT_EQ(renderer.Submit({0, 0, 0}, prepare).draws, 0u);
+    EXPECT_FALSE(confirmed());
+    state.fail_draw = false;
+    ASSERT_EQ(renderer.Submit({0, 0, 0}, prepare).draws, 1u);
+    EXPECT_EQ(renderer.Submit({0, 0, 0}, {}).draws, 0u);
+    EXPECT_FALSE(confirmed());
+    ASSERT_EQ(renderer.Submit({0, 0, 0}, prepare).draws, 1u);
+    EXPECT_EQ(renderer.Submit({0, 0, 0}, [](const auto&) { return false; }).draws, 0u);
+    EXPECT_FALSE(confirmed());
+    ASSERT_EQ(renderer.Submit({0, 0, 0}, prepare).draws, 1u);
+    renderer.BeginLiveOwnership(frame + 1);
+    ASSERT_TRUE(renderer.FinishLiveOwnership());
+    EXPECT_EQ(renderer.Submit({0, 0, 0}, prepare).draws, 0u);
+    EXPECT_FALSE(confirmed());
+    renderer.BeginLiveOwnership(frame);
+    ASSERT_TRUE(renderer.FinishLiveOwnership());
+    ASSERT_EQ(renderer.Submit({0, 0, 0}, prepare).draws, 1u);
+    renderer.PrepareWorldSwap();
+    EXPECT_FALSE(confirmed());
+    renderer.Shutdown();
+    jobs.shutdown();
+}
+
 TEST(FarWorldHandoffRenderer, SameFrameOwnershipAndSubmitExceptionRestoreBindings) {
     JobSystem jobs;
     jobs.startup(1);
@@ -2564,11 +2726,14 @@ TEST_F(SessionRendererTest, SessionSelectionPreservesAdmissionRefusalsAndPurpose
 
 TEST_F(SessionRendererTest, ProducerSessionInputsBindAndSubmitHeterogeneousTileFingerprints) {
     EXPECT_EQ(renderer.Residency(), nullptr);
+    const auto& terrain = renderer.TerrainCoverage();
+    EXPECT_FALSE(terrain.Covers({200, -8, 0}));
     ASSERT_TRUE(Stage()) << FarWorldRefusalName(renderer.Selection(FarWorldPurpose::World).refusal);
     ASSERT_TRUE(Settle());
     renderer.BeginLiveOwnership(frame);
     ASSERT_TRUE(renderer.FinishLiveOwnership());
     const auto stats = renderer.Submit({0, 0, 0}, [](const auto&) { return true; });
+    EXPECT_TRUE(terrain.Covers({200, -8, 0}));
     Capture(stats);
     const auto& snapshot = renderer.Diagnostic();
     ASSERT_EQ(snapshot.tile_count, 2u);
@@ -2582,6 +2747,10 @@ TEST_F(SessionRendererTest, ProducerSessionInputsBindAndSubmitHeterogeneousTileF
     EXPECT_EQ(FarWorldDiagnosticJson(snapshot)["authority_kind"], "session");
     EXPECT_EQ(renderer.Selection(FarWorldPurpose::Preview).effective, FarWorldMode::Legacy);
     EXPECT_FALSE(renderer.AdvanceFrame(++frame, {0, 0, 0}, {}));
+    state.current = false;
+    EXPECT_EQ(renderer.Submit({0, 0, 0}, [](const auto&) { return true; }).draws, 0u);
+    EXPECT_FALSE(terrain.Covers({200, -8, 0}));
+    state.current = true;
 }
 
 TEST_F(SessionRendererTest, TargetSerialPendingSourceAndRefusalsCannotQualifyOldServing) {

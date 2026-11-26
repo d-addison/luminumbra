@@ -7,15 +7,14 @@ gap map](distant-world-implementation-status.md) and
 planned work and pending evidence. Generation, meshing, queues, residency, upload
 accounting and renderer integration are implemented; normal presets still lack
 immutable authority and fall back from the default Ladder request to Legacy.
-Saved-world far production authority remains fixture-only until FW S8 (v0.3.1);
+Saved-world far production authority remains fixture-only until its v0.3.2 consumer;
 the renderer reports an explicit unavailable/refusal diagnostic.
 
-Indexed authority durability and rehydration are in preparation with native qualification pending.
-Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water
-continuation (issue #242), strict distant policy and distant creatures (S8), remaining S9
-closure, and the committed-generation edited-SDF producer and FW S8 consumer are
-planned for v0.3.1. The per-system continuation and transaction requirements below
-describe that planned work. Regional continuation performance/default enablement
+Indexed authority durability and rehydration are implemented, with native qualification pending.
+Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy
+and regional foliage/water continuation (issue #242) are implemented for v0.3.2
+(in preparation), with native qualification pending. The per-system continuation and transaction requirements below
+remain qualification obligations after implementation. Regional continuation performance/default enablement
 is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320).
 No current-candidate native qualification is claimed and no acceptance threshold
 is waived by source landing.

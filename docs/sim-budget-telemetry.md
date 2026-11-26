@@ -201,7 +201,7 @@ Build the existing `perf` preset, then run from the repository:
 ```sh
 python3 tools/perf/capture_sim_budget.py \
   --binary build/perf/bin/luminumbra_server_app \
-  --evidence-dir build/campaign-archives-20260907/slice-A3/before
+  --evidence-dir ../sim-budget-captures/before
 ```
 
 Repeat with another named directory after simulation work. The default workload
@@ -210,6 +210,17 @@ mountains and archipelago, with the existing ecology and planted rosters and
 `--no-audio`. The script fails on missing binaries, existing output directories,
 server errors, invalid artifacts or vacuous plant/creature/scent/field work.
 It retains partial evidence on failure and does not publish a success manifest.
+Add `--check-neutrality` to also run a telemetry-off smoke counterpart immediately
+after each preset's traced capture. This opt-in mode requires an evidence directory
+outside the checkout. The counterpart uses the same executable, root, preset,
+seed, rosters, tick count, radii and 30-tick autosave cadence; only `--sim-budget`
+and the artifact output argument differ. Both counterpart world hashes must match
+the traced hash, both artifacts must report exactly two complete smoke runs and
+identical effective simulation gates, and the disabled artifact must omit
+`sim_budget` entirely. Successful process exits and smoke verdicts are required.
+The traced artifact still passes every population, field-path, per-tick work
+and replay check. Fixture identities are checked again after all requested runs.
+The default invocation continues to capture only telemetry-on evidence.
 The committed shipping-default work-budget baseline and CI capture use 600 ticks
 instead. To check or re-pin that baseline, pass `--ticks 600 --seed 1337 --radius 1
 --collision-radius 1` explicitly and follow the
@@ -230,7 +241,13 @@ are populated starting worlds, not an enforced constant entity population.
 
 Each directory contains `<preset>.json` (the smoke artifact), `<preset>.log`
 (diagnostic stdout/stderr) and, only after all captures validate, `capture.json`.
-The latter is a new UTF-8 JSON evidence record with schema
+With `--check-neutrality`, it also retains `<preset>-telemetry-off.json` and
+`<preset>-telemetry-off.log`. Each manifest run then has an optional `telemetry_off`
+object containing the counterpart's relative `artifact` and exact `command`,
+using the existing manifest schema. Its presence in a successful manifest records
+that the neutrality checks passed; absence does not establish neutrality.
+Failures retain artifacts and diagnostics and prevent success-manifest publication.
+The manifest is a UTF-8 JSON evidence record with schema
 `luminumbra.sim_budget_capture.v1` and required keys `revision`, `source_dirty`,
 `binary_sha256`, `fixture_hash`,
 `seed`, `ticks`, `surface_radius`, `collision_radius`, and `runs`. Each run has
@@ -322,6 +339,44 @@ large-world measurements remain pending. Continue using
 per-system telemetry; this synthetic harness adds no replacement stage telemetry,
 enforced limits, shipping simulation inputs, save fields or replay bytes.
 
+## Representative comparison report
+
+Capture both endpoints with `--check-neutrality`, then write the report outside
+the checkout, retaining the original capture directories unchanged:
+
+```sh
+python3 -I -B tools/perf/report_sim_budget.py \
+  ../sim-budget-captures/before ../sim-budget-captures/after \
+  > ../sim-budget-captures/comparison.json
+```
+
+The JSON report retains all three presets and all 30 stage identities, including
+inactive stages. Each endpoint includes its measured revision, dirty flag,
+binary digest, resolved-input fixture hash, preset hash, seed, tick count and
+radii. Per-stage rows retain the original p50/p95/p99 and maximum milliseconds,
+sample count, total integer work and maximum per-tick work. Inactive durations
+remain null. Per-preset neutrality results include both runs' world/replay
+hashes, replay-work equality and effective simulation gates.
+
+The report revalidates the original artifacts and requires complete telemetry-off
+counterparts and the capture harness's populated roster, no-audio and 30-tick
+autosave workload. Both endpoints must match the strict comparator's seed,
+ticks, fixture hash, preset hash and radii, as well as effective gates. Different
+revisions and binary digests are retained; world hashes may differ across
+revisions. Missing or incompatible evidence refuses the report before writing
+any JSON to stdout. Timing ratios are advisory after/before ratios (null for
+inactive stages, a zero denominator or an unrepresentable ratio) and require
+the same host and build conditions to interpret; the tool cannot verify those
+conditions from the capture manifest.
+
+The existing proposal emitter supplies the after endpoint's `proposal` and
+`integer_proposal` with default integer headroom 3/2 (adjustable using
+`--headroom-num` and `--headroom-den`). Only the proposal's advisory p99 fields
+depend on durations; the integer proposal does not. Scheduler `RegionWork`
+remains unevaluated. This report hands a proposal to issue #141 and does not
+change enforced limits or establish native acceptance. `SimBudgetReportContract`
+registers the two-tick synthetic regressions without launching the engine.
+
 ## Executable checks
 
 Seven `SimBudgetTelemetry` gtests cover complete production artifact byte equality
@@ -336,7 +391,14 @@ mutually exclusive wind/weather stage coverage and exact field work totals,
 starting plant/creature counts, and ordinary save bytes (including plants,
 metadata and clock) across a telemetry toggle at the same tick. Active regions
 intentionally changes the simulation; equality is required across telemetry
-settings, not across active-regions settings. `SimBudgetCaptureContract` runs
-seven Python command and refusal tests, including both field paths, refusal
-of mixed coverage, and wrongly typed or malformed world hashes. Discovered totals, the measured delta against current devel,
+settings, not across active-regions settings. That parity test pins historical
+terrain and disables other simulation gates. The opt-in shipping-workload capture
+supplements it by exercising current shipping gates on all three presets; it does
+not replace the historical test's two active-region modes.
+`SimBudgetNeutralityContract` runs four mocked-launch Python tests on tiny synthetic
+artifacts, covering command equality, hash/gate mismatch, disabled telemetry
+refusal and failure publication ordering without an engine launch.
+`SimBudgetCaptureContract` runs Python command and refusal tests, including both
+field paths, refusal of mixed coverage, and wrongly typed or malformed world hashes.
+Discovered totals, the measured delta against current devel,
 execution results and qualification limitations are in the campaign receipt.

@@ -8,6 +8,35 @@
 #include "FarWorldSelection.h"
 
 namespace Luminumbra::Rendering {
+
+// Render-thread-only coverage of successful terrain submissions. No GPU pointers
+// escape submission. The clipped window is at most eight cells per axis per tier;
+// off-window draws cannot overwrite its direct-mapped cells, even with explicit
+// manifests. Full key checks prevent absent cells from aliasing resident ones.
+// Storage is fixed at five tiers * 64 cells and charged with the renderer owner.
+class FarWorldTerrainCoverage {
+public:
+    void Clear() noexcept;
+    void Begin(const std::array<double, 3>& camera) noexcept;
+    // Call only after the current, spanning allocation was successfully drawn.
+    void RecordSubmitted(const FarVolumeDrawRecord& record) noexcept;
+    // Five direct cell probes, independent of tree count, resident count and
+    // world size. The clip/span/arrival tests mirror terrain fragment ownership.
+    bool Covers(const std::array<double, 3>& position) const noexcept;
+
+private:
+    struct Entry {
+        World::FarTileKey key;
+        World::FarVolumeSpan span;
+        FarWorldArrival arrival;
+        double outer_radius = 0;
+        bool present = false;
+    };
+    static std::size_t Slot(std::int64_t tile_x, std::int64_t tile_z) noexcept;
+    std::array<std::array<Entry, 64>, World::kFarTierCount> entries_{};
+    std::array<double, 3> camera_{};
+};
+
 class FarWorldHandoffRenderer;
 struct FarSessionHandoffTile;
 struct FarWorldHandoffDiagnosticSnapshot;
@@ -135,6 +164,8 @@ public:
                       std::span<const FarVolumeWantedRequest> requests);
     FarWorldSubmitStats Submit(const std::array<double, 3>& camera,
                                const FarWorldPrepareDraw& prepare);
+    // Borrowed render-thread view; submission refreshes it before prop collection.
+    const FarWorldTerrainCoverage& TerrainCoverage() const;
     // Called after the selected G-buffer submission; never for a paired replay.
     void CaptureDiagnostic(FarWorldSelection selection,
                            std::uint64_t frame,
@@ -212,6 +243,7 @@ private:
     std::optional<World::FarVolumeMemoryLease> integration_charge_;
     std::optional<World::FarVolumeGpuLease> ownership_gpu_charge_;
     FarWorldOwnership ownership_;
+    FarWorldTerrainCoverage terrain_coverage_;
     std::shared_ptr<const FarWorldPristineFixture> fixture_;
     std::unique_ptr<FarVolumeResidency> residency_;
     // Fixed history and its transactional copy are included in sizeof(*this)'s

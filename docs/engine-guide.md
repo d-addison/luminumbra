@@ -552,6 +552,88 @@ length includes the four-byte count. An eight-byte FNV-1a-64 footer covers all
 preceding bytes (offset basis 14695981039346656037, prime 1099511628211).
 An empty store writes no file; the total file limit is 64 MiB.
 
+The ambient grid is world-anchored: 24 m cells, grouped into 16 x 16 pages.
+The 512 m region containing a cell's centre owns it, including on pages shared
+by several owners. Initialized cell indices lie in `[-699051, 699050]` on each
+axis. A page has four u64 initialization-mask words; cell index is
+`local_z * 16 + local_x`, followed by five channel-major arrays of 256 u16 words.
+Uninitialized cells contain zero in every channel.
+
+Existing pages evolve under the regional schedule: due-owner interiors relax
+toward the epoch target with arithmetic shift 4, while cross-owner exchange
+reads sealed previous-tick cells at the common cadence phase. Absent or frozen
+owners do not exchange. Frozen content stays unchanged per owner, including
+when another owner updates its cells on a shared physical page.
+
+| Channel / mask bit | Stored meaning | Session consumer |
+|---|---|---|
+| 0 / 1 | Wind X, signed i16 bits in units of 1/1024 m/s | Ground wind; mid/high layers multiply by 2/4 |
+| 1 / 2 | Wind Z, same signed units | Ground wind; mid/high layers multiply by 2/4 |
+| 2 / 4 | Moisture, unsigned `[0, 65535]` | Rain/snow intensity divided by 65535 |
+| 3 / 8 | Front, unsigned `[0, 65535]` | Clear/overcast/rain/snow/fog at thresholds 13107/26214/39321/52428 |
+| 4 / 16 | Charge, unsigned `[0, 65535]` | Aether emission divided by 65535 |
+
+The append-only seed registry reserves `+39` for ambient cells and `+40` for
+regional weather. Ambient seeding mixes world seed, channel, signed cell X/Z
+and epoch `absolute_tick / 8`; initialized cells survive thaw without reseeding.
+Regional weather mixes `world_seed + 40` with separate spawn
+`0x535041574e000000` and strike `0x535452494b455300` domains. Spawning also uses
+owner coordinates and owner active age; strikes use storm salt and storm active
+age. These streams retain their existing numeric values; the next free offset
+is `+41`. Legacy procedural wind/weather/lightning/aether retain `+11`/`+12`/
+`+13`/`+14`; energy retains its RNG-free reserved `+38` slot.
+
+Record widths below exclude the ten-byte section header. Owner coordinates and
+cell/page keys are pairs of signed i32 values. Floating state is encoded as
+exact binary32 or binary64 bits, never native struct bytes.
+
+| Section | Record layout in wire order | Bytes / record | Record cap |
+|---|---|---:|---:|
+| 1: ambient | Page key, four u64 masks, five arrays of 256 u16 words | 2600 | 16384 pages |
+| 2: storms | Owner, binary32 centre X/Z, velocity X/Z, intensity; u64 absolute spawn tick; u32 lifetime, salt, active age | 48 | 65536 total; 16 per owner |
+| 3: strikes | Owner, u64 absolute strike tick; binary32 X/Z, magnitude; u32 storm salt, active age | 36 | 65536 total; 32 per owner |
+| 4: scent | One-metre cell key, four binary64 concentrations | 40 | 65536 cells |
+| 5: soil | One-metre page key, four u64 masks, 256 i32 values | 1064 | 4096 pages |
+| 6: irrigation | One-metre page key, four u64 masks, 256 i32 values | 1064 | 4096 pages |
+| 7: weather clocks | Owner, u64 active age | 16 | 65536 owners |
+| 8: scent floors (v3) | Aligned one-metre block key, four u64 masks | 40 | 4096 blocks |
+
+Pages, scent cells/blocks and clocks sort by signed `(x, z)`. Storms sort by
+`(spawn_tick, salt)` and strikes by `(strike_tick, storm_salt, world_x_bits,
+world_z_bits)`. Storm identity is unique across owners. Weather positions are
+finite and within `[-16777216, 16777216)` metres, and their position-derived
+owners match the stored owners. Velocity components are finite with absolute
+value at most 32 m/s; intensity and magnitude are finite in `[0, 1]`. Storm
+lifetime is nonzero and active age is less than lifetime; strike active age is
+at most one. Absolute weather ticks and owner ages are below the WorldClock
+tick limit. Scent concentrations are finite and nonnegative. Soil and
+irrigation values lie in `[0, 1000000]` and `[0, 4000000]`, respectively.
+
+The save service checks every initialized ambient/soil/irrigation cell and
+every storm, strike, scent cell/floor block and weather clock against the saved
+active-region ledger. A nonempty field store requires that ledger and an indexed
+snapshot transaction. A missing optional FPG member loads an empty store only
+when consistent with the snapshot index. A present empty file is corrupt.
+On this implementation, empty ambient authority retains procedural sampling;
+automatic first-due activation and procedural-storm adoption remain pending
+for issue #136. Missing-file admission alone does not establish activation.
+
+| Input or save condition | Current refusal/result |
+|---|---|
+| Missing FPG, absent or consistently absent in the index | Empty store; no load-time advancement |
+| Present FPG without an index; indexed presence, size or checksum mismatch | Inconsistent snapshot |
+| Unreadable file or file over 64 MiB | Field pages load failed: unreadable or oversized file |
+| Truncation, checksum mismatch, wrong magic/channel mask, unsupported version (including future versions) | Field pages load failed; generic corrupt typed record diagnostic |
+| Invalid section type/order/count/length, record cap, duplicate identity/key, noncanonical encoding or invalid numeric state | Field pages load failed; corrupt record or specific page-validation diagnostic |
+| Empty page mask, nonzero uninitialized cell or initialized cell outside the grid domain | Field pages load failed; specific page-validation diagnostic |
+| Nonempty store without the saved ledger, or any owner absent from it | Corrupt field pages: orphaned owner |
+| Nonempty save outside an indexed transaction | Field pages save refused |
+| Cancelled load | Saved-world validation cancelled |
+
+Parsing and loading stage candidates before replacing output; refusals preserve
+the caller's field state. Whole-world entry applies its separate transactional
+admission rules before publication.
+
 Version 3 adds section 8 for compact scent floors. Each 40-byte record contains
 signed i32 world-cell x and z, both aligned to multiples of eight, followed by
 four u64 masks in scent-channel order. The block spans 8 x 8 one-metre cells;

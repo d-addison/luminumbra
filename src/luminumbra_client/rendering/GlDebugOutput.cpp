@@ -1,6 +1,7 @@
 #include "GlDebugOutput.h"
 
 #include "core/Log.h"
+#include "core/RuntimeScenarioConfig.h"
 #include "luminumbra_common/core/Environment.h"
 
 #include <atomic>
@@ -9,25 +10,11 @@ namespace Luminumbra::Rendering::GlDebug {
 
 namespace {
 
-// Install state + counters. Atomics because the driver may invoke the callback
-// from a non-render thread on async (non-SYNCHRONOUS) contexts; we force
-// SYNCHRONOUS so in practice it is the render thread, but the atomics keep the
-// telemetry race-free regardless and cost nothing on the hot path.
-// The driver callback and installer run independently, so state must survive both call stacks.
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-std::atomic<bool> g_installed{false};
-// Driver callbacks update process-lifetime telemetry read outside any one callback invocation.
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-std::atomic<unsigned long long> g_total{0};
-// Driver callbacks update process-lifetime telemetry read outside any one callback invocation.
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-std::atomic<unsigned long long> g_errors{0};
-// Driver callbacks update process-lifetime telemetry read outside any one callback invocation.
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-std::atomic<unsigned long long> g_warnings{0};
-// Driver callbacks update process-lifetime telemetry read outside any one callback invocation.
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-std::atomic<unsigned long long> g_notifications{0};
+// Installation survives driver calls; message telemetry lives in the runtime counters.
+std::atomic<bool>& InstalledState() {
+    static std::atomic<bool> installed{false};
+    return installed;
+}
 
 const char* source_str(GLenum source) {
     switch (source) {
@@ -88,6 +75,8 @@ const char* severity_str(GLenum severity) {
     }
 }
 
+} // namespace
+
 void GLAPIENTRY debug_message_router(GLenum source,
                                      GLenum type,
                                      GLuint id,
@@ -98,13 +87,18 @@ void GLAPIENTRY debug_message_router(GLenum source,
     (void)length;
     (void)user_param;
 
-    g_total.fetch_add(1, std::memory_order_relaxed);
+    // Preserve the application callback's noisy driver-message suppression list.
+    if (id == 131169 || id == 131185 || id == 131218 || id == 131204) {
+        return;
+    }
+    auto& counters = Client::ScenarioHarness::GetGLDebugRuntimeCounters();
+    counters.messages.fetch_add(1, std::memory_order_relaxed);
 
     // An ERROR type, or anything the driver flags HIGH, is a real fault: surface it
     // as an error regardless of the message type.: we only log it.
     const bool is_error = (type == GL_DEBUG_TYPE_ERROR) || (severity == GL_DEBUG_SEVERITY_HIGH);
     if (is_error) {
-        g_errors.fetch_add(1, std::memory_order_relaxed);
+        counters.errors.fetch_add(1, std::memory_order_relaxed);
         LUMINUMBRA_CORE_ERROR("[GL][{}][{}][{}] id={} {}",
                               source_str(source),
                               type_str(type),
@@ -118,7 +112,7 @@ void GLAPIENTRY debug_message_router(GLenum source,
         case GL_DEBUG_SEVERITY_NOTIFICATION:
             // Suppressed at the driver level by default (glDebugMessageControl), so
             // this branch only runs in LUMIN_GL_DEBUG=verbose mode. Keep it quiet (trace).
-            g_notifications.fetch_add(1, std::memory_order_relaxed);
+            counters.notifications.fetch_add(1, std::memory_order_relaxed);
             LUMINUMBRA_CORE_TRACE("[GL][{}][{}][NOTIFICATION] id={} {}",
                                   source_str(source),
                                   type_str(type),
@@ -126,7 +120,7 @@ void GLAPIENTRY debug_message_router(GLenum source,
                                   message ? message : "");
             break;
         default: // LOW / MEDIUM warnings, perf tips, deprecation, portability.
-            g_warnings.fetch_add(1, std::memory_order_relaxed);
+            counters.warnings.fetch_add(1, std::memory_order_relaxed);
             LUMINUMBRA_CORE_WARN("[GL][{}][{}][{}] id={} {}",
                                  source_str(source),
                                  type_str(type),
@@ -137,10 +131,8 @@ void GLAPIENTRY debug_message_router(GLenum source,
     }
 }
 
-} // namespace
-
 bool InstallGlDebugCallback() {
-    if (g_installed.load(std::memory_order_acquire)) {
+    if (InstalledState().load(std::memory_order_acquire)) {
         return true; // idempotent
     }
 
@@ -176,7 +168,7 @@ bool InstallGlDebugCallback() {
             GL_DONT_CARE, GL_DONT_CARE, GL_DEBUG_SEVERITY_NOTIFICATION, 0, nullptr, GL_FALSE);
     }
 
-    g_installed.store(true, std::memory_order_release);
+    InstalledState().store(true, std::memory_order_release);
     LUMINUMBRA_CORE_INFO(
         "GL KHR_debug output installed (synchronous{}); routing driver messages to the engine log",
         verbose ? ", verbose" : ", notifications suppressed");
@@ -190,16 +182,15 @@ bool InstallGlDebugCallback() {
 }
 
 bool IsGlDebugInstalled() {
-    return g_installed.load(std::memory_order_acquire);
+    return InstalledState().load(std::memory_order_acquire);
 }
 
 GlDebugCounters GetGlDebugCounters() {
-    GlDebugCounters c;
-    c.total = g_total.load(std::memory_order_relaxed);
-    c.errors = g_errors.load(std::memory_order_relaxed);
-    c.warnings = g_warnings.load(std::memory_order_relaxed);
-    c.notifications = g_notifications.load(std::memory_order_relaxed);
-    return c;
+    const auto stats = Client::ScenarioHarness::CurrentGLDebugRuntimeStats();
+    return {.total = stats.messages,
+            .errors = stats.errors,
+            .warnings = stats.warnings,
+            .notifications = stats.notifications};
 }
 
 void LabelGlObject(GLenum identifier, GLuint name, const std::string& label) {

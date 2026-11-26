@@ -33,6 +33,7 @@
 #include "luminumbra_common/systems/PlantCoarse.h"
 #include "luminumbra_common/systems/PlantDiseaseSystem.h"
 #include "luminumbra_common/systems/PollinationSystem.h"
+#include "luminumbra_common/systems/RegionElapsedTicks.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/SoilNutrientSystem.h"
 #include "luminumbra_common/world/Chunk.h"
@@ -1103,6 +1104,76 @@ TEST(RegionConsumerGate, EmptyUnknownAndInvalidOwnersAreBlockedOnlyWithInstalled
     EXPECT_TRUE(gate.Allows(entity));
     registry.get<C::PlantRegionComponent>(entity).owner_x = 0;
     EXPECT_FALSE(gate.Allows(entity));
+}
+
+TEST(RegionElapsedTicks, LegacyDueFrozenAndZeroWindows) {
+    entt::registry registry;
+    const auto entity = registry.create();
+    const std::array<RegionKey, 4> due{{{0, 0}, {1, 0}, {2, 0}, {-1, -1}}};
+    const std::map<RegionKey, std::uint32_t> windows{
+        {{0, 0}, 8}, {{1, 0}, 0}, {{-1, -1}, 65536}, {{3, 0}, 32}};
+    const W::RegionElapsedTicks elapsed(windows);
+    const RegionConsumerGate gate(registry, due, elapsed);
+    const RegionConsumerGate legacy_due(registry, due);
+    const RegionConsumerGate legacy;
+    const RegionConsumerGate empty_due(registry, {}, elapsed);
+    const std::map<RegionKey, std::uint32_t> empty_windows;
+    const RegionConsumerGate empty_elapsed(registry, due, W::RegionElapsedTicks(empty_windows));
+    EXPECT_EQ(W::RegionElapsedTicks{}.ForOwner({123, -456}), 1u);
+    EXPECT_EQ(elapsed.ForOwner({0, 0}), 8u);
+    EXPECT_EQ(elapsed.ForOwner({1, 0}), 0u);
+    EXPECT_EQ(elapsed.ForOwner({2, 0}), 0u);
+    EXPECT_EQ(legacy.ElapsedTicks(entity), 1u);
+    EXPECT_EQ(
+        RegionConsumerGate(RegionConsumerGate::PlantIdentity::Simulation).ElapsedTicks(entity), 1u);
+    EXPECT_EQ(gate.ElapsedTicks(entity), 0u); // No transform or saved owner.
+    auto& position = registry.emplace<C::TransformComponent>(entity).position;
+    struct Case {
+        float x;
+        bool allowed;
+        std::uint32_t ticks;
+    };
+    const std::array cases{Case{4, true, 8},
+                           Case{513, true, 0},
+                           Case{1025, true, 0},  // Due, but no elapsed window.
+                           Case{1537, false, 0}, // Frozen/not due, despite a map entry.
+                           Case{-0.5f, true, 65536},
+                           Case{std::numeric_limits<float>::infinity(), false, 0},
+                           Case{std::numeric_limits<float>::quiet_NaN(), false, 0}};
+    for (const auto& item : cases) {
+        SCOPED_TRACE(item.x);
+        position = {item.x, 0, item.x < 0 ? -0.5f : 4.0f};
+        EXPECT_EQ(gate.Allows(entity), item.allowed);
+        EXPECT_EQ(gate.AllowsPosition(position), item.allowed);
+        EXPECT_EQ(gate.ElapsedTicks(entity), item.ticks);
+        EXPECT_EQ(gate.ElapsedTicksAtPosition(position), item.ticks);
+        EXPECT_EQ(legacy_due.ElapsedTicks(entity), item.allowed ? 1u : 0u);
+        EXPECT_EQ(legacy.ElapsedTicks(entity), 1u);
+        EXPECT_EQ(legacy.ElapsedTicksAtPosition(position), 1u);
+        EXPECT_EQ(empty_due.ElapsedTicks(entity), 0u);
+        EXPECT_EQ(empty_elapsed.ElapsedTicks(entity), 0u);
+    }
+    // Persistent plant ownership wins even when the transform is invalid or absent.
+    registry.emplace<C::PlantRegionComponent>(entity, std::uint64_t{1}, -1, -1, std::uint64_t{0});
+    EXPECT_EQ(gate.ElapsedTicks(entity), 65536u);
+    registry.remove<C::TransformComponent>(entity);
+    EXPECT_EQ(gate.ElapsedTicks(entity), 65536u);
+    registry.get<C::PlantRegionComponent>(entity).owner_x = 9;
+    EXPECT_EQ(gate.ElapsedTicks(entity), 0u);
+
+    std::vector<std::uint64_t> scratch;
+    const RegionConsumerGate scratch_gate(
+        registry, due, scratch, RegionConsumerGate::PlantIdentity::Simulation, elapsed);
+    auto& owner = registry.get<C::PlantRegionComponent>(entity);
+    owner.owner_x = 1;
+    owner.owner_z = 0;
+    EXPECT_TRUE(scratch_gate.UsesSimulationPlantIdentity());
+    EXPECT_TRUE(scratch_gate.Allows(entity));
+    EXPECT_EQ(scratch_gate.ElapsedTicks(entity), 0u);
+    // Installing an elapsed view never opts existing one-step consumers into elapsed rules.
+    registry.emplace<C::MortalComponent>(entity).lifespan_ticks = 100;
+    luminumbra::ai::RunLifespanOnTick(registry, 1, scratch_gate);
+    EXPECT_EQ(registry.get<C::MortalComponent>(entity).age_ticks, 1u);
 }
 
 TEST(RegionConsumerGate, AdmissionWorkScalesWithDueOwnersAndQueriedParticipants) {
@@ -4618,4 +4689,435 @@ void CheckResourceGridCopyDiagnostics() {
 TEST(RegionConsumerGate, ResourceGridCopiesPreserveCellsAndCountOnlyBufferCopies) {
     ASSERT_NO_FATAL_FAILURE(CheckResourceGridCopyDiagnostics<F::SoilGrid>());
     ASSERT_NO_FATAL_FAILURE(CheckResourceGridCopyDiagnostics<F::IrrigationGrid>());
+}
+
+namespace {
+struct AlarmElapsedReference {
+    float x;
+    float level;
+    bool predator;
+    bool dead;
+    bool alarmed;
+    std::uint32_t ticks;
+    bool raised = false;
+};
+
+// Independent scalar oracle: due-time inputs, synchronous steps, windows ending together.
+void AdvanceAlarmReference(std::vector<AlarmElapsedReference>& actors, float dt) {
+    std::uint32_t longest = 0;
+    for (const auto& actor : actors) {
+        longest = std::max(longest, actor.ticks);
+    }
+    const float rate = dt * static_cast<float>(Luminumbra::TICKS_PER_SECOND);
+    const float keep = 1.0f - std::clamp((1.0f - 0.85f) * rate, 0.0f, 1.0f);
+    std::vector<float> levels(actors.size());
+    for (std::uint32_t remaining = longest; remaining != 0; --remaining) {
+        for (std::size_t index = 0; index < actors.size(); ++index) {
+            const auto& listener = actors[index];
+            levels[index] = listener.level;
+            if (listener.ticks < remaining) {
+                continue;
+            }
+            if (listener.dead) {
+                levels[index] = 0;
+                continue;
+            }
+            float level = listener.alarmed ? 1.0f : listener.level * keep;
+            for (std::size_t source_index = 0; source_index < actors.size(); ++source_index) {
+                const auto& source = actors[source_index];
+                if (source_index == index || source.ticks < remaining || source.dead ||
+                    source.predator != listener.predator) {
+                    continue;
+                }
+                const float strength =
+                    source.alarmed ? 1.0f : (source.level >= 0.25f ? source.level : 0);
+                const float dx = source.x - listener.x;
+                const float distance = Luminumbra::DeterministicMath::Sqrt(dx * dx);
+                if (distance < 12.0f) {
+                    level = std::max(level,
+                                     strength * 0.9f * (1.0f - distance * (1.0f / 12.0f)) * rate);
+                }
+            }
+            levels[index] = std::clamp(level, 0.0f, 1.0f);
+        }
+        for (std::size_t index = 0; index < actors.size(); ++index) {
+            auto& actor = actors[index];
+            actor.raised = actor.raised || levels[index] > actor.level + 1.0e-6f;
+            actor.level = levels[index];
+        }
+    }
+}
+
+entt::entity
+ElapsedAlarmActor(entt::registry& registry, const AlarmElapsedReference& spec, int owner) {
+    const auto entity = registry.create();
+    registry.emplace<C::TransformComponent>(entity).position = {spec.x, 0, 0};
+    auto& creature = registry.emplace<C::CreatureComponent>(entity);
+    creature.is_predator = spec.predator;
+    creature.eaten = spec.dead;
+    auto& alarm = registry.emplace<C::AlarmComponent>(entity);
+    alarm.level = spec.level;
+    alarm.alarmed = spec.alarmed ? 1 : 0;
+    registry.emplace<C::PlantRegionComponent>(entity).owner_x = owner;
+    return entity;
+}
+} // namespace
+
+TEST(HerdAlarm, RegionalElapsedMatchesApprovedReferenceAndFreezesListeners) {
+    for (const auto ticks : {0u, 1u, 2u, 8u, 32u}) {
+        for (const float dt : {0.0f,
+                               Luminumbra::SECONDS_PER_TICK * 0.5f,
+                               Luminumbra::SECONDS_PER_TICK,
+                               Luminumbra::SECONDS_PER_TICK * 2.0f}) {
+            SCOPED_TRACE(ticks);
+            SCOPED_TRACE(dt);
+            entt::registry registry;
+            std::vector<AlarmElapsedReference> expected{
+                {0, 0, false, false, true, ticks},
+                {5, 0, false, false, false, ticks},
+                {10, 0, false, false, false, ticks},
+                {15, 0, false, false, false, ticks},
+                {100, 0.2f, false, false, false, ticks},
+                {2, 0.6f, true, false, false, ticks},
+                {1, 0.8f, false, true, true, ticks},
+                {2, 0.17f, false, false, false, 0}, // frozen listener
+                {14, 1, false, false, true, 0},     // frozen source
+                {3, 0.4f, false, false, true, 0},   // due with zero elapsed
+                {104, 0, false, false, true, std::min(ticks, 2u)}};
+            std::vector<entt::entity> entities;
+            for (std::size_t index = 0; index < expected.size(); ++index) {
+                const int owner = index < 7 ? 0 : (index < 9 ? 1 : (index == 9 ? 2 : 3));
+                entities.push_back(ElapsedAlarmActor(registry, expected[index], owner));
+            }
+            const std::array<RegionKey, 3> due{{{0, 0}, {2, 0}, {3, 0}}};
+            const std::map<RegionKey, std::uint32_t> windows{
+                {{0, 0}, ticks}, {{1, 0}, ticks}, {{2, 0}, 0}, {{3, 0}, std::min(ticks, 2u)}};
+            AI::CreatureTickAdmission admission;
+            admission.Capture(registry,
+                              RegionConsumerGate(registry, due, W::RegionElapsedTicks(windows)));
+            // The cached owner survives a move into a denied region.
+            registry.get<C::PlantRegionComponent>(entities[0]).owner_x = 1;
+            expected.push_back({108, 0, false, false, false, 1});
+            entities.push_back(ElapsedAlarmActor(registry, expected.back(), 1)); // newborn
+            AdvanceAlarmReference(expected, dt);
+            const auto stats = AI::RunHerdAlarmOnTick(registry, dt, &admission, true);
+            EXPECT_EQ(stats.participants, ticks == 0 ? 1 : 9);
+            EXPECT_EQ(stats.sources, ticks == 0 ? 0 : 3);
+            int raised = 0;
+            for (std::size_t index = 0; index < entities.size(); ++index) {
+                EXPECT_EQ(std::bit_cast<std::uint32_t>(
+                              registry.get<C::AlarmComponent>(entities[index]).level),
+                          std::bit_cast<std::uint32_t>(expected[index].level))
+                    << index;
+                raised += expected[index].raised ? 1 : 0;
+            }
+            EXPECT_EQ(stats.raised, raised);
+        }
+    }
+    // Boundary windows use a tiny roster so the largest supported replay stays fast.
+    for (const auto ticks : {36000u, 36001u, 65536u}) {
+        entt::registry registry;
+        std::vector<AlarmElapsedReference> expected{{0, 0.2f, false, false, false, ticks},
+                                                    {100, 0.3f, false, false, false, ticks}};
+        std::vector<entt::entity> entities;
+        for (const auto& spec : expected) {
+            entities.push_back(ElapsedAlarmActor(registry, spec, 0));
+        }
+        const std::array<RegionKey, 1> due{{{0, 0}}};
+        const std::map<RegionKey, std::uint32_t> windows{{{0, 0}, ticks}};
+        AI::CreatureTickAdmission admission;
+        admission.Capture(registry,
+                          RegionConsumerGate(registry, due, W::RegionElapsedTicks(windows)));
+        AdvanceAlarmReference(expected, Luminumbra::SECONDS_PER_TICK);
+        const auto stats =
+            AI::RunHerdAlarmOnTick(registry, Luminumbra::SECONDS_PER_TICK, &admission, true);
+        EXPECT_EQ(stats.participants, 2);
+        for (std::size_t index = 0; index < entities.size(); ++index) {
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(
+                          registry.get<C::AlarmComponent>(entities[index]).level),
+                      std::bit_cast<std::uint32_t>(expected[index].level));
+        }
+    }
+}
+
+TEST(HerdAlarm, ElapsedInvalidWindowIsAtomicAndLegacyRemainsOneStep) {
+    entt::registry registry;
+    const auto first = ElapsedAlarmActor(registry, {0, 0.2f, false, false, false, 1}, 0);
+    const auto invalid = ElapsedAlarmActor(registry, {2, 0, false, false, true, 1}, 1);
+    const std::array<RegionKey, 2> due{{{0, 0}, {1, 0}}};
+    for (const auto ticks : {65537u, std::numeric_limits<std::uint32_t>::max()}) {
+        const std::map<RegionKey, std::uint32_t> windows{{{0, 0}, 1}, {{1, 0}, ticks}};
+        AI::CreatureTickAdmission admission;
+        admission.Capture(registry,
+                          RegionConsumerGate(registry, due, W::RegionElapsedTicks(windows)));
+        EXPECT_THROW(
+            AI::RunHerdAlarmOnTick(registry, Luminumbra::SECONDS_PER_TICK, &admission, true),
+            std::invalid_argument);
+        EXPECT_EQ(registry.get<C::AlarmComponent>(first).level, 0.2f);
+        EXPECT_EQ(registry.get<C::AlarmComponent>(invalid).level, 0);
+    }
+    // Denied/zero windows are no-ops, including a dead listener with nonzero state.
+    registry.get<C::CreatureComponent>(first).eaten = true;
+    const std::map<RegionKey, std::uint32_t> zero{{{0, 0}, 0}, {{1, 0}, 0}};
+    AI::CreatureTickAdmission admission;
+    admission.Capture(registry, RegionConsumerGate(registry, due, W::RegionElapsedTicks(zero)));
+    EXPECT_EQ(AI::RunHerdAlarmOnTick(registry, Luminumbra::SECONDS_PER_TICK, &admission, true)
+                  .participants,
+              0);
+    EXPECT_EQ(registry.get<C::AlarmComponent>(first).level, 0.2f);
+    // Legacy ignores observational elapsed values and still drains dead listeners.
+    EXPECT_EQ(
+        AI::RunHerdAlarmOnTick(registry, Luminumbra::SECONDS_PER_TICK, &admission).participants, 2);
+    EXPECT_EQ(registry.get<C::AlarmComponent>(first).level, 0);
+    EXPECT_EQ(registry.get<C::AlarmComponent>(invalid).level, 1);
+    entt::registry empty;
+    EXPECT_EQ(
+        AI::RunHerdAlarmOnTick(empty, Luminumbra::SECONDS_PER_TICK, nullptr, true).participants, 0);
+}
+
+TEST(Decomposition, RegionalElapsedMatchesSingleTicksAndReleasesExactlyOnce) {
+    for (const auto ticks : {0u, 1u, 2u, 7u, 32u, 36001u, 65536u}) {
+        SCOPED_TRACE(ticks);
+        entt::registry registry, reference;
+        std::vector<entt::entity> entities;
+        const auto build = [](entt::registry& target) {
+            std::vector<entt::entity> result;
+            for (const auto duration :
+                 {0u, 1u, 7u, 900u, 65537u, std::numeric_limits<std::uint32_t>::max()}) {
+                const auto entity = target.create();
+                result.push_back(entity);
+                target.emplace<C::TransformComponent>(entity).position = {4, 0, 0};
+                target.emplace<C::MortalComponent>(entity).dead = 1;
+                auto& decay = target.emplace<C::DecayComponent>(entity);
+                decay.decay_duration = duration;
+                decay.decay_ticks = duration > 1 && duration != 65537u ? duration - 2 : 0;
+                decay.nutrient_released_milli =
+                    duration == 0
+                        ? 0
+                        : static_cast<std::uint16_t>(1000ull * decay.decay_ticks / duration);
+            }
+            for (int owner = 0; owner < 3; ++owner) {
+                const auto entity = target.create();
+                result.push_back(entity);
+                target.emplace<C::TransformComponent>(entity).position = {
+                    static_cast<float>(owner * 512 + 4), 0, 0};
+                target.emplace<C::MortalComponent>(entity).dead = owner == 0 ? 0 : 1;
+                target.emplace<C::DecayComponent>(entity).decay_duration = 0;
+            }
+            const auto creature = target.create();
+            result.push_back(creature);
+            target.emplace<C::TransformComponent>(creature).position = {4, 0, 0};
+            target.emplace<C::CreatureComponent>(creature).eaten = true;
+            target.emplace<C::DecayComponent>(creature).decay_duration = 7;
+            return result;
+        };
+        entities = build(registry);
+        ASSERT_EQ(build(reference), entities);
+        const std::array<RegionKey, 2> due{{{0, 0}, {2, 0}}};
+        const std::map<RegionKey, std::uint32_t> windows{{{0, 0}, ticks}, {{2, 0}, 0}};
+        const RegionConsumerGate gate(registry, due, W::RegionElapsedTicks(windows));
+        AI::CreatureTickAdmission admission;
+        admission.Capture(registry, gate);
+        const auto creature = entities.back();
+        registry.get<C::TransformComponent>(creature).position.x = 516;
+        // Newborn corpse gets the current tick, even when the captured window is empty.
+        for (auto* target : {&registry, &reference}) {
+            const auto newborn = target->create();
+            target->emplace<C::TransformComponent>(newborn).position = {1540, 0, 0};
+            target->emplace<C::CreatureComponent>(newborn).eaten = true;
+            target->emplace<C::DecayComponent>(newborn).decay_duration = 7;
+            if (target == &registry) {
+                entities.push_back(newborn);
+            }
+        }
+        std::uint32_t remaining_release = 1000; // eaten creature's full load
+        for (std::size_t index = 0; index < 6; ++index) {
+            remaining_release +=
+                1000u - registry.get<C::DecayComponent>(entities[index]).nutrient_released_milli;
+        }
+        std::uint32_t expected_release = 0;
+        int expected_finished = 0;
+        const auto steps = std::max(1u, ticks);
+        for (std::uint32_t step = 0; step < steps; ++step) {
+            std::vector<RegionKey> reference_due;
+            if (ticks != 0) {
+                reference_due.push_back({0, 0});
+            }
+            if (step + 1 == steps) {
+                reference_due.push_back({3, 0});
+            }
+            const RegionConsumerGate reference_gate(reference, reference_due);
+            const auto stats = LegacyCreatureTickOracle::RunDecompositionOnTick(
+                reference, step, nullptr, reference_gate);
+            expected_release += stats.released_total;
+            expected_finished += stats.finished;
+        }
+        // Finished history must not contribute to the runtime traversal oracle.
+        for (int index = 0; index < 128; ++index) {
+            registry.emplace<C::DecayComponent>(registry.create()).fully_decomposed = 1;
+        }
+        const auto stats =
+            AI::RunDecompositionOnTick(registry, 65536, &admission, gate, nullptr, true);
+        EXPECT_EQ(stats.visited, entities.size());
+        EXPECT_EQ(stats.decaying, ticks == 0 ? 1 : 8);
+        EXPECT_EQ(stats.released_total, expected_release);
+        EXPECT_EQ(stats.finished, expected_finished);
+        for (const auto entity : entities) {
+            const auto& actual = registry.get<C::DecayComponent>(entity);
+            const auto& expected = reference.get<C::DecayComponent>(entity);
+            EXPECT_EQ(actual.decay_ticks, expected.decay_ticks);
+            EXPECT_EQ(actual.nutrient_released_milli, expected.nutrient_released_milli);
+            EXPECT_EQ(actual.fully_decomposed, expected.fully_decomposed);
+        }
+        // Oversized integer windows are O(1), saturate safely, and finish exactly once.
+        const std::map<RegionKey, std::uint32_t> finish_windows{
+            {{0, 0}, std::numeric_limits<std::uint32_t>::max()}};
+        const std::array<RegionKey, 1> finish_due{{{0, 0}}};
+        const RegionConsumerGate finish_gate(
+            registry, finish_due, W::RegionElapsedTicks(finish_windows));
+        admission.Capture(registry, finish_gate);
+        // Recapture uses current ownership: the moved creature and the newborn are
+        // now frozen outside region 0, regardless of the size of its finish window.
+        EXPECT_FALSE(admission.Allows(creature));
+        EXPECT_FALSE(admission.Allows(entities.back()));
+        const auto frozen_finish =
+            AI::RunDecompositionOnTick(registry, 65537, &admission, finish_gate, nullptr, true);
+        EXPECT_EQ(frozen_finish.visited,
+                  entities.size() - static_cast<std::size_t>(stats.finished));
+        const auto& moved_reference = reference.get<C::DecayComponent>(creature);
+        const auto& newborn_reference = reference.get<C::DecayComponent>(entities.back());
+        EXPECT_EQ(stats.finished + frozen_finish.finished,
+                  6 + static_cast<int>(moved_reference.fully_decomposed));
+        EXPECT_EQ(stats.released_total + frozen_finish.released_total,
+                  remaining_release - 1000u + moved_reference.nutrient_released_milli +
+                      newborn_reference.nutrient_released_milli);
+        for (std::size_t index = 6; index < entities.size(); ++index) {
+            const auto& actual = registry.get<C::DecayComponent>(entities[index]);
+            const auto& expected = reference.get<C::DecayComponent>(entities[index]);
+            EXPECT_EQ(actual.decay_ticks, expected.decay_ticks);
+            EXPECT_EQ(actual.nutrient_released_milli, expected.nutrient_released_milli);
+            EXPECT_EQ(actual.fully_decomposed, expected.fully_decomposed);
+        }
+        // Readmit only the moved creature so all seven original corpses can finish.
+        registry.get<C::TransformComponent>(creature).position.x = 4;
+        admission.Capture(registry, finish_gate);
+        EXPECT_TRUE(admission.Allows(creature));
+        EXPECT_EQ(admission.ElapsedTicks(creature), std::numeric_limits<std::uint32_t>::max());
+        const auto finish =
+            AI::RunDecompositionOnTick(registry, 65538, &admission, finish_gate, nullptr, true);
+        EXPECT_EQ(finish.visited,
+                  entities.size() - static_cast<std::size_t>(stats.finished) -
+                      static_cast<std::size_t>(frozen_finish.finished));
+        EXPECT_EQ(stats.finished + frozen_finish.finished + finish.finished, 7);
+        EXPECT_EQ(stats.released_total + frozen_finish.released_total + finish.released_total,
+                  remaining_release + newborn_reference.nutrient_released_milli);
+        EXPECT_EQ(registry.get<C::DecayComponent>(creature).decay_ticks, 7u);
+        EXPECT_EQ(registry.get<C::DecayComponent>(creature).nutrient_released_milli, 1000u);
+        EXPECT_EQ(registry.get<C::DecayComponent>(creature).fully_decomposed, 1u);
+        const auto after =
+            AI::RunDecompositionOnTick(registry, 65539, &admission, finish_gate, nullptr, true);
+        EXPECT_EQ(after.visited, 4u);
+        EXPECT_EQ(after.finished, 0);
+        EXPECT_EQ(after.released_total, 0u);
+    }
+}
+
+TEST(Decomposition, ElapsedPublicationAbortKeepsLiveRoster) {
+    for (const bool prepare_before_abort : {false, true}) {
+        entt::registry registry;
+        const auto corpse = Creature(registry, 4);
+        registry.get<C::CreatureComponent>(corpse).eaten = true;
+        registry.emplace<C::DecayComponent>(corpse).decay_duration = 7;
+        const auto frozen = Creature(registry, 516);
+        registry.get<C::CreatureComponent>(frozen).eaten = true;
+        registry.emplace<C::DecayComponent>(frozen).decay_duration = 0;
+        const auto& roster = AI::DecompositionParticipants(registry);
+        const std::array<RegionKey, 1> due{{{0, 0}}};
+        const std::map<RegionKey, std::uint32_t> windows{{{0, 0}, 8}};
+        const RegionConsumerGate gate(registry, due, W::RegionElapsedTicks(windows));
+        AI::CreatureTickAdmission admission;
+        admission.Capture(registry, gate);
+        F::FoliageRegistryStage stage;
+        stage.Begin(registry, 1);
+        const auto aborted =
+            AI::RunDecompositionStage(stage.registry(), 8, &admission, gate, roster, true, true);
+        EXPECT_EQ(aborted.finished, 1);
+        EXPECT_EQ(aborted.released_total, 1000u);
+        EXPECT_EQ(roster.size(), 2u);
+        if (prepare_before_abort) {
+            stage.PreparePublication(registry);
+        }
+        stage.Abort();
+        stage.Commit(registry);
+        EXPECT_EQ(stage.publications(), 0u);
+        EXPECT_EQ(registry.get<C::DecayComponent>(corpse).decay_ticks, 0u);
+        EXPECT_EQ(registry.get<C::DecayComponent>(corpse).nutrient_released_milli, 0u);
+        EXPECT_EQ(registry.get<C::DecayComponent>(corpse).fully_decomposed, 0u);
+        EXPECT_EQ(roster.size(), 2u);
+        stage.Begin(registry, 1);
+        const auto retried =
+            AI::RunDecompositionStage(stage.registry(), 8, &admission, gate, roster, true, true);
+        EXPECT_EQ(retried.released_total, aborted.released_total);
+        EXPECT_EQ(retried.finished, 1);
+        stage.PreparePublication(registry);
+        stage.Commit(registry);
+        stage.Commit(registry);
+        EXPECT_EQ(stage.publications(), 1u);
+        EXPECT_FALSE(roster.contains(corpse));
+        EXPECT_TRUE(roster.contains(frozen));
+        EXPECT_EQ(registry.get<C::DecayComponent>(corpse).nutrient_released_milli, 1000u);
+        const auto after =
+            AI::RunDecompositionStage(registry, 9, &admission, gate, roster, false, true);
+        EXPECT_EQ(after.visited, 1u);
+        EXPECT_EQ(after.finished, 0);
+        EXPECT_EQ(after.released_total, 0u);
+    }
+}
+
+TEST(Decomposition, ElapsedDetachedTraversalStaysBoundedByCandidatePool) {
+    entt::registry registry, detached;
+    const auto corpse = Creature(registry, 4);
+    registry.get<C::CreatureComponent>(corpse).eaten = true;
+    registry.emplace<C::DecayComponent>(corpse).decay_duration = 7;
+    // Unstaged live participants must not be visited by the detached tick.
+    for (int index = 0; index < 63; ++index) {
+        registry.emplace<C::DecayComponent>(registry.create());
+    }
+    const auto& roster = AI::DecompositionParticipants(registry);
+    ASSERT_EQ(roster.size(), 64u);
+    const std::array<RegionKey, 1> due{{{0, 0}}};
+    const std::map<RegionKey, std::uint32_t> windows{{{0, 0}, 8}};
+    const RegionConsumerGate gate(registry, due, W::RegionElapsedTicks(windows));
+    AI::CreatureTickAdmission admission;
+    admission.Capture(registry, gate);
+    ASSERT_EQ(detached.create(corpse), corpse);
+    detached.emplace<C::CreatureComponent>(corpse, registry.get<C::CreatureComponent>(corpse));
+    detached.emplace<C::DecayComponent>(corpse, registry.get<C::DecayComponent>(corpse));
+    std::vector<entt::entity> scratch;
+    const auto stats =
+        AI::RunDetachedDecompositionOnTick(detached, 8, &admission, gate, roster, scratch, true);
+    EXPECT_EQ(stats.visited, 1u);
+    EXPECT_EQ(stats.finished, 1);
+    EXPECT_EQ(stats.released_total, 1000u);
+    EXPECT_EQ(scratch, std::vector<entt::entity>{corpse});
+    EXPECT_EQ(roster.size(), 64u);
+    EXPECT_EQ(registry.get<C::DecayComponent>(corpse).decay_ticks, 0u);
+    const auto repeated =
+        AI::RunDetachedDecompositionOnTick(detached, 9, &admission, gate, roster, scratch, true);
+    EXPECT_EQ(repeated.visited, 0u);
+    EXPECT_EQ(repeated.released_total, 0u);
+    detached.remove<C::DecayComponent>(corpse);
+    EXPECT_EQ(
+        AI::RunDetachedDecompositionOnTick(detached, 10, &admission, gate, roster, scratch, true)
+            .visited,
+        0u);
+    EXPECT_EQ(roster.size(), 64u);
+    // Also exercise a missing candidate through the borrowed-roster traversal.
+    const std::set<entt::entity> selected{corpse};
+    EXPECT_EQ(AI::RunDecompositionOnTick(detached, 11, &admission, gate, &selected, true).visited,
+              1u);
+    EXPECT_EQ(roster.size(), 64u);
+    const std::set<entt::entity> empty;
+    EXPECT_EQ(AI::RunDecompositionStage(registry, 12, &admission, gate, empty, false, true).visited,
+              0u);
 }

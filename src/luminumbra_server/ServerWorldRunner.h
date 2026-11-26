@@ -235,11 +235,12 @@ public:
         return m_bootError;
     }
 
-    // boot water-settle exit stats + the settle CONTRACT. A global all-asleep
-    // fixed point does not exist for this solver (wet/dry boundary cells limit-cycle and
+    // Boot water-settle exit stats and contract. Flowing worlds need not reach an all-asleep
+    // fixed point (wet/dry boundary cells limit-cycle and
     // wake propagation re-wakes neighbours), so the contract that makes save/load water
     // round-trip is: FRESH boots leave zero uninitialized chunks (contract_ok) and run a
-    // fixed deterministic transient budget; LOADED boots skip the water settle entirely
+    // bounded deterministic transient budget, with exact continuation once asleep and drained;
+    // LOADED boots skip the water settle entirely
     // (water paused through Boot — water_settle_skipped — the restored mid-flow state is
     // authoritative) and resume from the persisted sim-window cursor. awake > 0 at exit
     // is expected and fine. Populated by Boot; asserted by the heavy oracle.
@@ -247,7 +248,7 @@ public:
         std::size_t water_chunks = 0;      // chunks with has_water_sim at exit
         std::size_t awake = 0;             // water chunks not asleep at exit (informational)
         std::size_t uninited = 0;          // streamed chunks never water-initialized
-        int iterations = 0;                // physics-creature settle iterations consumed
+        int iterations = 0;                // Water settle passes actually executed.
         bool water_settle_skipped = false; // true = loaded boot (water paused, no settle)
         bool contract_ok() const {
             return uninited == 0;

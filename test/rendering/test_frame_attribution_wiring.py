@@ -5520,7 +5520,8 @@ class DiagnosticScenarioCaptureWiring(unittest.TestCase):
     def test_backbuffer_completion_uses_the_checked_pixel_writer(self):
         harness = read(CLIENT / "core/RuntimeScenarioHarness.cpp")
         writer = block(harness, "bool WriteBackbufferPpm(")
-        self.assertIn("return WritePixelBufferPpm(path, width, height, pixels);", writer)
+        self.assertIn("if (!WritePixelBufferPpm(path, width, height, pixels)) {", writer)
+        self.assertIn("return false;", block(writer, "if (!WritePixelBufferPpm("))
         self.assertNotIn("std::ofstream", writer)
         self.assertLess(writer.index("CapturePixelBytes(width, height, 3, bytes)"),
                         writer.index("std::vector<unsigned char> pixels(bytes)"))
@@ -5846,6 +5847,34 @@ class SweepCameraInputWiring(unittest.TestCase):
 
 
 class ScenarioGeometryMaskWiringTests(unittest.TestCase):
+    def test_water_evidence_is_required_only_for_submitted_forward_water(self):
+        capture = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
+        reader = block(capture, "SkyPixelMask ReadScenarioSkyMask(")
+        predicate = re.search(r"if \((include_water.*?)\) \{", reader, re.S).group(1)
+        for include_water, water_layer, water_draws in itertools.product(
+                (False, True), (False, True), (0, 1, 2**64 - 1)):
+            with self.subTest(include_water=include_water, water_layer=water_layer,
+                              water_draws=water_draws):
+                required = cpp_expression(predicate, **{
+                    "include_water": include_water,
+                    "pipeline.isolation_config().renders(IsolationLayer::Water)": water_layer,
+                    "pipeline.get_last_render_pass_stats().water_draws": water_draws,
+                })
+                self.assertEqual(required, include_water and water_layer and water_draws != 0)
+        # Dry frames still need readable depth; submitted water never bypasses
+        # validity or extent checks, including a missing or stale replay.
+        self.assertLess(reader.index("!source.read_aov("), reader.index("if (include_water"))
+        water = block(reader, "if (include_water")
+        self.assertIn("!water.valid() || water.width != width || water.height != height", water)
+        self.assertIn("return {};", water)
+        self.assertIn("BuildSkyPixelMask(depth, width, height, water.pixels)", water)
+        self.assertNotIn("capture_diagnostics_enabled()", reader)
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        self.assertIn("m_last_render_pass_stats = {};",
+                      block(pipeline, "void RenderPipeline::prepare_frame("))
+        self.assertIn("m_last_render_pass_stats.water_draws += water_stats.water_draws;",
+                      block(pipeline, "void RenderPipeline::execute_stage_water("))
+
     def test_sky_clear_value_does_not_erase_finite_geometry(self):
         harness = read(CLIENT / "core/RuntimeScenarioHarness.cpp")
         classifier = compact(block(harness, "SkyPixelMask BuildSkyPixelMask("))
@@ -5884,6 +5913,49 @@ class ScenarioGeometryMaskWiringTests(unittest.TestCase):
         self.assertIn('glGetUniformLocation(static_cast<GLuint>(visibility_program), "u_model")', replay)
         self.assertIn("glUniformMatrix4fv(model_location", replay)
         self.assertNotIn('m_water_shader->setMat4("u_model"', replay)
+
+    def test_remaining_capture_consumers_require_matching_masks(self):
+        capture = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
+        for method in ("captureWaterVisual", "captureMaterialVisual", "writeScenarioBackbuffer"):
+            body = block(capture, "ScenarioRunnerImpl::" + method + "(")
+            self.assertIn("ReadScenarioSkyMask(", body)
+            self.assertIn('refuseScenarioCapture("scenario_geometry_readback_unavailable")', body)
+        pins = block(capture, "void ScenarioRunnerImpl::onPreRenderCapturePins(")
+        water_capture = pins[:pins.index("set_water_visibility_capture_enabled(true)")]
+        for scenario in ("lod_ground", "lod_seam_arrival", "water_visual", "material_visual",
+                         "window_mode_stress"):
+            self.assertIn("scenario_config." + scenario + "_smoke()", water_capture)
+
+    def test_remaining_classifiers_validate_and_use_depth_eligibility(self):
+        harness = read(CLIENT / "core/RuntimeScenarioHarness.cpp")
+        material = read(CLIENT / "core/scenarios/MaterialLodAnalysis.cpp")
+        for source, methods in (
+            (harness, ("AnalyzeScreenshotPixels", "AnalyzeWaterReflection", "AnalyzeWaterLuminance",
+                       "AnalyzeLodHolePixels")),
+            (material, ("AnalyzeMaterialPixels", "BuildMaterialHeatmap")),
+        ):
+            for method in methods:
+                body = block(source, method + "(const std::vector<unsigned char>& pixels,")
+                self.assertIn("ValidateScenarioPixelBuffers(pixels, sky_mask, width, height)", body)
+                self.assertIn("sky_mask.pixels[", body)
+        for predicate in ("IsDarkVoidPixel", "IsNearBlackPixel", "IsBackgroundBluePixel", "IsSeamSliverPixel"):
+            self.assertNotIn(predicate, harness)
+        for filename, signature in (("PlayerViewSmoke", "PlayerViewPixelStats AnalyzePlayerViewPixels("),
+                                    ("FarLodHorizonSmoke", "FarLodBoundaryBandStats AnalyzeFarLodBoundaryBand(")):
+            source = read(CLIENT / ("core/scenarios/" + filename + ".cpp"))
+            self.assertNotIn("pixels[offset] <= 2u", block(source, signature))
+        player = read(CLIENT / "core/scenarios/PlayerViewSmoke.cpp")
+        self.assertIn('{"void_predicate", "reversed_z_depth_water"}', player)
+
+    def test_backbuffer_stats_require_geometry_before_readback_and_publish_after_success(self):
+        harness = read(CLIENT / "core/RuntimeScenarioHarness.cpp")
+        writer = block(harness, "bool WriteBackbufferPpm(")
+        self.assertIn("sky_mask == nullptr", writer)
+        self.assertIn("!sky_mask->valid_for(width, height)", writer)
+        self.assertLess(writer.index("sky_mask == nullptr"), writer.index("glReadPixels("))
+        self.assertLess(writer.index("!sky_mask->valid_for(width, height)"), writer.index("glReadPixels("))
+        self.assertLess(writer.index("if (!WritePixelBufferPpm("), writer.index("*out_stats = stats"))
+        self.assertLess(writer.index("if (!WritePixelBufferPpm("), writer.index("*out_lod_hole_stats = hole_stats"))
 
 
 if __name__ == "__main__":

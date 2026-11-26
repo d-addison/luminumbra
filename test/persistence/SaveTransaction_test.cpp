@@ -1,5 +1,6 @@
 #include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/persistence/CreatedWorldArtifacts.h"
+#include "luminumbra_common/persistence/RecoveryDurability.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 
@@ -537,6 +538,271 @@ void ComputeFinalTree(const fs::path& baseline_dir, TreeMap& out) {
 #endif
 
 } // namespace
+
+namespace {
+using Receipt = detail::NamespaceReceipt;
+using ReceiptPhase = detail::NamespaceReceiptPhase;
+using ReceiptOutcome = detail::NamespaceRetirementOutcome;
+using NamespaceState = detail::NamespaceEntryState;
+using FlushObservation = detail::NamespaceFlushObservation;
+
+// One artifact, one durable receipt, and at most one injected failure per attempt.
+// Reconstructing the receipt from durable models restarting between any two phases.
+struct ReceiptOperations {
+    Receipt durable{.identity = {7, 11, 13}, .phase = ReceiptPhase::Prepared};
+    std::array<std::uint64_t, 3> occupant = durable.identity;
+    FlushObservation observation{
+        .succeeded = true, .volume_known = true, .ntfs = true, .volume = 7};
+    bool present = true;
+    bool retained = true;
+    bool unknown_namespace = false;
+    std::string failure;
+    std::vector<std::string> trace;
+
+    NamespaceState inspect_namespace(const std::array<std::uint64_t, 3>& expected) {
+        trace.emplace_back("inspect");
+        if (unknown_namespace)
+            return static_cast<NamespaceState>(255);
+        if (failure == "inspect" || (present && occupant != expected))
+            return NamespaceState::Refused;
+        return present ? NamespaceState::Owned : NamespaceState::Absent;
+    }
+    bool record_prepared(const std::array<std::uint64_t, 3>& expected) {
+        trace.emplace_back("prepare");
+        if (failure == "prepare")
+            return false;
+        durable = {.identity = expected, .phase = ReceiptPhase::Prepared};
+        return true;
+    }
+    bool remove_owned(const std::array<std::uint64_t, 3>& expected) {
+        trace.emplace_back("remove");
+        if (failure == "remove" || !present || occupant != expected)
+            return false;
+        present = false;
+        return failure != "remove-after";
+    }
+    bool record_namespace_done(const std::array<std::uint64_t, 3>& expected) {
+        trace.emplace_back("namespace-record");
+        if (failure == "namespace-record")
+            return false;
+        durable = {.identity = expected, .phase = ReceiptPhase::NamespaceDone};
+        return true;
+    }
+    FlushObservation flush_later_commit() {
+        trace.emplace_back("later-flush");
+        return failure == "later-flush" ? FlushObservation{} : observation;
+    }
+    bool record_flush_observed(const std::array<std::uint64_t, 3>& expected,
+                               const FlushObservation& observed) {
+        trace.emplace_back("flush-record");
+        if (failure == "flush-record" || !observed.succeeded || !observed.volume_known ||
+            !observed.ntfs || observed.volume != expected.front())
+            return false;
+        durable = {.identity = expected, .phase = ReceiptPhase::FlushObserved};
+        return true;
+    }
+    bool retire_receipt(const std::array<std::uint64_t, 3>& expected) {
+        trace.emplace_back("retire");
+        if (failure == "retire" || durable.identity != expected ||
+            durable.phase != ReceiptPhase::FlushObserved)
+            return false;
+        retained = false;
+        return true;
+    }
+};
+} // namespace
+
+TEST(SaveTransaction, NamespaceReceiptRetainedWithoutLaterFlush) {
+    ReceiptOperations operations;
+    operations.observation.succeeded = false;
+    auto receipt = operations.durable;
+    EXPECT_EQ(detail::CompleteNamespaceRetirement(receipt, operations), ReceiptOutcome::Failed);
+    EXPECT_FALSE(operations.present);
+    EXPECT_TRUE(operations.retained);
+    EXPECT_EQ(operations.durable.phase, ReceiptPhase::NamespaceDone);
+    EXPECT_EQ(operations.trace,
+              (std::vector<std::string>{"inspect", "remove", "namespace-record", "later-flush"}));
+}
+
+TEST(SaveTransaction, NamespaceReceiptRetainedOnDifferentVolume) {
+    ReceiptOperations operations;
+    operations.observation.volume = 19;
+    auto receipt = operations.durable;
+    EXPECT_EQ(detail::CompleteNamespaceRetirement(receipt, operations), ReceiptOutcome::Retained);
+    EXPECT_TRUE(operations.retained);
+    EXPECT_EQ(receipt.phase, ReceiptPhase::NamespaceDone);
+    EXPECT_EQ(operations.trace.back(), "later-flush");
+}
+
+TEST(SaveTransaction, NamespaceReceiptRetainedOnNonNtfsOrUnknownVolume) {
+    for (const bool known : {false, true}) {
+        SCOPED_TRACE(known);
+        ReceiptOperations operations;
+        operations.observation.volume_known = known;
+        operations.observation.ntfs = !known;
+        auto receipt = operations.durable;
+        EXPECT_EQ(detail::CompleteNamespaceRetirement(receipt, operations),
+                  ReceiptOutcome::Retained);
+        EXPECT_TRUE(operations.retained);
+        EXPECT_EQ(receipt.phase, ReceiptPhase::NamespaceDone);
+        EXPECT_EQ(operations.trace.back(), "later-flush");
+    }
+}
+
+TEST(SaveTransaction, NamespaceReceiptRetiresAfterLaterSameVolumeNtfsFlush) {
+    ReceiptOperations operations;
+    auto receipt = operations.durable;
+    EXPECT_EQ(detail::CompleteNamespaceRetirement(receipt, operations), ReceiptOutcome::Retired);
+    EXPECT_FALSE(operations.retained);
+    EXPECT_EQ(operations.durable.phase, ReceiptPhase::FlushObserved);
+    EXPECT_EQ(
+        operations.trace,
+        (std::vector<std::string>{
+            "inspect", "remove", "namespace-record", "later-flush", "flush-record", "retire"}));
+}
+
+TEST(SaveTransaction, NamespaceReceiptSurvivesInterruptionBeforeLaterFlush) {
+    ReceiptOperations operations;
+    operations.failure = "later-flush";
+    auto receipt = operations.durable;
+    EXPECT_EQ(detail::CompleteNamespaceRetirement(receipt, operations), ReceiptOutcome::Failed);
+    ASSERT_TRUE(operations.retained);
+    ASSERT_FALSE(operations.present);
+    // Discard volatile phase state, and model an identity-matching resurrected entry.
+    receipt = operations.durable;
+    operations.present = true;
+    operations.occupant = receipt.identity;
+    operations.failure.clear();
+    operations.trace.clear();
+    EXPECT_EQ(detail::CompleteNamespaceRetirement(receipt, operations), ReceiptOutcome::Retired);
+    EXPECT_FALSE(operations.present);
+    EXPECT_FALSE(operations.retained);
+    EXPECT_EQ(operations.trace,
+              (std::vector<std::string>{"inspect",
+                                        "prepare",
+                                        "remove",
+                                        "namespace-record",
+                                        "later-flush",
+                                        "flush-record",
+                                        "retire"}));
+}
+
+TEST(SaveTransaction, NamespaceReceiptFailuresPreserveEvidenceAndRetry) {
+    for (const auto* failure : {"inspect",
+                                "prepare",
+                                "remove",
+                                "namespace-record",
+                                "later-flush",
+                                "flush-record",
+                                "retire"}) {
+        SCOPED_TRACE(failure);
+        ReceiptOperations operations;
+        operations.failure = failure;
+        if (operations.failure == "prepare")
+            operations.durable.phase = ReceiptPhase::FlushObserved;
+        auto receipt = operations.durable;
+        EXPECT_EQ(detail::CompleteNamespaceRetirement(receipt, operations), ReceiptOutcome::Failed);
+        EXPECT_TRUE(operations.retained);
+        EXPECT_EQ(operations.trace.back(), failure);
+        EXPECT_LE(operations.trace.size(), 7u);
+        // Retry uses only the durable record, including when the entry is already absent.
+        receipt = operations.durable;
+        operations.failure.clear();
+        operations.trace.clear();
+        EXPECT_EQ(detail::CompleteNamespaceRetirement(receipt, operations),
+                  ReceiptOutcome::Retired);
+        EXPECT_FALSE(operations.present);
+        EXPECT_FALSE(operations.retained);
+    }
+}
+
+TEST(SaveTransaction, NamespaceReceiptRetirementRetryReusesCompletedPhases) {
+    ReceiptOperations operations;
+    operations.failure = "retire";
+    auto receipt = operations.durable;
+    ASSERT_EQ(detail::CompleteNamespaceRetirement(receipt, operations), ReceiptOutcome::Failed);
+    ASSERT_EQ(operations.durable.phase, ReceiptPhase::FlushObserved);
+    ASSERT_FALSE(operations.present);
+    // Retries append no records and need no further flush once completion is durable.
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        SCOPED_TRACE(attempt);
+        receipt = operations.durable;
+        operations.trace.clear();
+        EXPECT_EQ(detail::CompleteNamespaceRetirement(receipt, operations), ReceiptOutcome::Failed);
+        EXPECT_TRUE(operations.retained);
+        EXPECT_EQ(operations.trace, (std::vector<std::string>{"inspect", "retire"}));
+    }
+    operations.failure.clear();
+    EXPECT_EQ(detail::CompleteNamespaceRetirement(receipt, operations), ReceiptOutcome::Retired);
+}
+
+TEST(SaveTransaction, NamespaceReceiptInvalidatesOldCompletionBeforeRepeatedRemoval) {
+    ReceiptOperations operations;
+    operations.durable.phase = ReceiptPhase::FlushObserved;
+    operations.failure = "remove-after";
+    auto receipt = operations.durable;
+    EXPECT_EQ(detail::CompleteNamespaceRetirement(receipt, operations), ReceiptOutcome::Failed);
+    EXPECT_FALSE(operations.present);
+    EXPECT_TRUE(operations.retained);
+    EXPECT_EQ(operations.durable.phase, ReceiptPhase::Prepared);
+    EXPECT_EQ(operations.trace, (std::vector<std::string>{"inspect", "prepare", "remove"}));
+    // A crash after removal but before its completion record cannot reuse the old flush.
+    operations.failure = "later-flush";
+    operations.trace.clear();
+    receipt = operations.durable;
+    EXPECT_EQ(detail::CompleteNamespaceRetirement(receipt, operations), ReceiptOutcome::Failed);
+    EXPECT_TRUE(operations.retained);
+    EXPECT_EQ(operations.durable.phase, ReceiptPhase::NamespaceDone);
+    EXPECT_EQ(operations.trace,
+              (std::vector<std::string>{"inspect", "namespace-record", "later-flush"}));
+}
+
+TEST(SaveTransaction, NamespaceReceiptRefusesForeignIdentityAndInvalidState) {
+    for (const auto invalid : {0, 1, 2, 3}) {
+        SCOPED_TRACE(invalid);
+        ReceiptOperations operations;
+        auto receipt = operations.durable;
+        if (invalid == 0)
+            operations.occupant[1] = 23;
+        else if (invalid == 1)
+            receipt.identity = {};
+        else if (invalid == 2)
+            receipt.phase = static_cast<ReceiptPhase>(255);
+        else
+            operations.unknown_namespace = true;
+        EXPECT_EQ(detail::CompleteNamespaceRetirement(receipt, operations), ReceiptOutcome::Failed);
+        EXPECT_TRUE(operations.present);
+        EXPECT_TRUE(operations.retained);
+        EXPECT_EQ(operations.durable.phase, ReceiptPhase::Prepared);
+        EXPECT_EQ(operations.trace.size(), invalid == 0 || invalid == 3 ? 1u : 0u);
+    }
+}
+
+TEST(SaveTransaction, HistoricalV4JournalStillDecodesAndRecovers) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+    const auto baseline = Tree(save.path());
+    {
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+        HookGuard hook(+[](const char* step, const fs::path&) {
+            if (std::string_view(step) == "before-rollback")
+                throw std::runtime_error("interrupted before rollback");
+        });
+        transaction.abort(nullptr);
+    }
+    auto records = JournalRecords(save.path());
+    ASSERT_FALSE(records.empty());
+    // Pin the historical schema independently of the current writer constant.
+    for (auto& record : records)
+        record["schema"] = "luminumbra.journal.v4";
+    Put(journal_directory(save.path()) / "txn.json", EncodeJournalRecords(records));
+    EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::RolledBack);
+    EXPECT_EQ(Tree(save.path()), baseline);
+    EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::NothingToDo);
+}
 
 TEST(SaveTransaction, TemporaryRootsAreProcessScopedAndDistinct) {
     const TempSave first, second;

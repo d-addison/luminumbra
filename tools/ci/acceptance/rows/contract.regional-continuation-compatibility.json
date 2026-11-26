@@ -12,6 +12,18 @@
   "evidence": [
     {
       "kind": "ctest",
+      "ref": "RegionalWaterCadence.GlobalCapIncludesPreparationAndBothSeamEndpoints"
+    },
+    {
+      "kind": "ctest",
+      "ref": "RegionalWaterCadence.SealedOwnersConserveVolumeAndRegisters"
+    },
+    {
+      "kind": "ctest",
+      "ref": "RegionalWaterCadence.ApprovedRankingSurvivesPermutationAndReload"
+    },
+    {
+      "kind": "ctest",
       "ref": "FoliageFieldPages.BorderExchangeRejectsPartialEndpointsAndInvalidFluxBeforeAnyWrites"
     },
     {

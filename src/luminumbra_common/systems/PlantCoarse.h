@@ -2,9 +2,14 @@
 
 #include "PlantGrowthSystem.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <functional>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace luminumbra::foliage {
 // Promote a resident carrying a genome/transform into an authoritative plant. Merely
@@ -118,5 +123,73 @@ inline std::uint32_t AdvancePlantGrowthCoarse(Comp::PlantGrowthComponent& growth
         identity->region_stamp = current_tick;
     }
     return advanced;
+}
+
+// Opt-in regional consumer. The caller binds the sampler to the due tick and keeps
+// the gate/windows and registry roster unchanged during this call. Exact integer
+// equivalence assumes that same sampled environment and infection for every tick.
+// Reuse caller-owned entity storage; only the participating component pools are
+// visited. Zero/denied windows neither sample nor change growth or owner stamps.
+template<typename Sampler>
+    requires std::is_invocable_r_v<PlantEnvSample, const Sampler&, const Comp::TransformComponent&>
+inline PlantGrowthStats
+RunRegionalPlantGrowthOnTick(entt::registry& reg,
+                             std::uint64_t current_tick,
+                             const Sampler& sample_env,
+                             const ::Luminumbra::world::RegionConsumerGate& gate,
+                             std::vector<entt::entity>& entities) {
+    if (&entities == &gate.PlantIdentityScratch())
+        throw std::invalid_argument("Plant identity scratch must be distinct");
+    entities.clear();
+    auto view = reg.view<Comp::PlantTag,
+                         Comp::PlantGrowthComponent,
+                         const Comp::PlantGenomeComponent,
+                         const Comp::TransformComponent>();
+    // Storage is bounded by the smallest participating component pool, not world size.
+    entities.reserve(view.size_hint());
+    for (const auto entity : view) {
+        const auto admission = gate.AdmissionFor(entity);
+        if (!admission.allowed || admission.elapsed_ticks == 0)
+            continue;
+        const auto* health = reg.try_get<const Comp::PlantHealthComponent>(entity);
+        // Match the regional window cap; the independent coarse primitive retains
+        // its 36,000-tick cap. Validate the entire roster before sampling or writing.
+        if (admission.elapsed_ticks > 65536 ||
+            (health && health->infection > Comp::kDiseaseUnitScale))
+            throw std::invalid_argument("Invalid regional plant window");
+        entities.push_back(entity);
+    }
+    if (gate.UsesSimulationPlantIdentity()) {
+        OrderPlantsBySimulationIdentity(reg, entities, gate.PlantIdentityScratch());
+    } else {
+        std::sort(entities.begin(), entities.end());
+    }
+    if constexpr (std::is_pointer_v<Sampler> || std::is_member_pointer_v<Sampler>) {
+        if (!entities.empty() && sample_env == nullptr)
+            throw std::bad_function_call();
+    }
+    PlantGrowthStats stats;
+    for (const auto entity : entities) {
+        const auto env = std::invoke(sample_env, view.get<const Comp::TransformComponent>(entity));
+        const auto* health = reg.try_get<const Comp::PlantHealthComponent>(entity);
+        const std::uint16_t infection = health ? health->infection : std::uint16_t{0};
+        auto remaining = gate.ElapsedTicks(entity);
+        // At most two subwindows per plant (65,536 total); tending takes at most
+        // 255 steps overall and wrap fallback at most 36,000 per coarse call.
+        while (remaining != 0) {
+            const auto elapsed = std::min(remaining, 36000u);
+            stats.advanced += static_cast<int>(
+                AdvancePlantGrowthCoarse(view.get<Comp::PlantGrowthComponent>(entity),
+                                         view.get<const Comp::PlantGenomeComponent>(entity),
+                                         env,
+                                         infection,
+                                         elapsed,
+                                         current_tick,
+                                         reg.try_get<Comp::PlantRegionComponent>(entity)));
+            remaining -= elapsed;
+        }
+        ++stats.updated;
+    }
+    return stats;
 }
 } // namespace luminumbra::foliage

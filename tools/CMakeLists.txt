@@ -1,5 +1,17 @@
 # tools/CMakeLists.txt
 
+# Read-only persisted-ledger evidence; no host or save lifecycle is started.
+add_executable(luminumbra_active_regions_dump active_regions_dump.cpp)
+target_include_directories(luminumbra_active_regions_dump PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(luminumbra_active_regions_dump PRIVATE luminumbra_common)
+target_compile_definitions(luminumbra_active_regions_dump PRIVATE
+    LUMINUMBRA_ACTIVE_REGIONS_DUMP_ENTRY)
+luminumbra_configure_first_party_target(luminumbra_active_regions_dump)
+luminumbra_pin_fp_determinism(luminumbra_active_regions_dump)
+if(MINGW)
+    target_link_options(luminumbra_active_regions_dump PRIVATE -municode)
+endif()
+
 option(LUMINUMBRA_BUILD_TOOLS "Build optional command-line content tools" OFF)
 if(LUMINUMBRA_BUILD_TOOLS)
     add_executable(luminumbra_active_regions_bench active_regions_bench.cpp)
@@ -225,6 +237,15 @@ if(BUILD_TESTING)
                 "${CMAKE_CURRENT_SOURCE_DIR}/perf/test_summarize_process_receipts.py")
     set_tests_properties(ProcessReceiptSummaryPython
         PROPERTIES LABELS "perf;tools" TIMEOUT 60)
+    add_test(
+        NAME DeferredStackEvidenceSmoke
+        COMMAND "${Python3_EXECUTABLE}" -I -B
+                "${CMAKE_CURRENT_SOURCE_DIR}/perf/test_capture_deferred_stack.py"
+                DeferredStackEvidenceTests.test_fixed_deadlines_and_failure_receipts
+                DeferredStackEvidenceTests.test_rejects_mixed_binary_or_source_identity
+                DeferredStackEvidenceTests.test_synthetic_profile_report_is_deterministic)
+    set_tests_properties(DeferredStackEvidenceSmoke
+        PROPERTIES LABELS "perf;tools" TIMEOUT 30)
     add_test(
         NAME PerformanceMeasurementValidatorContract
         COMMAND "${Python3_EXECUTABLE}"

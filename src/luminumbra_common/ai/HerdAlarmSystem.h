@@ -33,6 +33,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -86,34 +87,61 @@ struct HerdAlarmStats {
 // RunHerdAlarmOnTick: maintain the propagating alarm field. id-ordered, two-phase snapshot.
 // `dt` scales the decay/propagation rate so the field is frame-rate independent (the sim
 // runs a fixed dt; the parameter keeps the signature honest and lets tests exercise decay).
+// Elapsed opt-in samples geometry/role/alarmed at due time and repeats this exact float step,
+// never dt * elapsed. Windows end at the same due tick: shorter windows (including newborns)
+// join only for their suffix; zero/denied windows neither emit nor receive. As in foliage
+// replay, reject windows above 65,536 before any writes. Stats count distinct participants,
+// initial sources and participants raised at least once. Legacy callers retain one step.
 inline HerdAlarmStats RunHerdAlarmOnTick(entt::registry& reg,
                                          float dt,
-                                         const CreatureTickAdmission* admission = nullptr) {
+                                         const CreatureTickAdmission* admission = nullptr,
+                                         bool use_elapsed = false) {
     HerdAlarmStats stats;
 
     auto view = reg.view<Comp::AlarmComponent, Comp::CreatureComponent, Comp::TransformComponent>();
 
-    // id-ordered participant list (deterministic traversal).
-    std::vector<entt::entity> ents(view.begin(), view.end());
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
-    });
-    if (ents.empty())
-        return stats; // empty roster -> pure no-op.
-
-    // ---- First pass: snapshot each participant's pre-tick state. ----
+    // Only admitted alarm participants are staged; storage is bounded by the EnTT entity
+    // mask, independent of nonparticipants and completed decomposition history.
     struct Snap {
         entt::entity e;
         float x, z;
-        float level;        // pre-tick level
-        bool predator;      // role to match on
-        bool dead;          // carcass: neither emits nor receives
-        float src_strength; // 0 if not a source this tick; else its emitting strength
+        float level;
+        bool predator;
+        bool dead;
+        bool alarmed;
+        std::uint32_t ticks;
+        float next;
+        float src_strength;
+        bool raised;
     };
+    const auto elapsedFor = [&](entt::entity entity) {
+        if (admission && !admission->Allows(entity)) {
+            return 0u;
+        }
+        return use_elapsed && admission ? admission->ElapsedTicks(entity) : 1u;
+    };
+    std::size_t participant_count = 0;
+    std::uint32_t steps = 0;
+    for (auto entity : view) {
+        const auto ticks = elapsedFor(entity);
+        if (use_elapsed && ticks > 65536u) {
+            throw std::invalid_argument("Unbounded alarm window");
+        }
+        if (ticks != 0) {
+            ++participant_count;
+            steps = std::max(steps, ticks);
+        }
+    }
+    if (participant_count == 0) {
+        return stats;
+    }
+    // Validate first, then allocate exactly the admitted count. reserve checks max_size;
+    // no byte-size multiplication or storage proportional to denied owners is needed.
     std::vector<Snap> snap;
-    snap.reserve(ents.size());
-    for (auto e : ents) {
-        if (admission && !admission->Allows(e)) {
+    snap.reserve(participant_count);
+    for (auto e : view) {
+        const auto ticks = elapsedFor(e);
+        if (ticks == 0) {
             continue;
         }
         const auto& al = view.get<Comp::AlarmComponent>(e);
@@ -121,17 +149,24 @@ inline HerdAlarmStats RunHerdAlarmOnTick(entt::registry& reg,
         const auto& tf = view.get<Comp::TransformComponent>(e);
         const float level = AlarmClamp01(al.level);
         const bool dead = cr.eaten;
-        float src = 0.0f;
-        if (!dead) {
-            // alarmed==1 is a full-strength source; otherwise above-threshold level relays.
-            if (al.alarmed != 0) {
-                src = 1.0f;
-            } else if (level >= kAlarmSourceThreshold) {
-                src = level;
-            }
-        }
-        snap.push_back({e, tf.position.x, tf.position.z, level, cr.is_predator, dead, src});
+        const float src =
+            dead ? 0.0f
+                 : (al.alarmed != 0 ? 1.0f : (level >= kAlarmSourceThreshold ? level : 0.0f));
+        snap.push_back({e,
+                        tf.position.x,
+                        tf.position.z,
+                        level,
+                        cr.is_predator,
+                        dead,
+                        al.alarmed != 0,
+                        ticks,
+                        level,
+                        src,
+                        false});
     }
+    std::sort(snap.begin(), snap.end(), [](const Snap& a, const Snap& b) {
+        return entt::to_integral(a.e) < entt::to_integral(b.e);
+    });
 
     stats.participants = static_cast<int>(snap.size());
     for (const Snap& s : snap) {
@@ -149,59 +184,65 @@ inline HerdAlarmStats RunHerdAlarmOnTick(entt::registry& reg,
     decay_loss = AlarmClamp01(decay_loss);
     const float keep = 1.0f - decay_loss;
 
-    // ---- Second pass: compute each creature's level from the frozen snapshot. ----
+    // At most 65,536 substeps and N*N pair probes per step (the existing all-pairs
+    // propagation contract). Reuse the N snapshots; no allocation or world scan per step.
     const float invR = kAlarmRadius > 0.0f ? (1.0f / kAlarmRadius) : 0.0f;
-    for (std::size_t i = 0; i < snap.size(); ++i) {
-        const Snap& self = snap[i];
-
-        auto& al = view.get<Comp::AlarmComponent>(self.e);
-
-        if (self.dead) {
-            // The dead don't warn and don't fear: drain to zero deterministically.
-            al.level = 0.0f;
-            continue;
+    for (std::uint32_t remaining = steps; remaining != 0; --remaining) {
+        for (auto& self : snap) {
+            self.src_strength =
+                self.ticks < remaining || self.dead
+                    ? 0.0f
+                    : (self.alarmed ? 1.0f
+                                    : (self.level >= kAlarmSourceThreshold ? self.level : 0.0f));
         }
-
-        // Self term: own pre-tick level decayed toward 0. An alarmed source pins itself to
-        // full so the originator stays lit while it senses the threat.
-        float next = self.level * keep;
-        if (al.alarmed != 0) {
-            next = 1.0f; // pin ONLY a genuinely-alarmed originator (not a relay that hit 1.0).
-        }
-
-        // Propagation term: take the STRONGEST same-role source contribution in range
-        // (max, not sum, so density doesn't blow the field past 1 and the gradient is the
-        // distance to the nearest/loudest alarm). Scaled by closeness and source strength.
-        float best_in = 0.0f;
-        for (std::size_t j = 0; j < snap.size(); ++j) {
-            if (j == i)
+        for (std::size_t i = 0; i < snap.size(); ++i) {
+            auto& self = snap[i];
+            if (self.ticks < remaining) {
                 continue;
-            const Snap& o = snap[j];
-            if (o.dead || o.src_strength <= 0.0f)
+            }
+            if (self.dead) {
+                self.next = 0.0f;
                 continue;
-            if (o.predator != self.predator)
-                continue; // only warn your own kind/role.
-            const float dx = o.x - self.x;
-            const float dz = o.z - self.z;
-            const float d = dm::Sqrt(dx * dx + dz * dz);
-            if (d >= kAlarmRadius)
-                continue;                            // out of earshot.
-            const float closeness = 1.0f - d * invR; // 1 at source.. 0 at edge.
-            const float contrib = o.src_strength * kAlarmTransfer * closeness * rate;
-            if (contrib > best_in)
-                best_in = contrib;
+            }
+            float next = self.level * keep;
+            if (self.alarmed) {
+                next = 1.0f;
+            }
+            float best_in = 0.0f;
+            for (std::size_t j = 0; j < snap.size(); ++j) {
+                if (j == i)
+                    continue;
+                const Snap& other = snap[j];
+                if (other.dead || other.src_strength <= 0.0f || other.predator != self.predator)
+                    continue;
+                const float dx = other.x - self.x;
+                const float dz = other.z - self.z;
+                const float distance = dm::Sqrt(dx * dx + dz * dz);
+                if (distance >= kAlarmRadius)
+                    continue;
+                const float closeness = 1.0f - distance * invR;
+                const float contrib = other.src_strength * kAlarmTransfer * closeness * rate;
+                if (contrib > best_in)
+                    best_in = contrib;
+            }
+            if (best_in > next)
+                next = best_in;
+            self.next = AlarmClamp01(next);
+            self.raised = self.raised || self.next > self.level + 1.0e-6f;
         }
-
-        // Fold the incoming alarm in: the field rises to whichever is louder — its decayed
-        // self level or the best incoming contribution (so a relayed creature lights up but
-        // a creature already louder than its neighbour isn't pulled down by them).
-        if (best_in > next)
-            next = best_in;
-
-        next = AlarmClamp01(next);
-        if (next > self.level + 1.0e-6f)
+        // Publish only into the scratch snapshot until every listener has read the same
+        // pre-step field. No partial registry writes, even for invalid elapsed input.
+        for (auto& self : snap) {
+            if (self.ticks >= remaining) {
+                self.level = self.next;
+            }
+        }
+    }
+    for (const auto& self : snap) {
+        view.get<Comp::AlarmComponent>(self.e).level = self.level;
+        if (self.raised) {
             ++stats.raised;
-        al.level = next;
+        }
     }
 
     return stats;

@@ -368,6 +368,7 @@ add_executable(common_tests
     common/WorldDurableResidency_test.cpp
     common/WaterDeterminism_test.cpp
     common/RegionalWater_test.cpp
+    common/RegionalWaterCadence_test.cpp
     common/WaterSeedInputs_test.cpp
     common/PlayerAvatar_test.cpp
     common/ReplicationProtocol_test.cpp
@@ -381,8 +382,11 @@ add_executable(common_tests
     common/ServerHeadlessHygiene_test.cpp
     common/SimulationClock_test.cpp
     common/ActiveRegionLedger_test.cpp
+    tools/active_regions_dump_test.cpp
+    ../tools/active_regions_dump.cpp
     common/ActiveRegionPriority_test.cpp
     common/ActiveRegionScale_test.cpp
+    common/ActiveRegionAcceptance_test.cpp
     common/SimulationIdentityAllocator_test.cpp
     common/PlantCreationIdentity_test.cpp
     common/GroundObjectStore_test.cpp
@@ -1817,6 +1821,7 @@ add_executable(frontier_gates_test
     persistence/water_cursor_hash_test.cpp
     persistence/save_load_corruption_corpus_test.cpp
     persistence/SaveTransaction_test.cpp
+    persistence/recovery_durability_test.cpp
 )
 
 # The region consumer regressions also exceed the default COFF section count.
@@ -2629,9 +2634,23 @@ set_tests_properties(RegionalAdmissionReportContract PROPERTIES LABELS "simulati
 add_test(NAME ActiveRegionScaleReportContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_active_region_scale.py")
 set_tests_properties(ActiveRegionScaleReportContract PROPERTIES LABELS "simulation;tools" TIMEOUT 5)
+add_test(NAME DeferredStackEvidenceContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_deferred_stack.py")
+set_tests_properties(DeferredStackEvidenceContract PROPERTIES LABELS "perf;tools" TIMEOUT 30)
+add_test(NAME SimBudgetNeutralityContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py"
+        SimBudgetNeutralityTests)
+set_tests_properties(SimBudgetNeutralityContract PROPERTIES LABELS "simulation;tools" TIMEOUT 5)
+add_test(NAME SimBudgetReportContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_report_sim_budget.py")
+set_tests_properties(SimBudgetReportContract PROPERTIES LABELS "simulation;tools" TIMEOUT 5)
 add_test(NAME SimBudgetGateContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_sim_budget_gate.py")
 set_tests_properties(SimBudgetGateContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
+add_test(NAME RecoveryDurabilityEvidenceContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/persistence/test_recovery_durability_evidence.py")
+set_tests_properties(RecoveryDurabilityEvidenceContract PROPERTIES LABELS "persistence;tools" TIMEOUT 30)
 
 # GPU tracer micro-profile. Manual/GPU — needs a real GL context and a
 # hardware GPU (skips gracefully headless; writes the artifact but skips the perf

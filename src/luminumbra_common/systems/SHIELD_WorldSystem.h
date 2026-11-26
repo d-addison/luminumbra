@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -432,6 +433,12 @@ public:
                        const TerrainGenParams& params,
                        int seed);
     ~SHIELD_WorldSystem();
+    // Final owner-thread teardown after capture retirement and registry cleanup.
+    // Drain without publication, then detach borrowed services so retained const
+    // capture owners may be destroyed after the session and its job system.
+    void release_session_services();
+    // Const teardown diagnostic: no borrowed services or session callbacks remain.
+    bool session_services_released() const;
 
     // Generates voxel data for a chunk. target_step is the meshing step this
     // generation must support: step <= 1 (default) generates the full 17^3
@@ -872,6 +879,28 @@ public:
     // WaterSystem::SetBootSettleMode for the full rationale.
     void SetWaterBootSettleMode(bool on);
 
+    // Owner-thread boot only, immediately after update + wait_for_streaming_jobs.
+    // The caller keeps registry, anchors and configuration fixed across omitted passes.
+    // Refusal changes nothing; successful continuation preserves all non-timing observations.
+    bool TryCompleteBootWaterSettle(entt::registry& registry,
+                                    const std::vector<Vec3>& anchors,
+                                    PhysicsSystem* physics_system,
+                                    std::uint64_t skipped);
+    // Const owner-thread diagnostic: queue-history slots, cursor, count, activation phase.
+    [[nodiscard]] std::array<std::size_t, 11> boot_settle_bookkeeping() const {
+        return {m_recent_queue_depths[0],
+                m_recent_queue_depths[1],
+                m_recent_queue_depths[2],
+                m_recent_queue_depths[3],
+                m_recent_queue_depths[4],
+                m_recent_queue_depths[5],
+                m_recent_queue_depths[6],
+                m_recent_queue_depths[7],
+                m_recent_queue_depth_cursor,
+                m_recent_queue_depth_count,
+                static_cast<std::size_t>(m_update_tick_counter)};
+    }
+
     // loaded-boot water pause: a session booted from a save must not advance
     // water during Boot (the restored mid-flow state is authoritative). See
     // WaterSystem::SetBootPaused.
@@ -1087,11 +1116,26 @@ public:
     // Canonical collision lattice, independent of render LOD/residency. Uses committed or
     // edited authority when present, refuses incomplete authority instead of regenerating it.
     // Exactly (CHUNK_SIZE_X+1)*(CHUNK_SIZE_Z+1) samples; no world mutation.
-    bool sample_simulation_collision(i32 chunk_x, i32 chunk_z, std::span<float> heights) const;
+    // Legacy callers supply their original heightmap as baseline; regional callers
+    // retain the analytic/committed baseline independent of renderer residency.
+    bool sample_simulation_collision(i32 chunk_x,
+                                     i32 chunk_z,
+                                     std::span<float> heights,
+                                     std::span<const float> baseline = {}) const;
     // Owner-thread diagnostic: scalar terrain evaluations performed by collision sampling.
     u64 simulation_collision_terrain_evaluations() const {
         return m_collision_terrain_evaluations;
     }
+    // Owner-thread edit stamp, including edits within an already prepared tick.
+    u64 collision_edit_revision() const {
+        return m_collision_edit_revision;
+    }
+    // Const owner-thread diagnostic: SDF inputs visited by collision projection.
+    u64 simulation_collision_sdf_samples() const {
+        return m_collision_sdf_samples;
+    }
+    // Const owner-thread diagnostic; cold inventory owns no projection sample arrays.
+    std::size_t simulation_collision_projection_bytes() const;
     bool durable_residency() const {
         return m_durable_residency;
     }
@@ -1349,13 +1393,52 @@ private:
     std::function<std::shared_ptr<Chunk>(const IVec3&)> m_durable_chunk_loader;
     std::function<void(std::string)> m_durable_chunk_fault;
     mutable bool m_durable_read_failed = false;
+    // Derived column membership; never serialized or hashed.
+    static constexpr std::size_t kCollisionSamples = (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1);
+    struct CollisionSlab {
+        std::array<float, kCollisionSamples> surfaces{};
+        u64 revision = 0;
+        bool prepared = false;
+        bool valid = true;
+        bool active = false;
+    };
+    struct CollisionColumnSamples {
+        std::array<float, kCollisionSamples> highest{};
+        std::array<i32, kCollisionSamples> owners{};
+        CollisionColumnSamples() {
+            highest.fill(-std::numeric_limits<float>::infinity());
+            owners.fill(std::numeric_limits<i32>::min());
+        }
+    };
+    struct CollisionColumn {
+        // One fixed lattice per indexed slab, including generated inputs staged
+        // before their first edit. No SDF copies or LRU-dependent reprojection.
+        std::map<i32, CollisionSlab> slabs;
+        std::set<i32> pending;
+        // Disjoint inclusive runs of active slabs, for clearing baseline heights.
+        std::map<i32, i32> runs;
+        // Fixed 289-sample arrays are allocated only when SDF is first projected;
+        // cold durable membership keeps only its pending slab coordinates.
+        std::unique_ptr<CollisionColumnSamples> samples;
+        u64 revision = 0;
+        std::size_t invalid = 0;
+    };
+    mutable std::unordered_map<u64, CollisionColumn> m_collision_columns;
+    void update_collision_slab(const IVec3& coords,
+                               const std::shared_ptr<Chunk>& source,
+                               std::span<const bool> changed = {}) const;
+    void invalidate_collision_samples(const IVec3& coords, std::span<const bool> changed = {});
     struct CollisionSamples {
         i32 x = 0;
         i32 z = 0;
         u64 generation = 0;
+        u64 column_revision = 0;
         u64 last_use = 0;
         float centre = 0;
         bool saved = false;
+        bool sdf = false;
+        bool projected = false;
+        bool initialized = false;
         bool valid = false;
         bool complete = false;
         std::array<float, (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1)> heights{};
@@ -1365,6 +1448,8 @@ private:
     // are invalidated at committed inventory/loader changes and terrain revisions.
     mutable std::array<CollisionSamples, 128> m_collision_samples{};
     mutable u64 m_collision_terrain_evaluations = 0;
+    mutable u64 m_collision_sdf_samples = 0;
+    u64 m_collision_edit_revision = 0;
     mutable u64 m_collision_sample_clock = 0;
     bool m_evictions_suspended = false;
     // Only restoration prepares derived seeds; read-only hash/collision probes do no extra work.
