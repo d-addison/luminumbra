@@ -79,7 +79,8 @@ protected:
     std::shared_ptr<Producer> producer;
     std::shared_ptr<Systems::SHIELD_WorldSystem> world;
     std::filesystem::path root = TestSupport::CreateUniqueTempDirectory("session_controller_");
-    const std::array<FarTileKey, 1> keys{{{5, 0, 0}}};
+    // V3 plus both source/read halos covers 6x6 regions, within 64 members.
+    const std::array<FarTileKey, 1> keys{{{3, 0, 0}}};
     void SetUp() override {
         jobs.startup(1);
         limits.rendering = FarWorldDevelopmentLimits();
@@ -178,6 +179,32 @@ protected:
     }
 };
 
+TEST_F(FarWorldSessionController, FixtureWindowsReadAndOversizedWindowKeepsExactFailure) {
+    // Cover the initial window and both successor directions without changing
+    // the finite profile. Each read retains at most 36 absent-member records.
+    const std::array<FarTileKey, 3> readable{{keys[0], {3, -1, 0}, {3, 1, 0}}};
+    for (const auto& key : readable) {
+        FarVolumeTileKey volume;
+        Save::AuthorityWindow window;
+        ASSERT_TRUE(ToFarVolumeTileKey(key, volume));
+        ASSERT_TRUE(Producer::source_window(volume, window));
+        const auto result = producer->read_committed(window, limits.capture.read);
+        ASSERT_EQ(result.membership, Save::AuthorityMembership::ProvenAbsent) << result.error;
+        EXPECT_EQ(result.members.size(), 36u);
+        EXPECT_TRUE(result.chunks.empty());
+        EXPECT_TRUE(result.error.empty());
+    }
+    // V5 needs 18x18 regions including halos, exceeding the same 64-member
+    // bound even for an empty save. This must remain a committed-read refusal.
+    const std::array<FarTileKey, 1> oversized{{{5, 0, 0}}};
+    ASSERT_TRUE(controller.Request(oversized));
+    EXPECT_EQ(controller.Pump(++frame), Controller::Phase::Refused);
+    EXPECT_EQ(controller.failure().source, Producer::Error::CommittedReadRefused);
+    EXPECT_EQ(controller.failure().capture, FarFrozenCaptureError::None);
+    EXPECT_EQ(producer->capture(), nullptr);
+    EXPECT_EQ(renderer.SessionMemoryPool(kFarTierCount)->refusals(), 0u);
+}
+
 TEST_F(FarWorldSessionController, ContinuousEditsCompleteActiveTransaction) {
     ASSERT_TRUE(controller.Request(keys));
     ASSERT_EQ(controller.Pump(++frame), Controller::Phase::Planning);
@@ -209,7 +236,7 @@ TEST_F(FarWorldSessionController, ContinuousEditsCompleteActiveTransaction) {
     const auto work = controller.work().admission_work;
     controller.Pump(frame); // duplicate frame must do no work
     EXPECT_EQ(controller.work().admission_work, work);
-    const std::array<FarTileKey, 1> last{{{5, -1, 0}}};
+    const std::array<FarTileKey, 1> last{{{3, -1, 0}}};
     ASSERT_TRUE(controller.Request(last));
     ASSERT_NO_FATAL_FAILURE(FinishBuild());
     EXPECT_EQ(controller.phase(), Controller::Phase::Complete);
@@ -254,7 +281,7 @@ TEST_F(FarWorldSessionController, RetirementPrunesOnlyAbsentKeys) {
     EXPECT_EQ(controller.RetireIdleHistory(), 0u);
     EXPECT_TRUE(controller.Retains(keys[0])); // current target is pinned
     ASSERT_NO_FATAL_FAILURE(FinishBuild());
-    const std::array<FarTileKey, 1> replacement{{{5, 1, 0}}};
+    const std::array<FarTileKey, 1> replacement{{{3, 1, 0}}};
     ASSERT_TRUE(controller.Request(replacement));
     for (unsigned pump = 0; pump < 2048; ++pump) {
         const auto phase = controller.Pump(++frame);
