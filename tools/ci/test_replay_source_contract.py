@@ -1347,6 +1347,106 @@ class AuthorityConsumerSourceContract(unittest.TestCase):
 
 
 class SessionUsabilitySourceContract(unittest.TestCase):
+    def assert_matching_restoration_completion(self, source):
+        rollback = self.function(source, "RollbackEntries", "")
+        matching = re.search(
+            r"if \(previous_bytes &&\s*!WorldSaveService::complete_restoration\(\s*"
+            r"destination,\s*current,\s*\{destination.parent_path\(\),\s*save_dir,\s*"
+            r"restored_stage.directory,\s*retired_stage.directory\},\s*errors\)\)\s*return false;",
+            rollback)
+        self.assertIsNotNone(matching)
+        self.assertLess(matching.start(), rollback.index('report_snapshot_step("rollback-entry"'))
+        self.assertRegex(rollback, r'if \(entry.path == kSnapshotIndexRelativePath\)\s*'
+                         r'order.push_back\(&entry\);')
+        self.assertRegex(rollback, r'if \(it->path != kSnapshotIndexRelativePath\)\s*'
+                         r'order.push_back\(&\*it\);')
+        self.assertLess(rollback.index("order.push_back(&entry)"),
+                        rollback.index("order.push_back(&*it)"))
+        self.assertIn("NearestExistingDirectory(destination.parent_path()), errors)", rollback)
+        recovery = self.function(source, "recover_pending_journal", "")
+        self.assertRegex(recovery, r'if \(!RollbackEntries\(save_dir, document, control, errors\)\)'
+                         r'\s*\{\s*return RecoveryOutcome::Failed;\s*\}')
+
+    def test_matching_restoration_completes_before_rollback_progresses(self):
+        source = read_source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        self.assert_matching_restoration_completion(source)
+        for original, replacement in (
+            ("previous_bytes &&", "!previous_bytes &&"),
+            ("!WorldSaveService::complete_restoration", "!WorldSaveService::artifact_identity"),
+            ("restored_stage.directory,", "destination.parent_path(),"),
+            ("if (entry.path == kSnapshotIndexRelativePath)", "if (false)"),
+        ):
+            with self.subTest(original=original), self.assertRaises(AssertionError):
+                self.assert_matching_restoration_completion(source.replace(original, replacement))
+
+    def assert_published_restoration_completion(self, source):
+        publication = self.function(source, "publish_restoration", "WorldSaveService::")
+        self.assertRegex(
+            publication, r'if \(!complete_restoration\(\s*destination,\s*incoming,\s*'
+            r'\{destination.parent_path\(\),\s*temp.parent_path\(\),\s*'
+            r'source_stage \? source_stage->directory : std::filesystem::path\{\},\s*'
+            r'retired_stage \? retired_stage->directory : std::filesystem::path\{\}\},\s*'
+            r'errors\)\)\s*return false;')
+        self.assertLess(publication.index("PublishProtectedMember("),
+                        publication.index("complete_restoration("))
+        self.assertLess(publication.index("complete_restoration("),
+                        publication.index('report_snapshot_step("after-replace"'))
+
+    def test_newly_published_restoration_completes_before_success(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        self.assert_published_restoration_completion(source)
+        for original, replacement in (
+            ("if (!complete_restoration(destination,", "if (false && !complete_restoration(destination,"),
+            ("temp.parent_path(),", "destination.parent_path(),"),
+            ("retired_stage ? retired_stage->directory", "source_stage ? source_stage->directory"),
+        ):
+            with self.subTest(original=original), self.assertRaises(AssertionError):
+                self.assert_published_restoration_completion(source.replace(original, replacement))
+
+    def test_restoration_completion_binds_writable_identity_and_checks_close(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        completion = self.function(source, "complete_restoration", "WorldSaveService::")
+        for operation in ("LockPublication(destination)", "file.open(StagingFile::Mode::Complete)",
+                          "file.identity(actual, false, allowed_links)", "identity != ArtifactIdentity{}",
+                          "std::equal(identity.begin(), identity.end(), actual.begin())",
+                          "return file.flush();", "return file.close();",
+                          "WorldSaveService::durable_flush_directory(parent, diagnostics)"):
+            self.assertIn(operation, completion)
+        self.assertRegex(completion, r'#if defined\(_WIN32\)\s*constexpr bool flush_file = true;'
+                         r'\s*#else\s*constexpr bool flush_file = false;')
+        self.assertIn("!detail::CompleteRestoration<flush_file>(operations, expected, parents)",
+                      completion)
+        staging = source.split("class StagingFile {", 1)[1].split("~StagingFile()", 1)[0]
+        self.assertRegex(staging, r'mode == Mode::Create \|\| mode == Mode::Complete\s*'
+                         r'\? GENERIC_READ \| GENERIC_WRITE')
+        self.assertIn("mode == Mode::Complete ? FILE_SHARE_READ", staging)
+        barrier = read_source("src/luminumbra_common/persistence/RecoveryDurability.h")
+        self.assertIn("flushed = owned && operations.flush_file();", barrier)
+        self.assertIn("const bool closed = operations.close_file();", barrier)
+        self.assertIn("if (!owned || !flushed || !closed)", barrier)
+        self.assertIn("!parent.empty() && !operations.flush_parent(parent)", barrier)
+
+    def assert_matching_pair_completion(self, source):
+        recovery = self.function(source, "RecoverReplayPair", "")
+        self.assertRegex(
+            recovery, r'if \(old_trace != PairIdentity\{\} && '
+            r'\(trace_identity == old_trace \|\| restored\) &&\s*'
+            r'!WorldSaveService::complete_restoration\(\s*companion,\s*trace_identity,\s*'
+            r'\{directory, directory, \{\}, \{\}\},\s*nullptr,\s*'
+            r'std::numeric_limits<unsigned>::max\(\)\)\)\s*return false;')
+        self.assertLess(recovery.index("complete_restoration("),
+                        recovery.index("journal.remove()"))
+
+    def test_matching_replay_trace_completes_before_pair_cleanup(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        self.assert_matching_pair_completion(source)
+        for original, replacement in (
+            ("(trace_identity == old_trace || restored)", "(trace_identity == old_trace)"),
+            ("std::numeric_limits<unsigned>::max()))", "1))"),
+        ):
+            with self.subTest(original=original), self.assertRaises(AssertionError):
+                self.assert_matching_pair_completion(source.replace(original, replacement))
+
     def assert_concrete_ecology_admission(self, source):
         self.assertRegex(source, r"const auto plant_env\s*=\s*\[")
         self.assertNotRegex(source, r"\bEnvSampler\b")
