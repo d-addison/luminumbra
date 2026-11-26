@@ -1,4 +1,5 @@
 #include "luminumbra_client/rendering/FoliageGroundWork.h"
+#include "luminumbra_common/core/IntegerPrimitives.h"
 
 #include <gtest/gtest.h>
 
@@ -213,7 +214,7 @@ TEST(FoliageGroundWork, FinalOrderedBytesMatchFreshBuildForEveryCompletionOrder)
     for (std::size_t index = 0; index < fresh.size(); ++index)
         fresh[index] = Synchronous(Request(index));
     const auto hash = [](const auto& columns) {
-        std::uint64_t value = 1469598103934665603ull;
+        std::uint64_t value = Core::kFnv1a64HistoricalBasis;
         for (const auto& samples : columns) {
             const auto* bytes = reinterpret_cast<const unsigned char*>(samples.data());
             for (std::size_t index = 0; index < samples.size() * sizeof(glm::vec4); ++index) {

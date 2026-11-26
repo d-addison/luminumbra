@@ -103,6 +103,7 @@ struct ScreenshotPixelStats {
     std::uint64_t roi_pixels = 0;
     std::uint64_t water_like_pixels = 0;
     std::uint64_t dark_pixels = 0;
+    // Legacy name: all clear-depth sky pixels in the unchanged ROI.
     std::uint64_t bright_sky_like_pixels = 0;
     double water_like_ratio = 0.0;
 };
@@ -111,17 +112,16 @@ struct LodHolePixelStats {
     int width = 0;
     int height = 0;
     std::uint64_t roi_pixels = 0;
+    // Legacy colour bucket names: each now counts clear-depth sky in the ROI.
     std::uint64_t dark_void_pixels = 0;
     std::uint64_t near_black_pixels = 0;
     std::uint64_t background_blue_pixels = 0;
     double dark_void_ratio = 0.0;
     double near_black_ratio = 0.0;
     double background_blue_ratio = 0.0;
-    // Connected components (8-connectivity) of void (RGB <= 10) ROI pixels
-    // with at least kMinNearBlackClusterPx pixels. Narrow LOD seam crack
-    // slivers form connected runs of pure-black hole pixels even when the
-    // total near-black ratio stays below the area threshold, so the seam
-    // gate enforces the cluster count directly.
+    // Connected components (8-connectivity) of clear-depth sky ROI pixels
+    // with at least kMinNearBlackClusterPx pixels. The seam gate enforces
+    // this count even when the total uncovered ratio stays below its budget.
     std::uint64_t near_black_cluster_count = 0;
     std::uint64_t largest_near_black_cluster_px = 0;
 };
@@ -177,7 +177,15 @@ struct WaterCausticsSample {
     double texture_mean_abs_delta = -1.0;
 };
 
-WaterCausticsSample SampleBackbufferWaterLuminance(int width, int height, double elapsed_seconds);
+WaterCausticsSample AnalyzeWaterLuminance(const std::vector<unsigned char>& pixels,
+                                          const SkyPixelMask& sky_mask,
+                                          int width,
+                                          int height,
+                                          double elapsed_seconds);
+WaterCausticsSample SampleBackbufferWaterLuminance(const SkyPixelMask& sky_mask,
+                                                   int width,
+                                                   int height,
+                                                   double elapsed_seconds);
 
 // Reads back the generated caustics texture (RGBA8) and computes the mean
 // absolute per-channel delta against `previous_texels` (when non-empty),
@@ -202,6 +210,7 @@ struct WaterReflectionStats {
 };
 
 WaterReflectionStats AnalyzeWaterReflection(const std::vector<unsigned char>& pixels,
+                                            const SkyPixelMask& sky_mask,
                                             int width,
                                             int height,
                                             const Luminumbra::Vec3& sky_reference);
@@ -714,21 +723,31 @@ void WriteTimeOfDaySweepAnalysis(
     const TimeOfDayPixelStats& emissive_stats,
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
 
-ScreenshotPixelStats
-AnalyzeScreenshotPixels(const std::vector<unsigned char>& pixels, int width, int height);
-LodHolePixelStats
-AnalyzeLodHolePixels(const std::vector<unsigned char>& pixels, int width, int height);
-MaterialPixelStats
-AnalyzeMaterialPixels(const std::vector<unsigned char>& pixels, int width, int height);
+ScreenshotPixelStats AnalyzeScreenshotPixels(const std::vector<unsigned char>& pixels,
+                                             const SkyPixelMask& sky_mask,
+                                             int width,
+                                             int height);
+LodHolePixelStats AnalyzeLodHolePixels(const std::vector<unsigned char>& pixels,
+                                       const SkyPixelMask& sky_mask,
+                                       int width,
+                                       int height);
+MaterialPixelStats AnalyzeMaterialPixels(const std::vector<unsigned char>& pixels,
+                                         const SkyPixelMask& sky_mask,
+                                         int width,
+                                         int height);
 
+// Statistics require matching completed-frame geometry evidence.
 bool WriteBackbufferPpm(const std::filesystem::path& path,
                         int width,
                         int height,
                         ScreenshotPixelStats* out_stats = nullptr,
-                        LodHolePixelStats* out_lod_hole_stats = nullptr);
+                        LodHolePixelStats* out_lod_hole_stats = nullptr,
+                        const SkyPixelMask* sky_mask = nullptr);
 
-std::vector<unsigned char>
-BuildMaterialHeatmap(const std::vector<unsigned char>& pixels, int width, int height);
+std::vector<unsigned char> BuildMaterialHeatmap(const std::vector<unsigned char>& pixels,
+                                                const SkyPixelMask& sky_mask,
+                                                int width,
+                                                int height);
 
 nlohmann::json LodHolePixelStatsToJson(const LodHolePixelStats& stats);
 nlohmann::json ScreenshotPixelStatsToJson(const ScreenshotPixelStats& stats);
@@ -892,13 +911,8 @@ struct PlayerViewPixelStats {
     std::uint64_t below_horizon_pixels = 0;
     std::uint64_t below_horizon_sky_pixels = 0;
     double below_horizon_sky_ratio = 0.0;
-    // Degenerate-void clusters (8-connectivity, >= 12 px) under the STRICT
-    // void predicate max(r,g,b) <= 2. The LOD-seam gate's RGB <= 10 sliver
-    // predicate was tuned on the default preset; on the mountains preset
-    // legitimately shadowed cliff faces have a continuous dark tail (~5% of
-    // frame pixels <= 10 at noon, measured) while true voids - backface
-    // peeks through missing geometry - stay at RGB 0-2. Missing chunks that
-    // open to the skybox are caught by the sky classifier instead.
+    // Uncovered clusters (8-connectivity, >= 12 px) in the below-horizon ROI.
+    // Finite-depth shadowed cliffs remain geometry, independent of RGB.
     std::uint64_t void_cluster_count = 0;
     std::uint64_t largest_void_cluster_px = 0;
 };

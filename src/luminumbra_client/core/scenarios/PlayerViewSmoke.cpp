@@ -208,7 +208,6 @@ PlayerViewPixelStats AnalyzePlayerViewPixels(const std::vector<unsigned char>& p
     const int roi_top = std::min(height, stats.horizon_row_from_top + margin);
     const int min_x = width / 64;
     const int max_x = width - min_x;
-    const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
 
     for (int y = 0; y < height; ++y) {
         const int y_from_top = height - 1 - y; // glReadPixels rows are bottom-up
@@ -229,13 +228,10 @@ PlayerViewPixelStats AnalyzePlayerViewPixels(const std::vector<unsigned char>& p
                                         static_cast<double>(stats.below_horizon_pixels);
     }
 
-    // Strict-void cluster pass (see PlayerViewPixelStats): connected
-    // components of max(r,g,b) <= 2 pixels over the same below-horizon ROI
-    // as the sky metric. The gate's premise - everything below the eye-level
-    // horizon over loaded terrain must be rendered geometry - is what makes
-    // a void cluster a defect there; above the horizon, point-blank cliff
-    // faces in full shadow legitimately reach RGB 0-2 (lighting domain, not
-    // coverage).
+    // Apply the unchanged 8-connected, >= 12-pixel void budget to uncovered
+    // pixels in the below-horizon ROI. Exact clear depth replaces RGB <= 2;
+    // finite-depth shadowed cliffs remain legitimate geometry at every colour.
+    // The validated extent bounds both mask and flood stack to 4096 x 4096 entries.
     std::vector<std::uint8_t> void_mask(
         static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0u);
     for (int y = 0; y < height; ++y) {
@@ -244,9 +240,9 @@ PlayerViewPixelStats AnalyzePlayerViewPixels(const std::vector<unsigned char>& p
             continue;
         }
         for (int x = min_x; x < max_x; ++x) {
-            const std::size_t offset =
-                static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
-            if (pixels[offset] <= 2u && pixels[offset + 1u] <= 2u && pixels[offset + 2u] <= 2u) {
+            const auto index = static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                               static_cast<std::size_t>(x);
+            if (sky_mask.pixels[index] != 0) {
                 void_mask[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
                           static_cast<std::size_t>(x)] = 1u;
             }
@@ -369,13 +365,11 @@ void WritePlayerViewAnalysis(
                  {"below_horizon_pixels", capture.sky.below_horizon_pixels},
                  {"below_horizon_sky_pixels", capture.sky.below_horizon_sky_pixels},
                  {"below_horizon_sky_ratio", capture.sky.below_horizon_sky_ratio},
-                 // Enforced void clusters: strict predicate max(r,g,b) <= 2
-                 // (legit mountain shadow has a continuous dark tail at the
-                 // LOD-seam gate's <= 10 bound; true voids stay at 0-2).
+                 // Legacy field names retain the unchanged uncovered-cluster budget.
                  {"near_black_cluster_count", capture.sky.void_cluster_count},
                  {"largest_near_black_cluster_px", capture.sky.largest_void_cluster_px},
-                 {"void_predicate", "max_rgb<=2"},
-                 // Informative: the LOD-seam-tuned (<= 10) hole statistics.
+                 {"void_predicate", "reversed_z_depth_water"},
+                 // Informative: uncovered-pixel statistics in the LOD-seam ROI.
                  {"holes", LodHolePixelStatsToJson(capture.holes)},
              }},
             {"passed", station_passed},

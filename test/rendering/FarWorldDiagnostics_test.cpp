@@ -738,6 +738,221 @@ private:
     std::vector<FarTileKey> expected;
 };
 
+TEST(FarBudgetMeasurement, ColdFillIncludesWarmupAndRequiresCurrentCoverage) {
+    using namespace Luminumbra::Client::Measurement;
+    auto station = std::make_unique<Station>();
+    auto& snapshot = station->Snapshot();
+    FarBudgetMeasurement measurement(3);
+    FarBudgetObservation unavailable;
+    unavailable.render_frame = 1;
+    ASSERT_TRUE(measurement.record(unavailable, 10, 10));
+    snapshot.frame = 2;
+    snapshot.tiers[0].resident.memory = {1024, 10, 20, 30, 40, 2};
+    snapshot.upload.tiers[0] = {1, 2, 1, 1, 1, 1, 2, 100, 50};
+    const auto identity = snapshot.tiles[0].built;
+    const auto stale_tier = static_cast<std::size_t>(identity.key.tier - 1);
+    snapshot.tiles[0].built.content_hash = 1;
+    const auto stale = ProjectFarBudget(snapshot);
+    ASSERT_TRUE(stale.accepted);
+    EXPECT_FALSE(stale.current_coverage);
+    EXPECT_FALSE(stale.tiers[stale_tier].current_coverage);
+    ASSERT_TRUE(measurement.record(stale, 20, 5));
+    snapshot.tiles[0].built = identity;
+    snapshot.frame = 3;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 30, 5, 60));
+    const auto& completed = measurement.frames().back();
+    EXPECT_EQ(completed.origin_ms, 0);
+    EXPECT_EQ(completed.accepted_ms, 20);
+    EXPECT_EQ(completed.completed_ms, 30);
+    for (std::size_t i = 0; i < completed.tier_completed_ms.size(); ++i)
+        EXPECT_EQ(completed.tier_completed_ms[i], i == stale_tier ? 30 : 20);
+    nlohmann::json report;
+    add_far_budget_reporting(report, measurement, true);
+    const auto& block = report["far_budget"];
+    EXPECT_EQ(block["frames"].size(), 3u);
+    EXPECT_TRUE(block["frames"][0]["timing_frame"].is_null());
+    EXPECT_EQ(block["frames"][2]["timing_frame"], 60);
+    EXPECT_EQ(block["fills"][0]["status"], "complete");
+    EXPECT_EQ(block["frames"][1]["tiers"][0]["memory"]["total_bytes"], 30);
+    EXPECT_EQ(block["frames"][1]["tiers"][0]["work"]["upload_bytes"], 100);
+    EXPECT_EQ(block["frames"][1]["tiers"][0]["work"]["successful_upload_bytes"], 50);
+    // Diagnostic order does not change cohort identity.
+    const auto original = ProjectFarBudget(snapshot);
+    std::swap(snapshot.tiles[0], snapshot.tiles[snapshot.tile_count - 1]);
+    EXPECT_EQ(ProjectFarBudget(snapshot).target_cohort, original.target_cohort);
+    snapshot.complete = false;
+    EXPECT_FALSE(ProjectFarBudget(snapshot).accepted);
+    snapshot.complete = true;
+    snapshot.tile_count = snapshot.tiles.size() + 1;
+    EXPECT_FALSE(ProjectFarBudget(snapshot).accepted);
+}
+
+TEST(FarBudgetMeasurement, EpochChangeResetsFill) {
+    using namespace Luminumbra::Client::Measurement;
+    auto station = std::make_unique<Station>();
+    auto& snapshot = station->Snapshot();
+    FarBudgetMeasurement measurement(7);
+    snapshot.frame = 1;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 10, 10));
+    snapshot.frame = 2;
+    ++snapshot.world_epoch;
+    // New epoch with stale resources must open an incomplete epoch event.
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 20, 5));
+    EXPECT_EQ(measurement.frames().back().kind, FarFillKind::Epoch);
+    EXPECT_FALSE(measurement.frames().back().completed_ms);
+    for (std::size_t i = 0; i < snapshot.tile_count; ++i) {
+        snapshot.tiles[i].desired.world_epoch = snapshot.world_epoch;
+        snapshot.tiles[i].built = snapshot.tiles[i].desired;
+    }
+    snapshot.frame = 3;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 30, 5));
+    EXPECT_EQ(measurement.frames().back().origin_ms, 15);
+    EXPECT_EQ(measurement.frames().back().accepted_ms, 30);
+    EXPECT_EQ(measurement.frames().back().completed_ms, 30);
+    snapshot.frame = 4;
+    ++snapshot.bake_generation;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 40, 5));
+    EXPECT_EQ(measurement.frames().back().kind, FarFillKind::EditBake);
+    EXPECT_FALSE(measurement.frames().back().completed_ms);
+    snapshot.frame = 5;
+    for (std::size_t i = 0; i < snapshot.tile_count; ++i) {
+        snapshot.tiles[i].desired.bake_generation = snapshot.bake_generation;
+        snapshot.tiles[i].built = snapshot.tiles[i].desired;
+    }
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 50, 5));
+    snapshot.frame = 6;
+    snapshot.tiles[0].coverage.current = false;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 60, 5));
+    EXPECT_EQ(measurement.frames().back().kind, FarFillKind::Refill);
+    snapshot.frame = 7;
+    snapshot.tiles[0].coverage.current = true;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 70, 5));
+    nlohmann::json report;
+    add_far_budget_reporting(report, measurement, true);
+    EXPECT_EQ(report["far_budget"]["fills"].size(), 4u);
+    EXPECT_EQ(report["far_budget"]["fills"][0]["completed_ms"], 10);
+    EXPECT_EQ(report["far_budget"]["fills"][3]["completed_ms"], 70);
+}
+
+TEST(FarBudgetMeasurement, UnavailableFramesCannotHideEpochChanges) {
+    using namespace Luminumbra::Client::Measurement;
+    auto station = std::make_unique<Station>();
+    auto& snapshot = station->Snapshot();
+    FarBudgetMeasurement measurement(4);
+    snapshot.frame = 1;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 10, 10));
+    FarBudgetObservation unavailable;
+    unavailable.render_frame = 2;
+    ASSERT_TRUE(measurement.record(unavailable, 20, 5));
+    snapshot.frame = 3;
+    ++snapshot.world_epoch;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 30, 5));
+    EXPECT_EQ(measurement.frames().back().kind, FarFillKind::Epoch);
+    EXPECT_FALSE(measurement.frames().back().accepted_ms);
+    snapshot.frame = 4;
+    for (std::size_t i = 0; i < snapshot.tile_count; ++i) {
+        snapshot.tiles[i].desired.world_epoch = snapshot.world_epoch;
+        snapshot.tiles[i].built = snapshot.tiles[i].desired;
+    }
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 40, 5));
+    EXPECT_EQ(measurement.frames().back().event, 2u);
+    EXPECT_EQ(measurement.frames().back().origin_ms, 25);
+    EXPECT_EQ(measurement.frames().back().completed_ms, 40);
+}
+
+TEST(FarBudgetMeasurement, SessionNeedsCurrentServingTargetAndKnownIdentity) {
+    using namespace Luminumbra::Client::Measurement;
+    auto station = std::make_unique<Station>();
+    auto& snapshot = station->Snapshot();
+    snapshot.authority_kind = FarWorldAuthorityKind::Session;
+    snapshot.content_identity = 0;
+    snapshot.target_serial = 4;
+    snapshot.serving_serial = 3;
+    snapshot.latest_target_ready = true;
+    for (std::size_t i = 0; i < snapshot.tile_count; ++i)
+        snapshot.tiles[i].accepted_content_identity = snapshot.tiles[i].desired.content_hash;
+    const auto waiting = ProjectFarBudget(snapshot);
+    EXPECT_TRUE(waiting.accepted);
+    EXPECT_NE(waiting.content_identity, 0u);
+    EXPECT_FALSE(waiting.current_coverage);
+    snapshot.serving_serial = snapshot.target_serial;
+    EXPECT_TRUE(ProjectFarBudget(snapshot).current_coverage);
+    EXPECT_FALSE(ProjectFarBudget(snapshot, false).current_coverage);
+    snapshot.tiles[0].accepted_content_identity = 0;
+    EXPECT_FALSE(ProjectFarBudget(snapshot).accepted);
+    snapshot.tiles[0].accepted_content_identity = snapshot.tiles[0].desired.content_hash;
+    snapshot.target_serial = 0;
+    EXPECT_FALSE(ProjectFarBudget(snapshot).accepted);
+}
+
+TEST(FarBudgetMeasurement, FrameStorageRefusesOverflow) {
+    using namespace Luminumbra::Client::Measurement;
+    EXPECT_THROW((FarBudgetMeasurement{0}), std::invalid_argument);
+    EXPECT_THROW((FarBudgetMeasurement{FarBudgetMeasurement::kMaxObservations + 1}),
+                 std::invalid_argument);
+    EXPECT_THROW((FarBudgetMeasurement{std::numeric_limits<std::size_t>::max()}),
+                 std::invalid_argument);
+    FarBudgetMeasurement validation(4);
+    FarBudgetObservation invalid;
+    EXPECT_FALSE(validation.record(invalid, 10, 10));
+    invalid.render_frame = 2;
+    EXPECT_FALSE(validation.record(invalid, 10, 10));
+    invalid.render_frame = 1;
+    EXPECT_FALSE(validation.record(invalid, 10, 5));
+    ASSERT_TRUE(validation.record(invalid, 10, 10));
+    EXPECT_FALSE(validation.record(invalid, 20, 5));
+    invalid.render_frame = 3;
+    EXPECT_FALSE(validation.record(invalid, 20, 5));
+    invalid.render_frame = 2;
+    EXPECT_FALSE(validation.record(invalid, 9, 1));
+    EXPECT_FALSE(validation.record(invalid, 20, 15));
+    ASSERT_EQ(validation.frames().size(), 1u);
+    ASSERT_TRUE(validation.record(invalid, 20, 5));
+    FarBudgetMeasurement measurement(1);
+    FarBudgetObservation observation;
+    observation.render_frame = 1;
+    EXPECT_FALSE(measurement.record(observation, -1, 0));
+    EXPECT_FALSE(measurement.record(observation, 0, 1));
+    EXPECT_FALSE(measurement.record(observation, std::numeric_limits<double>::infinity(), 0));
+    EXPECT_TRUE(measurement.frames().empty());
+    ASSERT_TRUE(measurement.record(observation, 10, 10));
+    observation.render_frame = 2;
+    EXPECT_FALSE(measurement.record(observation, 20, 10));
+    ASSERT_EQ(measurement.frames().size(), 1u);
+    EXPECT_EQ(measurement.frames()[0].observed.render_frame, 1u);
+    nlohmann::json report;
+    add_far_budget_reporting(report, measurement, false);
+    EXPECT_EQ(report["far_budget"]["storage_complete"], false);
+    EXPECT_EQ(report["far_budget"]["fills"][0]["status"], "incomplete");
+}
+
+TEST(FarBudgetMeasurement, DeadlineEmptyCohortAndRefillRemainDistinct) {
+    using namespace Luminumbra::Client::Measurement;
+    auto station = std::make_unique<Station>();
+    auto& snapshot = station->Snapshot();
+    FarBudgetMeasurement measurement(4);
+    snapshot.frame = 1;
+    snapshot.tiles[0].coverage.current = false;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 90000, 90000));
+    EXPECT_FALSE(measurement.frames().back().timed_out);
+    snapshot.frame = 2;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 90001, 1));
+    EXPECT_TRUE(measurement.frames().back().timed_out);
+    snapshot.frame = 3;
+    snapshot.tiles[0].coverage.current = true;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 90002, 1));
+    EXPECT_FALSE(measurement.frames().back().completed_ms);
+    snapshot.frame = 4;
+    ++snapshot.tiles[0].desired.span_generation;
+    snapshot.tiles[0].built = snapshot.tiles[0].desired;
+    ASSERT_TRUE(measurement.record(ProjectFarBudget(snapshot), 90003, 1));
+    EXPECT_EQ(measurement.frames().back().kind, FarFillKind::Cohort);
+    EXPECT_EQ(measurement.frames().back().completed_ms, 90003);
+    EXPECT_FALSE(measurement.record(ProjectFarBudget(snapshot), 90004, 1));
+    snapshot.tile_count = 0;
+    EXPECT_FALSE(ProjectFarBudget(snapshot).accepted);
+}
+
 TEST(FarWorldDiagnostics, EmptyCoverageDoesNotRequireGpuStoresOrSubmission) {
     const Station station;
     ASSERT_TRUE(station.Ready(90));

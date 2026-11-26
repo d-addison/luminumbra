@@ -74,9 +74,14 @@ struct PredatorPackStats {
 
 // RunPredatorPackOnTick: maintain the pack-hunting coordination field. id-ordered, two-phase
 // snapshot. Returns per-tick stats (telemetry / test hooks).
-inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg,
-                                               std::uint64_t tick,
-                                               const CreatureTickAdmission* admission = nullptr) {
+// Elapsed opt-in: coordination is an assignment from the due-time snapshot, not a
+// timer. Only positive-window hunters, allies and prey enter it; zero/frozen hunters
+// retain their steering. No work is multiplied by the elapsed window length.
+inline PredatorPackStats
+RunPredatorPackOnTick(entt::registry& reg,
+                      std::uint64_t tick,
+                      const CreatureTickAdmission* admission = nullptr,
+                      const ::Luminumbra::world::RegionConsumerGate* elapsed_gate = nullptr) {
     (void)tick; // no rng / time dependence; kept for signature parity with sibling systems.
     PredatorPackStats stats;
 
@@ -102,7 +107,7 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg,
     std::vector<PredSnap> ps;
     ps.reserve(preds.size());
     for (auto e : preds) {
-        if (admission && !admission->Allows(e)) {
+        if (!AllowsElapsedParticipant(reg, e, admission, elapsed_gate)) {
             continue;
         }
         const auto& cr = predView.get<Comp::CreatureComponent>(e);
@@ -120,7 +125,7 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg,
     {
         auto preyView = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
         for (auto e : preyView) {
-            if (admission && !admission->Allows(e)) {
+            if (!AllowsElapsedParticipant(reg, e, admission, elapsed_gate)) {
                 continue;
             }
             const auto& cr = preyView.get<Comp::CreatureComponent>(e);
@@ -214,7 +219,8 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg,
             const float dz = q.z - cz;
             const float d2 = dx * dx + dz * dz;
             if (first || d2 < bestD2 ||
-                (admission && d2 == bestD2 && (q.x < preyX || (q.x == preyX && q.z < preyZ)))) {
+                ((admission || elapsed_gate) && d2 == bestD2 &&
+                 (q.x < preyX || (q.x == preyX && q.z < preyZ)))) {
                 bestD2 = d2;
                 preyX = q.x;
                 preyZ = q.z;

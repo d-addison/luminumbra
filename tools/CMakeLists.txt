@@ -230,6 +230,15 @@ if(BUILD_TESTING)
     set_tests_properties(ProcessReceiptSummaryPython
         PROPERTIES LABELS "perf;tools" TIMEOUT 60)
     add_test(
+        NAME DeferredStackEvidenceSmoke
+        COMMAND "${Python3_EXECUTABLE}" -I -B
+                "${CMAKE_CURRENT_SOURCE_DIR}/perf/test_capture_deferred_stack.py"
+                DeferredStackEvidenceTests.test_fixed_deadlines_and_failure_receipts
+                DeferredStackEvidenceTests.test_rejects_mixed_binary_or_source_identity
+                DeferredStackEvidenceTests.test_synthetic_profile_report_is_deterministic)
+    set_tests_properties(DeferredStackEvidenceSmoke
+        PROPERTIES LABELS "perf;tools" TIMEOUT 30)
+    add_test(
         NAME PerformanceMeasurementValidatorContract
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_validate_performance_measurement.py")

@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -477,6 +478,22 @@ TEST(CropLifecycle, SimulationAdmissionRefusesBeforeParentOrCursorMutation) {
         EXPECT_THROW(F::RunCropLifecycleOnTick(
                          registry, 1, 0, Gate(Gate::PlantIdentity::Simulation), allocator),
                      std::runtime_error);
+        // The invalid participant joins only the last virtual tick. Admission
+        // must refuse the whole window before the first parent can reproduce.
+        const std::array due{Luminumbra::world::RegionKey{0, 0},
+                             Luminumbra::world::RegionKey{1, 0}};
+        registry.emplace<C::PlantRegionComponent>(first, C::PlantRegionComponent{1u, 0, 0, 0u});
+        registry.emplace<C::PlantRegionComponent>(second, C::PlantRegionComponent{2u, 1, 0, 0u});
+        const std::map<Luminumbra::world::RegionKey, std::uint32_t> windows{{due[0], 2},
+                                                                            {due[1], 1}};
+        std::vector<std::uint64_t> scratch;
+        const Gate gate(registry,
+                        due,
+                        scratch,
+                        Gate::PlantIdentity::Simulation,
+                        Luminumbra::world::RegionElapsedTicks(windows));
+        EXPECT_THROW(F::RunCropLifecycleRegional(registry, 2, gate, 0, allocator),
+                     std::runtime_error);
         EXPECT_EQ(allocator.next_persistent_id(), 3u);
         for (const auto entity : {first, second}) {
             EXPECT_EQ(registry.get<C::CropLifecycleComponent>(entity).generations, 0u);
@@ -496,6 +513,9 @@ TEST(CropLifecycle, SimulationSelectionRequiresMatchingAllocatorEvenForEmptyRost
     EXPECT_THROW(F::RunCropLifecycleOnTick(registry, 1, 0, simulation), std::invalid_argument);
     EXPECT_THROW(F::RunCropLifecycleOnTick(registry, 1, 0, {}, allocator), std::invalid_argument);
     EXPECT_EQ(F::RunCropLifecycleOnTick(registry, 1, 0, simulation, allocator).reseeded, 0);
+    EXPECT_THROW(F::RunCropLifecycleRegional(registry, 1, simulation), std::invalid_argument);
+    EXPECT_THROW(F::RunCropLifecycleRegional(registry, 1, {}, 0, allocator), std::invalid_argument);
+    EXPECT_EQ(F::RunCropLifecycleRegional(registry, 1, simulation, 0, allocator).reseeded, 0);
     EXPECT_EQ(allocator.next_persistent_id(), 1u);
 }
 
@@ -520,6 +540,279 @@ TEST(CropLifecycle, SimulationGrowingRipeningAndMaximumRipeCounter) {
         std::numeric_limits<std::uint32_t>::max();
     EXPECT_EQ(F::RunCropLifecycleOnTick(registry, 3, 0, gate, allocator).reseeded, 1);
     EXPECT_EQ(allocator.next_persistent_id(), 3u);
+}
+
+TEST(CropLifecycle, RegionalElapsedPreservesBirthIdentityAndEventMultiplicity) {
+    namespace W = Luminumbra::world;
+    using Gate = W::RegionConsumerGate;
+    for (const bool simulation : {false, true}) {
+        SCOPED_TRACE(simulation);
+        entt::registry regional, reference;
+        W::ActiveRegionLedger regional_ledger, reference_ledger;
+        const std::array<std::uint64_t, 6> ids{3, 1, 2, 4, 5, 6};
+        const std::array owners{W::RegionKey{0, 0}, W::RegionKey{-1, 0}, W::RegionKey{1, 0}};
+        for (auto* registry : {&regional, &reference}) {
+            for (std::size_t index = 0; index < ids.size(); ++index) {
+                const auto owner = owners[index == 3 ? 1 : (index == 4 ? 2 : 0)];
+                const auto parent = spawnRipe(*registry,
+                                              index % 2 == 0,
+                                              index % 2 == 0 ? 2u : 1u,
+                                              {static_cast<float>(owner.x * 512 + 100), 0, 100},
+                                              RandomGenome(index + 1u));
+                registry->emplace<C::PlantRegionComponent>(
+                    parent, C::PlantRegionComponent{ids[index], owner.x, owner.z, 0u});
+                registry->emplace<C::SimulationIdentityComponent>(parent, ids[index]);
+                registry->get<C::PlantGrowthComponent>(parent).stress_points = 81;
+                if (index == 5)
+                    registry->get<C::PlantGrowthComponent>(parent).planted_tick = 100;
+                registry->emplace<C::PollinationComponent>(parent).pollinated = true;
+                registry->get<C::PollinationComponent>(parent).next_genome = RandomGenome(999);
+            }
+        }
+        ASSERT_TRUE(regional_ledger.reserve_persistent_ids(7));
+        ASSERT_TRUE(reference_ledger.reserve_persistent_ids(7));
+        const auto identity =
+            simulation ? Gate::PlantIdentity::Simulation : Gate::PlantIdentity::Legacy;
+        const std::array due{owners[0], owners[2]};
+        const std::map<W::RegionKey, std::uint32_t> windows{
+            {owners[0], 5}, {owners[1], 5}, {owners[2], 0}};
+        std::vector<std::uint64_t> scratch;
+        const Gate gate(regional, due, scratch, identity, W::RegionElapsedTicks(windows));
+        const auto allocate = [&](std::uint64_t& id) {
+            return regional_ledger.allocate_persistent_id(id);
+        };
+        const auto result =
+            simulation ? F::RunCropLifecycleRegional(regional, 100, gate, 99, regional_ledger)
+                       : F::RunCropLifecycleRegional(regional, 100, gate, 99, allocate);
+        F::CropLifecycleStats expected;
+        for (std::uint64_t tick = 96; tick <= 100; ++tick) {
+            // The reference advances one ordinary tick. Exclude the explicitly
+            // future-born parent until its real birth, without changing its owner.
+            entt::entity future_parent = entt::null;
+            if (tick < 100) {
+                for (const auto entity : reference.view<C::PlantRegionComponent>()) {
+                    if (reference.get<C::PlantRegionComponent>(entity).persistent_id == 6u)
+                        future_parent = entity;
+                }
+                ASSERT_TRUE(reference.valid(future_parent));
+                reference.remove<C::CropLifecycleComponent>(future_parent);
+            }
+            std::vector<std::uint64_t> step_scratch;
+            const std::array active{owners[0]};
+            const Gate step_gate(reference, active, step_scratch, identity);
+            const auto step_allocate = [&](std::uint64_t& id) {
+                return reference_ledger.allocate_persistent_id(id);
+            };
+            const auto step =
+                simulation
+                    ? F::RunCropLifecycleOnTick(reference, tick, 99, step_gate, reference_ledger)
+                    : F::RunCropLifecycleOnTick(reference, tick, 99, step_gate, step_allocate);
+            if (tick < 100) {
+                auto& lifecycle = reference.emplace<C::CropLifecycleComponent>(future_parent);
+                lifecycle.lifespan_ticks = 1;
+            }
+            expected.ripening += step.ripening;
+            expected.reseeded += step.reseeded;
+            expected.reset += step.reset;
+            expected.died += step.died;
+        }
+        EXPECT_EQ(result.ripening, expected.ripening);
+        EXPECT_EQ(result.reseeded, expected.reseeded);
+        EXPECT_EQ(result.reset, expected.reset);
+        EXPECT_EQ(result.died, expected.died);
+        EXPECT_EQ(result.ripening, 6);
+        EXPECT_EQ(result.reseeded, 4);
+        EXPECT_EQ(result.reset, 2);
+        EXPECT_EQ(result.died, 2);
+        // Owner lookups depend on the initial roster and four births, not elapsed scans.
+        EXPECT_EQ(gate.owner_visits(), 21u);
+        EXPECT_EQ(regional_ledger.next_persistent_id(), 11u);
+        EXPECT_EQ(regional_ledger.encode(), reference_ledger.encode());
+        EXPECT_EQ(Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
+                      F::BuildPlantEntitySnapshot(regional, true)),
+                  Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
+                      F::BuildPlantEntitySnapshot(reference, true)));
+        for (const auto entity : regional.view<C::PlantRegionComponent>()) {
+            const auto id = regional.get<C::PlantRegionComponent>(entity).persistent_id;
+            if (id < 7)
+                continue;
+            const auto birth_tick = id == 7 ? 96u : (id == 10 ? 100u : 97u);
+            const auto& growth = regional.get<C::PlantGrowthComponent>(entity);
+            EXPECT_EQ(growth.planted_tick, birth_tick);
+            EXPECT_EQ(growth.last_tick, birth_tick);
+            EXPECT_EQ(regional.get<C::PlantRegionComponent>(entity).region_stamp, birth_tick);
+            EXPECT_EQ(regional.get<C::PlantGenomeComponent>(entity).genes, RandomGenome(999).genes);
+            EXPECT_EQ(regional.get<C::CropLifecycleComponent>(entity).generations, 0u);
+            EXPECT_EQ(regional.get<C::CropLifecycleComponent>(entity).ripe_ticks, 0u);
+            if (simulation) {
+                EXPECT_EQ(F::RequirePlantSimulationId(regional, entity), id);
+            }
+        }
+    }
+}
+
+TEST(CropLifecycle, RegionalDestinationMustCoverBirthTickAndRefusalsPreserveParent) {
+    namespace W = Luminumbra::world;
+    using Gate = W::RegionConsumerGate;
+    for (const bool simulation : {false, true}) {
+        for (const int target_window : {-1, 0, 1}) {
+            SCOPED_TRACE(simulation);
+            SCOPED_TRACE(target_window);
+            entt::registry registry;
+            W::ActiveRegionLedger ledger;
+            const auto parent = spawnRipe(registry, true, 1, {0, 0, 100}, RandomGenome(1));
+            registry.emplace<C::PlantRegionComponent>(parent,
+                                                      C::PlantRegionComponent{1u, 0, 0, 0u});
+            registry.emplace<C::SimulationIdentityComponent>(parent, 1u);
+            registry.get<C::PlantGrowthComponent>(parent).stress_points = 81;
+            ASSERT_TRUE(ledger.reserve_persistent_ids(2));
+            std::uint64_t due_tick = 0;
+            for (std::uint64_t tick = 1; tick <= 100; ++tick) {
+                auto rng = DeterministicRng::seeded(F::kGerminationSeedOffset ^ 99u, 1u, tick);
+                const auto angle = rng.next_unit() * 6.2831853f;
+                if (Luminumbra::DeterministicMath::Cos(angle) < 0) {
+                    due_tick = tick + 1;
+                    break;
+                }
+            }
+            ASSERT_NE(due_tick, 0u);
+            std::vector<W::RegionKey> due{{0, 0}};
+            if (target_window >= 0)
+                due.push_back({-1, 0});
+            const std::map<W::RegionKey, std::uint32_t> windows{
+                {{0, 0}, 2}, {{-1, 0}, target_window > 0 ? 1u : 0u}};
+            std::vector<std::uint64_t> scratch;
+            const Gate gate(registry,
+                            due,
+                            scratch,
+                            simulation ? Gate::PlantIdentity::Simulation
+                                       : Gate::PlantIdentity::Legacy,
+                            W::RegionElapsedTicks(windows));
+            // First replay only the outward event tick. The target is frozen or
+            // has no overlapping history, so no identity may be consumed.
+            const std::map<W::RegionKey, std::uint32_t> first_windows{{{0, 0}, 1}, {{-1, 0}, 0}};
+            std::vector<std::uint64_t> first_scratch;
+            const Gate first_gate(registry,
+                                  due,
+                                  first_scratch,
+                                  simulation ? Gate::PlantIdentity::Simulation
+                                             : Gate::PlantIdentity::Legacy,
+                                  W::RegionElapsedTicks(first_windows));
+            const auto allocate = [&](std::uint64_t& id) {
+                return ledger.allocate_persistent_id(id);
+            };
+            const auto refused =
+                simulation
+                    ? F::RunCropLifecycleRegional(registry, due_tick - 1, first_gate, 99, ledger)
+                    : F::RunCropLifecycleRegional(registry, due_tick - 1, first_gate, 99, allocate);
+            EXPECT_EQ(refused.reseeded, 0);
+            EXPECT_EQ(ledger.next_persistent_id(), 2u);
+            EXPECT_EQ(registry.get<C::CropLifecycleComponent>(parent).ripe_ticks, 0u);
+            EXPECT_EQ(registry.get<C::CropLifecycleComponent>(parent).generations, 0u);
+            EXPECT_EQ(registry.get<C::PlantGrowthComponent>(parent).stress_points, 81u);
+            if (target_window == 1) {
+                const auto result =
+                    simulation
+                        ? F::RunCropLifecycleRegional(registry, due_tick, gate, 99, ledger)
+                        : F::RunCropLifecycleRegional(registry, due_tick, gate, 99, allocate);
+                EXPECT_EQ(result.reseeded, 1);
+                EXPECT_EQ(ledger.next_persistent_id(), 3u);
+                for (const auto entity : registry.view<C::PlantRegionComponent>()) {
+                    if (entity != parent) {
+                        EXPECT_EQ(registry.get<C::PlantGrowthComponent>(entity).planted_tick,
+                                  due_tick);
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(CropLifecycle, RegionalWindowBoundsExhaustionAndMaximumTick) {
+    namespace W = Luminumbra::world;
+    using Gate = W::RegionConsumerGate;
+    for (const std::uint32_t elapsed : {0u, 1u, 36001u, 65536u, 65537u}) {
+        SCOPED_TRACE(elapsed);
+        entt::registry registry;
+        const auto parent = spawnRipe(registry,
+                                      true,
+                                      std::numeric_limits<std::uint32_t>::max(),
+                                      {100, 0, 100},
+                                      RandomGenome(1));
+        const std::array due{W::RegionKey{0, 0}};
+        const std::map<W::RegionKey, std::uint32_t> windows{{due[0], elapsed}};
+        const Gate gate(registry, due, W::RegionElapsedTicks(windows));
+        if (elapsed > 65536) {
+            EXPECT_THROW(F::RunCropLifecycleRegional(registry, 65536, gate), std::invalid_argument);
+            EXPECT_EQ(registry.get<C::CropLifecycleComponent>(parent).ripe_ticks, 0u);
+        } else {
+            EXPECT_EQ(F::RunCropLifecycleRegional(registry, 65536, gate).ripening,
+                      static_cast<int>(elapsed));
+            EXPECT_EQ(registry.get<C::CropLifecycleComponent>(parent).ripe_ticks, elapsed);
+        }
+        const auto before = registry.get<C::CropLifecycleComponent>(parent).ripe_ticks;
+        F::RunCropLifecycleOnTick(registry, 65537, 0, gate);
+        EXPECT_EQ(registry.get<C::CropLifecycleComponent>(parent).ripe_ticks, before + 1u);
+    }
+    for (const bool simulation : {false, true}) {
+        entt::registry registry;
+        W::ActiveRegionLedger ledger;
+        const auto parent = spawnRipe(registry, true, 1, {100, 0, 100}, RandomGenome(1));
+        registry.emplace<C::PlantRegionComponent>(parent, C::PlantRegionComponent{1u, 0, 0, 0u});
+        registry.emplace<C::SimulationIdentityComponent>(parent, 1u);
+        ASSERT_TRUE(ledger.reserve_persistent_ids(W::ActiveRegionLedger::kPersistentIdLimit));
+        const std::array due{W::RegionKey{0, 0}};
+        std::map<W::RegionKey, std::uint32_t> windows{{due[0], 3}};
+        std::vector<std::uint64_t> scratch;
+        const Gate gate(registry,
+                        due,
+                        scratch,
+                        simulation ? Gate::PlantIdentity::Simulation : Gate::PlantIdentity::Legacy,
+                        W::RegionElapsedTicks(windows));
+        const auto allocate = [&](std::uint64_t& id) {
+            return ledger.allocate_persistent_id(id);
+        };
+        EXPECT_THROW((simulation ? F::RunCropLifecycleRegional(registry, 1, gate, 0, ledger)
+                                 : F::RunCropLifecycleRegional(registry, 1, gate, 0, allocate)),
+                     std::invalid_argument);
+        const auto result = simulation
+                                ? F::RunCropLifecycleRegional(registry, 100, gate, 0, ledger)
+                                : F::RunCropLifecycleRegional(registry, 100, gate, 0, allocate);
+        EXPECT_EQ(result.reseeded, 0);
+        EXPECT_EQ(registry.get<C::CropLifecycleComponent>(parent).ripe_ticks, 0u);
+        EXPECT_EQ(registry.get<C::CropLifecycleComponent>(parent).generations, 0u);
+        EXPECT_EQ(ledger.next_persistent_id(), W::ActiveRegionLedger::kPersistentIdLimit);
+        // Blocked farming refuses before invoking even a legacy ID allocator.
+        int allocations = 0;
+        const auto blocked_allocate = [&](std::uint64_t&) {
+            ++allocations;
+            return true;
+        };
+        registry.ctx().emplace<F::FarmingReplayGate>().blocked = true;
+        if (!simulation) {
+            EXPECT_EQ(
+                F::RunCropLifecycleRegional(registry, 100, gate, 0, blocked_allocate).reseeded, 0);
+        }
+        EXPECT_EQ(allocations, 0);
+    }
+    entt::registry registry;
+    const auto parent = spawnRipe(
+        registry, true, std::numeric_limits<std::uint32_t>::max(), {100, 0, 100}, RandomGenome(1));
+    registry.get<C::CropLifecycleComponent>(parent).ripe_ticks =
+        std::numeric_limits<std::uint32_t>::max();
+    const std::array due{W::RegionKey{0, 0}};
+    const std::map<W::RegionKey, std::uint32_t> windows{{due[0], 3}};
+    const Gate gate(registry, due, W::RegionElapsedTicks(windows));
+    EXPECT_EQ(F::RunCropLifecycleRegional(registry, std::numeric_limits<std::uint64_t>::max(), gate)
+                  .reseeded,
+              1);
+    EXPECT_EQ(registry.get<C::CropLifecycleComponent>(parent).generations, 1u);
+    for (const auto entity : registry.view<C::PlantTag>()) {
+        if (entity != parent) {
+            EXPECT_EQ(registry.get<C::PlantGrowthComponent>(entity).planted_tick,
+                      std::numeric_limits<std::uint64_t>::max() - 2u);
+        }
+    }
 }
 
 } // namespace

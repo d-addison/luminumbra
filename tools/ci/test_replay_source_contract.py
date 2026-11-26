@@ -1,6 +1,7 @@
 """Guard replay fixture symbol ownership without claiming native link coverage."""
 
 import ast
+import os
 from pathlib import Path
 import re
 import runpy
@@ -32,23 +33,28 @@ def read_source(path):
 
 class NamedFnvBasisContract(unittest.TestCase):
     def test_named_digest_sites_do_not_reintroduce_the_truncated_literal(self):
-        # These migrated domains retain explicit seed choices, including their test mirrors.
-        paths = (
-            "src/luminumbra_server/ServerWorldRunner.cpp",
-            "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
-            "test/net/net_soak_over_the_wire_test.cpp",
-            "test/common/replication_scale_test.cpp",
-            "test/common/WaterDeterminism_test.cpp",
-            "test/client/world_dressing_test.cpp",
-            "test/common/WaterSeedInputs_test.cpp",
-            "test/common/PlantProcgen_test.cpp",
-            "test/sim/photo_mode_test.cpp",
-        )
-        literal = re.compile(rb"(?<![0-9])1469598103934665603(?![0-9])")
-        for path in paths:
-            with self.subTest(path=path):
-                self.assertIsNone(literal.search((ROOT / path).read_bytes()),
-                                  "Use the named historical or standard basis")
+        # Split the spelling so this guard does not itself introduce a forbidden hit.
+        basis = b"146959810" b"3934665603"
+        literal = re.compile(rb"(?<![0-9])" + basis + rb"(?![0-9])")
+        allowed = {
+            ("src/luminumbra_common/core/IntegerPrimitives.h",
+             b"inline constexpr std::uint64_t kFnv1a64HistoricalBasis = " + basis + b"ull;"),
+            ("test/common/IntegerPrimitives_test.cpp",
+             b"EXPECT_EQ(Fnv1a64(nullptr, 0, kFnv1a64HistoricalBasis), " + basis + b"ull);"),
+            ("tools/perf/validate_foliage_evidence.py",
+             b"FNV1A64_HISTORICAL_BASIS = " + basis),
+        }
+        for directory in ("src", "test", "tools"):
+            for folder, directories, filenames in os.walk(ROOT / directory, onerror=self.fail):
+                directories.sort()
+                for filename in sorted(filenames):
+                    path = Path(folder) / filename
+                    relative = path.relative_to(ROOT).as_posix()
+                    for number, line in enumerate(path.read_bytes().splitlines(), 1):
+                        if literal.search(line):
+                            with self.subTest(path=relative, line=number):
+                                self.assertIn((relative, line.strip()), allowed,
+                                              f"{relative}:{number}: use the named historical basis")
 
 
 class ReplaySourceContract(unittest.TestCase):
@@ -1347,6 +1353,58 @@ class AuthorityConsumerSourceContract(unittest.TestCase):
 
 
 class SessionUsabilitySourceContract(unittest.TestCase):
+    def assert_namespace_receipt_completion(self, source):
+        completion = self.function(source, "CompleteNamespaceRetirement", "")
+        ordered = (
+            "operations.inspect_namespace(receipt.identity)",
+            "operations.record_prepared(receipt.identity)",
+            "receipt.phase = NamespaceReceiptPhase::Prepared;",
+            "operations.remove_owned(receipt.identity)",
+            "operations.record_namespace_done(receipt.identity)",
+            "receipt.phase = NamespaceReceiptPhase::NamespaceDone;",
+            "operations.flush_later_commit()",
+            "if (!observation.succeeded)",
+            "!observation.volume_known || !observation.ntfs ||",
+            "observation.volume != receipt.identity.front()",
+            "operations.record_flush_observed(receipt.identity, observation)",
+            "receipt.phase = NamespaceReceiptPhase::FlushObserved;",
+            "operations.retire_receipt(receipt.identity)",
+        )
+        positions = [completion.index(operation) for operation in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("return NamespaceRetirementOutcome::Retained;", completion)
+        self.assertIn("receipt.identity[1] == 0 && receipt.identity[2] == 0", completion)
+        self.assertIn("receipt.phase != NamespaceReceiptPhase::FlushObserved", completion)
+        self.assertIn("if (receipt.phase == NamespaceReceiptPhase::Prepared)", completion)
+        self.assertIn("if (receipt.phase == NamespaceReceiptPhase::NamespaceDone)", completion)
+
+    def test_namespace_receipt_requires_ordered_same_volume_ntfs_completion(self):
+        source = read_source("src/luminumbra_common/persistence/RecoveryDurability.h")
+        self.assert_namespace_receipt_completion(source)
+        for original, replacement in (
+            ("!observation.volume_known || !observation.ntfs ||", "false ||"),
+            ("observation.volume != receipt.identity.front()", "false"),
+            ("operations.record_flush_observed(receipt.identity, observation)", "true"),
+            ("operations.inspect_namespace(receipt.identity)", "NamespaceEntryState::Absent"),
+            ("operations.record_prepared(receipt.identity)", "true"),
+        ):
+            with self.subTest(original=original), self.assertRaises((AssertionError, ValueError)):
+                self.assert_namespace_receipt_completion(source.replace(original, replacement))
+
+    def test_journal_flush_observation_uses_same_handle_and_clears_failures(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        append = self.function(source, "append_journal_record", "WorldSaveService::")
+        self.assertLess(append.index("*observation = {};"), append.index("if (record.empty()"))
+        native = append.index("::GetVolumeInformationByHandleW(file,")
+        self.assertLess(append.index('write_bytes("\\n", 1) && flush()'), native)
+        self.assertIn("FILE_NAME_NORMALIZED | VOLUME_NAME_GUID", append)
+        self.assertRegex(append, r"if \(local_volume &&\s*::GetVolumeInformationByHandleW\(file,")
+        self.assertIn("serial == actual.front()", append)
+        self.assertIn('std::wstring_view(filesystem_name.data()) == L"NTFS"', append)
+        self.assertLess(native, append.index("const bool closed = close();"))
+        self.assertLess(append.index("if (!ok || !closed)"),
+                        append.index("*observation = completed_flush;"))
+
     def assert_matching_restoration_completion(self, source):
         rollback = self.function(source, "RollbackEntries", "")
         matching = re.search(

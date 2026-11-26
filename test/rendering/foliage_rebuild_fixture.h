@@ -3,6 +3,7 @@
 #include "luminumbra/core/Types.h"
 #include "luminumbra_client/rendering/FoliageSurfaceSlots.h"
 #include "luminumbra_client/rendering/passes/FoliagePass.h"
+#include "luminumbra_common/core/IntegerPrimitives.h"
 #include "luminumbra_common/world/Chunk.h"
 
 #define GLFW_INCLUDE_NONE
@@ -182,8 +183,9 @@ protected:
                       0);
         }
     }
-    static std::uint64_t
-    Fnv(const void* data, std::size_t size, std::uint64_t hash = 1469598103934665603ull) {
+    static std::uint64_t Fnv(const void* data,
+                             std::size_t size,
+                             std::uint64_t hash = Luminumbra::Core::kFnv1a64HistoricalBasis) {
         const auto* bytes = static_cast<const unsigned char*>(data);
         for (std::size_t offset = 0; offset < size; ++offset) {
             hash = (hash ^ bytes[offset]) * 1099511628211ull;
@@ -195,7 +197,7 @@ protected:
     static std::uint64_t LegacyUploadedHash(const FoliagePass& pass,
                                             std::size_t count,
                                             const glm::vec3& camera = kCamera) {
-        std::uint64_t hash = 1469598103934665603ull;
+        std::uint64_t hash = Luminumbra::Core::kFnv1a64HistoricalBasis;
         // The fixtures supply the admitted logical count (at most three), since
         // retained buffer capacity includes unused slots and dispatch unbinds
         // the compute program before returning.

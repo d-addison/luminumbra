@@ -131,9 +131,13 @@ struct MigrationStats {
 
 // RunMigrationOnTick: for each migratory creature, write a wish toward the current seasonal
 // target scaled by the seasonal drive. id-ordered, deterministic. season01 is a plain input.
-inline MigrationStats RunMigrationOnTick(entt::registry& reg,
-                                         float season01,
-                                         const CreatureTickAdmission* admission = nullptr) {
+// Elapsed opt-in: target, drive and wish sample the due-time calendar phase once,
+// independent of positive window length. Zero/frozen windows retain all steering.
+inline MigrationStats
+RunMigrationOnTick(entt::registry& reg,
+                   float season01,
+                   const CreatureTickAdmission* admission = nullptr,
+                   const ::Luminumbra::world::RegionConsumerGate* elapsed_gate = nullptr) {
     MigrationStats stats;
 
     auto view = reg.view<Comp::MigratoryComponent, Comp::TransformComponent>();
@@ -156,7 +160,7 @@ inline MigrationStats RunMigrationOnTick(entt::registry& reg,
     stats.drive = drive;
 
     for (auto e : ents) {
-        if (admission && !admission->Allows(e)) {
+        if (!AllowsElapsedParticipant(reg, e, admission, elapsed_gate)) {
             continue;
         }
         ++stats.participants;

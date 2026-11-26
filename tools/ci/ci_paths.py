@@ -81,6 +81,7 @@ PYTHON_TESTS = (
     "tools/ci/test_tidy_cache.py",
     "tools/ci/test_check_tidy_suppressions.py",
     "tools/perf/test_capture_sim_budget.py",
+    "tools/perf/test_capture_deferred_stack.py",
     "tools/perf/test_check_gl_debug_log.py",
     "tools/perf/test_check_residency.py",
     "tools/perf/test_fixture_hash.py",
@@ -95,6 +96,7 @@ PYTHON_TESTS = (
     "tools/perf/test_render_crash_capture.py",
     "tools/perf/test_run_qualification.py",
     "tools/perf/test_sim_budget_gate.py",
+    "tools/perf/test_report_sim_budget.py",
     "tools/perf/test_summarize_process_receipts.py",
     "tools/perf/test_terrain_aov_paths.py",
     "tools/perf/test_terrain_aovs.py",
@@ -105,6 +107,7 @@ PYTHON_TESTS = (
     "tools/assets/test_acquire.py",
     "tools/audio/test_bank_validate.py",
     "tools/persistence/test_save_receipt.py",
+    "tools/persistence/test_recovery_durability_evidence.py",
     "tools/rendering/acceptance/test_scene_matrix.py",
 )
 PYTHON_MODULES = {
@@ -126,7 +129,9 @@ PYTHON_MODULES = {
     "tools/ci/validate_performance_measurement.py",
     "tools/ci/validate_public_tree.py", "tools/ci/validate_visual_catalog.py",
     "tools/perf/check_residency.py", "tools/perf/check_sim_budgets.py",
+    "tools/perf/capture_deferred_stack.py",
     "tools/perf/propose_sim_budgets.py", "tools/perf/sim_budget_compare.py",
+    "tools/perf/report_sim_budget.py",
     "tools/perf/sim_budget_io.py", "tools/perf/render_budget.py",
     "tools/perf/fixture_paths.py",
     "tools/perf/regional_admission_report.py",
@@ -136,6 +141,7 @@ PYTHON_MODULES = {
     "tools/release/verify_release.py", "tools/release/validate_release_gates.py",
     "tools/assets/acquire.py",
     "tools/audio/bank_validate.py", "tools/persistence/save_receipt.py",
+    "tools/persistence/recovery_durability_evidence.py",
     "tools/rendering/acceptance/scene_matrix.py",
 }
 # blender-authoring.yml covers these explicit files on Linux and Windows.
@@ -202,8 +208,10 @@ CI_ENTRYPOINTS = (
         "tools/gates/shader-scenes.py",
         "tools/check_runtime_data_manifest.py", "tools/check_sdf_contract_doc.py",
         "tools/config_codegen.py", "tools/perf/capture_sim_budget.py",
+        "tools/perf/capture_deferred_stack.py",
         "tools/perf/check_sim_budgets.py", "tools/perf/fixture_hash.py",
         "tools/perf/perf.py", "tools/perf/propose_sim_budgets.py",
+        "tools/perf/report_sim_budget.py",
         "tools/release/generate_sbom.py", "tools/release/validate_package.py",
         "tools/release/validate_sbom.py", "tools/release/validate_release_gates.py",
     }
