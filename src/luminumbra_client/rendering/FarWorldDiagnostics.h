@@ -22,6 +22,13 @@ enum class FarWorldAuthorityKind {
     Session
 };
 struct FarWorldHandoffDiagnosticSnapshot;
+// Per-refresh measurements, absent until the refresh owner supplies them.
+// These counters are observations, never admission allowances or defaults.
+struct FarWorldRefreshWork {
+    std::uint64_t source_read_bytes = 0, source_copied_bytes = 0, source_decode_work = 0;
+    std::uint64_t capture_work = 0, admission_work = 0, admission_height_observations = 0;
+    double source_ms = 0;
+};
 struct FarWorldTileDiagnostic {
     World::FarBuildIdentity desired, built;
     World::FarVolumeCoverageIntent intent;
@@ -46,7 +53,9 @@ struct FarWorldDiagnosticSnapshot {
     FarWorldSelection selection;
     FarWorldAuthorityKind authority_kind = FarWorldAuthorityKind::Fixture;
     std::uint64_t serving_serial = 0, target_serial = 0, submitted_water_indices = 0;
+    std::uint64_t serving_committed_generation = 0, manifest_fingerprint = 0;
     bool latest_target_ready = false;
+    std::optional<FarWorldRefreshWork> refresh_work;
     World::FarWorldAuthorityProducer::FrozenResult source_failure;
     FarWorldSubmissionRefusal submission_refusal = FarWorldSubmissionRefusal::None;
     std::uint64_t world_epoch = 0, frame = 0, content_identity = 0, bake_generation = 0;

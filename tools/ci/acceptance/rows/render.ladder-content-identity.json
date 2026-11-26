@@ -1,12 +1,12 @@
 {
   "id": "render.ladder-content-identity",
   "source": "docs/render-benchmark.md#far-mode-reporting-and-ladder-baselines",
-  "statement": "The v2, v3 and v4 benchmark schema readers refuse unavailable zero far authority content identities in every measured Ladder baseline frame; diagnostic captures retain zero as unavailable. Missing, malformed and overflowing identities are refused in both modes.",
+  "statement": "The v2, v3 and v4 benchmark schema readers require a nonzero fixture content identity or a distinct nonzero session manifest fingerprint in every measured Ladder baseline frame. Session evidence preserves zero fixture content identity and requires a nonzero world epoch, current serving and target serials, matching committed generations, latest-target readiness and no source or capture failure. Missing, malformed and overflowing authority metadata is refused; diagnostic captures may report unavailable or stale authority.",
   "status": "covered",
   "evidence": [
     {
       "kind": "script",
-      "ref": "tools/perf/test_perf.py"
+      "ref": "tools/perf/test_render_contract.py"
     },
     {
       "kind": "ctest",

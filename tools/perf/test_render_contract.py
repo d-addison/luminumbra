@@ -102,6 +102,13 @@ def args(**overrides):
     return argparse.Namespace(**result)
 
 
+def session_authority():
+    return dict(authority_kind='session', content_identity='0', world_epoch=12,
+                committed_generation=9, serving_committed_generation=9,
+                serving_serial=7, target_serial=7, manifest_fingerprint='18446744073709551615',
+                latest_target_ready=True, source_error=0, capture_error=0, refresh_work=None)
+
+
 def refresh_pass_statistics(data):
     values = [row['gpu_pass_sum_ms'] for row in data['frame_samples']]
     summary = perf.summarize(values, 'ms')
@@ -114,6 +121,98 @@ def refresh_pass_statistics(data):
 
 
 class RenderContractTests(unittest.TestCase):
+    def test_session_baseline_rejects_stale_or_missing_authority(self):
+        data = artifact()
+        data['far_world'] = far_capture()['far_world']
+        authority = session_authority()
+        for row in data['far_world']['frames']:
+            row.update(authority)
+        readers = (lambda document: perf.validate_far_world_reporting(document, ladder_baseline=True),
+                   lambda document: capture.validate(document, args(ladder_baseline=True)),
+                   lambda document: contract.validate(document, QUALIFIED, ladder_baseline=True))
+        for reader in readers:
+            reader(data)
+        v2 = self.report_capture()
+        v2.update(frames=4, warmup_frames=2, far_world=copy.deepcopy(data['far_world']))
+        v2_args = args(position=[0, 0, 0], yaw=0, pitch=0, tod=0,
+                       qualified_renderer=None, ladder_baseline=True)
+        self.assertEqual(capture.validate(v2, v2_args)['verdict'], 'PASS')
+        v2['far_world']['frames'][1]['serving_serial'] = 6
+        with self.assertRaisesRegex(ValueError, 'Ladder baseline refused'):
+            capture.validate(v2, v2_args)
+        mutations = [dict(world_epoch=0), dict(manifest_fingerprint='0'), dict(serving_serial=6),
+                     dict(target_serial=0, serving_serial=0), dict(latest_target_ready=False),
+                     dict(committed_generation=10), dict(serving_committed_generation=8),
+                     dict(source_error=10), dict(capture_error=10), dict(effective_mode='legacy'),
+                     dict(suppressed=True), dict(coverage_settled=False), dict(refusal='AdmissionFailed')]
+        # Every measured position, rather than just the report frame, must be current.
+        for index in range(4):
+            for mutation in mutations:
+                refused = copy.deepcopy(data)
+                refused['far_world']['frames'][index].update(mutation)
+                update_far_summary(refused)
+                with self.subTest(index=index, mutation=mutation):
+                    perf.validate_far_world_reporting(refused)  # Still useful diagnostic evidence.
+                    for reader in readers:
+                        with self.assertRaisesRegex(ValueError, 'Ladder baseline refused'):
+                            reader(refused)
+        # Initial pristine committed generation zero is legitimate; serial/epoch zero are not.
+        for row in data['far_world']['frames']:
+            row.update(committed_generation=0, serving_committed_generation=0)
+        for reader in readers:
+            reader(data)
+        for key in authority:
+            if key == 'content_identity':
+                continue
+            refused = copy.deepcopy(data)
+            del refused['far_world']['frames'][1][key]
+            with self.subTest(missing=key):
+                for reader in readers:
+                    with self.assertRaises(ValueError):
+                        reader(refused)
+
+    def test_session_authority_rejects_partial_unknown_and_out_of_range_metadata(self):
+        data = far_capture()
+        authority = session_authority()
+        for row in data['far_world']['frames']:
+            row.update(authority)
+        counters = dict(source_read_bytes=11, source_copied_bytes=12, source_decode_work=13,
+                        capture_work=14, admission_work=15, admission_height_observations=16)
+        for work in (None, dict(counters, source_ms=1.25),
+                     dict.fromkeys((*counters, 'source_ms'), 0),
+                     dict(dict.fromkeys(counters, 2**64 - 1), source_ms=sys.float_info.max)):
+            data['far_world']['frames'][0]['refresh_work'] = work
+            perf.validate_far_world_reporting(data, ladder_baseline=True)
+        mutations = [dict(authority_kind='unknown'), dict(authority_kind=None),
+                     dict(authority_kind=[]), dict(content_identity='1'),
+                     dict(latest_target_ready=1), dict(refresh_work={})]
+        for key in ('manifest_fingerprint',):
+            mutations.extend({key: value} for value in ('', '-1', '1.0', 'x', '18446744073709551616',
+                                                       1, True, None))
+        for key in ('world_epoch', 'committed_generation', 'serving_committed_generation',
+                    'serving_serial', 'target_serial'):
+            mutations.extend({key: value} for value in (-1, 2**64, 1.0, '1', True, None))
+        for key in ('source_error', 'capture_error'):
+            mutations.extend({key: value} for value in (-1, 11, True, '0', None))
+        for key in counters:
+            for value in (-1, 2**64, True, 1.5, None):
+                mutations.append(dict(refresh_work=dict(counters, source_ms=0, **{key: value})))
+            incomplete = dict(counters, source_ms=0)
+            del incomplete[key]
+            mutations.append(dict(refresh_work=incomplete))
+        for value in (None, -1, float('nan'), float('inf'), 10**400, True, '0'):
+            mutations.append(dict(refresh_work=dict(counters, source_ms=value)))
+        for mutation in mutations:
+            refused = copy.deepcopy(data)
+            refused['far_world']['frames'][1].update(mutation)
+            with self.subTest(mutation=mutation):
+                for baseline in (False, True):
+                    with self.assertRaises(ValueError):
+                        perf.validate_far_world_reporting(refused, ladder_baseline=baseline)
+        for row in data['far_world']['frames']:
+            row.update(authority_kind='fixture', content_identity='42', manifest_fingerprint='0')
+        perf.validate_far_world_reporting(data, ladder_baseline=True)
+
     def test_far_budget_no_world_frames_require_complete_timer_identity(self):
         for stages in ((), contract.GPU_STAGES):
             data = budget_artifact()
@@ -1139,6 +1238,21 @@ class ScriptedWorkloadTests(unittest.TestCase):
                 lines[index] = ' '.join(tokens)
             path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
             self.scripts[kind] = path
+
+    def test_session_authority_in_v4_baseline(self):
+        script = self.scripts['save_load']
+        data = workload_artifact('save_load', script)
+        template = far_capture()['far_world']['frames'][0]
+        data['far_world'] = dict(frames=[dict(copy.deepcopy(template), frame=index + 2,
+                                            **session_authority()) for index in range(data['frames'])])
+        update_far_summary(data)
+        self.assertEqual(capture.validate(data, args(traversal=script, ladder_baseline=True))['verdict'], 'PASS')
+        self.assertEqual(contract.validate(data, QUALIFIED, traversal=script, ladder_baseline=True)['verdict'], 'PASS')
+        data['far_world']['frames'][1]['serving_committed_generation'] = 8
+        for reader in (lambda: capture.validate(data, args(traversal=script, ladder_baseline=True)),
+                       lambda: contract.validate(data, QUALIFIED, traversal=script, ladder_baseline=True)):
+            with self.assertRaisesRegex(ValueError, 'Ladder baseline refused'):
+                reader()
 
     def test_every_workload_requires_named_graphics_preset(self):
         for kind, script in self.scripts.items():

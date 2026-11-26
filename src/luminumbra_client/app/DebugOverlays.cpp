@@ -759,6 +759,33 @@ void DrawGpuProfilerContents(Luminumbra::Rendering::RenderPipeline& renderPipeli
                 cave_policy_name(fw.requested_cave_policy),
                 cave_policy_name(fw.bound_cave_policy));
     ImGui::Text("submission refusal: %s", FarWorldSubmissionRefusalName(fw.submission_refusal));
+    if (fw.authority_kind == FarWorldAuthorityKind::Session) {
+        ImGui::Text("session generation %llu serving %llu; serial %llu / target %llu ready %d",
+                    static_cast<unsigned long long>(fw.bake_generation),
+                    static_cast<unsigned long long>(fw.serving_committed_generation),
+                    static_cast<unsigned long long>(fw.serving_serial),
+                    static_cast<unsigned long long>(fw.target_serial),
+                    fw.latest_target_ready);
+        ImGui::Text("manifest %llu; source/capture error %d/%d; admission status %d",
+                    static_cast<unsigned long long>(fw.manifest_fingerprint),
+                    static_cast<int>(fw.source_failure.source),
+                    static_cast<int>(fw.source_failure.capture),
+                    static_cast<int>(renderPipeline.far_world_renderer().AdmissionStatus()));
+        if (fw.refresh_work) {
+            const auto& work = *fw.refresh_work;
+            ImGui::Text("source read/copied bytes %llu/%llu decode %llu (%.3f ms)",
+                        static_cast<unsigned long long>(work.source_read_bytes),
+                        static_cast<unsigned long long>(work.source_copied_bytes),
+                        static_cast<unsigned long long>(work.source_decode_work),
+                        work.source_ms);
+            ImGui::Text("capture/admission work %llu/%llu height observations %llu",
+                        static_cast<unsigned long long>(work.capture_work),
+                        static_cast<unsigned long long>(work.admission_work),
+                        static_cast<unsigned long long>(work.admission_height_observations));
+        } else {
+            ImGui::TextUnformatted("refresh work: unavailable");
+        }
+    }
     ImGui::Text("selected %d; draws %zu indices %zu; suppression %s; water capability %d",
                 fw.selection.effective == FarWorldMode::Ladder,
                 fw.draws,
