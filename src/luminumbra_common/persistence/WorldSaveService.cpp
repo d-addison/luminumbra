@@ -332,22 +332,59 @@ void AcquirePublicationLock(std::unique_lock<std::shared_mutex>& lock,
     }
 }
 
+std::vector<const std::shared_mutex*>& HeldPublicationMutexes() {
+    thread_local std::vector<const std::shared_mutex*> held;
+    return held;
+}
+
+// Exclusive publication gate that its owning thread may re-enter. Recorded
+// removal completion retires a world member through remove_owned_entry while
+// the publisher (PublishProtectedMember, durable_remove) already holds that
+// member's gate; locking a std::shared_mutex twice from one thread is undefined
+// and fails with EDEADLK on glibc. Shared readers are unaffected.
+class PublicationLock {
+public:
+    PublicationLock() = default;
+    PublicationLock(const PublicationLock&) = delete;
+    PublicationLock& operator=(const PublicationLock&) = delete;
+    PublicationLock(PublicationLock&& other) noexcept = default;
+    PublicationLock& operator=(PublicationLock&&) = delete;
+    ~PublicationLock() {
+        if (!m_lock.owns_lock())
+            return;
+        auto& held = HeldPublicationMutexes();
+        const auto found = std::find(held.begin(), held.end(), m_lock.mutex());
+        if (found != held.end())
+            held.erase(found);
+    }
+
+    void acquire(std::shared_mutex& mutex, detail::RegionFileSync& sync) {
+        auto& held = HeldPublicationMutexes();
+        if (std::find(held.begin(), held.end(), &mutex) != held.end())
+            return;
+        m_lock = std::unique_lock(mutex, std::defer_lock);
+        AcquirePublicationLock(m_lock, sync);
+        held.push_back(&mutex);
+    }
+
+private:
+    std::unique_lock<std::shared_mutex> m_lock;
+};
+
 struct PublicationLocks {
-    std::unique_lock<std::shared_mutex> clock_pair;
-    std::unique_lock<std::shared_mutex> file;
+    PublicationLock clock_pair;
+    PublicationLock file;
 };
 
 PublicationLocks LockPublication(const std::filesystem::path& path) {
     auto& sync = detail::RegionFileSyncFor(path);
-    PublicationLocks locks{.clock_pair =
-                               std::unique_lock(ClockPairPublicationMutex(), std::defer_lock),
-                           .file = std::unique_lock(sync.publication, std::defer_lock)};
+    PublicationLocks locks;
     // Readers comparing ledger and clock need one consistent pair, including
     // across a rewind. Writers keep the installed ledger tick <= clock tick.
     // Only replacement holds this gate; staging and fsync never acquire it.
     if (path.filename() == "world_info.json" || path.filename() == "active-regions.arl")
-        AcquirePublicationLock(locks.clock_pair, sync);
-    AcquirePublicationLock(locks.file, sync);
+        locks.clock_pair.acquire(ClockPairPublicationMutex(), sync);
+    locks.file.acquire(sync.publication, sync);
     return locks;
 }
 
