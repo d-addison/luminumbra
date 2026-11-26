@@ -2770,8 +2770,11 @@ if(DEFINED ENV{VISUAL_SWEEP_PYTHON})
 endif()
 if(Python3_FOUND)
     add_test(NAME FarHorizonV2ValidatorContract
-        COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover -s "${CMAKE_SOURCE_DIR}/tools/gates" -p test_far_ladder_oracle.py)
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/gates/test_far_ladder_oracle.py")
     set_tests_properties(FarHorizonV2ValidatorContract PROPERTIES LABELS "tools" TIMEOUT 60)
+    add_test(NAME FarWorldReportPython
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_far_world_report.py")
+    set_tests_properties(FarWorldReportPython PROPERTIES LABELS "tools" TIMEOUT 60)
     if(Python3_VERSION VERSION_GREATER_EQUAL "3.10")
         add_test(NAME FoliageEvidenceContract
             COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_foliage_evidence.py)

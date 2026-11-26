@@ -3580,7 +3580,7 @@ function Test-PlayerView {
 # checked only when the artifact mode is ladder; otherwise ladder_checked is
 # reported false. Complete v2 checks every required station's retained ON frame,
 # deadline <=90 seconds, current spanning identities and independent wanted set.
-# An explicit Ladder run refuses until immutable fixture authority is supported.
+# Ladder qualification requires effective session authority at every station.
 
 # File-only controls exercise selected-mode dispatch and combined water evidence
 # through the same independent validator used below.
@@ -3590,7 +3590,7 @@ function Assert-FarHorizonWaterNegativeControls {
         if (Get-Command $candidate -ErrorAction SilentlyContinue) { $waterPython = $candidate; break }
     }
     if (-not $waterPython) { throw "far water controls require Python 3 (stdlib only)" }
-    & $waterPython -B -m unittest discover -s (Join-Path $PSScriptRoot ".") -p "test_far_ladder_oracle.py"
+    & $waterPython -I -B -m unittest discover -s (Join-Path $PSScriptRoot ".") -p "test_far_ladder_oracle.py"
     if ($LASTEXITCODE -ne 0) { throw "FarLodHorizon v2 mode/water negative controls failed" }
 }
 
@@ -3604,19 +3604,46 @@ function Assert-FarHorizonLegacyCompatibility {
     }
 }
 
+function Assert-FarHorizonVisualStations {
+    param([object]$Analysis, [object]$Oracle)
+    Assert-FarOracleObject $Analysis "horizon visuals" "analysis" @("stations", "aggregates")
+    Assert-FarOracleObject $Analysis.aggregates "horizon visuals" "aggregates" @("captured_stations", "expected_stations")
+    Assert-FarOracleArray $Analysis.stations "horizon visuals" "stations"
+    $captured = Get-FarOracleInteger $Analysis.aggregates.captured_stations "horizon visuals" "captured_stations"
+    $expected = Get-FarOracleInteger $Analysis.aggregates.expected_stations "horizon visuals" "expected_stations"
+    $visualRows = @($Analysis.stations)
+    $oracleRows = @($Oracle.stations)
+    if ($visualRows.Count -eq 0 -or $visualRows.Count -ne $oracleRows.Count -or
+        $captured -ne $visualRows.Count -or $expected -ne $visualRows.Count) {
+        throw "FarLodHorizon incomplete visual stations"
+    }
+    for ($index = 0; $index -lt $oracleRows.Count; $index++) {
+        $visual = $visualRows[$index]
+        $retained = $oracleRows[$index]
+        Assert-FarOracleObject $visual "horizon visuals" "station" @("name", "camera", "passed")
+        Assert-FarOracleObject $visual.camera "horizon visuals" "camera" @("world_x", "world_y", "world_z")
+        if ($visual.name -cne $retained.name -or $visual.passed -isnot [bool] -or -not $visual.passed) {
+            throw "FarLodHorizon mismatched or failed visual station"
+        }
+        foreach ($axis in @("world_x", "world_y", "world_z")) {
+            $coordinate = Get-FarOracleCoordinate $visual.camera.$axis "horizon visuals" "camera.$axis"
+            if ($coordinate -ne $retained.camera.$axis) {
+                throw "FarLodHorizon stale visual camera"
+            }
+        }
+    }
+}
+
 function Test-FarLodHorizon {
     Assert-FarHorizonWaterNegativeControls
-    if ($FarWorldRenderer -eq "Ladder") {
-        throw "FarLodHorizon Ladder qualification is unsupported: the world presets lack injected immutable authority; native cave/edit/budget/water qualification remains NEEDS-NATIVE-RUN. A refused Legacy fallback cannot qualify Ladder."
-    }
-    # The validator selector does not override the client's systems.json request.
-    # Legacy qualification must explicitly opt out through the existing setting.
+    # The selector validates the actual client request; it never edits settings.
     $systems = Get-Content -LiteralPath "data/common/systems.json" -Raw | ConvertFrom-Json
+    $wantLadder = $FarWorldRenderer -eq "Ladder"
     if ($systems.render.far_world_ladder.enabled -isnot [bool] -or
-        $systems.render.far_world_ladder.enabled -ne $false) {
-        throw "FarLodHorizon Legacy requires explicit render.far_world_ladder.enabled:false in data/common/systems.json. The default request is Ladder; a refused fallback is not an explicit Legacy request."
+        $systems.render.far_world_ladder.enabled -ne $wantLadder) {
+        throw "FarLodHorizon $FarWorldRenderer requires matching explicit render.far_world_ladder.enabled in data/common/systems.json. A refused fallback cannot qualify."
     }
-    Write-Host "FarLodHorizon selected renderer: $FarWorldRenderer (explicit Legacy opt-out; ladder_checked:false)"
+    Write-Host "FarLodHorizon selected renderer: $FarWorldRenderer"
     $exe = Get-ClientExe
     $runSeconds = [Math]::Max(680, $SmokeSeconds)
 
@@ -3629,7 +3656,7 @@ function Test-FarLodHorizon {
     # boundary-band-coverage assertion is gated to the sea preset).
     $waterBearingPresets = @("mountains", "archipelago")
     $openWaterPresets = @("archipelago")
-    foreach ($preset in @("mountains", "default", "archipelago")) {
+    foreach ($preset in @("mountains", "default", "archipelago", "cave_dense")) {
         $viewDir = "build/$BuildPreset/test-artifacts/runtime/farlod-horizon-$preset"
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $viewDir
         New-Item -ItemType Directory -Force -Path $viewDir | Out-Null
@@ -3649,15 +3676,28 @@ function Test-FarLodHorizon {
         # Runs retained #199 aggregate checks plus the strict station/pose validator.
         $oracleResult = Assert-FarHorizonV2Artifact -Path (Join-Path $viewDir "farlod-horizon-ladder-oracle.json") -Renderer ($FarWorldRenderer.ToLowerInvariant())
         if ($oracle.world_preset -ne $preset) { throw "farlod horizon ($preset) wrong v2 preset" }
-        Assert-FarHorizonLegacyCompatibility -SelectedEvidence $oracleResult
-        $analysisPath = Join-Path $viewDir "farlod-horizon-analysis.json"
-        $analysis = Read-JsonArtifact -Path $analysisPath -Schema "luminumbra.farlod_horizon.v1"
-        Assert-FarLodHorizonStationCoverage -Analysis $analysis -Name "farlod horizon ($preset)"
-        foreach ($counter in @("regions_wanted", "regions_resident", "regions_missing")) {
-            $oracleCount = Get-FarOracleInteger $oracle.legacy.$counter "farlod horizon ($preset) oracle" "legacy.$counter"
-            $analysisCount = Get-FarOracleInteger $analysis.farlod.$counter "farlod horizon ($preset)" "farlod.$counter"
-            if ($oracleCount -ne $analysisCount) {
-                throw "farlod horizon ($preset) oracle legacy.$counter $oracleCount differs from runtime farlod.$counter $analysisCount"
+        if ($wantLadder) {
+            if ($oracleResult.Mode -cne "ladder" -or $oracleResult.LadderChecked -ne $true) {
+                throw "FarLodHorizon wrong-mode: session Ladder evidence required"
+            }
+            foreach ($station in $oracle.stations) {
+                if ($station.snapshot.authority_kind -cne "session") {
+                    throw "FarLodHorizon Ladder requires session authority at every station"
+                }
+            }
+            $analysis = Read-JsonArtifact -Path (Join-Path $viewDir "farlod-horizon-visual.json") -Schema "luminumbra.farlod_horizon.visual.v1"
+            Assert-FarHorizonVisualStations -Analysis $analysis -Oracle $oracle
+        } else {
+            Assert-FarHorizonLegacyCompatibility -SelectedEvidence $oracleResult
+            $analysisPath = Join-Path $viewDir "farlod-horizon-analysis.json"
+            $analysis = Read-JsonArtifact -Path $analysisPath -Schema "luminumbra.farlod_horizon.v1"
+            Assert-FarLodHorizonStationCoverage -Analysis $analysis -Name "farlod horizon ($preset)"
+            foreach ($counter in @("regions_wanted", "regions_resident", "regions_missing")) {
+                $oracleCount = Get-FarOracleInteger $oracle.legacy.$counter "farlod horizon ($preset) oracle" "legacy.$counter"
+                $analysisCount = Get-FarOracleInteger $analysis.farlod.$counter "farlod horizon ($preset)" "farlod.$counter"
+                if ($oracleCount -ne $analysisCount) {
+                    throw "farlod horizon ($preset) oracle legacy.$counter $oracleCount differs from runtime farlod.$counter $analysisCount"
+                }
             }
         }
         $ladderCheckedText = "false"
@@ -3674,21 +3714,23 @@ function Test-FarLodHorizon {
             throw "farlod horizon ($preset) captured $($analysis.aggregates.captured_stations) of $($analysis.aggregates.expected_stations) stations"
         }
 
-        # Retain the aggregate checks alongside the per-station independent
-        # coverage checks above. thresholds.f2_outer_range_m is v1 metadata.
-        if ([int64]$analysis.farlod.regions_missing -gt 0) {
-            throw "farlod horizon ($preset) has $($analysis.farlod.regions_missing) missing wanted far regions after settle"
-        }
-        if ([int64]$analysis.farlod.regions_resident -le 0 -or [int64]$analysis.farlod.regions_wanted -le 0) {
-            throw "farlod horizon ($preset) reports no resident/wanted far regions - the far path did not run"
-        }
-        # Resident byte budget.
-        if ([int64]$analysis.farlod.farlod_resident_bytes -le 0 -or
-            [int64]$analysis.farlod.farlod_resident_bytes -ge [int64]$analysis.thresholds.resident_budget_bytes) {
-            throw "farlod horizon ($preset) resident bytes $($analysis.farlod.farlod_resident_bytes) outside (0, $($analysis.thresholds.resident_budget_bytes))"
-        }
-        if ([int64]$analysis.farlod.far_region_draws -le 0 -or [int64]$analysis.farlod.far_indices_drawn -le 0) {
-            throw "farlod horizon ($preset) drew no far region meshes at capture time"
+        if (-not $wantLadder) {
+            # Retain the aggregate checks alongside the per-station independent
+            # coverage checks above. thresholds.f2_outer_range_m is v1 metadata.
+            if ([int64]$analysis.farlod.regions_missing -gt 0) {
+                throw "farlod horizon ($preset) has $($analysis.farlod.regions_missing) missing wanted far regions after settle"
+            }
+            if ([int64]$analysis.farlod.regions_resident -le 0 -or [int64]$analysis.farlod.regions_wanted -le 0) {
+                throw "farlod horizon ($preset) reports no resident/wanted far regions - the far path did not run"
+            }
+            # Resident byte budget.
+            if ([int64]$analysis.farlod.farlod_resident_bytes -le 0 -or
+                [int64]$analysis.farlod.farlod_resident_bytes -ge [int64]$analysis.thresholds.resident_budget_bytes) {
+                throw "farlod horizon ($preset) resident bytes $($analysis.farlod.farlod_resident_bytes) outside (0, $($analysis.thresholds.resident_budget_bytes))"
+            }
+            if ([int64]$analysis.farlod.far_region_draws -le 0 -or [int64]$analysis.farlod.far_indices_drawn -le 0) {
+                throw "farlod horizon ($preset) drew no far region meshes at capture time"
+            }
         }
 
         # gbuffer GPU delta vs the in-run far-disabled baseline.
@@ -3699,6 +3741,8 @@ function Test-FarLodHorizon {
             if ([double]$analysis.gbuffer.gbuffer_delta_ms -ge [double]$analysis.thresholds.max_gbuffer_delta_ms) {
                 throw "farlod horizon ($preset) gbuffer GPU delta $($analysis.gbuffer.gbuffer_delta_ms) ms exceeds $($analysis.thresholds.max_gbuffer_delta_ms) ms (baseline $($analysis.gbuffer.baseline_gbuffer_gpu_ms), far $($analysis.gbuffer.far_gbuffer_gpu_ms))"
             }
+        } elseif ($wantLadder) {
+            throw "FarLodHorizon Ladder qualification requires GPU timer samples"
         } else {
             Write-Host "farlod horizon ($preset): GPU timers unsupported on this context; gbuffer delta gate not applicable"
         }
@@ -3728,20 +3772,24 @@ function Test-FarLodHorizon {
             }
         }
 
-        # Telemetry surfaces in last-known-runtime.json.
-        $runtimeState = Get-Content (Join-Path $viewDir "last-known-runtime.json") -Raw | ConvertFrom-Json
-        if ($null -eq $runtimeState.farlod -or $null -eq $runtimeState.farlod.farlod_resident_bytes) {
-            throw "farlod horizon ($preset) last-known-runtime.json is missing the farlod telemetry section"
+        if (-not $wantLadder) {
+            # Telemetry surfaces in last-known-runtime.json.
+            $runtimeState = Get-Content (Join-Path $viewDir "last-known-runtime.json") -Raw | ConvertFrom-Json
+            if ($null -eq $runtimeState.farlod -or $null -eq $runtimeState.farlod.farlod_resident_bytes) {
+                throw "farlod horizon ($preset) last-known-runtime.json is missing the farlod telemetry section"
+            }
         }
 
         if (-not $analysis.passed) {
             throw "farlod horizon ($preset) analysis reported failure"
         }
-        Write-Host ("farlod horizon ({0}): wanted={1} resident={2} missing={3} resident_bytes={4} draws={5} indices={6} gbuffer baseline={7}ms far={8}ms delta={9}ms max_sky={10} bands_resolved={11}" -f `
-            $preset, $analysis.farlod.regions_wanted, $analysis.farlod.regions_resident, $analysis.farlod.regions_missing, `
-            $analysis.farlod.farlod_resident_bytes, $analysis.farlod.far_region_draws, $analysis.farlod.far_indices_drawn, `
-            $analysis.gbuffer.baseline_gbuffer_gpu_ms, $analysis.gbuffer.far_gbuffer_gpu_ms, $analysis.gbuffer.gbuffer_delta_ms, `
-            $analysis.aggregates.max_below_horizon_sky_ratio, $analysis.aggregates.bands_resolved)
+        if (-not $wantLadder) {
+            Write-Host ("farlod horizon ({0}): wanted={1} resident={2} missing={3} resident_bytes={4} draws={5} indices={6} gbuffer baseline={7}ms far={8}ms delta={9}ms max_sky={10} bands_resolved={11}" -f `
+                $preset, $analysis.farlod.regions_wanted, $analysis.farlod.regions_resident, $analysis.farlod.regions_missing, `
+                $analysis.farlod.farlod_resident_bytes, $analysis.farlod.far_region_draws, $analysis.farlod.far_indices_drawn, `
+                $analysis.gbuffer.baseline_gbuffer_gpu_ms, $analysis.gbuffer.far_gbuffer_gpu_ms, $analysis.gbuffer.gbuffer_delta_ms, `
+                $analysis.aggregates.max_below_horizon_sky_ratio, $analysis.aggregates.bands_resolved)
+        }
 
         # water-continuity gate. On a water-bearing
         # preset the far path must render a flat water sheet where the live
@@ -3753,6 +3801,9 @@ function Test-FarLodHorizon {
         # skipped. The below-horizon sky-ratio gate above already proves the
         # combined far terrain+water leaves no sky/void band below the horizon.
         $maxWaterDraws = [int]$analysis.far_water.max_water_sheet_draws
+        if ($wantLadder) {
+            $maxWaterDraws = ($oracle.stations | ForEach-Object { $_.snapshot.submitted_water_indices } | Measure-Object -Maximum).Maximum
+        }
         $maxBandWaterRatio = [double]$analysis.aggregates.max_boundary_band_water_ratio
         #  re-derived far-water band FLOOR (open sea). The
         # pre-aerial-perspective classifier passed on a degenerate ~0.013 reading
