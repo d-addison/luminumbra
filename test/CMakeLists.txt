@@ -1816,6 +1816,7 @@ add_executable(frontier_gates_test
     persistence/water_cursor_hash_test.cpp
     persistence/save_load_corruption_corpus_test.cpp
     persistence/SaveTransaction_test.cpp
+    persistence/recovery_durability_test.cpp
 )
 
 # The region consumer regressions also exceed the default COFF section count.
