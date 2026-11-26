@@ -7,9 +7,18 @@ namespace Luminumbra::Rendering::AttributedGl {
 // Both hosts support one GL context on its owning render thread. In particular,
 // do not make this TLS: disabled attribution must not initialize/access TLS on
 // every GL bind or submission. Creation/deletion also run on the context owner.
+namespace detail {
+struct ProgramStorage {
+    mutable Client::Attribution::ProgramFirstUse state;
+};
+// Constant initialization precedes dynamic initialization in every TU, including
+// a wrapper called by a static initializer. The const owner retains destruction
+// of the lazily created registry; only its render-thread-owned state is mutable.
+inline constinit const ProgramStorage program_storage{};
+} // namespace detail
+
 inline Client::Attribution::ProgramFirstUse& programs() {
-    static Client::Attribution::ProgramFirstUse state;
-    return state;
+    return detail::program_storage.state;
 }
 using Program = Client::Attribution::ProgramFirstUse::Program;
 

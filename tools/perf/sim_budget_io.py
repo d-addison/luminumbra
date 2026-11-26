@@ -35,9 +35,10 @@ def validate_workload_integer(value: Any, key: str) -> int:
     return parsed
 
 
-def read_json(path: Path, *, root: Path | None = None) -> Any:
+def read_json(path: Path, *, root: Path | None = None, limit: int | None = None) -> Any:
     try:
-        text = read_text(root if root is not None else path.parent, path, encoding="utf-8-sig")
+        text = read_text(root if root is not None else path.parent, path,
+                         encoding="utf-8-sig", limit=limit)
     except OSError as exc:
         raise ValueError(f"cannot read {path.name}: {exc.strerror or exc}") from exc
     try:
@@ -83,8 +84,10 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
             raise ValueError(f"capture.json has an invalid {key}")
 
 
-def load_capture(directory: Path) -> dict[str, Any]:
-    manifest = read_json(directory / "capture.json", root=directory)
+def load_capture(directory: Path, *, include_artifacts: bool = False,
+                 limit: int | None = None, max_runs: int | None = None) -> dict[str, Any]:
+    """Optionally retain validated artifacts and bound diagnostic input reads."""
+    manifest = read_json(directory / "capture.json", root=directory, limit=limit)
     if not isinstance(manifest, dict) or manifest.get("schema") != CAPTURE_SCHEMA:
         raise ValueError("capture.json has a missing or unsupported schema")
     absent = [key for key in MANIFEST_KEYS if key not in manifest]
@@ -96,6 +99,8 @@ def load_capture(directory: Path) -> dict[str, Any]:
     runs = manifest.get("runs")
     if not isinstance(runs, list) or not runs:
         raise ValueError("capture.json lists no runs")
+    if max_runs is not None and len(runs) > max_runs:
+        raise ValueError("capture.json exceeds run count bound")
     presets: dict[str, dict[str, Any]] = {}
     for run in runs:
         if (not isinstance(run, dict) or not isinstance(run.get("preset"), str)
@@ -106,7 +111,7 @@ def load_capture(directory: Path) -> dict[str, Any]:
             raise ValueError(f"duplicate preset in capture.json: {preset}")
         # Validate the authored spelling once, keeping the selected directory's
         # native path for the shared reader's metadata and containment checks.
-        data = read_json(directory.joinpath(*reference_parts(artifact)), root=directory)
+        data = read_json(directory.joinpath(*reference_parts(artifact)), root=directory, limit=limit)
         if not isinstance(data, dict):
             raise ValueError(f"{artifact} is not a JSON object")
         try:
@@ -114,6 +119,9 @@ def load_capture(directory: Path) -> dict[str, Any]:
         except (TypeError, KeyError, AttributeError) as exc:
             raise ValueError(f"{artifact} is malformed: {exc}") from exc
         presets[preset] = {"stages": summarize_stages(data["sim_budget"]["stages"])}
+        if include_artifacts:
+            # Keep the validated object; consumers need not reopen the pathname.
+            presets[preset]["artifact"] = data
     return {"manifest": manifest, "presets": presets}
 
 

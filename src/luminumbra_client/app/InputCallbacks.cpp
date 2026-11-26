@@ -83,6 +83,7 @@ void RefreshInputOwnership(GLFWwindow* window) {
     ownership.imgui_mouse = imgui && ImGui::GetIO().WantCaptureMouse;
     if (b.router->SetOwnership(ownership)) {
         app.interactions = {};
+        app.input.firstMouse = true;
         if (auto* player = b.playerController->get())
             player->ClearQueuedLiveInput();
     }

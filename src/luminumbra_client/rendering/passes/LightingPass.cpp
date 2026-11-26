@@ -4,6 +4,7 @@
 #include "../RenderingDefaults.h"
 #include "DebugViewPass.h"
 #include "core/Profiler.h"
+#include "core/StrictNumeric.h"
 #include "rendering/AttributedGl.h"
 
 #include "../EnvironmentBrdfLut.gen.h"
@@ -584,12 +585,11 @@ void LightingPass::execute(const RenderContext& ctx,
         // wrap floor. It is parsed once; 0.25 is the shipped navigable-night default.
         static const float s_moon_wrap_floor = [] {
             if (const auto value = Core::ReadEnvironment("LUMIN_MOON_WRAP_FLOOR")) {
-                try {
-                    return std::stof(*value);
-                } catch (...) {
-                    // The static initializer bounds this diagnostic to once per process.
-                    LUMINUMBRA_CORE_WARN("Invalid LUMIN_MOON_WRAP_FLOOR; using 0.25");
-                }
+                float wrap_floor = 0.25f;
+                if (Core::ParseNumber(*value, wrap_floor))
+                    return wrap_floor;
+                // The static initializer bounds this diagnostic to once per process.
+                LUMINUMBRA_CORE_WARN("Invalid LUMIN_MOON_WRAP_FLOOR; using 0.25");
             }
             return 0.25f;
         }();
