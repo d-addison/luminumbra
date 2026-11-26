@@ -47,6 +47,7 @@ enum class ResourceLifetime : u8 {
 struct TextureDesc {
     u32 width = 0;
     u32 height = 0;
+    u32 depth = 0;           // Nonzero selects GL_TEXTURE_3D; layers must then be 1.
     u32 layers = 1;          // > 1 => GL_TEXTURE_2D_ARRAY (e.g. the shadow atlas)
     u32 internal_format = 0; // raw GL internal format (e.g. GL_RGBA16F)
     u32 format = 0;          // raw GL pixel format for the (null) upload
@@ -55,6 +56,7 @@ struct TextureDesc {
     u32 mag_filter = 0;
     u32 wrap_s = 0;
     u32 wrap_t = 0;
+    u32 wrap_r = 0;
     bool depth_compare = false; // GL_COMPARE_REF_TO_TEXTURE (shadow atlas)
     bool has_border_color = false;
     float border_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};

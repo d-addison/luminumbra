@@ -854,6 +854,7 @@ std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
         {"skybox", "skybox.vert", "enhanced_skybox.frag"},
         {"shadow_map", "shadow_map.vert", "shadow_map.frag"},
         {"ssao", "ssao.vert", "ssao.frag"},
+        {"post", "ssao.vert", "post.frag"},
         {"ssao_blur", "ssao.vert", "ssao_blur.frag"},
         {"water", "water.vert", "water.frag"},
         {"rml_ui", "rml.vert", "rml.frag"},
@@ -6548,10 +6549,11 @@ TEST(RenderSmokeTest, RenderFrameworkContractsEmitArtifacts) {
     shader_health << "{\n";
     shader_health << "  \"schema\": \"luminumbra.render_framework.shader_health.v1\",\n";
     shader_health << "  \"runtime_validity_requires_compile_and_link_success\": true,\n";
-    shader_health << "  \"programs\": [\"basic\", \"g_buffer\", \"instanced_mesh_gbuffer\", "
-                     "\"lighting_pass\", \"skybox\", \"shadow_map\", \"ssao\", \"ssao_blur\", "
-                     "\"water\", \"rml_ui\", \"loading_hologram\", \"loading_visual\", "
-                     "\"volumetric_lighting\", \"magical_particles\"]\n";
+    shader_health
+        << "  \"programs\": [\"basic\", \"g_buffer\", \"instanced_mesh_gbuffer\", "
+           "\"lighting_pass\", \"skybox\", \"shadow_map\", \"ssao\", \"ssao_blur\", \"post\", "
+           "\"water\", \"rml_ui\", \"loading_hologram\", \"loading_visual\", "
+           "\"volumetric_lighting\", \"magical_particles\"]\n";
     shader_health << "}\n";
 
     std::ofstream capture_hooks(RenderFrameworkArtifactRoot() / "capture_hooks.json");
@@ -9731,6 +9733,245 @@ TEST(RenderSmokeTest, AllocationLedgerMipSizesAreBoundedAndSaturating) {
     EXPECT_EQ(resources.allocated_bytes(), 1u);
     resources.forget_buffer_allocation(1);
     EXPECT_EQ(resources.allocated_bytes(), 0u);
+}
+
+TEST(RenderSmokeTest, VolumeTextureLedgerCountsDepthMipsAndRejectsInvalidExtents) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderResourceRegistry resources;
+    TextureDesc desc;
+    desc.width = desc.height = desc.depth = 4;
+    desc.internal_format = GL_RGBA16F;
+    desc.format = GL_RGBA;
+    desc.type = GL_FLOAT;
+    desc.wrap_r = GL_CLAMP_TO_EDGE;
+    EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc), 512u);
+    EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc, 32), 584u);
+    const auto texture = resources.create_texture("volume", desc);
+    ASSERT_NE(texture.id, 0u);
+    EXPECT_EQ(LedgerBytes(resources.allocation_ledger(), "volume"),
+              GlTextureAllocationBytes(texture.id));
+    GLint wrapping = 0;
+    glGetTextureParameteriv(texture.id, GL_TEXTURE_WRAP_R, &wrapping);
+    EXPECT_EQ(wrapping, GL_CLAMP_TO_EDGE);
+    const auto invalid = [&](const TextureDesc& rejected) {
+        EXPECT_EQ(resources.create_texture("invalid_volume", rejected).id, 0u);
+        EXPECT_EQ(resources.allocation_ledger().size(), 1u);
+    };
+    desc.layers = 2;
+    invalid(desc);
+    EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc),
+              std::numeric_limits<std::size_t>::max());
+    desc.layers = 1;
+    desc.depth = std::numeric_limits<Luminumbra::u32>::max();
+    invalid(desc);
+    desc.width = desc.height = desc.depth;
+    EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc),
+              std::numeric_limits<std::size_t>::max());
+    invalid(desc);
+    desc.width = 0;
+    invalid(desc);
+    EXPECT_FALSE(resources.resize_texture("volume", 0, 4));
+    ASSERT_NE(resources.owned_texture_desc("volume"), nullptr);
+    EXPECT_EQ(resources.owned_texture_desc("volume")->width, 4u);
+    const std::array replacement{RenderResourceRegistry::TargetExtent{"volume", 2, 2}};
+    ASSERT_TRUE(resources.replace_targets(replacement));
+    EXPECT_EQ(LedgerBytes(resources.allocation_ledger(), "volume"), 128u);
+    // Depth-one volumes still have a 3D target and a single slice.
+    desc.width = desc.height = desc.depth = 1;
+    const auto single = resources.create_texture("single_slice", desc);
+    ASSERT_NE(single.id, 0u);
+    EXPECT_EQ(GlTextureAllocationBytes(single.id), 8u);
+    resources.destroy_all_owned();
+    EXPECT_TRUE(resources.allocation_ledger().empty());
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+namespace {
+// Names the leaking resource class instead of only reporting the aggregate flag.
+void ExpectPipelineResourcesReleased(const RenderPipeline& pipeline) {
+    const auto stats = pipeline.get_resource_registry_stats();
+    EXPECT_EQ(stats.framebuffers, 0u);
+    EXPECT_EQ(stats.textures, 0u);
+    EXPECT_EQ(stats.renderbuffers, 0u);
+    EXPECT_EQ(stats.buffers, 0u);
+    EXPECT_EQ(stats.vertex_arrays, 0u);
+    EXPECT_EQ(stats.shader_programs, 0u);
+    EXPECT_EQ(stats.terrain_slots, 0u);
+    EXPECT_EQ(stats.water_slots, 0u);
+    EXPECT_TRUE(stats.empty_after_shutdown);
+}
+} // namespace
+
+TEST(RenderSmokeTest, PostShaderStartupFailureReleasesAllRegistryResources) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    ReloadShaderSources sources(true);
+    const auto fragment = sources.directory / "res/shaders/post.frag";
+    // Missing source, compile failure, and a linked but incompatible LUT sampler.
+    for (int input = 0; input < 3; ++input) {
+        SCOPED_TRACE(input);
+        if (input == 0) {
+            ASSERT_TRUE(fs::remove(fragment));
+        } else {
+            ASSERT_TRUE(
+                WriteLayoutShader(fragment,
+                                  input == 1 ? "#version 450 core\n#error invalid post shader\n"
+                                             : "#version 450 core\nuniform sampler2D u_scene;\n"
+                                               "uniform sampler2D u_lookLut;\nout vec4 color;\n"
+                                               "void main() { color = texture(u_scene, vec2(.5)) + "
+                                               "texture(u_lookLut, vec2(.5)); }\n"));
+        }
+        RenderPipeline pipeline;
+        pipeline.enable_static_model_content(false);
+        pipeline.set_post_lut_enabled(true);
+        EXPECT_FALSE(pipeline.startup(32, 24, sources.directory));
+        EXPECT_TRUE(pipeline.allocation_ledger().empty());
+        pipeline.shutdown();
+        EXPECT_TRUE(pipeline.allocation_ledger().empty());
+        ExpectPipelineResourcesReleased(pipeline);
+    }
+}
+
+TEST(RenderSmokeTest, PostLutDefaultBlitIdentityAndChannelSwapAtBothRenderScales) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(32, 24, SourceRoot()));
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(false);
+    RenderResourceRegistry targets;
+    struct Cleanup {
+        RenderPipeline& pipeline;
+        RenderResourceRegistry& targets;
+        ~Cleanup() {
+            pipeline.shutdown();
+            targets.destroy_all_owned();
+        }
+    } cleanup{pipeline, targets};
+    TextureDesc desc;
+    desc.width = 32;
+    desc.height = 24;
+    desc.internal_format = GL_RGBA8;
+    desc.format = GL_RGBA;
+    desc.type = GL_UNSIGNED_BYTE;
+    for (const auto* name : {"actual", "reference"}) {
+        ASSERT_NE(targets.create_texture(name, desc).id, 0u);
+        FboDesc fbo;
+        fbo.attachments = {{GL_COLOR_ATTACHMENT0, name}};
+        ASSERT_NE(targets.create_fbo(name, fbo).id, 0u);
+    }
+    GLuint lut = 0;
+    for (const auto& entry : pipeline.allocation_ledger())
+        if (entry.name == "post_look_lut") {
+            lut = entry.gl_id;
+            EXPECT_EQ(entry.bytes, 32u * 32u * 32u * 8u);
+            EXPECT_EQ(entry.bytes, GlTextureAllocationBytes(lut));
+        }
+    ASSERT_NE(lut, 0u);
+    std::vector<float> identity(32u * 32u * 32u * 4u);
+    glGetTextureImage(lut,
+                      0,
+                      GL_RGBA,
+                      GL_FLOAT,
+                      static_cast<GLsizei>(identity.size() * sizeof(float)),
+                      identity.data());
+    std::vector<float> swapped(identity.size());
+    for (std::size_t index = 0; index < identity.size(); index += 4) {
+        const auto texel = index / 4;
+        EXPECT_NEAR(identity[index], static_cast<float>(texel % 32u) / 31.0f, 0.0005f);
+        EXPECT_NEAR(identity[index + 1], static_cast<float>((texel / 32u) % 32u) / 31.0f, 0.0005f);
+        EXPECT_NEAR(identity[index + 2], static_cast<float>(texel / (32u * 32u)) / 31.0f, 0.0005f);
+        EXPECT_EQ(identity[index + 3], 1.0f);
+        swapped[index] = identity[index + 2];
+        swapped[index + 1] = identity[index + 1];
+        swapped[index + 2] = identity[index];
+        swapped[index + 3] = identity[index + 3];
+    }
+    Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    entt::registry registry;
+    Camera camera({0, 32, 0});
+    const auto read = [&](const char* name) {
+        std::array<std::uint8_t, 32 * 24 * 4> pixels{};
+        glGetTextureImage(targets.texture(name).id,
+                          0,
+                          GL_RGBA,
+                          GL_UNSIGNED_BYTE,
+                          static_cast<GLsizei>(pixels.size()),
+                          pixels.data());
+        return pixels;
+    };
+    const auto compare = [&](bool enabled, bool channel_swap) {
+        pipeline.set_offscreen_target(targets.fbo("actual").id, 32, 24);
+        pipeline.render_frame(registry, world, camera, 0.0f);
+        const auto actual = read("actual");
+        // Independent oracle: exactly the previous clear + GL_LINEAR blit,
+        // reading this same frame's lit scene after the production post stage.
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, pipeline.lighting_fbo().fbo_id);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, targets.fbo("reference").id);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glBlitFramebuffer(0,
+                          0,
+                          static_cast<GLsizei>(pipeline.internal_width()),
+                          static_cast<GLsizei>(pipeline.internal_height()),
+                          0,
+                          0,
+                          32,
+                          24,
+                          GL_COLOR_BUFFER_BIT,
+                          GL_LINEAR);
+        const auto reference = read("reference");
+        if (!enabled) {
+            EXPECT_EQ(actual, reference);
+        } else {
+            std::size_t changed_channels = 0;
+            for (std::size_t index = 0; index < actual.size(); ++index) {
+                const auto channel = index % 4;
+                const auto expected_index = channel_swap && (channel == 0 || channel == 2)
+                                                ? index - channel + (2 - channel)
+                                                : index;
+                EXPECT_LE(std::abs(static_cast<int>(actual[index]) - reference[expected_index]), 1);
+                if (std::abs(static_cast<int>(actual[index]) - reference[index]) > 8)
+                    ++changed_channels;
+            }
+            if (channel_swap) {
+                EXPECT_GT(changed_channels, 32u) << "fixture must visibly distinguish red and blue";
+            }
+        }
+        const auto& trace = pipeline.frame_stage_trace();
+        EXPECT_EQ(trace, BuildLuminumbraFrameGraph().schedule());
+        const auto post = std::find(trace.begin(), trace.end(), "final_blit");
+        ASSERT_NE(post, trace.end());
+        EXPECT_LT(std::find(trace.begin(), trace.end(), "lightning_overlay"), post);
+        EXPECT_LT(post, std::find(trace.begin(), trace.end(), "debug_view"));
+        const auto& metadata = pipeline.get_last_render_pass_metadata();
+        ASSERT_FALSE(metadata.empty());
+        EXPECT_EQ(metadata.back().name, "final_blit");
+        EXPECT_EQ(metadata.back().inputs, (std::vector<std::string>{"lighting.color"}));
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    };
+    // First render exercises the preset/default state without calling the enable setter.
+    compare(false, false);
+    for (const float scale : {1.0f, 0.67f}) {
+        SCOPED_TRACE(scale);
+        pipeline.set_render_scale(scale);
+        pipeline.set_post_lut_enabled(false);
+        compare(false, false);
+        glTextureSubImage3D(lut, 0, 0, 0, 0, 32, 32, 32, GL_RGBA, GL_FLOAT, identity.data());
+        pipeline.set_post_lut_enabled(true);
+        compare(true, false);
+        glTextureSubImage3D(lut, 0, 0, 0, 0, 32, 32, 32, GL_RGBA, GL_FLOAT, swapped.data());
+        compare(true, true);
+        pipeline.set_post_lut_enabled(false);
+        compare(false, false);
+    }
+    pipeline.shutdown();
+    EXPECT_TRUE(pipeline.allocation_ledger().empty());
+    ExpectPipelineResourcesReleased(pipeline);
 }
 
 TEST(RenderSmokeTest, AllocationLedgerOwnedTargetsReconcileResizeFailureAndPixelParity) {
