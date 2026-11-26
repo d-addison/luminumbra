@@ -384,6 +384,7 @@ add_executable(common_tests
     tools/active_regions_dump_test.cpp
     ../tools/active_regions_dump.cpp
     common/ActiveRegionPriority_test.cpp
+    common/ActiveRegionAcceptance_test.cpp
     common/SimulationIdentityAllocator_test.cpp
     common/PlantCreationIdentity_test.cpp
     common/GroundObjectStore_test.cpp
@@ -2628,9 +2629,20 @@ set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tool
 add_test(NAME RegionalAdmissionReportContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_regional_admission_report.py")
 set_tests_properties(RegionalAdmissionReportContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
+add_test(NAME SimBudgetNeutralityContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py"
+        SimBudgetNeutralityTests)
+set_tests_properties(SimBudgetNeutralityContract PROPERTIES LABELS "simulation;tools" TIMEOUT 5)
+add_test(NAME SimBudgetReportContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_report_sim_budget.py")
+set_tests_properties(SimBudgetReportContract PROPERTIES LABELS "simulation;tools" TIMEOUT 5)
 add_test(NAME SimBudgetGateContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_sim_budget_gate.py")
 set_tests_properties(SimBudgetGateContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
+add_test(NAME RecoveryDurabilityEvidenceContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/persistence/test_recovery_durability_evidence.py")
+set_tests_properties(RecoveryDurabilityEvidenceContract PROPERTIES LABELS "persistence;tools" TIMEOUT 30)
 
 # GPU tracer micro-profile. Manual/GPU — needs a real GL context and a
 # hardware GPU (skips gracefully headless; writes the artifact but skips the perf

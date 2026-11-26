@@ -4,19 +4,18 @@ The host ledger implements the persistent-active scheduling foundation in
 [distant-world.md](distant-world.md). It is gated by the existing
 `sim.active_regions` switch, enabled in compiled and packaged defaults for
 v0.3.0. Explicitly disabling it retains the legacy simulation periods and hash
-behavior. Budgets remain unlimited in shipped configuration. Existing field
-pages, weather, scent and energy consume regional scheduling;
-automatic ambient-page activation and complete field qualification remain release work.
+behavior. Budgets remain unlimited in shipped configuration. Landed consumers
+include ground objects, regional fields/weather/scent/energy and regional
+foliage/water; consumer-specific activation and qualification remain separate
+from the ledger switch.
 
-Indexed authority durability and rehydration are in preparation with native qualification pending.
-The continuation and qualification work for durable completed work and ground objects,
-regional fields/weather/scent/energy, regional foliage/water (issue #242), and strict
-distant policy and distant creatures is carried by v0.3.2 (in preparation).
-Regional continuation performance/default enablement is planned for v0.4.0
-as [issue #320](https://github.com/d-addison/luminumbra/issues/320).
-Implemented consumers do not establish native verification or release qualification.
-The dedicated server autosaves every five minutes; issue #136 still requires paired
-flag-state oracle artifacts and a 20 km activation/freezing run log.
+Indexed authority durability and rehydration are implemented, with native qualification pending.
+Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy
+and regional foliage/water continuation (issue #242) are implemented for v0.3.2
+(in preparation), with native qualification pending. Regional continuation performance/default enablement is planned for v0.4.0
+as [issue #320](https://github.com/d-addison/luminumbra/issues/320). These consumers
+retain their individual activation gates. The dedicated server autosaves
+every five minutes; this does not qualify those continuation consumers.
 
 ## Planned shared simulation identity
 
@@ -34,8 +33,9 @@ Keys are signed persistence region coordinates: floor(world X / 512),
 floor(world Z / 512), bounded to [-32768, 32768) by the existing packed chunk
 identity. The fixed 512 metre XZ disc intersects the region's closed square;
 edge tangencies count, corner squares outside the circle do not. Vertical
-position and adaptive streaming radii do not affect membership. Regions remain
-in the ledger after departure. The host's last walking feet position is stored
+position and adaptive streaming radii do not affect membership. Regions survive departure until the 108,000-tick idle retention check evicts an
+unowned, unedited, unpinned, unpopulated record with no water cursor or durable
+extension state. The host's last walking feet position is stored
 as an optional anchor and restored before ticking. Camera movement and noclip
 updates cannot replace it. Replicated server avatar positions are supplied at
 the host tick boundary; avatar persistence remains outside this slice. An absent
@@ -77,15 +77,17 @@ due, frozen never is. All stamps use WorldClock, with no load-time restart.
 Repeated/backward scheduler ticks refuse. Frozen scheduling metadata can change;
 its simulation cursor, last-ticked stamp and frozen content digest do not advance.
 
-Idle retention probes ownership only for otherwise evictable records. The host
-builds one set of pending work keys and all resident chunk region keys per tick,
-including pristine and `Loading` chunks. These residents protect scheduling
+Idle retention probes ownership only for otherwise evictable records. On the first
+ownership probe of a tick, the host builds one set of pending work keys and all
+resident chunk region keys, including pristine and `Loading` chunks. These residents protect scheduling
 history even when they contribute no frozen content. Consumed work stops owning
 records on the next tick.
 
 Invalid host input never throws out of the session. Non-finite or out-of-range
-(outside -2^24 <= x,z < 2^24) walking anchors, ground-object edit positions and region pins are
-ignored and counted (observational, never hashed or saved). Invalid replicated anchors, work for
+(outside -2^24 <= x,z < 2^24) walking anchors and ground-object edit positions are
+ignored and counted once per refused call, as are pin requests outside
+-32768 <= x,z < 32768, while unpinning an unknown region is an uncounted no-op
+(observational, never hashed or saved). Invalid replicated anchors, work for
 regions the ledger does not know, and visit-time ledger exhaustion are skipped inside the scheduler
 and counted in the schedule's `rejected` triple; the schedule digest appends that triple only when
 it is non-zero, so valid input keeps its digest.
@@ -193,7 +195,7 @@ ceiling starts at the restored WorldClock tick without executing a tick, so
 an immediate edit or pin can be saved before simulation advances.
 No old-world migration occurs. Corrupt, truncated, oversized, duplicate,
 misordered or inconsistent records refuse with `Corrupt active-region ledger.`
-A valid magic followed by a version greater than 2 refuses distinctly with
+A valid magic followed by a version greater than 3 refuses distinctly with
 `Unsupported future active-region ledger version.` Version zero is corrupt.
 A save containing the ledger requires `sim.active_regions`; opening or writing
 with it off refuses as incompatible configuration. Older engine builds refuse
@@ -269,7 +271,7 @@ hash term.
 The footer is one LE u64 FNV-1a-64 checksum over every preceding byte, including
 the extension length and TLVs (offset basis 14695981039346656037, multiplier
 1099511628211). Total length must be exactly 56 + count * 104 + 8 for version 1,
-or 56 + count * 104 + 4 + ext_len + 8 for version 2. Files are capped at
+or 56 + count * 104 + 4 + ext_len + 8 for versions 2 and 3. Files are capped at
 109,051,979 bytes before allocation. No trailing bytes, padding, native structs,
 section omission or alternate encodings are accepted. Stamps cannot exceed the
 validation ceiling, counters cannot exceed the hold or both be nonzero, phases
@@ -399,6 +401,7 @@ Debug/Release controls and native qualification retain their own source identiti
 the historical table above is not relabelled as post-repair evidence. Integrated
 and native acceptance remain tracked by [issue #163](https://github.com/d-addison/luminumbra/issues/163).
 The wind input-padding defect tracked by [issue #173](https://github.com/d-addison/luminumbra/issues/173) was fixed afterwards on devel (df8a6716, e9b122e5); the evidence above is unchanged and pre-dates that fix.
+Here “afterwards” refers to the investigation: both fixes were included in the ledger merge.
 
 `RegionRecordingOverwrite` runs the shipping recorder/player with
 `--test-streaming-radius-cap 1` on every invocation. This diagnostic option applies

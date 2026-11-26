@@ -108,13 +108,36 @@ FarVolumeResidentObservation Observation(const FarVolumeResidency& owner, FarTil
     }
     return *value;
 }
+void CheckFrameWork(const FarVolumeFrameResult& frame) {
+    FarVolumeTierWork sum;
+    for (const auto& tier : frame.tiers) {
+        sum.build_attempts += tier.build_attempts;
+        sum.dispatched += tier.dispatched;
+        sum.completed += tier.completed;
+        sum.upload_attempts += tier.upload_attempts;
+        sum.uploaded += tier.uploaded;
+        sum.upload_bytes += tier.upload_bytes;
+        sum.successful_upload_bytes += tier.successful_upload_bytes;
+        sum.rejected += tier.rejected;
+        sum.evicted += tier.evicted;
+    }
+    EXPECT_EQ(sum.build_attempts, frame.build_attempts);
+    EXPECT_EQ(sum.dispatched, frame.dispatched);
+    EXPECT_EQ(sum.completed, frame.completed);
+    EXPECT_EQ(sum.upload_attempts, frame.upload_attempts);
+    EXPECT_EQ(sum.uploaded, frame.uploaded);
+    EXPECT_EQ(sum.upload_bytes, frame.upload_bytes);
+    EXPECT_EQ(sum.successful_upload_bytes, frame.successful_upload_bytes);
+    EXPECT_EQ(sum.rejected, frame.rejected);
+    EXPECT_EQ(sum.evicted, frame.evicted);
+}
 bool WaitReady(FarVolumeResidency& owner,
                std::span<const FarVolumeWantedRequest> requests,
                const FarVolumeAuthorityProducer& producer,
                std::size_t builds = 6) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     do {
-        owner.AdvanceFrame(0, 0, {builds, 0, 0}, producer, {});
+        CheckFrameWork(owner.AdvanceFrame(0, 0, {builds, 0, 0}, producer, {}));
         bool ready = true;
         for (const auto& request : requests) {
             const auto state = owner.Observe(request.identity.key);
@@ -145,6 +168,77 @@ FarVolumeUploadBackend Backend(std::size_t& calls) {
     };
 }
 } // namespace
+
+TEST(FarVolumeResidency, PerTierWorkReconcilesWithFrameTotals) {
+    JobSystem jobs;
+    jobs.startup(2);
+    FarVolumeTierMemory memory(Budgets());
+    FarVolumeResidency owner(jobs, memory, Limits());
+    const std::array requests{Wanted({1, 0, 0}),
+                              Wanted({2, 0, 0}),
+                              Wanted({3, 0, 0}),
+                              Wanted({4, 0, 0}),
+                              Wanted({5, 0, 0})};
+    ASSERT_TRUE(owner.ReplaceWanted(requests));
+    const FarVolumeAuthorityProducer producer = [](const auto& request, auto&) {
+        return Authority(request, request.identity.key.tier == 1);
+    };
+    const auto dispatched = owner.AdvanceFrame(0, 0, {5, 0, 0}, producer, {});
+    CheckFrameWork(dispatched);
+    ASSERT_EQ(dispatched.build_attempts, 5u);
+    ASSERT_EQ(dispatched.dispatched, 5u);
+    EXPECT_EQ(dispatched.completed, 0u);
+    std::array<std::size_t, kFarTierCount> completions{};
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    do {
+        const auto frame = owner.AdvanceFrame(0, 0, {}, {}, {});
+        CheckFrameWork(frame);
+        for (std::size_t i = 0; i < completions.size(); ++i)
+            completions[i] += frame.tiers[i].completed;
+        if (std::all_of(
+                completions.begin(), completions.end(), [](auto count) { return count == 1; }))
+            break;
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < deadline);
+    for (std::size_t i = 0; i < completions.size(); ++i) {
+        SCOPED_TRACE(i);
+        EXPECT_EQ(dispatched.tiers[i].build_attempts, 1u);
+        EXPECT_EQ(dispatched.tiers[i].dispatched, 1u);
+        ASSERT_EQ(completions[i], 1u);
+        ASSERT_EQ(Observation(owner, requests[i].identity.key).eligibility,
+                  FarVolumeEligibility::Ready);
+    }
+    const auto deferred = owner.AdvanceFrame(0, 0, {}, {}, {});
+    CheckFrameWork(deferred);
+    EXPECT_EQ(deferred.completed, 0u);
+    EXPECT_EQ(deferred.upload_attempts, 0u);
+    std::size_t calls = 0;
+    const auto uploaded = owner.AdvanceFrame(0, 0, {0, 5, 32ULL * 1024 * 1024}, {}, Backend(calls));
+    CheckFrameWork(uploaded);
+    EXPECT_EQ(uploaded.uploaded, 5u);
+    EXPECT_EQ(calls, 1u); // Four Empty results settle without backend allocation.
+    EXPECT_GT(uploaded.tiers[0].successful_upload_bytes, 0u);
+    for (std::size_t i = 0; i < uploaded.tiers.size(); ++i) {
+        SCOPED_TRACE(i);
+        EXPECT_EQ(uploaded.tiers[i].upload_attempts, 1u);
+        EXPECT_EQ(uploaded.tiers[i].uploaded, 1u);
+        EXPECT_EQ(uploaded.tiers[i].upload_bytes, uploaded.tiers[i].successful_upload_bytes);
+        if (i != 0) {
+            EXPECT_EQ(uploaded.tiers[i].upload_bytes, 0u);
+        }
+    }
+    ASSERT_TRUE(owner.ReplaceWanted({}));
+    ASSERT_TRUE(owner.ReplaceWanted(requests));
+    const auto refused = owner.AdvanceFrame(0, 0, {5, 0, 0}, {}, {});
+    CheckFrameWork(refused);
+    EXPECT_EQ(refused.rejected, 5u);
+    for (const auto& tier : refused.tiers) {
+        EXPECT_EQ(tier.build_attempts, 1u);
+        EXPECT_EQ(tier.dispatched, 0u);
+        EXPECT_EQ(tier.rejected, 1u);
+    }
+    CheckFrameWork(owner.AdvanceFrame(0, 0, {5, 5, 32ULL * 1024 * 1024}, {}, {}));
+}
 
 TEST(FarVolumeResidency, CombinedWetUploadDebitsAndCurrentArrivalRestoresAfterWaterFailure) {
     JobSystem jobs;
@@ -277,8 +371,14 @@ TEST(FarVolumeResidency, OneGlobalDispatchBudgetAndNoFrameRetryAfterFailure) {
         called.push_back(request.identity.key);
         return Authority(request);
     };
-    for (int i = 0; i < 5; ++i)
-        EXPECT_LE(owner.AdvanceFrame(0, 0, {1, 0, 0}, producer, {}).dispatched, 1u);
+    std::size_t completed = 0;
+    for (int i = 0; i < 5; ++i) {
+        const auto frame = owner.AdvanceFrame(0, 0, {1, 0, 0}, producer, {});
+        CheckFrameWork(frame);
+        completed += frame.completed;
+        EXPECT_LE(frame.dispatched, 1u);
+    }
+    EXPECT_EQ(completed, 3u); // Dispatch-rejected results are completions too.
     ASSERT_EQ(called.size(), 3u);
     EXPECT_EQ(called[0].tier, 5);
     EXPECT_EQ(called[1].tier, 4);
@@ -356,6 +456,10 @@ TEST(FarVolumeResidency, ActualUploadBytesCapDefersReadyAndPreservesOldGpuOnFail
         return failing(mesh);
     };
     const auto failure = owner.AdvanceFrame(0, 0, {0, 2, bytes}, {}, counted_failure);
+    CheckFrameWork(failure);
+    EXPECT_EQ(failure.tiers[4].upload_attempts, 1u);
+    EXPECT_EQ(failure.tiers[4].upload_bytes, bytes);
+    EXPECT_EQ(failure.tiers[4].successful_upload_bytes, 0u);
     EXPECT_TRUE(failure.horizon_refused);
     EXPECT_EQ(failure.upload_bytes, bytes);
     EXPECT_EQ(failure.successful_upload_bytes, 0u);
@@ -516,6 +620,8 @@ TEST(FarVolumeResidency, DeferredUploadReservesResultSlotBeforeBuildAdmission) {
     ASSERT_GT(ready.ready_upload_bytes, 0u);
     const auto waiting = owner.AdvanceFrame(0, 0, {2, 0, 0}, producer, {});
     ASSERT_EQ(waiting.dispatched, 0u);
+    CheckFrameWork(waiting);
+    EXPECT_EQ(waiting.tiers[4].build_attempts, 0u);
     EXPECT_EQ(waiting.build_attempts, 0u);
     EXPECT_EQ(waiting.rejected, 0u);
     ASSERT_LE(ready.ready_upload_bytes, pool->limit() - pool->used());
@@ -523,6 +629,8 @@ TEST(FarVolumeResidency, DeferredUploadReservesResultSlotBeforeBuildAdmission) {
     ASSERT_TRUE(pressure.TryCharge(pool->limit() - pool->used() - ready.ready_upload_bytes));
     for (int frame = 0; frame < 3; ++frame) {
         const auto deferred = owner.AdvanceFrame(0, 0, {2, 0, 0}, producer, {});
+        CheckFrameWork(deferred);
+        EXPECT_EQ(deferred.tiers[4].build_attempts, 0u);
         EXPECT_EQ(deferred.dispatched, 0u);
         EXPECT_EQ(deferred.build_attempts, 0u);
         EXPECT_EQ(deferred.rejected, 0u);
@@ -575,6 +683,8 @@ TEST(FarVolumeResidency, ProspectiveEvictionRequiresCurrentUnderlayAndKeepsKeyLa
     auto wanted = std::array{parent, near, far, added};
     ASSERT_TRUE(owner.ReplaceWanted(wanted));
     const auto pressure = owner.AdvanceFrame(0, 0, {1, 0, 0}, producer, {});
+    CheckFrameWork(pressure);
+    EXPECT_EQ(pressure.tiers[3].evicted, 1u);
     EXPECT_EQ(pressure.evicted, 1u);
     EXPECT_FALSE(owner.Resource(far.identity.key));
     EXPECT_EQ(owner.Resource(near.identity.key), near_gpu);
@@ -599,6 +709,8 @@ TEST(FarVolumeResidency, ProspectiveEvictionRequiresCurrentUnderlayAndKeepsKeyLa
     added.build_headroom_bytes = pool->limit() - pool->used() + 1;
     ASSERT_TRUE(owner.ReplaceWanted(std::array{near, far, added}));
     const auto refused = owner.AdvanceFrame(0, 0, {1, 0, 0}, producer, {});
+    CheckFrameWork(refused);
+    EXPECT_EQ(refused.tiers[3].rejected, 1u);
     EXPECT_EQ(refused.evicted, 0u);
     EXPECT_EQ(refused.rejected, 1u);
     EXPECT_EQ(owner.Resource(near.identity.key), saved_near);
@@ -875,7 +987,7 @@ bool HandoffSettle(FarVolumeHandoff& owner,
                    std::span<const FarHandoffTileInput> inputs,
                    const FarVolumeUploadBackend& backend) {
     return HandoffWait([&] {
-        owner.AdvanceFrame(0, 0, {6, 6, 32ULL * 1024 * 1024}, backend);
+        CheckFrameWork(owner.AdvanceFrame(0, 0, {6, 6, 32ULL * 1024 * 1024}, backend));
         return std::all_of(inputs.begin(), inputs.end(), [&](const auto& input) {
             return IsFarTileCovering(
                 HandoffObserve(owner, input.wanted.identity.key).target_coverage);
@@ -1331,7 +1443,7 @@ TEST_F(FarSessionPublicationTest, EmptySavedSourceProjectsOceanAndDryLandThrough
         std::size_t uploads = 0;
         const auto backend = Backend(uploads);
         ASSERT_TRUE(HandoffWait([&] {
-            owner.AdvanceFrame(0, 0, {6, 6, 32ULL * 1024 * 1024}, backend);
+            CheckFrameWork(owner.AdvanceFrame(0, 0, {6, 6, 32ULL * 1024 * 1024}, backend));
             return IsFarTileCovering(HandoffObserve(owner, {1, 0, 0}).target_coverage);
         }));
         const auto uploaded = HandoffObserve(owner, {1, 0, 0});
@@ -1821,6 +1933,85 @@ TEST(FarVolumeHandoff, ObservationVisitsMatchIndexedQueriesAcrossRemovalAndDrain
     check(owner, inputs.size());
 }
 
+TEST(FarVolumeHandoff, FailedUploadsDebitTheirOriginatingTier) {
+    JobSystem jobs;
+    jobs.startup(2);
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    FarVolumeHandoff owner(jobs, *memory, Limits());
+    const std::array inputs{HandoffInput(memory, {1, 0, 0}, 1, false),
+                            HandoffInput(memory, {2, 0, 0}, 1, true),
+                            HandoffInput(memory, {3, 0, 0}, 1, true),
+                            HandoffInput(memory, {4, 0, 0}, 1, true),
+                            HandoffInput(memory, {5, 0, 0}, 1, true)};
+    ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, inputs)));
+    const auto dispatched = owner.AdvanceFrame(0, 0, {5, 0, 0}, {});
+    CheckFrameWork(dispatched);
+    ASSERT_EQ(dispatched.dispatched, 5u);
+    std::array<std::size_t, kFarTierCount> completions{};
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    do {
+        const auto frame = owner.AdvanceFrame(0, 0, {}, {});
+        CheckFrameWork(frame);
+        for (std::size_t i = 0; i < completions.size(); ++i)
+            completions[i] += frame.tiers[i].completed;
+        if (std::all_of(
+                completions.begin(), completions.end(), [](auto count) { return count == 1; }))
+            break;
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < deadline);
+    std::array<std::uint64_t, kFarTierCount> bytes{};
+    for (std::size_t i = 0; i < completions.size(); ++i) {
+        SCOPED_TRACE(i);
+        EXPECT_EQ(dispatched.tiers[i].build_attempts, 1u);
+        EXPECT_EQ(dispatched.tiers[i].dispatched, 1u);
+        ASSERT_EQ(completions[i], 1u);
+        const auto observed = HandoffObserve(owner, inputs[i].wanted.identity.key);
+        ASSERT_EQ(observed.target_eligibility, FarVolumeEligibility::Ready);
+        bytes[i] = observed.ready_upload_bytes;
+        if (i != 0) {
+            ASSERT_GT(bytes[i], 0u);
+        }
+    }
+    std::size_t calls = 0;
+    const FarVolumeUploadBackend backend =
+        [&](const auto& mesh) -> std::unique_ptr<FarVolumeGpuAllocation> {
+        ++calls;
+        if (calls == 1)
+            throw std::runtime_error("partial backend failure");
+        if (calls == 2)
+            return {};
+        return std::make_unique<Gpu>(mesh.vertices.size() * sizeof(VoxelVertex) +
+                                     mesh.indices.size() * sizeof(std::uint32_t));
+    };
+    // Coarsest first: V5 throws, V4 returns null, V3 succeeds. V1/V2 defer.
+    const auto first = owner.AdvanceFrame(0, 0, {0, 3, 32ULL * 1024 * 1024}, backend);
+    CheckFrameWork(first);
+    EXPECT_EQ(first.upload_attempts, 3u);
+    EXPECT_EQ(first.uploaded, 1u);
+    EXPECT_EQ(first.rejected, 2u);
+    EXPECT_EQ(first.completed, 0u);
+    for (std::size_t i = 0; i < first.tiers.size(); ++i) {
+        SCOPED_TRACE(i);
+        const bool attempted = i >= 2;
+        EXPECT_EQ(first.tiers[i].upload_attempts, attempted ? 1u : 0u);
+        EXPECT_EQ(first.tiers[i].upload_bytes, attempted ? bytes[i] : 0u);
+        EXPECT_EQ(first.tiers[i].successful_upload_bytes, i == 2 ? bytes[i] : 0u);
+        EXPECT_EQ(first.tiers[i].rejected, i >= 3 ? 1u : 0u);
+    }
+    const auto second = owner.AdvanceFrame(0, 0, {5, 5, 32ULL * 1024 * 1024}, backend);
+    CheckFrameWork(second);
+    EXPECT_EQ(second.build_attempts, 0u);
+    EXPECT_EQ(second.upload_attempts, 2u);
+    EXPECT_EQ(second.uploaded, 2u);
+    EXPECT_EQ(second.completed, 0u);
+    EXPECT_EQ(second.tiers[0].uploaded, 1u);
+    EXPECT_EQ(second.tiers[0].upload_bytes, 0u);
+    EXPECT_EQ(second.tiers[1].successful_upload_bytes, bytes[1]);
+    EXPECT_EQ(second.tiers[3].upload_attempts, 0u);
+    EXPECT_EQ(second.tiers[4].upload_attempts, 0u);
+    EXPECT_EQ(calls, 4u);
+}
+
 TEST(FarVolumeHandoff, FailedUploadDebitsOnceAndRetainsServingCoverage) {
     JobSystem jobs;
     jobs.startup(1);
@@ -1853,6 +2044,8 @@ TEST(FarVolumeHandoff, FailedUploadDebitsOnceAndRetainsServingCoverage) {
         return {};
     };
     const auto first = owner.AdvanceFrame(0, 0, {1, 1, bytes}, fail);
+    CheckFrameWork(first);
+    EXPECT_EQ(first.tiers[4].upload_attempts, 1u);
     EXPECT_EQ(first.upload_attempts, 1u);
     EXPECT_EQ(first.upload_bytes, bytes);
     EXPECT_EQ(first.successful_upload_bytes, 0u);
@@ -1972,6 +2165,8 @@ TEST(FarVolumeHandoff, DeferredUploadReservesResultSlotAndPreservesFallbackPromo
     ASSERT_GT(ready.ready_upload_bytes, 0u);
     const auto deferred_without_pressure = owner.AdvanceFrame(0, 0, {2, 0, 0}, {});
     ASSERT_EQ(deferred_without_pressure.dispatched, 0u);
+    CheckFrameWork(deferred_without_pressure);
+    EXPECT_EQ(deferred_without_pressure.tiers[4].build_attempts, 0u);
     EXPECT_EQ(deferred_without_pressure.build_attempts, 0u);
     EXPECT_EQ(deferred_without_pressure.rejected, 0u);
     ASSERT_LE(ready.ready_upload_bytes, pool->limit() - pool->used());
@@ -1979,6 +2174,8 @@ TEST(FarVolumeHandoff, DeferredUploadReservesResultSlotAndPreservesFallbackPromo
     ASSERT_TRUE(pressure.TryCharge(pool->limit() - pool->used() - ready.ready_upload_bytes));
     for (int frame = 0; frame < 3; ++frame) {
         const auto deferred = owner.AdvanceFrame(0, 0, {2, 0, 0}, {});
+        CheckFrameWork(deferred);
+        EXPECT_EQ(deferred.tiers[4].build_attempts, 0u);
         EXPECT_EQ(deferred.dispatched, 0u);
         EXPECT_EQ(deferred.build_attempts, 0u);
         EXPECT_EQ(deferred.rejected, 0u);
@@ -2025,6 +2222,10 @@ TEST(FarVolumeHandoff, DiscardedDeferredUploadReleasesResultSlotForNextFallback)
         ASSERT_GT(bytes, 0u);
         const auto rejected =
             owner.AdvanceFrame(0, 0, {1, 1, byte_refusal ? bytes - 1 : bytes}, {});
+        CheckFrameWork(rejected);
+        EXPECT_EQ(rejected.tiers[4].upload_attempts, 1u);
+        EXPECT_EQ(rejected.tiers[4].upload_bytes, byte_refusal ? 0u : bytes);
+        EXPECT_EQ(rejected.tiers[4].rejected, 1u);
         EXPECT_EQ(rejected.rejected, 1u);
         EXPECT_EQ(rejected.dispatched, 1u);
         const auto failed = HandoffObserve(owner, inputs[0].wanted.identity.key);
@@ -2738,11 +2939,16 @@ TEST(FarVolumeHandoff, BuildAndConversionFailuresKeepServingAndLatchUntilNewPubl
         const std::array b{HandoffInput(memory, {5, 0, 0}, 2, true, -256, 64, false, conversion)};
         ASSERT_TRUE(owner.StageTarget(HandoffManifest(2, b)));
         upstream.RefuseNextAllocation(!conversion);
+        std::size_t completed = 0;
         ASSERT_TRUE(HandoffWait([&] {
-            owner.AdvanceFrame(0, 0, {1, 1, 32ULL * 1024 * 1024}, Backend(calls));
+            const auto frame =
+                owner.AdvanceFrame(0, 0, {1, 1, 32ULL * 1024 * 1024}, Backend(calls));
+            CheckFrameWork(frame);
+            completed += frame.tiers[4].completed;
             return HandoffObserve(owner, {5, 0, 0}).target_eligibility ==
                    FarVolumeEligibility::RequestRejected;
         }));
+        EXPECT_EQ(completed, 1u); // Compile/conversion failure is collected once.
         EXPECT_EQ(HandoffObserve(owner, {5, 0, 0}).target_build_failure,
                   conversion ? FarVolumeBuildStatus::ConvertRefused
                              : FarVolumeBuildStatus::CompileRefused);

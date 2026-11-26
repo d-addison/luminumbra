@@ -148,6 +148,13 @@ public:
     void attach_mesh_jobs(JobSystem* jobs);
     static constexpr UploadLimits kMeshUploadLimits{4 * 1024 * 1024, 2, 1, 3.0};
 
+    // CPU preparation shared by direct hosts and the draw path. Runtime edits
+    // must use registry.patch/replace so EnTT emits its component update signal.
+    // Returns the number of instances rebuilt (zero for an unchanged registry).
+    std::size_t prepare_static_props(entt::registry& registry, bool frozen = false);
+    // Read-only diagnostic; the pointer remains valid until the next cache rebuild.
+    const glm::mat4* cached_static_prop_model(entt::entity entity) const;
+
 private:
     struct MeshPreparation;
     std::unique_ptr<MeshPreparation> m_mesh_preparation;
@@ -204,20 +211,20 @@ private:
     GLuint m_jointPaletteSSBO = 0;
     std::size_t m_jointPaletteSSBOCapacityBytes = 0;
 
-    // cached static-prop instance data. Props are scattered
-    // ONCE and never move, so their model matrix + albedo tint + base-mesh hash
-    // are precomputed once instead of rebuilt for ALL ~84k instances every frame
+    // Cached static-prop instance data. Model matrix + albedo tint + base-mesh hash
+    // are rebuilt on relevant component signals instead of for ALL ~84k instances every frame
     // (the measured CPU-submit bottleneck: lines that built translate*rotate*scale
     // + the leaf/bark tint hash per instance per frame). Per frame we only do
     // distance->LOD + frustum cull (still using the per-LOD resolved mesh sphere,
     // so the visible set is identical) + append into the reused per-group buffers.
-    //; rebuilt when the static-mesh population changes. This flat array
+    // This flat array
     // is also the upload-once source 's GPU compute cull will consume.
     struct CachedStaticProp {
+        entt::entity entity = entt::null;
         glm::mat4 model;                // precomputed translate * rotate * scale
         glm::vec3 position;             // transform.position (distance + sphere center)
         glm::vec3 tint;                 // precomputed per-instance albedo tint
-        float maxScale = 1.0f;          // max(scale.xyz) for the cull radius
+        float maxScale = 1.0f;          // largest model basis length for the cull radius
         std::uint64_t baseMeshHash = 0; // fnv64(meshPath) — resolve memo / group key seed
         std::uint32_t pathIndex = 0;    // index into m_propMeshPaths (stable storage)
         std::uint32_t materialId = 0;

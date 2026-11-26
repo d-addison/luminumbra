@@ -1,12 +1,12 @@
 {
   "id": "contract.region-symmetric-boundary",
   "source": "docs/active-regions.md#activation-and-ordering",
-  "statement": "Non-finite or out-of-range (outside -2^24 <= x,z < 2^24) walking anchors, ground-object edit positions and region pins are ignored and counted (observational, never hashed or saved).",
+  "statement": "Non-finite or out-of-range (outside -2^24 <= x,z < 2^24) walking anchors and ground-object edit positions are ignored and counted once per refused call, as are pin requests outside -32768 <= x,z < 32768, while unpinning an unknown region is an uncounted no-op (observational, never hashed or saved).",
   "status": "partial",
   "requirements": [
     "ar.activation.050"
   ],
-  "discrepancy": "`docs/active-regions.md#activation-and-ordering`: docs/active-regions.md now agrees with the ledger's asymmetric half-open interval [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries in test/common/ActiveRegionLedger_test.cpp covers both axes; an integrated boundary regression with full endpoint coverage remains planned under issue #250. Boundary rejection and counting through walking anchors, ground-object edits and region pins still require end-to-end evidence.",
+  "discrepancy": "`docs/active-regions.md#activation-and-ordering`: docs/active-regions.md now agrees with the ledger's asymmetric half-open interval [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries in test/common/ActiveRegionLedger_test.cpp covers both axes; the integrated boundary regression ActiveRegionAcceptance.SessionInputBoundsPreserveValidAuthority now covers walking anchors, ground-object edits and pins, including rejection counts, adjacent representable endpoints and retention of the previous valid anchor. Native qualification coverage remains planned under issue #250: boundary rejection and counting through walking anchors, ground-object edits and region pins still require end-to-end evidence on the current candidate.",
   "evidence": [
     {
       "kind": "ctest",
@@ -23,17 +23,17 @@
     {
       "kind": "ctest",
       "ref": "ActiveRegionLedgerTest.AnchorBoundaryInputRefusals",
-      "planned": "Add a half-open-boundary regression accepting -2^24 and the adjacent interior coordinates, and rejecting and counting +2^24 and the adjacent exterior coordinates (including the next representable value below -2^24) on X and Z through walking anchors, ground-object edits and pins.; owner: ds Cover both X and Z endpoints: accept -2^24 and reject +2^24, including the next representable float below -2^24."
+      "planned": "Qualify the half-open-boundary regression accepting -2^24 and the adjacent interior coordinates, and rejecting and counting +2^24 and the adjacent exterior coordinates (including the next representable value below -2^24) on X and Z through walking anchors, ground-object edits and pins.; owner: ds Qualify both X and Z endpoints: accept -2^24 and reject +2^24, including the next representable float below -2^24. Registered ActiveRegionAcceptance.SessionInputBoundsPreserveValidAuthority supplies fast session coverage; retain current-candidate native results for this qualification obligation."
     },
     {
       "kind": "ctest",
       "ref": "ActiveRegionLedgerTest.SymmetricAnchorBoundaries",
-      "planned": "Cover both X and Z endpoints for walking anchors, ground-object edits and pins: accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates, including the next representable float below -2^24.; owner: ds"
+      "planned": "Qualify both X and Z endpoints for walking anchors, ground-object edits and pins: accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates, including the next representable float below -2^24.; owner: ds Registered ActiveRegionAcceptance.SessionInputBoundsPreserveValidAuthority supplies fast session coverage; retain current-candidate native results for this qualification obligation."
     },
     {
       "kind": "ctest",
       "ref": "GameSessionHeadlessWorldTest.HalfOpenHostInputBoundaries",
-      "planned": "Add a host-boundary regression for walking anchors, ground-object edits and pins: exercise both X and Z endpoints; accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates for walking anchors and ground-object edits, including the next representable float below -2^24, with the corresponding signed region-pin bounds and rejection counters; owner: ds"
+      "planned": "Qualify the host-boundary regression for walking anchors, ground-object edits and pins: exercise both X and Z endpoints; accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates for walking anchors and ground-object edits, including the next representable float below -2^24, with the corresponding signed region-pin bounds and rejection counters; owner: ds Registered ActiveRegionAcceptance.SessionInputBoundsPreserveValidAuthority supplies fast session coverage; retain current-candidate native results for this qualification obligation."
     }
   ]
 }
