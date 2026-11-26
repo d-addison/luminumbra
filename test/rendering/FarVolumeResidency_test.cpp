@@ -223,8 +223,9 @@ TEST(FarVolumeResidency, PerTierWorkReconcilesWithFrameTotals) {
         EXPECT_EQ(uploaded.tiers[i].upload_attempts, 1u);
         EXPECT_EQ(uploaded.tiers[i].uploaded, 1u);
         EXPECT_EQ(uploaded.tiers[i].upload_bytes, uploaded.tiers[i].successful_upload_bytes);
-        if (i != 0)
+        if (i != 0) {
             EXPECT_EQ(uploaded.tiers[i].upload_bytes, 0u);
+        }
     }
     ASSERT_TRUE(owner.ReplaceWanted({}));
     ASSERT_TRUE(owner.ReplaceWanted(requests));
@@ -1967,8 +1968,9 @@ TEST(FarVolumeHandoff, FailedUploadsDebitTheirOriginatingTier) {
         const auto observed = HandoffObserve(owner, inputs[i].wanted.identity.key);
         ASSERT_EQ(observed.target_eligibility, FarVolumeEligibility::Ready);
         bytes[i] = observed.ready_upload_bytes;
-        if (i != 0)
+        if (i != 0) {
             ASSERT_GT(bytes[i], 0u);
+        }
     }
     std::size_t calls = 0;
     const FarVolumeUploadBackend backend =
