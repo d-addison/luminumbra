@@ -102,6 +102,19 @@ public:
         std::uint64_t work = 0;
         bool complete = false;
     };
+    // Complete closed lattice contributors, including the rectangular normal
+    // halo. Invalid/excessive coordinates preserve output.
+    static bool source_window(const FarVolumeTileKey& key,
+                              Persistence::WorldSaveService::AuthorityWindow& output);
+    // Shares the frozen cursor: callers serialize discovery and capture. Reads
+    // only the accepted immutable source, retaining the world until completion.
+    // Discovery visits record/scalar validation, authoritative extents, every
+    // selected water cell, 131x131 water columns and 129x129 surface columns.
+    FrozenResult start_coverage(const std::shared_ptr<const Systems::SHIELD_WorldSystem>& world,
+                                const FarVolumeCoverageIntent& intent,
+                                const FrozenPolicy& policy,
+                                const FarFrozenCaptureLimits& limits);
+    FrozenPump pump_coverage(std::uint64_t budget, FarVolumeRequest& output);
     // Retains the immutable accepted source and world. Owner-thread calls only;
     // the host fences publication during each pump, never across frames.
     // A unit validates one record header, scalar, water cell or shared node,
