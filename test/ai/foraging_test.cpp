@@ -168,4 +168,33 @@ TEST(Foraging, FollowsTrailWhenGoalNeutral) {
         << "should climb the food trail toward +x";
 }
 
+TEST(Foraging, LegacyFoodTieKeepsHandleOrderDespiteIdentity) {
+    entt::registry r;
+    ScentField field(9, 9, 4);
+    const auto actor = spawnForager(r, 4, 4);
+    const auto first = spawnFood(r, 3, 4, 1);
+    const auto second = spawnFood(r, 5, 4, 1);
+    r.emplace<Comp::SimulationIdentityComponent>(actor, 30u);
+    r.emplace<Comp::SimulationIdentityComponent>(first, 20u);
+    r.emplace<Comp::SimulationIdentityComponent>(second, 10u);
+    const auto stats = RunForagingOnTick(r, field, {1, 0, 1});
+    EXPECT_EQ(stats.pickups, 1u);
+    EXPECT_EQ(stats.identity_order_visits, 0u);
+    EXPECT_EQ(r.get<Comp::FoodSourceComponent>(first).amount, 0);
+    EXPECT_EQ(r.get<Comp::FoodSourceComponent>(second).amount, 1);
+}
+
+TEST(Foraging, IdentityModeWithoutFoodStillDepositsAndDoesNotPickUp) {
+    entt::registry r;
+    ScentField field(9, 9, 4);
+    const auto actor = spawnForager(r, 4, 4);
+    r.emplace<Comp::SimulationIdentityComponent>(actor, 1u);
+    const auto stats = luminumbra::ai::RunForagingOnTickV2(r, field);
+    EXPECT_EQ(stats.foragers, 1u);
+    EXPECT_EQ(stats.pickups, 0u);
+    EXPECT_EQ(stats.deliveries, 0u);
+    EXPECT_FALSE(r.get<Comp::ForagerComponent>(actor).carrying_food);
+    EXPECT_DOUBLE_EQ(field.Sample(kHomeTrailChannel, 4, 4), 1);
+}
+
 } // namespace

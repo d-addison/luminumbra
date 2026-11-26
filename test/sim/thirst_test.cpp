@@ -299,4 +299,37 @@ TEST(Thirst, OrderIndependent) {
     }
 }
 
+TEST(Thirst, LegacyWaterTieKeepsHandleOrderDespiteIdentity) {
+    entt::registry r;
+    const auto actor = spawnCreature(r, 0, 0, 0.8f);
+    const auto first = spawnHole(r, -10, 0, 1);
+    const auto second = spawnHole(r, 10, 0, 1);
+    r.emplace<Comp::SimulationIdentityComponent>(actor, 30u);
+    r.emplace<Comp::SimulationIdentityComponent>(first, 20u);
+    r.emplace<Comp::SimulationIdentityComponent>(second, 10u);
+    const auto stats = RunThirstOnTick(r, kDt);
+    EXPECT_EQ(stats.identity_order_visits, 0u);
+    EXPECT_LT(thirstOf(r, actor).wish_x, 0);
+}
+
+TEST(Thirst, IdentityModeWithoutWaterResetsStaleWishAndProximity) {
+    entt::registry r;
+    const auto actor = spawnCreature(r, 0, 0, 0.8f);
+    r.emplace<Comp::SimulationIdentityComponent>(actor, 1u);
+    auto& th = r.get<Comp::ThirstComponent>(actor);
+    th.wish_x = 1;
+    th.wish_z = -1;
+    th.drinking = 1;
+    th.water_proximity = 1;
+    const auto stats = luminumbra::ai::RunThirstOnTickV2(r, kDt);
+    EXPECT_EQ(stats.participants, 1);
+    EXPECT_EQ(stats.seeking, 0);
+    EXPECT_EQ(stats.drinking, 0);
+    EXPECT_GT(th.thirst, 0.8f);
+    EXPECT_FLOAT_EQ(th.wish_x, 0);
+    EXPECT_FLOAT_EQ(th.wish_z, 0);
+    EXPECT_FLOAT_EQ(th.water_proximity, 0);
+    EXPECT_EQ(th.drinking, 0);
+}
+
 } // namespace
