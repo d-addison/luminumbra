@@ -430,6 +430,12 @@ void WaterPass::capture_visibility(const RenderContext& ctx, const WaterPassInpu
         // color write mask. Unwritten pixels must never become water evidence.
         glClearTexImage(color, 0, GL_RGBA, GL_FLOAT, zero);
         glDisable(GL_BLEND);
+        // Diagnostics can bind a distinct program variant. Uniform locations
+        // belong to the program actually drawing, including during this replay.
+        GLint visibility_program = 0;
+        glGetIntegerv(GL_CURRENT_PROGRAM, &visibility_program);
+        const GLint model_location =
+            glGetUniformLocation(static_cast<GLuint>(visibility_program), "u_model");
         // Same program, uniforms, animated vertices and fragment discards. Alpha
         // is nonzero for every surviving water fragment, independent of its hue.
         for (const auto& item : input.draw_items) {
@@ -437,7 +443,7 @@ void WaterPass::capture_visibility(const RenderContext& ctx, const WaterPassInpu
             if (elements == 0) {
                 continue;
             }
-            m_water_shader->setMat4("u_model", item.model);
+            glUniformMatrix4fv(model_location, 1, GL_FALSE, &item.model[0][0]);
             glBindVertexArray(item.vao_id);
             AttributedGl::Submit(glDrawElements,
                                  static_cast<GLenum>(GL_TRIANGLES),

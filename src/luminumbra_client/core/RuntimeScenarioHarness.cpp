@@ -47,6 +47,7 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <system_error>
 
 namespace Luminumbra::Client::ScenarioHarness {
@@ -56,9 +57,43 @@ double PixelLuminance(unsigned char r, unsigned char g, unsigned char b) {
            0.0722 * static_cast<double>(b);
 }
 
-bool IsBelowHorizonSkyPixel(unsigned char r, unsigned char g, unsigned char b) {
-    return b >= 70 && static_cast<int>(b) >= static_cast<int>(r) + 35 &&
-           static_cast<int>(g) >= static_cast<int>(r) + 18 && g <= b;
+bool SkyPixelMask::valid_for(int image_width, int image_height) const {
+    return image_width > 0 && image_height > 0 && image_width <= 4096 && image_height <= 4096 &&
+           width == image_width && height == image_height &&
+           pixels.size() == static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+}
+
+SkyPixelMask BuildSkyPixelMask(const std::vector<float>& depth,
+                               int width,
+                               int height,
+                               const std::vector<unsigned char>& water_coverage) {
+    if (width <= 0 || height <= 0 || width > 4096 || height > 4096) {
+        return {};
+    }
+    const auto count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    if (depth.size() != count || (!water_coverage.empty() && water_coverage.size() != count) ||
+        std::any_of(depth.begin(), depth.end(), [](float value) {
+            return !std::isfinite(value) || value < 0.0f || value > 1.0f;
+        })) {
+        return {};
+    }
+    SkyPixelMask mask{
+        .width = width, .height = height, .pixels = std::vector<unsigned char>(count)};
+    // Exact clear value: an epsilon would erase finite, blue-hazed distant geometry.
+    for (std::size_t index = 0; index < count; ++index) {
+        mask.pixels[index] =
+            depth[index] == 0.0f && (water_coverage.empty() || water_coverage[index] == 0);
+    }
+    return mask;
+}
+
+void ValidateScenarioPixelBuffers(const std::vector<unsigned char>& pixels,
+                                  const SkyPixelMask& sky_mask,
+                                  int width,
+                                  int height) {
+    if (!sky_mask.valid_for(width, height) || pixels.size() != sky_mask.pixels.size() * 3u) {
+        throw std::invalid_argument("Scenario colour and geometry evidence must match");
+    }
 }
 
 bool IsWaterLikePixel(unsigned char r, unsigned char g, unsigned char b) {
