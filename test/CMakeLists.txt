@@ -385,6 +385,7 @@ add_executable(common_tests
     tools/active_regions_dump_test.cpp
     ../tools/active_regions_dump.cpp
     common/ActiveRegionPriority_test.cpp
+    common/ActiveRegionAcceptance_test.cpp
     common/SimulationIdentityAllocator_test.cpp
     common/PlantCreationIdentity_test.cpp
     common/GroundObjectStore_test.cpp
