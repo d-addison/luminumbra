@@ -135,7 +135,9 @@ TEST_F(FarWorldCapturePlan, NegativeBoundaryIncludesEveryHaloContributor) {
     EXPECT_TRUE(std::is_sorted(wanted.begin(), wanted.end()));
     for (std::size_t index = 0; index < wanted.size(); ++index) {
         const auto tier = FarTierAt(wanted[index].tier);
-        ASSERT_TRUE(tier);
+        if (!tier.has_value()) {
+            FAIL() << "wanted key has an invalid tier";
+        }
         const auto& window = plan.source_windows()[index];
         const auto step = std::int64_t(tier->sample_spacing_meters);
         const auto edge = std::int64_t(tier->tile_edge_meters);
@@ -416,10 +418,32 @@ TEST_F(FarWorldCapturePlan, WaterResolutionPrecedenceAndAmbiguityUseImmutableIma
     ASSERT_NO_FATAL_FAILURE(Build());
     EXPECT_EQ(plan.accepted()->tiles[0].request.span.max_y, 16);
     const auto accepted = plan.accepted();
-    producer->changes()->membership(Water({0, 1, 0}, 4, 0, 1), false, true);
+    const auto* source = producer->capture();
+    const auto ambiguous = Water({0, 1, 0}, 4, 0, 1);
+    producer->changes()->membership(ambiguous, false, true);
+    ASSERT_TRUE(producer->request_capture(plan.source_windows()));
+    // Published water ambiguity is refused before a candidate source is installed.
+    producer->pump_capture();
+    EXPECT_EQ(producer->capture_status().error, Producer::Error::WaterUnavailable);
+    EXPECT_FALSE(producer->capture_status().active);
+    EXPECT_FALSE(producer->capture_status().queued);
+    producer->pump_capture();
+    EXPECT_EQ(producer->capture_status().error, Producer::Error::WaterUnavailable);
+    EXPECT_FALSE(producer->capture_status().latest_ready);
+    EXPECT_EQ(producer->capture(), source);
+    EXPECT_EQ(plan.Start(producer, world, policy, sampling, limits).error,
+              Plan::Error::SourceRefused);
+    EXPECT_EQ(plan.accepted(), accepted);
+
+    // Committed ambiguity reaches discovery through the immutable source image.
+    producer->changes()->membership(ambiguous, false, false);
+    ASSERT_TRUE(disk.insert_chunk(ambiguous));
+    ASSERT_TRUE(Save{}.save_world(disk, root));
+    ASSERT_TRUE(producer->admit_saved_source(root, reads, error)) << error;
     ASSERT_NO_FATAL_FAILURE(Capture());
     ASSERT_TRUE(plan.Start(producer, world, policy, sampling, limits).ok());
     const auto result = Finish();
+    EXPECT_EQ(result.error, Plan::Error::SourceRefused);
     EXPECT_EQ(result.source.source, Producer::Error::WaterUnavailable);
     EXPECT_EQ(plan.accepted(), accepted);
 }

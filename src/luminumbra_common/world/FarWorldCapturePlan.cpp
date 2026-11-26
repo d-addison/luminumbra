@@ -210,7 +210,8 @@ FarWorldCapturePlan::Result FarWorldCapturePlan::Pump(std::uint64_t allowance) {
             result.error = Error::SourceChanged;
             break;
         }
-        if (!impl_->aggregate || !impl_->aggregate->CheckDeadline() ||
+        auto& aggregate = impl_->aggregate;
+        if (!aggregate.has_value() || !aggregate->CheckDeadline() ||
             impl_->producer->capture()->deadline.expired()) {
             result.error = Error::SourceRefused;
             result.source.capture = FarFrozenCaptureError::DeadlineExceeded;

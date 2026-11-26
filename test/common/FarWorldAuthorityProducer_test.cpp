@@ -1275,6 +1275,20 @@ TEST_F(FarWorldSourceCaptureTest, MalformedVolatileCaptureRefusesBeforeReadingAn
     ASSERT_NE(producer.capture(), nullptr);
 }
 
+void ExpectRetiredCoverageRefusal(Producer& producer,
+                                  const std::shared_ptr<Systems::SHIELD_WorldSystem>& world,
+                                  const World::FarVolumeRequest& request,
+                                  const Producer::FrozenPolicy& policy,
+                                  const World::FarFrozenCaptureLimits& limits) {
+    EXPECT_EQ(producer.start_coverage(world, {request.key, {}}, policy, limits).source,
+              Producer::Error::AuthorityUnavailable);
+    auto coverage = request;
+    const auto refused = producer.pump_coverage(1, coverage);
+    EXPECT_EQ(refused.result.source, Producer::Error::AuthorityUnavailable);
+    EXPECT_EQ(refused.work, 0u);
+    EXPECT_EQ(coverage, request);
+}
+
 TEST(FarWorldAuthorityProducer, RetiredBindingRefusesBeforeSampling) {
     const auto root = TestSupport::CreateUniqueTempDirectory("retired_capture_");
     struct Cleanup {
@@ -1331,13 +1345,7 @@ TEST(FarWorldAuthorityProducer, RetiredBindingRefusesBeforeSampling) {
         }
         EXPECT_EQ(producer.start_frozen(world, request, policy, limits, pool).source,
                   Producer::Error::AuthorityUnavailable);
-        EXPECT_EQ(producer.start_coverage(world, {request.key, {}}, policy, limits).source,
-                  Producer::Error::AuthorityUnavailable);
-        auto coverage = request;
-        const auto refused_coverage = producer.pump_coverage(1, coverage);
-        EXPECT_EQ(refused_coverage.result.source, Producer::Error::AuthorityUnavailable);
-        EXPECT_EQ(refused_coverage.work, 0u);
-        EXPECT_EQ(coverage, request);
+        ExpectRetiredCoverageRefusal(producer, world, request, policy, limits);
         EXPECT_EQ(producer.compose_frozen(*world, request, policy, limits, pool, output).source,
                   Producer::Error::AuthorityUnavailable);
         EXPECT_EQ(work.counts().height, 0u);
