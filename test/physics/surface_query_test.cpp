@@ -398,9 +398,10 @@ TEST_P(TerrainEditCollision, SharedBorderAndVerticalSlabsRefreshTogether) {
     }
     // A separate fill above the original surface must affect the column even
     // though the original surface slab is outside the brush's vertical AABB.
-    auto upper = MakeFlatFloorChunk({0, 1, 0}, 8);
-    world->GenerateChunkData(*upper);
-    ASSERT_TRUE(world->adopt_streamed_chunk(upper));
+    // The dig's surface rebuild already admitted the upper margin slab.
+    const auto upper = world->find_streamed_chunk({0, 1, 0});
+    ASSERT_NE(upper, nullptr);
+    ASSERT_EQ(upper->sdf_data.size(), 17u * 17u * 17u);
     ASSERT_GT(world->EditTerrainVoxel({8, 19, 8}, 2, true, &physics), 0);
     const auto filled = physics.audio_raycast({8.25f, 24, 8.25f}, {8.25f, 0, 8.25f});
     ASSERT_TRUE(filled.hit);
@@ -591,7 +592,7 @@ TEST_P(TerrainEditCollision, DigLowersColumnAcrossVerticalChunkBoundary) {
 TEST_P(TerrainEditCollision, ColdProjectionAfterEditIsBoundedByBrushFootprint) {
     // Pre-admit the remesh band so the diagnostic isolates editing, rather than
     // first-time procedural generation. The upper slabs are outside that band.
-    ASSERT_TRUE(world->EnsureSurfaceReadyNear({8, 8, 8}, nullptr, 2, 2));
+    ASSERT_TRUE(world->EnsureSurfaceReadyNear({8, 8, 8}, &physics, 2, 2));
     for (int slab_y = 2; slab_y <= 21; ++slab_y) {
         auto slab = MakeFlatFloorChunk({0, slab_y, 0}, 8);
         slab->sdf_data.assign(17 * 17 * 17, 1);
@@ -643,6 +644,9 @@ TEST(SurfaceQuery, WaterAdmissionStagesProjectionBeforeFirstEdit) {
     params.continental_spline = {{{-1, 0}}, {{1, 0}}};
     params.caves_enabled = false;
     auto world = std::make_unique<SHIELD_WorldSystem>(nullptr, nullptr, params, 4242);
+    PhysicsSystem physics;
+    physics.startup();
+    physics.set_world_system(world.get());
     Luminumbra::Systems::WaterSystem water(nullptr, world.get());
     world->set_durable_residency(true);
     world->SetWaterSystem(&water);
@@ -652,7 +656,7 @@ TEST(SurfaceQuery, WaterAdmissionStagesProjectionBeforeFirstEdit) {
     ASSERT_TRUE(world->unpark_chunk(admitted->get_id()));
     // Meshing an already populated water admission must reuse its staged SDF
     // projection, just like streaming generation and direct adoption.
-    ASSERT_TRUE(world->EnsureSurfaceReadyNear({72, 8, 8}, nullptr, 2, 2));
+    ASSERT_TRUE(world->EnsureSurfaceReadyNear({72, 8, 8}, &physics, 2, 2));
     const auto work = world->simulation_collision_sdf_samples();
     ASSERT_GT(world->EditTerrainVoxel({72, 8, 8}, 2, false, nullptr), 0);
     std::array<float, 17 * 17> heights{};
