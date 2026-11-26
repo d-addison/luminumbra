@@ -5,6 +5,7 @@
 #include "core/LogDispatcherSink.h"
 #include "luminumbra_client/rendering/FarWorldHandoffDiagnostics.h"
 #include "luminumbra_client/rendering/FarWorldSessionController.h"
+#include "world/FarWorldCapturePlan.h"
 #include "world/WorldStreamingState.h"
 #include <array>
 #include <cmath>
@@ -21,6 +22,7 @@ using namespace Luminumbra::World;
 using namespace Luminumbra::Rendering;
 using Controller = Rendering::FarWorldSessionController;
 using Producer = FarWorldAuthorityProducer;
+using Plan = World::FarWorldCapturePlan;
 using Save = Persistence::WorldSaveService;
 
 // Fixed fake storage for the real scheduler; no GL calls or native context.
@@ -185,7 +187,165 @@ protected:
                                    0,
                                    0);
     }
+    void CaptureDiscoverySource(const Plan& plan) {
+        ASSERT_TRUE(producer->request_capture(plan.source_windows()));
+        for (std::uint64_t work = 0; work < limits.admission_operations;
+             work += limits.operations_per_pump) {
+            producer->pump_capture(limits.operations_per_pump);
+            const auto status = producer->capture_status();
+            ASSERT_EQ(status.error, Producer::Error::None);
+            if (!status.active) {
+                ASSERT_TRUE(status.latest_ready);
+                return;
+            }
+        }
+        FAIL() << "discovery source exceeded the operation bound";
+    }
+    Plan::Result FinishDiscovery(Plan& plan) const {
+        for (std::uint64_t work = 0; work < limits.planning_operations;
+             work += limits.operations_per_pump) {
+            const auto result = plan.Pump(limits.operations_per_pump);
+            EXPECT_LE(result.work, limits.operations_per_pump);
+            if (!result.ok() || result.complete) {
+                return result;
+            }
+        }
+        ADD_FAILURE() << "discovery exceeded the operation bound";
+        plan.Cancel();
+        return {Plan::Error::WorkLimit};
+    }
 };
+
+TEST_F(FarWorldSessionController, DiagnosticsDiscoveryUsesTransactionAcrossSixPristineTiles) {
+    limits = FarWorldDiagnosticsSessionLimits(limits.capture.clock.now, this);
+    ASSERT_NO_FATAL_FAILURE(ConfigureSource());
+    Plan plan(controller.SourceConfig().source.memory);
+    const std::array<FarTileKey, 6> wanted{
+        {{1, 0, 0}, {1, 1, 0}, {1, 2, 0}, {1, 3, 0}, {1, 4, 0}, {1, 5, 0}}};
+    ASSERT_EQ(plan.SetWanted(wanted), Plan::Error::None);
+    ASSERT_NO_FATAL_FAILURE(CaptureDiscoverySource(plan));
+    FarFrozenCaptureWork transaction(limits.transaction_samples);
+    // Existing transaction work must survive Start and both completion and cancel.
+    ASSERT_TRUE(transaction.ChargeHeight());
+    ASSERT_TRUE(transaction.ChargeDensity());
+    ASSERT_TRUE(transaction.ChargeWater());
+    auto sampling = limits.sampling;
+    sampling.work = &transaction;
+    const Plan::Limits planning{limits.tiles, limits.planning_operations, limits.rendering.spans};
+    ASSERT_TRUE(plan.Start(producer, world, policy, sampling, planning).ok());
+    const auto result = FinishDiscovery(plan);
+    ASSERT_TRUE(result.ok()) << static_cast<int>(result.source.capture);
+    ASSERT_TRUE(result.complete);
+    const auto accepted = plan.accepted();
+    ASSERT_NE(accepted, nullptr);
+    EXPECT_EQ(accepted->tiles.size(), wanted.size());
+    constexpr std::uint64_t water_per_tile = 4u * 131u * 131u;
+    constexpr std::uint64_t height_per_tile = 131u * 131u + 129u * 129u;
+    const auto counts = transaction.counts();
+    EXPECT_EQ(counts.water, 1u + wanted.size() * water_per_tile);
+    EXPECT_EQ(counts.height, 1u + wanted.size() * height_per_tile);
+    EXPECT_EQ(counts.density, 1u);
+    EXPECT_GT(counts.water, sampling.max_water_samples);
+    plan.Cancel();
+    EXPECT_EQ(transaction.counts().water, counts.water);
+    EXPECT_FALSE(producer->frozen_active());
+}
+
+TEST_F(FarWorldSessionController, DiagnosticsDiscoveryRetainsTileAndTransactionCaps) {
+    limits = FarWorldDiagnosticsSessionLimits(limits.capture.clock.now, this);
+    ASSERT_NO_FATAL_FAILURE(ConfigureSource());
+    Plan plan(controller.SourceConfig().source.memory);
+    const std::array<FarTileKey, 6> wanted{
+        {{1, 0, 0}, {1, 1, 0}, {1, 2, 0}, {1, 3, 0}, {1, 4, 0}, {1, 5, 0}}};
+    ASSERT_EQ(plan.SetWanted(wanted), Plan::Error::None);
+    ASSERT_NO_FATAL_FAILURE(CaptureDiscoverySource(plan));
+    constexpr std::uint64_t water_per_tile = 4u * 131u * 131u;
+    constexpr std::uint64_t height_per_tile = 131u * 131u + 129u * 129u;
+    const Plan::Limits planning{limits.tiles, limits.planning_operations, limits.rendering.spans};
+    const FarFrozenCaptureWork::Counts exact{
+        wanted.size() * height_per_tile, 0, wanted.size() * water_per_tile};
+    FarFrozenCaptureWork full(exact);
+    auto sampling = limits.sampling;
+    sampling.max_height_samples = height_per_tile;
+    sampling.max_water_samples = water_per_tile;
+    sampling.work = &full;
+    ASSERT_TRUE(plan.Start(producer, world, policy, sampling, planning).ok());
+    const auto complete = FinishDiscovery(plan);
+    ASSERT_TRUE(complete.ok());
+    ASSERT_TRUE(complete.complete);
+    EXPECT_EQ(full.counts().height, exact.height);
+    EXPECT_EQ(full.counts().water, exact.water);
+    const auto accepted = plan.accepted();
+    ASSERT_NE(accepted, nullptr);
+    // Both kinds must refuse one sample below either the tile or transaction
+    // boundary. Discovery never charges density; its zero allowance is valid.
+    for (const bool height : {false, true}) {
+        for (const bool per_tile : {false, true}) {
+            SCOPED_TRACE(testing::Message() << "height=" << height << " tile=" << per_tile);
+            auto caps = exact;
+            auto bounded = limits.sampling;
+            if (per_tile) {
+                if (height) {
+                    bounded.max_height_samples = height_per_tile - 1;
+                } else {
+                    bounded.max_water_samples = water_per_tile - 1;
+                }
+            } else if (height) {
+                --caps.height;
+            } else {
+                --caps.water;
+            }
+            FarFrozenCaptureWork transaction(caps);
+            bounded.work = &transaction;
+            ASSERT_TRUE(plan.Start(producer, world, policy, bounded, planning).ok());
+            const auto result = FinishDiscovery(plan);
+            EXPECT_EQ(result.error, Plan::Error::SourceRefused);
+            EXPECT_EQ(result.source.capture, FarFrozenCaptureError::WorkLimit);
+            EXPECT_EQ(plan.accepted(), accepted);
+            EXPECT_FALSE(plan.active());
+            EXPECT_FALSE(producer->frozen_active());
+            const auto counts = transaction.counts();
+            EXPECT_EQ(counts.density, 0u);
+            if (height) {
+                EXPECT_EQ(counts.height, per_tile ? height_per_tile - 1 : caps.height);
+            } else {
+                EXPECT_EQ(counts.water, per_tile ? water_per_tile - 1 : caps.water);
+            }
+        }
+    }
+}
+
+TEST_F(FarWorldSessionController, DiagnosticsDiscoveryChecksParentDeadlineAndEmptyWanted) {
+    limits = FarWorldDiagnosticsSessionLimits(limits.capture.clock.now, this);
+    ASSERT_NO_FATAL_FAILURE(ConfigureSource());
+    Plan plan(controller.SourceConfig().source.memory);
+    ASSERT_EQ(plan.SetWanted(keys), Plan::Error::None);
+    ASSERT_NO_FATAL_FAILURE(CaptureDiscoverySource(plan));
+    const Plan::Limits planning{limits.tiles, limits.planning_operations, limits.rendering.spans};
+    FarFrozenCaptureWork transaction(
+        limits.transaction_samples, nullptr, {limits.capture.clock.now, this, ticks + 1});
+    auto sampling = limits.sampling;
+    sampling.work = &transaction;
+    ASSERT_TRUE(plan.Start(producer, world, policy, sampling, planning).ok());
+    ++ticks;
+    const auto expired = FinishDiscovery(plan);
+    EXPECT_EQ(expired.error, Plan::Error::SourceRefused);
+    EXPECT_EQ(expired.source.capture, FarFrozenCaptureError::DeadlineExceeded);
+    EXPECT_EQ(plan.accepted(), nullptr);
+    EXPECT_EQ(transaction.counts().height, 0u);
+    EXPECT_EQ(transaction.counts().water, 0u);
+    ASSERT_EQ(plan.SetWanted(std::span<const FarTileKey>{}), Plan::Error::None);
+    FarFrozenCaptureWork empty({0, 0, 0});
+    sampling.work = &empty;
+    ASSERT_TRUE(plan.Start(producer, world, policy, sampling, planning).ok());
+    ASSERT_TRUE(FinishDiscovery(plan).complete);
+    const auto accepted = plan.accepted();
+    ASSERT_NE(accepted, nullptr);
+    EXPECT_TRUE(accepted->tiles.empty());
+    EXPECT_EQ(empty.counts().height, 0u);
+    EXPECT_EQ(empty.counts().density, 0u);
+    EXPECT_EQ(empty.counts().water, 0u);
+}
 
 TEST_F(FarWorldSessionController, DiagnosticsProfileIsCompleteAndFinite) {
     const auto profile = FarWorldDiagnosticsSessionLimits(limits.capture.clock.now, this);

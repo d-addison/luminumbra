@@ -192,7 +192,12 @@ FarWorldCapturePlan::Start(const std::shared_ptr<Producer>& producer,
             sampling.max_height_samples, sampling.max_density_samples, sampling.max_water_samples},
         sampling.work,
         sampling.deadline);
-    impl_->sampling.work = &aggregate;
+    // The producer creates a fresh per-tile counter from sampling's image caps.
+    // Across tiles, charge the supplied transaction directly; applying the image
+    // caps again here would refuse a valid multi-tile discovery. Without an
+    // injected transaction, retain the existing finite aggregate allowance.
+    // The aggregate still checks both deadlines between tiles in Pump().
+    impl_->sampling.work = sampling.work ? sampling.work : &aggregate;
     impl_->limits = limits;
     impl_->operations = 0;
     impl_->cursor = 0;
