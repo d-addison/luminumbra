@@ -596,6 +596,10 @@ FarWorldAuthorityProducer::read_committed(const Save::AuthorityWindow& window,
     }
     return impl_->reader.read(window, limits);
 }
+FarWorldAuthorityProducer::Limits FarWorldAuthorityProducer::source_limits() const {
+    return impl_->state->limits;
+}
+
 bool FarWorldAuthorityProducer::configure_capture(const CaptureLimits& limits) {
     const auto& read = limits.read;
     if (impl_->retired || !ValidLimits(impl_->state->limits) || limits.deadline_frames == 0 ||

@@ -143,6 +143,8 @@ public:
     bool set_wanted(std::span<const Persistence::WorldSaveService::AuthorityWindow> wanted);
     DirtyTiles tick();
     Counters counters() const;
+    // Owner-thread value diagnostic for integration-domain/limit admission.
+    Limits source_limits() const;
     // Refusal preserves output. Only published owned terrain and integer water
     // are copied; resident generation and staged arrays never become authority.
     Error copy_published(const Persistence::WorldSaveService::AuthorityWindow& window,

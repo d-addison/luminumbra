@@ -68,6 +68,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeGlBackend.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldReplayGl.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldDiagnostics.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldSessionController.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldRenderer.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeHandoff.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldHandoffRenderer.cpp
