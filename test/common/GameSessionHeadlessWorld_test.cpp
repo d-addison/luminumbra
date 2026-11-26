@@ -10467,7 +10467,8 @@ TEST(GameSessionHeadlessWorldTest, FirstActivationRetainsSavedStormIdentity) {
         const auto before = target->GetActiveRegionLedger().canonical_bytes();
         const auto export_path =
             root.path() / (target == &loaded ? "immediate-load" : "immediate-state");
-        ASSERT_TRUE(target->SaveWorldStateTo(export_path));
+        // Active-region saves refuse transient worlds; the refusal must not arm pages.
+        EXPECT_EQ(target->SaveWorldStateTo(export_path), target == &loaded);
         EXPECT_FALSE(fs::exists(P::WorldSaveService::field_pages_path(export_path)));
         EXPECT_EQ(target->GetActiveRegionLedger().canonical_bytes(), before);
         target->SetReplicatedSimulationAnchors({});
@@ -10555,8 +10556,15 @@ TEST(GameSessionHeadlessWorldTest, ActivatedPagesReopenWithoutCatchup) {
         EXPECT_TRUE(target->GetWeatherSystem()->StrikesThisTick().empty());
         const auto export_path =
             root.path() / (target == &loaded ? "activated-load" : "activated-state");
-        ASSERT_TRUE(target->SaveWorldStateTo(export_path));
-        EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::field_pages_path(export_path)), fields);
+        // Active-region saves refuse transient worlds, so only the loaded world exports.
+        if (target == &loaded) {
+            ASSERT_TRUE(target->SaveWorldStateTo(export_path));
+            EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::field_pages_path(export_path)),
+                      fields);
+        } else {
+            EXPECT_FALSE(target->SaveWorldStateTo(export_path));
+            EXPECT_EQ(target->GetFieldPages().serialize(), fields);
+        }
         target->SetReplicatedSimulationAnchors({});
     }
     // Enough active ticks to cross strike cadence; frozen owners and absolute storm
