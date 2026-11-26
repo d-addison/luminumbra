@@ -313,6 +313,7 @@ void FarVolumeResidency::Reject(Entry& entry, FarVolumeFrameResult& result) {
     entry.completion.reset();
     entry.eligibility = FarVolumeEligibility::RequestRejected;
     ++result.rejected;
+    ++result.tiers[desired.identity.key.tier - 1].rejected;
     if (desired.identity.key.tier == World::kFarTierCount)
         result.horizon_refused = true;
 }
@@ -357,6 +358,7 @@ bool FarVolumeResidency::Headroom(std::size_t number,
         entry.uploaded = FarVolumeUploadedTile{};
         entry.eligibility = FarVolumeEligibility::BudgetEvicted;
         ++result.evicted;
+        ++result.tiers[number - 1].evicted;
         if (fits())
             return true;
     }
@@ -393,6 +395,8 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
                 auto completed =
                     tier->queue.TakeCompleted(entry.desired->identity, entry.desired->intent);
                 if (completed) {
+                    ++result.completed;
+                    ++result.tiers[entry.desired->identity.key.tier - 1].completed;
                     tier->queue.Forget(entry.desired->identity.key);
                     if (completed->status() == FarVolumeBuildStatus::Ready ||
                         completed->status() == FarVolumeBuildStatus::ReadyEmpty) {
@@ -425,12 +429,14 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
             const auto bytes = UploadBytes(entry.completion->mesh());
             if (!bytes || *bytes > limits.upload_bytes) {
                 ++result.upload_attempts;
+                ++result.tiers[n - 1].upload_attempts;
                 Reject(entry, result);
                 continue;
             }
             if (*bytes > limits.upload_bytes - result.upload_bytes)
                 continue;
             ++result.upload_attempts;
+            ++result.tiers[n - 1].upload_attempts;
             const auto& desired = RequireEngaged(entry.desired);
             if (!Headroom(n, *bytes, desired.identity.key, result)) {
                 Reject(entry, result);
@@ -438,6 +444,7 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
             }
             const auto remaining = limits.upload_bytes - result.upload_bytes;
             result.upload_bytes += *bytes;
+            result.tiers[n - 1].upload_bytes += *bytes;
             if (!UploadFarVolume(*entry.completion,
                                  desired.identity,
                                  desired.intent,
@@ -451,7 +458,9 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
             entry.completion.reset();
             entry.eligibility = FarVolumeEligibility::Settled;
             ++result.uploaded;
+            ++result.tiers[n - 1].uploaded;
             result.successful_upload_bytes += *bytes;
+            result.tiers[n - 1].successful_upload_bytes += *bytes;
         }
     }
     // One global dispatch budget; explicit single-key Pump avoids fallback.
@@ -472,10 +481,12 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
             if (tier.queue.ResultCapacity(held) == 0)
                 break;
             ++result.build_attempts;
+            ++result.tiers[n - 1].build_attempts;
             if (entry.eligibility == FarVolumeEligibility::Pending) {
                 const std::array key{RequireEngaged(entry.desired).identity.key};
                 const auto dispatched = tier.queue.Pump(1, key, held);
                 result.dispatched += dispatched;
+                result.tiers[n - 1].dispatched += dispatched;
                 if (dispatched != 0)
                     entry.eligibility = FarVolumeEligibility::Building;
                 continue;
@@ -519,6 +530,7 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
             const std::array key{entry.desired->identity.key};
             const auto dispatched = tier.queue.Pump(1, key, held);
             result.dispatched += dispatched;
+            result.tiers[n - 1].dispatched += dispatched;
             entry.eligibility =
                 dispatched == 0 ? FarVolumeEligibility::Pending : FarVolumeEligibility::Building;
         }

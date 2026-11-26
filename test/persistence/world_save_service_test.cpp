@@ -4,6 +4,7 @@
 #include "../support/CalendarMetadataCases.h"
 #include "../support/PersistenceFileOps.h"
 #include "../support/UniqueTempPath.h"
+#include "../support/WorldSaveTestAccess.h"
 #include "../support/WorldgenTestData.h"
 
 #include "core/FilesystemPath.h"
@@ -535,6 +536,40 @@ TEST(WorldSaveService, SaveThenLoadRoundTripPreservesWorldHash) {
 
     EXPECT_EQ(restored.size(), original.size());
     EXPECT_EQ(service.world_hash(restored), original_hash);
+}
+
+TEST(WorldSaveService, DecodeInspectionCountsWorkerLoadAttempts) {
+    namespace detail = Luminumbra::Persistence::detail;
+    const TempSaveDir save_dir("worker_decode_inspection");
+    const WorldSaveService service;
+    WorldStreamingState original;
+    AddFixtureChunk(original, IVec3(0, 0, 0), ChunkState::Ready, 1u);
+    ASSERT_TRUE(service.save_world(original, save_dir.path()));
+
+    WorldStreamingState restored;
+    std::vector<std::string> errors;
+    bool loaded = false;
+    const auto before = detail::decode_count_for_testing();
+    std::jthread successful_worker(
+        [&] { loaded = service.load_world(restored, save_dir.path(), errors); });
+    successful_worker.join();
+    ASSERT_TRUE(loaded);
+    EXPECT_TRUE(errors.empty());
+    EXPECT_EQ(restored.size(), 1u);
+    EXPECT_EQ(service.world_hash(restored), service.world_hash(original));
+    EXPECT_EQ(detail::decode_count_for_testing(), before + 1u);
+
+    // Malformed metadata refuses before reading chunk payloads, but still counts
+    // as one load attempt. The main thread must observe both worker attempts.
+    ASSERT_TRUE(WorldSaveService::write_file_durably(save_dir.path() / "world_info.json", "{"));
+    std::jthread refused_worker(
+        [&] { loaded = service.load_world(restored, save_dir.path(), errors); });
+    refused_worker.join();
+    EXPECT_FALSE(loaded);
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_EQ(errors.front(), "corrupt world metadata: invalid JSON");
+    EXPECT_TRUE(restored.empty());
+    EXPECT_EQ(detail::decode_count_for_testing(), before + 2u);
 }
 
 TEST(WorldSaveService, AbandonedRegionAndManifestStagingAllowsLoadAndIsReclaimedOnRetry) {

@@ -6,7 +6,10 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <limits>
+#include <map>
 #include <tuple>
 #include <vector>
 
@@ -285,6 +288,75 @@ TEST(PredatorPack, RunEqualsReplay) {
     ASSERT_EQ(run.size(), replay.size());
     for (std::size_t i = 0; i < run.size(); ++i) {
         EXPECT_EQ(run[i], replay[i]) << "divergence at sample " << i;
+    }
+}
+
+TEST(PredatorPack, RegionalElapsedRequiresBothParticipants) {
+    namespace W = Luminumbra::world;
+    for (const bool zero_window : {false, true}) {
+        for (const auto ticks : {1u, 8u, 36001u, 65536u}) {
+            SCOPED_TRACE(zero_window);
+            SCOPED_TRACE(ticks);
+            entt::registry r;
+            const auto hunter = spawnPredator(r, 4, 4);
+            const auto ally = spawnPredator(r, 513, 4);
+            const auto denied_prey = spawnPrey(r, 513, 4);
+            const auto admitted_prey = spawnPrey(r, 4, 20);
+            r.get<Comp::PackHunterComponent>(ally) = {0.75f, -0.25f, 1};
+            const std::vector<W::RegionKey> due = zero_window
+                                                      ? std::vector<W::RegionKey>{{0, 0}, {1, 0}}
+                                                      : std::vector<W::RegionKey>{{0, 0}};
+            const std::map<W::RegionKey, std::uint32_t> windows{{{0, 0}, ticks}, {{1, 0}, 0}};
+            const W::RegionConsumerGate gate(r, due, W::RegionElapsedTicks(windows));
+            luminumbra::ai::CreatureTickAdmission admission;
+            admission.Capture(r, gate);
+            // Put denied participants nearby and the admitted prey in a frozen destination.
+            r.get<Comp::TransformComponent>(ally).position.x = 6;
+            r.get<Comp::TransformComponent>(denied_prey).position = {4, 0, 3};
+            r.get<Comp::TransformComponent>(admitted_prey).position.x = 513;
+            const auto stats = RunPredatorPackOnTick(r, 65536, &admission, &gate);
+            EXPECT_EQ(stats.participants, 1);
+            EXPECT_EQ(stats.packed, 0);
+            EXPECT_EQ(stats.hunting, 1);
+            EXPECT_EQ(packOf(r, hunter).in_pack, 0);
+            EXPECT_GT(packOf(r, hunter).coord_x, 0);
+            EXPECT_GT(packOf(r, hunter).coord_z, 0); // admitted prey, not the closer denied prey
+            EXPECT_EQ(packOf(r, ally).coord_x, 0.75f);
+            EXPECT_EQ(packOf(r, ally).coord_z, -0.25f);
+            EXPECT_EQ(packOf(r, ally).in_pack, 1);
+            // No admitted target: the active hunter clears its wish; the ally remains frozen.
+            r.get<Comp::CreatureComponent>(admitted_prey).eaten = true;
+            EXPECT_EQ(RunPredatorPackOnTick(r, 65537, &admission, &gate).hunting, 0);
+            EXPECT_EQ(packOf(r, hunter).coord_x, 0);
+            EXPECT_EQ(packOf(r, hunter).coord_z, 0);
+            EXPECT_EQ(packOf(r, ally).coord_x, 0.75f);
+            // Admit both owners on the next capture: coordination resumes with unequal windows.
+            const std::array<W::RegionKey, 2> resumed_due{{{0, 0}, {1, 0}}};
+            const std::map<W::RegionKey, std::uint32_t> resumed_windows{{{0, 0}, ticks},
+                                                                        {{1, 0}, 1}};
+            const W::RegionConsumerGate resumed(
+                r, resumed_due, W::RegionElapsedTicks(resumed_windows));
+            admission.Capture(r, resumed);
+            EXPECT_EQ(RunPredatorPackOnTick(r, 65538, &admission, &resumed).packed, 2);
+            EXPECT_EQ(packOf(r, hunter).in_pack, 1);
+            EXPECT_EQ(packOf(r, ally).in_pack, 1);
+        }
+    }
+}
+
+TEST(PredatorPack, RegionalElapsedTargetTiesIgnoreStorageOrder) {
+    namespace W = Luminumbra::world;
+    for (const bool reverse : {false, true}) {
+        entt::registry r;
+        const auto hunter = spawnPredator(r, 20, 20);
+        spawnPrey(r, reverse ? 30 : 10, 20);
+        spawnPrey(r, reverse ? 10 : 30, 20);
+        const std::array<W::RegionKey, 1> due{{{0, 0}}};
+        const std::map<W::RegionKey, std::uint32_t> windows{{{0, 0}, 65536}};
+        const W::RegionConsumerGate gate(r, due, W::RegionElapsedTicks(windows));
+        EXPECT_EQ(RunPredatorPackOnTick(r, 65536, nullptr, &gate).hunting, 1);
+        EXPECT_EQ(packOf(r, hunter).coord_x, -1);
+        EXPECT_EQ(packOf(r, hunter).coord_z, 0);
     }
 }
 

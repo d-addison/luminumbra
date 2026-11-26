@@ -284,13 +284,9 @@ void WriteLodSeamArrivalAnalysis(const std::filesystem::path& artifact_dir,
     constexpr double kMaxDarkVoidRatio = 0.020;
     constexpr double kMaxNearBlackRatio = 0.0065;
     constexpr double kMaxBackgroundBlueRatio = 0.025;
-    // Seam crack sliver clusters (>= 12 connected void pixels, RGB <= 10) are
-    // the user-visible defect even at near-black ratios far below the area
-    // threshold (pre-fix captures: 505-675 void pixels per frame forming
-    // wedge-shaped holes, at near-black ratios of only 0.0002-0.0013).
-    // Column-aligned LOD selection plus stale-skirt repair keeps the void
-    // cluster count at zero; legitimately dark geometry (RGB 17-28) is not
-    // counted.
+    // Seam cracks remain 8-connected clusters of >= 12 uncovered ROI pixels.
+    // Exact clear depth replaces RGB <= 10; finite-depth dark geometry is eligible
+    // terrain. The zero-cluster budget and every area/ratio ceiling are unchanged.
     constexpr std::uint64_t kMaxNearBlackClusterCount = 0;
 
     const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
@@ -316,6 +312,7 @@ void WriteLodSeamArrivalAnalysis(const std::filesystem::path& artifact_dir,
     }
 
     nlohmann::json artifact = {{"schema", "luminumbra.lod_seam_arrival.v1"},
+                               {"sky_classifier", "reversed_z_depth_water"},
                                {"timestamp_utc", TimestampUtc()},
                                {"passed", passed},
                                {"duration_seconds", duration_seconds},

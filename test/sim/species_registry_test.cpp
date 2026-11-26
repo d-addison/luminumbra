@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "luminumbra_common/components/CreatureComponents.h"
 #include "luminumbra_common/components/CropLifecycleComponents.h"
 #include "luminumbra_common/components/PlantComponents.h"
 #include "luminumbra_common/core/DeterministicRng.h"
@@ -25,13 +26,18 @@ const char* const kWheat = R"({
 })";
 
 TEST(SpeciesRegistry, SpeciesIdPreservesByteHash) {
-    EXPECT_EQ(F::SpeciesId16(""), 3123u);
-    EXPECT_EQ(F::SpeciesId16("wheat"), 7403u);
-    EXPECT_EQ(F::SpeciesId16("oak"), 56013u);
-    EXPECT_EQ(F::SpeciesId16("\x80"), 46541u);
-    EXPECT_EQ(F::SpeciesId16("\xff"), 53088u);
-    EXPECT_EQ(F::SpeciesId16("w\x80\xff"
-                             "heat"),
+    const auto expect_id = [](const char* name, std::uint16_t expected) {
+        EXPECT_EQ(F::SpeciesId16(name), expected);
+        EXPECT_EQ(C::CreatureSpeciesId16(name), expected);
+    };
+    EXPECT_EQ(C::CreatureSpeciesId16(nullptr), 3123u);
+    expect_id("", 3123u);
+    expect_id("wheat", 7403u);
+    expect_id("oak", 56013u);
+    expect_id("\x80", 46541u);
+    expect_id("\xff", 53088u);
+    expect_id("w\x80\xff"
+              "heat",
               51681u);
 }
 
