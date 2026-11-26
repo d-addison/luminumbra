@@ -1324,7 +1324,19 @@ bool PhysicsSystem::can_admit_simulation_owner(const glm::vec3& position,
 }
 
 bool PhysicsSystem::prepare_simulation_collisions(std::span<const Vec3> anchors,
-                                                  std::uint64_t tick) try {
+                                                  std::uint64_t tick) {
+    return prepare_simulation_collisions_impl(anchors, tick, false);
+}
+
+bool PhysicsSystem::refresh_simulation_collisions(const Vec3& edit_anchor) {
+    const std::array<Vec3, 1> anchors{edit_anchor};
+    return prepare_simulation_collisions_impl(
+        anchors, std::numeric_limits<std::uint64_t>::max(), true);
+}
+
+bool PhysicsSystem::prepare_simulation_collisions_impl(std::span<const Vec3> anchors,
+                                                       std::uint64_t tick,
+                                                       bool retain_horizon) try {
     if (!simulation_collisions_enabled()) {
         return true; // Preserve the legacy path, including body allocation order and hashes.
     }
@@ -1342,7 +1354,9 @@ bool PhysicsSystem::prepare_simulation_collisions(std::span<const Vec3> anchors,
     if (!m_body_interface || anchors.size() > kSimulationOwnerBudget) {
         return false;
     }
-    SimulationHorizon horizon;
+    // Editing retains the last admitted horizon, including anchor-only hosts.
+    // The union still has the fixed 128-column limit and publishes atomically.
+    SimulationHorizon horizon = retain_horizon ? state.horizon : SimulationHorizon{};
     for (const auto& anchor : anchors) {
         ++state.owner_visit_count;
         if (!horizon.add(anchor)) {

@@ -126,6 +126,8 @@ public:
     bool
     prepare_simulation_collisions(std::span<const Vec3> anchors,
                                   std::uint64_t tick = std::numeric_limits<std::uint64_t>::max());
+    // Refresh edited geometry without retiring any previously admitted columns.
+    bool refresh_simulation_collisions(const Vec3& edit_anchor);
     // Owner-thread collision mode/readiness queries used by terrain refresh.
     bool simulation_collisions_enabled() const;
     bool simulation_collisions_ready() const;
@@ -363,6 +365,9 @@ public:
 
 private:
     bool capture_player_owner(World::PhysicsOwnerState& output) const;
+    bool prepare_simulation_collisions_impl(std::span<const Vec3> anchors,
+                                            std::uint64_t tick,
+                                            bool retain_horizon);
     bool add_chunk_collision_impl(Chunk& chunk,
                                   JPH::BodyID restored_id,
                                   std::span<const float> restored_heights,

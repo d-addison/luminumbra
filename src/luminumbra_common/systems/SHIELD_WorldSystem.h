@@ -1106,6 +1106,8 @@ public:
     u64 simulation_collision_sdf_samples() const {
         return m_collision_sdf_samples;
     }
+    // Const owner-thread diagnostic; cold inventory owns no projection sample arrays.
+    std::size_t simulation_collision_projection_bytes() const;
     bool durable_residency() const {
         return m_durable_residency;
     }
@@ -1372,6 +1374,14 @@ private:
         bool valid = true;
         bool active = false;
     };
+    struct CollisionColumnSamples {
+        std::array<float, kCollisionSamples> highest{};
+        std::array<i32, kCollisionSamples> owners{};
+        CollisionColumnSamples() {
+            highest.fill(-std::numeric_limits<float>::infinity());
+            owners.fill(std::numeric_limits<i32>::min());
+        }
+    };
     struct CollisionColumn {
         // One fixed lattice per indexed slab, including generated inputs staged
         // before their first edit. No SDF copies or LRU-dependent reprojection.
@@ -1379,14 +1389,11 @@ private:
         std::set<i32> pending;
         // Disjoint inclusive runs of active slabs, for clearing baseline heights.
         std::map<i32, i32> runs;
-        std::array<float, kCollisionSamples> highest{};
-        std::array<i32, kCollisionSamples> owners{};
+        // Fixed 289-sample arrays are allocated only when SDF is first projected;
+        // cold durable membership keeps only its pending slab coordinates.
+        std::unique_ptr<CollisionColumnSamples> samples;
         u64 revision = 0;
         std::size_t invalid = 0;
-        CollisionColumn() {
-            highest.fill(-std::numeric_limits<float>::infinity());
-            owners.fill(std::numeric_limits<i32>::min());
-        }
     };
     mutable std::unordered_map<u64, CollisionColumn> m_collision_columns;
     void update_collision_slab(const IVec3& coords,
@@ -1403,6 +1410,7 @@ private:
         bool saved = false;
         bool sdf = false;
         bool projected = false;
+        bool initialized = false;
         bool valid = false;
         bool complete = false;
         std::array<float, (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1)> heights{};

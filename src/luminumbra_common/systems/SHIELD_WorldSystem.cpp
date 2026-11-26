@@ -5671,8 +5671,7 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
         if (physics_system && physics_system->simulation_collisions_enabled()) {
             // Keep the brush queryable even in an anchor-only host. Preparation
             // retains every participating owner and replaces only changed shapes.
-            const std::array<Vec3, 1> edit_anchor{world_pos};
-            (void)physics_system->prepare_simulation_collisions(edit_anchor);
+            (void)physics_system->refresh_simulation_collisions(world_pos);
         }
         if (physics_system)
             physics_system->wake_terrain_bodies(world_pos, radius_m);
@@ -7249,6 +7248,8 @@ void SHIELD_WorldSystem::update_collision_slab(const IVec3& coords,
     constexpr std::size_t kSide = CHUNK_SIZE_X + 1;
     constexpr std::size_t kVertical = CHUNK_SIZE_Y + 1;
     const bool has_sdf = source && !source->sdf_data.empty();
+    if (has_sdf && !column.samples)
+        column.samples = std::make_unique<CollisionColumnSamples>();
     const bool partial = changed.size() == kCollisionSamples && slab.prepared && slab.valid;
     candidate.active = source && source->has_terrain_authority() && has_sdf;
     candidate.valid = !has_sdf || source->sdf_data.size() == kCollisionSamples * kVertical;
@@ -7318,15 +7319,16 @@ void SHIELD_WorldSystem::update_collision_slab(const IVec3& coords,
     candidate.prepared = prepared;
     slab = candidate;
     const float base = static_cast<float>(coords.y * CHUNK_SIZE_Y);
-    for (std::size_t index = 0; index < kCollisionSamples; ++index) {
+    for (std::size_t index = 0; column.samples && index < kCollisionSamples; ++index) {
         if (partial && !activation && !changed[index])
             continue;
-        if (slab.active && slab.surfaces[index] > base && coords.y >= column.owners[index]) {
-            column.highest[index] = slab.surfaces[index];
-            column.owners[index] = coords.y;
-        } else if (column.owners[index] == coords.y) {
-            column.highest[index] = -std::numeric_limits<float>::infinity();
-            column.owners[index] = std::numeric_limits<i32>::min();
+        if (slab.active && slab.surfaces[index] > base &&
+            coords.y >= column.samples->owners[index]) {
+            column.samples->highest[index] = slab.surfaces[index];
+            column.samples->owners[index] = coords.y;
+        } else if (column.samples->owners[index] == coords.y) {
+            column.samples->highest[index] = -std::numeric_limits<float>::infinity();
+            column.samples->owners[index] = std::numeric_limits<i32>::min();
             // Only losing the top solid sample searches downward. These are
             // cached scalar projections, never SDF reads, bounded by lower slabs.
             auto lower = column.slabs.lower_bound(coords.y);
@@ -7335,8 +7337,8 @@ void SHIELD_WorldSystem::update_collision_slab(const IVec3& coords,
                 const auto& previous = lower->second;
                 const float lower_base = static_cast<float>(lower->first * CHUNK_SIZE_Y);
                 if (previous.active && previous.surfaces[index] > lower_base) {
-                    column.highest[index] = previous.surfaces[index];
-                    column.owners[index] = lower->first;
+                    column.samples->highest[index] = previous.surfaces[index];
+                    column.samples->owners[index] = lower->first;
                     break;
                 }
             }
@@ -7599,6 +7601,17 @@ bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(const FarLodSdfSnapshot
     return published_sdfs == captured_resident_sdfs;
 }
 
+std::size_t SHIELD_WorldSystem::simulation_collision_projection_bytes() const {
+    std::size_t bytes = 0;
+    for (const auto& [key, column] : m_collision_columns) {
+        (void)key;
+        if (column.samples)
+            bytes += sizeof(CollisionColumnSamples);
+        bytes += column.slabs.size() * sizeof(CollisionSlab::surfaces);
+    }
+    return bytes;
+}
+
 bool SHIELD_WorldSystem::sample_simulation_collision(i32 chunk_x,
                                                      i32 chunk_z,
                                                      std::span<float> heights,
@@ -7624,7 +7637,7 @@ bool SHIELD_WorldSystem::sample_simulation_collision(i32 chunk_x,
     for (std::size_t probe = 0; probe < m_collision_samples.size(); ++probe) {
         const auto index = (slot + probe) % m_collision_samples.size();
         const auto& entry = m_collision_samples[index];
-        if (entry.valid && entry.x == chunk_x && entry.z == chunk_z) {
+        if (entry.initialized && entry.x == chunk_x && entry.z == chunk_z) {
             selected = index;
             break;
         }
@@ -7643,6 +7656,9 @@ bool SHIELD_WorldSystem::sample_simulation_collision(i32 chunk_x,
     }
     auto& cached = m_collision_samples[selected];
     cached.last_use = ++m_collision_sample_clock;
+    const bool reset_baseline = !cached.initialized || cached.x != chunk_x || cached.z != chunk_z ||
+                                cached.generation != generation ||
+                                generation == std::numeric_limits<u64>::max();
     if (!cached.valid || cached.x != chunk_x || cached.z != chunk_z ||
         cached.generation != generation || cached.column_revision != column_revision ||
         generation == std::numeric_limits<u64>::max()) {
@@ -7655,6 +7671,9 @@ bool SHIELD_WorldSystem::sample_simulation_collision(i32 chunk_x,
         cached.z = chunk_z;
         cached.generation = generation;
         cached.column_revision = column_revision;
+    }
+    if (reset_baseline) {
+        cached.initialized = true;
         // Only the centre is needed to locate committed authority's vertical layer.
         ++m_collision_terrain_evaluations;
         cached.centre =
@@ -7729,7 +7748,9 @@ bool SHIELD_WorldSystem::sample_simulation_collision(i32 chunk_x,
             while (!column.pending.empty()) {
                 const i32 slab_y = *column.pending.begin();
                 const IVec3 layer_coords(chunk_x, slab_y, chunk_z);
-                auto authority = find_streamed_chunk(layer_coords);
+                // The baseline read already resolved this slab, including a
+                // validated water-only fallback. Never ask the loader twice.
+                auto authority = slab_y == coords.y ? chunk : find_streamed_chunk(layer_coords);
                 if (!authority) {
                     const auto parked = m_parked.find(Chunk::calculate_id(layer_coords));
                     if (parked != m_parked.end())
@@ -7737,12 +7758,18 @@ bool SHIELD_WorldSystem::sample_simulation_collision(i32 chunk_x,
                 }
                 const bool layer_expected =
                     m_durable_chunks.contains(Chunk::calculate_id(layer_coords));
-                if (layer_expected && (!authority || !authority->has_terrain_authority()))
+                if (slab_y != coords.y && layer_expected &&
+                    (!authority || !authority->has_terrain_authority()))
                     authority = read_committed_chunk(layer_coords);
                 if (m_durable_read_failed ||
                     (layer_expected && (!authority || !authority->has_simulation_authority())))
                     return false;
                 update_collision_slab(layer_coords, authority);
+                // A partial/nonfinite SDF is retryable authority. Keep its
+                // membership pending so a corrected record can replace it.
+                const auto projected = column.slabs.find(slab_y);
+                if (projected != column.slabs.end() && !projected->second.valid)
+                    return false;
                 column.pending.erase(slab_y);
             }
             if (column.invalid != 0)
@@ -7766,7 +7793,8 @@ bool SHIELD_WorldSystem::sample_simulation_collision(i32 chunk_x,
                             height = static_cast<float>(run->first * CHUNK_SIZE_Y);
                     }
                 }
-                height = std::max(height, column.highest[index]);
+                if (column.samples)
+                    height = std::max(height, column.samples->highest[index]);
             }
         }
         if (cached.sdf) {
