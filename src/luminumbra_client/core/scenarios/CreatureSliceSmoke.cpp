@@ -648,12 +648,14 @@ CreatureSlicePlanProbe ProbeCreatureSlicePlan(Luminumbra::world::GameSession* ga
 }
 
 CreatureSliceComposition AnalyzeCreatureSliceComposition(const std::vector<unsigned char>& pixels,
+                                                         const SkyPixelMask& sky_mask,
                                                          int width,
                                                          int height,
                                                          int creature_screen_x_from_left,
                                                          int creature_screen_y_from_top,
                                                          int stimulus_screen_x_from_left,
                                                          int stimulus_screen_y_from_top) {
+    ValidateScenarioPixelBuffers(pixels, sky_mask, width, height);
     CreatureSliceComposition comp;
     comp.creature_screen_x = creature_screen_x_from_left;
     comp.creature_screen_y = creature_screen_y_from_top;
@@ -677,7 +679,9 @@ CreatureSliceComposition AnalyzeCreatureSliceComposition(const std::vector<unsig
         static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height);
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
-            if (IsBelowHorizonSkyPixel(px(x, y, 0), px(x, y, 1), px(x, y, 2))) {
+            if (sky_mask.pixels[static_cast<std::size_t>(height - 1 - y) *
+                                    static_cast<std::size_t>(width) +
+                                static_cast<std::size_t>(x)] != 0) {
                 ++sky_pixels;
             }
         }
@@ -706,7 +710,9 @@ CreatureSliceComposition AnalyzeCreatureSliceComposition(const std::vector<unsig
         for (int x = rx0; x <= rx1; ++x) {
             // Skip sky pixels inside the ROI so the creature mean reflects the
             // subject, not the sky behind it.
-            if (IsBelowHorizonSkyPixel(px(x, y, 0), px(x, y, 1), px(x, y, 2))) {
+            if (sky_mask.pixels[static_cast<std::size_t>(height - 1 - y) *
+                                    static_cast<std::size_t>(width) +
+                                static_cast<std::size_t>(x)] != 0) {
                 continue;
             }
             roi_sum[0] += px(x, y, 0);
@@ -731,7 +737,9 @@ CreatureSliceComposition AnalyzeCreatureSliceComposition(const std::vector<unsig
             if (x >= rx0 && x <= rx1 && y >= ry0 && y <= ry1) {
                 continue; // inside the creature ROI
             }
-            if (IsBelowHorizonSkyPixel(px(x, y, 0), px(x, y, 1), px(x, y, 2))) {
+            if (sky_mask.pixels[static_cast<std::size_t>(height - 1 - y) *
+                                    static_cast<std::size_t>(width) +
+                                static_cast<std::size_t>(x)] != 0) {
                 continue; // sky is not terrain
             }
             ref_sum[0] += px(x, y, 0);
@@ -920,6 +928,7 @@ void WriteCreatureSliceAnalysis(const std::filesystem::path& artifact_dir,
 
     const nlohmann::json artifact = {
         {"schema", "luminumbra.creature_slice_analysis.v1"},
+        {"sky_classifier", "reversed_z_depth_water"},
         {"timestamp_utc", TimestampUtc()},
         {"scenario", "creature_slice_smoke"},
         {"archetype", scene.archetype_name},
