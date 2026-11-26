@@ -38,6 +38,9 @@ bool HasValidWaterColumnState(const Chunk& chunk);
 
 class CreatedWorldArtifacts;
 struct BoundPublicationStage;
+namespace detail {
+struct NamespaceFlushObservation;
+}
 
 // Counters describing one incremental save pass over the streaming state.
 struct WorldSaveDirtyReport {
@@ -688,11 +691,14 @@ public:
     // Versioned journal records append through one verified handle; total control bytes stay
     // within kMaxSnapshotIndexBytes, retaining rollback_reserve bytes for recovery.
     // Empty expected identity requests exclusive creation.
+    // An optional observation describes only an appended commit's final successful flush,
+    // using volume metadata from that same handle. Initial publication supplies no observation.
     static bool append_journal_record(const std::filesystem::path& path,
                                       const std::string& record,
                                       ArtifactIdentity& identity,
                                       std::vector<std::string>* errors,
-                                      std::size_t rollback_reserve = 0);
+                                      std::size_t rollback_reserve = 0,
+                                      detail::NamespaceFlushObservation* observation = nullptr);
     // Recovery operations require the recorded object, including at the destructive operation.
     // A file with more than max_links names is reported as neither identified nor missing.
     static bool artifact_identity(const std::filesystem::path& path,

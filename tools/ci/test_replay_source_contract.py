@@ -1353,6 +1353,58 @@ class AuthorityConsumerSourceContract(unittest.TestCase):
 
 
 class SessionUsabilitySourceContract(unittest.TestCase):
+    def assert_namespace_receipt_completion(self, source):
+        completion = self.function(source, "CompleteNamespaceRetirement", "")
+        ordered = (
+            "operations.inspect_namespace(receipt.identity)",
+            "operations.record_prepared(receipt.identity)",
+            "receipt.phase = NamespaceReceiptPhase::Prepared;",
+            "operations.remove_owned(receipt.identity)",
+            "operations.record_namespace_done(receipt.identity)",
+            "receipt.phase = NamespaceReceiptPhase::NamespaceDone;",
+            "operations.flush_later_commit()",
+            "if (!observation.succeeded)",
+            "!observation.volume_known || !observation.ntfs ||",
+            "observation.volume != receipt.identity.front()",
+            "operations.record_flush_observed(receipt.identity, observation)",
+            "receipt.phase = NamespaceReceiptPhase::FlushObserved;",
+            "operations.retire_receipt(receipt.identity)",
+        )
+        positions = [completion.index(operation) for operation in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("return NamespaceRetirementOutcome::Retained;", completion)
+        self.assertIn("receipt.identity[1] == 0 && receipt.identity[2] == 0", completion)
+        self.assertIn("receipt.phase != NamespaceReceiptPhase::FlushObserved", completion)
+        self.assertIn("if (receipt.phase == NamespaceReceiptPhase::Prepared)", completion)
+        self.assertIn("if (receipt.phase == NamespaceReceiptPhase::NamespaceDone)", completion)
+
+    def test_namespace_receipt_requires_ordered_same_volume_ntfs_completion(self):
+        source = read_source("src/luminumbra_common/persistence/RecoveryDurability.h")
+        self.assert_namespace_receipt_completion(source)
+        for original, replacement in (
+            ("!observation.volume_known || !observation.ntfs ||", "false ||"),
+            ("observation.volume != receipt.identity.front()", "false"),
+            ("operations.record_flush_observed(receipt.identity, observation)", "true"),
+            ("operations.inspect_namespace(receipt.identity)", "NamespaceEntryState::Absent"),
+            ("operations.record_prepared(receipt.identity)", "true"),
+        ):
+            with self.subTest(original=original), self.assertRaises((AssertionError, ValueError)):
+                self.assert_namespace_receipt_completion(source.replace(original, replacement))
+
+    def test_journal_flush_observation_uses_same_handle_and_clears_failures(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        append = self.function(source, "append_journal_record", "WorldSaveService::")
+        self.assertLess(append.index("*observation = {};"), append.index("if (record.empty()"))
+        native = append.index("::GetVolumeInformationByHandleW(file,")
+        self.assertLess(append.index('write_bytes("\\n", 1) && flush()'), native)
+        self.assertIn("FILE_NAME_NORMALIZED | VOLUME_NAME_GUID", append)
+        self.assertRegex(append, r"if \(local_volume &&\s*::GetVolumeInformationByHandleW\(file,")
+        self.assertIn("serial == actual.front()", append)
+        self.assertIn('std::wstring_view(filesystem_name.data()) == L"NTFS"', append)
+        self.assertLess(native, append.index("const bool closed = close();"))
+        self.assertLess(append.index("if (!ok || !closed)"),
+                        append.index("*observation = completed_flush;"))
+
     def assert_matching_restoration_completion(self, source):
         rollback = self.function(source, "RollbackEntries", "")
         matching = re.search(
