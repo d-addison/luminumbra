@@ -4404,7 +4404,8 @@ std::map<RegionKey, std::uint64_t> GameSession::AdvanceRegionalWeather(FieldPage
         // Strike cadence follows the storm's own active age, not elapsed absolute ticks.
         const float intensity = std::bit_cast<float>(storm.intensity);
         if (interior_due && storm.active_age % 18 == 0 && intensity >= 0.45f) {
-            auto key = mix((seed + 40) ^ 0x535452494b455300ull ^
+            auto key = mix((seed + FieldPageState::kWeatherSeedOffset) ^
+                           FieldPageState::kWeatherStrikeDomain ^
                            (static_cast<std::uint64_t>(storm.seed_salt) * 0x9e3779b97f4a7c15ull));
             key = mix(key ^ ((storm.active_age / 18) * 0xff51afd7ed558ccdull));
             if (unit(key) < 0.4f * intensity) {
@@ -4449,7 +4450,8 @@ std::map<RegionKey, std::uint64_t> GameSession::AdvanceRegionalWeather(FieldPage
         const auto age = fields.stage_weather_owner(owner).clock.value_or(0);
         if (age % 45 != 0)
             continue;
-        auto key = mix((seed + 40) ^ 0x535041574e000000ull ^ ((age / 45) * 0x100000001b3ull));
+        auto key = mix((seed + FieldPageState::kWeatherSeedOffset) ^
+                       FieldPageState::kWeatherSpawnDomain ^ ((age / 45) * 0x100000001b3ull));
         key ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(owner.x)) * 0x9e3779b1u;
         key ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(owner.z)) * 0x85ebca77u;
         if (unit(key) >= 0.55f)

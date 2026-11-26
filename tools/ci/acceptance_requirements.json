@@ -1623,14 +1623,14 @@
     {
       "id": "ar.scope.005",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "No distant system consumes this schedule yet;",
-      "text": "No distant system consumes this schedule yet;"
+      "quote": "Existing field pages, weather, scent and energy consume regional scheduling;",
+      "text": "Existing field pages, weather, scent and energy consume regional scheduling;"
     },
     {
       "id": "ar.scope.006",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "field pages, creature records, water shares, diagnostics and measured budget activation remain separate work.",
-      "text": "field pages, creature records, water shares, diagnostics and measured budget activation remain separate work."
+      "quote": "automatic ambient-page activation and complete field qualification remain release work.",
+      "text": "automatic ambient-page activation and complete field qualification remain release work."
     },
     {
       "id": "ar.activation.001",
@@ -3513,8 +3513,8 @@
     {
       "id": "ar.scope.007",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures are planned for v0.3.1.",
-      "text": "Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures are planned for v0.3.1."
+      "quote": "The continuation and qualification work for durable completed work and ground objects, regional fields/weather/scent/energy, regional foliage/water (issue #242), and strict distant policy and distant creatures is carried by v0.3.2 (in preparation).",
+      "text": "The continuation and qualification work for durable completed work and ground objects, regional fields/weather/scent/energy, regional foliage/water (issue #242), and strict distant policy and distant creatures is carried by v0.3.2 (in preparation)."
     },
     {
       "id": "ar.scope.008",
@@ -3525,8 +3525,8 @@
     {
       "id": "ar.scope.009",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "These consumers are outside the shipping scheduler foundation.",
-      "text": "These consumers are outside the shipping scheduler foundation."
+      "quote": "Implemented consumers do not establish native verification or release qualification.",
+      "text": "Implemented consumers do not establish native verification or release qualification."
     },
     {
       "id": "ar.scope.010",
@@ -3537,8 +3537,8 @@
     {
       "id": "ar.scope.011",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "this does not implement those continuation consumers.",
-      "text": "this does not implement those continuation consumers."
+      "quote": "issue #136 still requires paired flag-state oracle artifacts and a 20 km activation/freezing run log.",
+      "text": "issue #136 still requires paired flag-state oracle artifacts and a 20 km activation/freezing run log."
     },
     {
       "id": "ar.file.119",

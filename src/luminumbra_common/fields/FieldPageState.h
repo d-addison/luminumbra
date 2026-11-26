@@ -78,7 +78,12 @@ public:
     static constexpr int kChannels = 5; // wind_x, wind_z, moisture, front, charge (all u16)
     // Seed epoch = tick / kCadenceTicks (the relaxation target changes once per 8 world ticks).
     static constexpr std::uint64_t kCadenceTicks = 8;
+    // Append-only seed registry: +39 ambient cells; +40 regional weather. Spawn and strike
+    // streams share the weather offset but use distinct domains before splitmix64 mixing.
     static constexpr std::uint64_t kSeedOffset = 39;
+    static constexpr std::uint64_t kWeatherSeedOffset = 40;
+    static constexpr std::uint64_t kWeatherSpawnDomain = 0x535041574e000000ull;
+    static constexpr std::uint64_t kWeatherStrikeDomain = 0x535452494b455300ull;
     static constexpr unsigned kRelaxShift = 4;
     static constexpr std::size_t kMaxPages = 16384;
     static constexpr std::size_t kMaxStorms = 65536, kMaxStrikes = 65536, kMaxScentCells = 65536;

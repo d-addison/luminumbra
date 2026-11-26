@@ -41,8 +41,9 @@ namespace luminumbra::foliage {
 inline constexpr std::uint64_t kGerminationSeedOffset = 36;
 inline constexpr std::uint64_t kSeasonSeedOffset =
     37; // reserved (season phase is tick%year, no RNG)
-// Registry continues: +38 energy-field-state (, recorded in
-// fields/EnergyFieldState.h — RNG-free, collision-avoidance only). Next free: +39.
+// Registry continues: +38 energy-field-state (fields/EnergyFieldState.h — RNG-free,
+// collision-avoidance only); +39 ambient cells; +40 regional weather with separate
+// spawn/strike domains (fields/FieldPageState.h). Next free: +41.
 
 struct CropLifecycleStats {
     int ripening = 0; // plants currently at the terminal stage
