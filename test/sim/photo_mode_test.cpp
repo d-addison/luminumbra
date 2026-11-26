@@ -24,6 +24,7 @@
 
 #include "components/CoreComponents.h"
 #include "components/CreatureComponents.h"
+#include "core/IntegerPrimitives.h"
 #include "game/PhotoMode.h"
 
 namespace {
@@ -252,7 +253,7 @@ void SeedCreatureRoster(entt::registry& reg) {
 // fields. Iterating a sorted view of entities keeps it stable regardless of internal
 // storage order.
 std::uint64_t HashCreatureState(const entt::registry& reg) {
-    std::uint64_t h = 1469598103934665603ull; // FNV offset basis
+    std::uint64_t h = Luminumbra::Core::kFnv1a64HistoricalBasis;
     auto fold = [&h](const void* data, std::size_t n) {
         const auto* p = static_cast<const unsigned char*>(data);
         for (std::size_t i = 0; i < n; ++i) {
