@@ -2,6 +2,7 @@
 
 #include "luminumbra_common/fields/FieldPageState.h"
 #include "luminumbra_common/fields/FoliageFieldPages.h"
+#include "luminumbra_common/systems/PlantCoarse.h"
 #include "luminumbra_common/systems/RegionalFoliage.h"
 
 #include <algorithm>
@@ -1437,4 +1438,59 @@ TEST(FoliageFieldPages, InvalidEmptyLiveTickRetainsItsCursorAndCanRetry) {
     EXPECT_EQ(pages.region_bytes({0, 0}), owner_before);
     EXPECT_EQ(replay.remaining_steps(), 0u);
 }
+TEST(FoliageFieldPages, ElapsedConsumersPreserveResourceOrdering) {
+    namespace C = Luminumbra::Components;
+    namespace F = luminumbra::foliage;
+    entt::registry registry;
+    const auto plant = registry.create();
+    registry.emplace<C::PlantTag>(plant);
+    registry.emplace<C::TransformComponent>(plant).position = {8, 0, 8};
+    registry.emplace<C::PlantGrowthComponent>(plant).stage =
+        static_cast<std::uint8_t>(C::PlantStage::Fruiting);
+    registry.emplace<C::PlantGenomeComponent>(plant).genes.fill(0.5f);
+    registry.emplace<C::SoilFeederComponent>(plant).uptake = 100;
+    const auto source = registry.create();
+    registry.emplace<C::TransformComponent>(source).position = {8, 0, 8};
+    registry.emplace<C::WaterSourceComponent>(source).output = 800;
+    FieldPageState fields;
+    ASSERT_TRUE(fields.set_soil({8, 8}, 1000));
+    ASSERT_TRUE(fields.set_irrigation({8, 8}, 0));
+    const std::map<RegionKey, std::uint32_t> windows{{{0, 0}, 3}};
+    const std::array<RegionKey, 1> due{{{0, 0}}};
+    const RegionConsumerGate gate(registry, due, RegionElapsedTicks(windows));
+    F::FoliageWindowReplay replay(fields, windows, 3, true);
+    replay.Advance(registry, fields);
+    // Historical replay consumes the plant feeder, while the standalone source
+    // belongs only to the live step. Growth must see the result of both phases.
+    // A Fruiting feeder draws uptake * 12 / 16 = 75 per step: two historical
+    // steps, then the live step.
+    EXPECT_EQ(registry.get<C::SoilFeederComponent>(plant).absorbed, 150u);
+    EXPECT_EQ(fields.irrigation().sample({8, 8}, -1), 0);
+    const auto stale_soil = fields.soil().sample({8, 8}, -1);
+    replay.FinishLiveTick(registry, fields);
+    const auto fresh_soil = fields.soil().sample({8, 8}, -1);
+    EXPECT_LT(fresh_soil, stale_soil);
+    EXPECT_GT(fields.irrigation().sample({8, 8}, -1), 0);
+    EXPECT_EQ(registry.get<C::SoilFeederComponent>(plant).absorbed, 225u);
+    unsigned samples = 0;
+    std::vector<entt::entity> participants;
+    F::RunRegionalPlantGrowthOnTick(
+        registry,
+        3,
+        [&](const C::TransformComponent&) {
+            ++samples;
+            EXPECT_EQ(fields.soil().sample({8, 8}, -1), fresh_soil);
+            EXPECT_GT(fields.irrigation().sample({8, 8}, -1), 0);
+            return F::PlantEnvSample{0.5f, 0.5f, 0.5f, 0.5f};
+        },
+        gate,
+        participants);
+    EXPECT_EQ(samples, 1u);
+    EXPECT_EQ(registry.get<C::PlantGrowthComponent>(plant).last_tick, 3u);
+    const auto committed = fields.serialize();
+    EXPECT_TRUE(replay.FinishLiveTick(registry, fields).empty());
+    EXPECT_EQ(fields.serialize(), committed);
+    EXPECT_EQ(registry.get<C::SoilFeederComponent>(plant).absorbed, 225u);
+}
+
 } // namespace

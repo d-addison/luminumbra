@@ -87,6 +87,7 @@
 #include "../systems/FoliageRegistryStage.h"
 #include "../systems/IrrigationSystem.h" // Soil-moisture irrigation.
 #include "../systems/PhysicsSystem.h"
+#include "../systems/PlantCoarse.h"
 #include "../systems/PlantDiseaseSystem.h" // Plant disease propagation.
 #include "../systems/PlantGrowthSystem.h"  // Plant growth tick.
 #include "../systems/PlantTerrainCache.h"
@@ -539,14 +540,17 @@ bool FoliageHistoryExpired(const ActiveRegionRecord& record, std::uint64_t tick)
 // the queue records changed components only, never a per-tick roster copy.
 class FoliageParticipants {
 public:
-    explicit FoliageParticipants(entt::registry& original)
-        : m_original(original) {
-        luminumbra::foliage::stage_detail::Participants([&]<typename T> {
-            for (const auto entity : original.view<const T>()) {
-                ++m_visits;
-                Changed(original, entity);
-            }
-        });
+    explicit FoliageParticipants(entt::registry& original, bool secondary)
+        : m_original(original)
+        , m_secondary(secondary) {
+        luminumbra::foliage::stage_detail::Participants(
+            [&]<typename T> {
+                for (const auto entity : original.view<const T>()) {
+                    ++m_visits;
+                    Changed(original, entity);
+                }
+            },
+            m_secondary);
         try {
             Tracked([&]<typename T> {
                 original.on_construct<T>().template connect<&FoliageParticipants::Changed>(*this);
@@ -609,7 +613,8 @@ public:
             bool participant = false;
             if (m_original.valid(entity)) {
                 luminumbra::foliage::stage_detail::Participants(
-                    [&]<typename T> { participant = participant || m_original.all_of<T>(entity); });
+                    [&]<typename T> { participant = participant || m_original.all_of<T>(entity); },
+                    m_secondary);
             }
             if (!participant) {
                 continue;
@@ -667,7 +672,8 @@ public:
                 ordered.push_back(entity);
             }
         }
-        auto selected = luminumbra::foliage::stage_detail::CopySelectedFoliage(m_original, ordered);
+        auto selected = luminumbra::foliage::stage_detail::CopySelectedFoliage(
+            m_original, ordered, m_secondary);
         for (const auto entity : ordered) {
             ++m_visits;
             if (m_original.all_of<Comp::CreatureComponent>(entity)) {
@@ -694,8 +700,8 @@ private:
         });
     }
     template<typename Function>
-    static void Tracked(const Function& function) {
-        luminumbra::foliage::stage_detail::Participants(function);
+    void Tracked(const Function& function) {
+        luminumbra::foliage::stage_detail::Participants(function, m_secondary);
         function.template operator()<Components::TransformComponent>();
         function.template operator()<Components::PlantRegionComponent>();
     }
@@ -719,6 +725,7 @@ private:
         return (*page)[index % kSlotPageSize];
     }
     entt::registry& m_original;
+    bool m_secondary = false;
     std::map<std::optional<RegionKey>, std::set<entt::entity>> m_owners;
     std::map<std::size_t, Member> m_members;
     // At most entity_mask + 1 slots/changes, independent of elapsed ticks.
@@ -731,8 +738,8 @@ private:
 } // namespace
 
 struct GameSession::FoliageStep {
-    explicit FoliageStep(entt::registry& original)
-        : participants(original) {}
+    explicit FoliageStep(entt::registry& original, bool elapsed)
+        : participants(original, elapsed) {}
     FoliageParticipants participants;
     luminumbra::foliage::FoliageRegistryStage registry;
     luminumbra::foliage::RegionalFoliageWindows windows;
@@ -916,7 +923,8 @@ struct GameSession::FoliageStep {
         if (!session.m_activeRegionsEnabled || session.m_foliageStep) {
             return;
         }
-        auto candidate = std::make_unique<FoliageStep>(session.m_registry);
+        auto candidate = std::make_unique<FoliageStep>(
+            session.m_registry, session.m_authorityProfile.elapsed_consumers);
         auto& step = *candidate;
         for (const auto& [key, record] : session.m_activeRegionLedger.records()) {
             step.last_ticks.emplace(key, luminumbra::foliage::FoliagePriorTick(record));
@@ -952,21 +960,23 @@ struct GameSession::FoliageStep {
         // Bootstrap only: participants without field pages still own history.
         // Match selection's explicit-owner precedence and incomplete opt-ins.
         bool unowned = false;
-        luminumbra::foliage::stage_detail::Participants([&]<typename T> {
-            for (const auto entity : session.m_registry.view<const T>()) {
-                const auto* owner =
-                    session.m_registry.try_get<const Components::PlantRegionComponent>(entity);
-                const auto* transform =
-                    session.m_registry.try_get<const Components::TransformComponent>(entity);
-                if (owner) {
-                    history_owners.insert({owner->owner_x, owner->owner_z});
-                } else if (transform && ActiveRegionLedger::valid_anchor(transform->position)) {
-                    history_owners.insert(ActiveRegionLedger::region_at(transform->position));
-                } else if (!transform) {
-                    unowned = true;
+        luminumbra::foliage::stage_detail::Participants(
+            [&]<typename T> {
+                for (const auto entity : session.m_registry.view<const T>()) {
+                    const auto* owner =
+                        session.m_registry.try_get<const Components::PlantRegionComponent>(entity);
+                    const auto* transform =
+                        session.m_registry.try_get<const Components::TransformComponent>(entity);
+                    if (owner) {
+                        history_owners.insert({owner->owner_x, owner->owner_z});
+                    } else if (transform && ActiveRegionLedger::valid_anchor(transform->position)) {
+                        history_owners.insert(ActiveRegionLedger::region_at(transform->position));
+                    } else if (!transform) {
+                        unowned = true;
+                    }
                 }
-            }
-        });
+            },
+            session.m_authorityProfile.elapsed_consumers);
         // Bootstrap runs once, bounded by the participant roster and kMaxRegions.
         for (const auto& [key, record] : session.m_activeRegionLedger.records()) {
             if ((unowned || history_owners.contains(key)) && record.state != RegionState::Frozen) {
@@ -1138,19 +1148,50 @@ struct GameSession::FoliageStep {
                                            fresh ? std::min(elapsed, std::uint32_t{1}) : elapsed);
             }
         }
-        has_registry_work = luminumbra::foliage::FoliageRegistryStage::HasWork(selected);
+        has_registry_work = luminumbra::foliage::FoliageRegistryStage::HasWork(
+            selected, session.m_authorityProfile.elapsed_consumers);
         if (has_registry_work || !step.pages.empty() || !windows.resumes.empty()) {
-            step.registry.Begin(selected, ledger.next_persistent_id());
+            step.registry.Begin(selected,
+                                ledger.next_persistent_id(),
+                                session.m_authorityProfile.elapsed_consumers);
         }
         step.replay = std::make_unique<luminumbra::foliage::FoliageWindowReplay>(
             step.pages, step.field_windows, target_tick, true);
         replay_work.clear();
+    }
+    // Tick-local capture and candidate gates share these windows through publication.
+    luminumbra::foliage::RegionalFoliageWindows consumer_windows;
+    std::vector<RegionKey> consumer_due;
+    std::vector<entt::entity> growth_entities;
+    void CaptureWindows(GameSession& session) {
+        UpdateIndexes(session);
+        // Due and deferred rosters each have the ledger's kMaxRegions bound;
+        // the captured maps and membership contain at most kMaxRegions distinct owners.
+        std::vector<RegionKey> selected(session.m_regionSchedule.due);
+        selected.insert(selected.end(), deferred.begin(), deferred.end());
+        consumer_windows = luminumbra::foliage::BuildRegionalFoliageWindows(
+            session.m_activeRegionLedger, selected, last_ticks, pending, session.m_worldClock);
+        consumer_due.clear();
+        for (const auto& [key, elapsed] : consumer_windows.elapsed) {
+            if (elapsed != 0) {
+                consumer_due.push_back(key);
+            }
+        }
     }
     std::vector<RegionKey> due;
     static RegionConsumerGate
     Gate(GameSession& session, const entt::registry& candidate, const FoliageStep* step) {
         if (!session.m_activeRegionsEnabled) {
             return {};
+        }
+        if (session.m_authorityProfile.elapsed_consumers) {
+            return RegionConsumerGate(
+                candidate,
+                session.m_foliageStep->consumer_due,
+                session.m_consumerGateScratch,
+                RegionConsumerGate::PlantIdentity::Legacy,
+                RegionElapsedTicks(session.m_foliageStep->consumer_windows.elapsed),
+                session.m_worldClock.tick());
         }
         const auto& owners = step ? step->due : session.m_regionSchedule.due;
         return RegionConsumerGate(candidate, owners, session.m_consumerGateScratch);
@@ -1269,9 +1310,12 @@ struct GameSession::FoliageStep {
                         step.registry.registry().get<const Components::SoilFeederComponent>(entity);
                 }
             }
-            step.has_registry_work = luminumbra::foliage::FoliageRegistryStage::HasWork(selected);
+            step.has_registry_work = luminumbra::foliage::FoliageRegistryStage::HasWork(
+                selected, session.m_authorityProfile.elapsed_consumers);
             step.registry.Abort();
-            step.registry.Begin(selected, session.m_activeRegionLedger.next_persistent_id());
+            step.registry.Begin(selected,
+                                session.m_activeRegionLedger.next_persistent_id(),
+                                session.m_authorityProfile.elapsed_consumers);
         }
         // A newly discovered long window waits for preflight on the next update.
         // Do not consume a partial tick into the isolated candidate here.
@@ -1828,6 +1872,91 @@ struct GameSession::EcologySchedule {
             throw std::logic_error("Invalid ecology schedule");
         }
     }
+    void RunPlantEcology(entt::registry& foliage_registry,
+                         std::uint64_t current_tick,
+                         const RegionConsumerGate& foliage_gate,
+                         const Vec2& windXZ,
+                         float mutation_rate,
+                         bool elapsed_consumers,
+                         luminumbra::simulation::SimBudgetTelemetry::TickScope& budget) {
+        namespace Comp = Components;
+        namespace TelemetryComp = Components;
+        namespace fol = luminumbra::foliage;
+        using Stage = luminumbra::simulation::SimBudgetStage;
+        // Compile once at session startup; dispatch only these two tasks per tick.
+        scheduler.execute(0, [&](std::string_view id) {
+            if (id == "ecology.pollination") {
+                budget.Next(Stage::Pollination, [&] {
+                    return SimParticipantCount<TelemetryComp::PollinationTag,
+                                               TelemetryComp::PlantGenomeComponent,
+                                               TelemetryComp::PlantGrowthComponent,
+                                               TelemetryComp::TransformComponent,
+                                               TelemetryComp::PollinationComponent>(
+                        foliage_registry);
+                });
+                if (!foliage_registry.view<Comp::PlantGenomeComponent>().empty()) {
+                    if (elapsed_consumers) {
+                        fol::RunPollinationRegional(
+                            foliage_registry, current_tick, foliage_gate, windXZ, 0, mutation_rate);
+                    } else {
+                        fol::RunPollinationOnTick(
+                            foliage_registry, current_tick, windXZ, 0, mutation_rate, foliage_gate);
+                    }
+                }
+            } else {
+                budget.Next(Stage::Disease, [&] {
+                    return SimParticipantCount<TelemetryComp::PlantTag,
+                                               TelemetryComp::PlantHealthComponent,
+                                               TelemetryComp::TransformComponent>(foliage_registry);
+                });
+                if (!foliage_registry.view<Comp::PlantHealthComponent>().empty()) {
+                    if (elapsed_consumers) {
+                        fol::RunPlantDiseaseRegional(foliage_registry, current_tick, foliage_gate);
+                    } else {
+                        fol::RunPlantDiseaseOnTick(foliage_registry, current_tick, 0, foliage_gate);
+                    }
+                }
+            }
+        });
+    }
+    static void SpreadFire(GameSession& session,
+                           entt::registry& foliage_registry,
+                           std::uint64_t current_tick,
+                           const Vec2& windXZ,
+                           const RegionConsumerGate& foliage_gate,
+                           const luminumbra::ai::CreatureTickAdmission* creature_admission,
+                           bool elapsed_consumers) {
+        namespace Comp = Components;
+        std::vector<luminumbra::sim::FireIgnitionSource> weather_ignitions;
+        if (session.m_weatherSystem) {
+            for (const Systems::StrikeEvent& strike : session.m_weatherSystem->StrikesThisTick()) {
+                weather_ignitions.push_back({
+                    glm::vec2(strike.world_x, strike.world_z),
+                    3.0f + strike.magnitude * 5.0f,
+                    std::max(0.25f, strike.magnitude),
+                });
+            }
+        }
+        if (elapsed_consumers) {
+            const auto admission_for = [&](entt::entity entity) {
+                if (creature_admission &&
+                    foliage_registry.all_of<Comp::CreatureComponent>(entity)) {
+                    return RegionConsumerGate::Admission{creature_admission->Allows(entity),
+                                                         creature_admission->ElapsedTicks(entity)};
+                }
+                return foliage_gate.AdmissionFor(entity);
+            };
+            luminumbra::sim::RunFireSpreadOnTick<false, true>(foliage_registry,
+                                                              current_tick,
+                                                              windXZ,
+                                                              weather_ignitions,
+                                                              foliage_gate,
+                                                              admission_for);
+        } else {
+            luminumbra::sim::RunFireSpreadOnTick(
+                foliage_registry, current_tick, windXZ, weather_ignitions, foliage_gate);
+        }
+    }
 };
 
 std::uint64_t GameSession::GetEcologyScheduleTraceHash() const {
@@ -2280,10 +2409,12 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 if (m_regionFault)
                     return i + 1;
             }
-            const auto creature_gate =
-                m_activeRegionsEnabled
-                    ? RegionConsumerGate(m_registry, m_regionSchedule.due, m_consumerGateScratch)
-                    : RegionConsumerGate{};
+            const bool elapsed_consumers =
+                m_activeRegionsEnabled && m_authorityProfile.elapsed_consumers;
+            if (elapsed_consumers) {
+                m_foliageStep->CaptureWindows(*this);
+            }
+            const auto creature_gate = FoliageStep::Gate(*this, m_registry, nullptr);
             luminumbra::ai::CreatureTickAdmission* const creature_admission =
                 CaptureCreatureTickAdmission(m_registry, m_activeRegionsEnabled, creature_gate);
             auto scheduled_fields = PrepareScheduledFieldPages(current_tick);
@@ -2727,8 +2858,17 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         s.temperature + (warmth - 0.5f) * kSeasonAmplitude);
                     return s;
                 };
-                luminumbra::foliage::RunPlantGrowthSystemOnTick(
-                    foliage_registry, current_tick, plant_env, foliage_gate);
+                if (elapsed_consumers) {
+                    luminumbra::foliage::RunRegionalPlantGrowthOnTick(
+                        foliage_registry,
+                        current_tick,
+                        plant_env,
+                        foliage_gate,
+                        m_foliageStep->growth_entities);
+                } else {
+                    luminumbra::foliage::RunPlantGrowthSystemOnTick(
+                        foliage_registry, current_tick, plant_env, foliage_gate);
+                }
                 m_plantTerrainCache->EndTick();
             }
 
@@ -2749,36 +2889,13 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     m_windFieldSystem ? m_windFieldSystem->SampleWind(m_metadata.spawnPoint)
                                       : ::Luminumbra::Vec2(0.0f);
 
-                // Compile once at session startup; dispatch only these two tasks per tick.
-                m_ecologySchedule->scheduler.execute(0, [&](std::string_view id) {
-                    if (id == "ecology.pollination") {
-                        budget.Next(Stage::Pollination, [&] {
-                            return SimParticipantCount<TelemetryComp::PollinationTag,
-                                                       TelemetryComp::PlantGenomeComponent,
-                                                       TelemetryComp::PlantGrowthComponent,
-                                                       TelemetryComp::TransformComponent,
-                                                       TelemetryComp::PollinationComponent>(
-                                foliage_registry);
-                        });
-                        if (!foliage_registry.view<Comp::PlantGenomeComponent>().empty())
-                            fol::RunPollinationOnTick(foliage_registry,
-                                                      current_tick,
-                                                      windXZ,
-                                                      0,
-                                                      m_plantMutationRate,
-                                                      foliage_gate);
-                    } else {
-                        budget.Next(Stage::Disease, [&] {
-                            return SimParticipantCount<TelemetryComp::PlantTag,
-                                                       TelemetryComp::PlantHealthComponent,
-                                                       TelemetryComp::TransformComponent>(
-                                foliage_registry);
-                        });
-                        if (!foliage_registry.view<Comp::PlantHealthComponent>().empty())
-                            fol::RunPlantDiseaseOnTick(
-                                foliage_registry, current_tick, 0, foliage_gate);
-                    }
-                });
+                m_ecologySchedule->RunPlantEcology(foliage_registry,
+                                                   current_tick,
+                                                   foliage_gate,
+                                                   windXZ,
+                                                   m_plantMutationRate,
+                                                   elapsed_consumers,
+                                                   budget);
                 //  germination: ripe plants senesce -> annual dies + reseeds, perennial
                 // resets + reseeds (child genome = the pollination cross, computed just above, or
                 // self). Runs AFTER pollination so next_genome is fresh. Opt-in via
@@ -2794,8 +2911,13 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                                        std::uint64_t& id) {
                         return FoliageStep::AllocateIdentity(*this, current_tick, foliage_step, id);
                     };
-                    fol::RunCropLifecycleOnTick(
-                        foliage_registry, current_tick, 0, foliage_gate, allocate_identity);
+                    if (elapsed_consumers) {
+                        fol::RunCropLifecycleRegional(
+                            foliage_registry, current_tick, foliage_gate, 0, allocate_identity);
+                    } else {
+                        fol::RunCropLifecycleOnTick(
+                            foliage_registry, current_tick, 0, foliage_gate, allocate_identity);
+                    }
                     if (m_regionFault) {
                         return i + 1;
                     }
@@ -2805,36 +2927,45 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                                TelemetryComp::TransformComponent>(foliage_registry);
                 });
                 if (!foliage_registry.view<Comp::CombustibleComponent>().empty()) {
-                    std::vector<luminumbra::sim::FireIgnitionSource> weather_ignitions;
-                    if (m_weatherSystem) {
-                        for (const Systems::StrikeEvent& strike :
-                             m_weatherSystem->StrikesThisTick()) {
-                            weather_ignitions.push_back({
-                                glm::vec2(strike.world_x, strike.world_z),
-                                3.0f + strike.magnitude * 5.0f,
-                                std::max(0.25f, strike.magnitude),
-                            });
-                        }
-                    }
-                    luminumbra::sim::RunFireSpreadOnTick(
-                        foliage_registry, current_tick, windXZ, weather_ignitions, foliage_gate);
+                    EcologySchedule::SpreadFire(*this,
+                                                foliage_registry,
+                                                current_tick,
+                                                windXZ,
+                                                foliage_gate,
+                                                creature_admission,
+                                                elapsed_consumers);
                 }
                 budget.Next(Stage::Grazing, [&] {
                     return SimParticipantCount<TelemetryComp::GrazeableComponent,
                                                TelemetryComp::TransformComponent>(foliage_registry);
                 });
-                if (!foliage_registry.view<Comp::GrazeableComponent>().empty())
-                    luminumbra::ai::RunWildlifeFoliageOnTick(foliage_registry,
-                                                             current_tick,
-                                                             m_wildlifeFoliageTuning,
-                                                             foliage_gate,
-                                                             creature_admission);
+                if (!foliage_registry.view<Comp::GrazeableComponent>().empty()) {
+                    if (elapsed_consumers) {
+                        luminumbra::ai::RunWildlifeFoliageOnTick<true>(foliage_registry,
+                                                                       current_tick,
+                                                                       m_wildlifeFoliageTuning,
+                                                                       foliage_gate,
+                                                                       creature_admission);
+                    } else {
+                        luminumbra::ai::RunWildlifeFoliageOnTick(foliage_registry,
+                                                                 current_tick,
+                                                                 m_wildlifeFoliageTuning,
+                                                                 foliage_gate,
+                                                                 creature_admission);
+                    }
+                }
                 budget.Next(Stage::Lifespan, [&] {
                     return SimParticipantCount<TelemetryComp::MortalComponent>(foliage_registry);
                 });
-                if (!foliage_registry.view<Comp::MortalComponent>().empty())
-                    luminumbra::ai::RunLifespanOnTick(
-                        foliage_registry, current_tick, foliage_gate, creature_admission);
+                if (!foliage_registry.view<Comp::MortalComponent>().empty()) {
+                    if (elapsed_consumers) {
+                        luminumbra::ai::RunLifespanOnTick<true>(
+                            foliage_registry, current_tick, foliage_gate, creature_admission);
+                    } else {
+                        luminumbra::ai::RunLifespanOnTick(
+                            foliage_registry, current_tick, foliage_gate, creature_admission);
+                    }
+                }
             }
             {
                 auto& living_registry = foliage_registry;
@@ -2851,7 +2982,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     luminumbra::ai::RunHerdAlarmOnTick(
                         living_registry,
                         static_cast<float>(m_simulationClock.fixed_dt()),
-                        creature_admission);
+                        creature_admission,
+                        elapsed_consumers);
                 // Decomposition: dead creatures decay + release nutrient (consumed by the soil
                 // loop).
                 // A detached stage is cleared and re-copied each tick. Borrow the live
@@ -2865,12 +2997,16 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                                       creature_admission,
                                                       foliage_gate,
                                                       decay_participants,
-                                                      foliage_step);
+                                                      foliage_step,
+                                                      elapsed_consumers);
+                auto& assignment_registry = elapsed_consumers ? living_registry : m_registry;
+                const auto* elapsed_gate = elapsed_consumers ? &foliage_gate : nullptr;
                 // Circadian: diurnal/nocturnal activity from a tick-derived day fraction.
                 budget.Next(Stage::Circadian, [&] {
-                    return SimParticipantCount<TelemetryComp::CircadianComponent>(m_registry);
+                    return SimParticipantCount<TelemetryComp::CircadianComponent>(
+                        assignment_registry);
                 });
-                if (!m_registry.view<Comp::CircadianComponent>().empty()) {
+                if (!assignment_registry.view<Comp::CircadianComponent>().empty()) {
                     constexpr std::uint64_t kTicksPerDay =
                         30ull * 60ull * 20ull; // 20-min day @30Hz
                     const float tod01 =
@@ -2878,18 +3014,22 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                             ? static_cast<float>(m_worldClock.solar_phase(current_tick))
                             : static_cast<float>(current_tick % kTicksPerDay) /
                                   static_cast<float>(kTicksPerDay);
-                    luminumbra::ai::RunCircadianOnTick(
-                        m_registry, tod01, m_circadianAmplitude, creature_admission);
+                    luminumbra::ai::RunCircadianOnTick(assignment_registry,
+                                                       tod01,
+                                                       m_circadianAmplitude,
+                                                       creature_admission,
+                                                       elapsed_gate);
                 }
                 // Territory: claim home + emit a homing bias (movement blends it like
                 // mate-seeking).
                 budget.Next(Stage::Territory, [&] {
                     return SimParticipantCount<TelemetryComp::TerritoryComponent,
-                                               TelemetryComp::TransformComponent>(m_registry);
+                                               TelemetryComp::TransformComponent>(
+                        assignment_registry);
                 });
-                if (!m_registry.view<Comp::TerritoryComponent>().empty())
+                if (!assignment_registry.view<Comp::TerritoryComponent>().empty())
                     luminumbra::ai::RunTerritoryOnTick(
-                        m_registry, current_tick, creature_admission);
+                        assignment_registry, current_tick, creature_admission, elapsed_gate);
                 // Predator pack: flanking coordination (a pack surrounds the prey).
                 budget.Next(Stage::Packs, [&] {
                     return SimParticipantCount<TelemetryComp::PackHunterComponent,
@@ -2898,20 +3038,22 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 });
                 if (!living_registry.view<Comp::PackHunterComponent>().empty())
                     luminumbra::ai::RunPredatorPackOnTick(
-                        living_registry, current_tick, creature_admission);
+                        living_registry, current_tick, creature_admission, elapsed_gate);
                 // Migration: seasonal drive toward a moving target (tick-derived year fraction).
                 budget.Next(Stage::Migration, [&] {
                     return SimParticipantCount<TelemetryComp::MigratoryComponent,
-                                               TelemetryComp::TransformComponent>(m_registry);
+                                               TelemetryComp::TransformComponent>(
+                        assignment_registry);
                 });
-                if (!m_registry.view<Comp::MigratoryComponent>().empty()) {
+                if (!assignment_registry.view<Comp::MigratoryComponent>().empty()) {
                     constexpr std::uint64_t kTicksPerYear = 30ull * 60ull * 60ull; // ~1h year @30Hz
                     const float season01 =
                         m_activeRegionsEnabled
                             ? static_cast<float>(m_worldClock.spring_phase(current_tick))
                             : static_cast<float>(current_tick % kTicksPerYear) /
                                   static_cast<float>(kTicksPerYear);
-                    luminumbra::ai::RunMigrationOnTick(m_registry, season01, creature_admission);
+                    luminumbra::ai::RunMigrationOnTick(
+                        assignment_registry, season01, creature_admission, elapsed_gate);
                 }
             }
 

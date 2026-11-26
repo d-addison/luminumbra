@@ -2,6 +2,7 @@
 
 #include "../ai/DecompositionSystem.h"
 #include "../components/AlarmComponents.h"
+#include "../components/CircadianComponents.h"
 #include "../components/CombustionComponents.h"
 #include "../components/CoreComponents.h"
 #include "../components/CreatureComponents.h"
@@ -10,12 +11,14 @@
 #include "../components/DiseaseComponents.h"
 #include "../components/GrazeableComponent.h"
 #include "../components/IrrigationComponents.h"
+#include "../components/MigratoryComponents.h"
 #include "../components/MortalComponents.h"
 #include "../components/PackHunterComponents.h"
 #include "../components/PlantComponents.h"
 #include "../components/PollinationComponents.h"
 #include "../components/SimulationIdentityComponent.h"
 #include "../components/SoilComponents.h"
+#include "../components/TerritoryComponents.h"
 #include "../core/WaterComponents.h"
 #include "../world/ActiveRegionLedger.h"
 #include "PlantGrowthSystem.h"
@@ -48,7 +51,7 @@ void Copy(const entt::registry& from,
     }
 }
 template<typename Function>
-void Participants(const Function& function) {
+void Participants(const Function& function, bool secondary = false) {
     function.template operator()<C::PlantTag>();
     function.template operator()<C::PollinationTag>();
     function.template operator()<C::CropLifecycleComponent>();
@@ -61,9 +64,14 @@ void Participants(const Function& function) {
     function.template operator()<C::CreatureComponent>();
     function.template operator()<C::AlarmComponent>();
     function.template operator()<C::DecayComponent>();
+    if (secondary) {
+        function.template operator()<C::CircadianComponent>();
+        function.template operator()<C::TerritoryComponent>();
+        function.template operator()<C::MigratoryComponent>();
+    }
 }
 template<typename Function>
-void Components(const Function& function) {
+void Components(const Function& function, bool secondary = false) {
     function.template operator()<C::TransformComponent>();
     function.template operator()<C::SimulationIdentityComponent>();
     function.template operator()<C::PlantTag>();
@@ -85,25 +93,33 @@ void Components(const Function& function) {
     function.template operator()<C::PackHunterComponent>();
     function.template operator()<C::AlarmComponent>();
     function.template operator()<C::DecayComponent>();
+    if (secondary) {
+        function.template operator()<C::CircadianComponent>();
+        function.template operator()<C::TerritoryComponent>();
+        function.template operator()<C::TerritoryBiasComponent>();
+        function.template operator()<C::MigratoryComponent>();
+    }
 }
 inline void CopyFoliage(const entt::registry& from,
                         entt::entity source,
                         entt::registry& to,
-                        entt::entity target) {
-    Components([&]<typename T> { Copy<T>(from, source, to, target); });
+                        entt::entity target,
+                        bool secondary = false) {
+    Components([&]<typename T> { Copy<T>(from, source, to, target); }, secondary);
 }
 // Selection is in ascending handle order, just like Begin's retained roster.
 // EnTT views and each() then visit every component pool in descending handle order,
 // independently of the live pools' insertion, deletion and recycling history.
 inline entt::registry CopySelectedFoliage(const entt::registry& original,
-                                          std::span<const entt::entity> ordered) {
+                                          std::span<const entt::entity> ordered,
+                                          bool secondary = false) {
     entt::registry selected;
     // The caller supplies only participating handles, bounded by EnTT's entity mask.
     for (const auto entity : ordered) {
         if (selected.create(entity) != entity) {
             throw std::runtime_error("Foliage handle refused");
         }
-        CopyFoliage(original, entity, selected, entity);
+        CopyFoliage(original, entity, selected, entity, secondary);
     }
     return selected;
 }
@@ -113,13 +129,14 @@ inline entt::registry CopySelectedFoliage(const entt::registry& original,
 // Retained handles stay stable; births acquire live handles after consumers succeed.
 class FoliageRegistryStage {
 public:
-    static bool HasWork(const entt::registry& original) {
+    static bool HasWork(const entt::registry& original, bool secondary = false) {
         bool has_work = false;
         stage_detail::Participants(
-            [&]<typename T> { has_work = has_work || !original.view<const T>().empty(); });
+            [&]<typename T> { has_work = has_work || !original.view<const T>().empty(); },
+            secondary);
         return has_work;
     }
-    void Begin(const entt::registry& original, std::uint64_t next_id) {
+    void Begin(const entt::registry& original, std::uint64_t next_id, bool secondary = false) {
         if (m_prepared && !m_committed) {
             throw std::runtime_error("Unfinished foliage publication");
         }
@@ -128,26 +145,29 @@ public:
         m_committed = false;
         m_initialId = m_nextId = next_id;
         m_simulationIdentity = false;
+        m_secondary = secondary;
+        m_addedBias.clear();
         m_registry.clear();
         m_retained.clear();
         // EnTT pools have the entity-mask bound; known capacities survive ticks.
-        stage_detail::Participants([&]<typename T> { Collect<T>(original); });
+        stage_detail::Participants([&]<typename T> { Collect<T>(original); }, m_secondary);
         std::sort(m_retained.begin(), m_retained.end());
-        stage_detail::Components([&]<typename T> {
+        Components([&]<typename T> {
             if (const auto* storage = original.storage<T>()) {
                 m_registry.storage<T>().reserve(std::min(storage->size(), m_retained.size()));
             }
         });
         for (const auto entity : m_retained) {
-            stage_detail::CopyFoliage(original, entity, m_registry, entity);
+            stage_detail::CopyFoliage(original, entity, m_registry, entity, m_secondary);
         }
     }
     // Detached v2 preparation. The live ledger remains the sole published cursor;
     // its existing register preparation must admit next_id() before Commit. Never
     // copy ledger records on the tick path: only the scalar cursor is staged.
     void Begin(const entt::registry& original,
-               const ::Luminumbra::world::ActiveRegionLedger& allocator) {
-        Begin(original, allocator.next_persistent_id());
+               const ::Luminumbra::world::ActiveRegionLedger& allocator,
+               bool secondary = false) {
+        Begin(original, allocator.next_persistent_id(), secondary);
         m_identityAllocator = ::Luminumbra::world::ActiveRegionLedger{};
         if (!m_identityAllocator.reserve_persistent_ids(m_initialId))
             throw std::runtime_error("Invalid foliage allocator cursor");
@@ -197,6 +217,7 @@ public:
         if (m_prepared || m_committed) {
             throw std::runtime_error("Repeated foliage preparation");
         }
+        m_addedBias.clear();
         for (const auto entity : m_retained) {
             ++m_publicationEntityVisits;
             if (!original.valid(entity)) {
@@ -213,7 +234,14 @@ public:
                     (!candidate || previous->id != candidate->id || previous->id >= initial_id()))
                     throw std::runtime_error("Foliage simulation identity changed");
             }
-            stage_detail::Components([&]<typename T> {
+            Components([&]<typename T> {
+                if constexpr (std::is_same_v<T, stage_detail::C::TerritoryBiasComponent>) {
+                    if (!original.all_of<T>(entity) && m_registry.all_of<T>(entity) &&
+                        original.all_of<stage_detail::C::TerritoryComponent>(entity)) {
+                        m_addedBias.push_back(entity);
+                        return;
+                    }
+                }
                 if (original.all_of<T>(entity) != m_registry.all_of<T>(entity)) {
                     throw std::runtime_error("Foliage component topology changed");
                 }
@@ -292,13 +320,16 @@ public:
             ReleaseHandles(detached.storage);
             detached.keep_cursor = true;
         }
-        stage_detail::Components([&]<typename T> {
+        Components([&]<typename T> {
             auto& storage = original.storage<T>();
             std::size_t count = 0;
             static_assert(entt::storage<T>::storage_policy == entt::deletion_policy::swap_and_pop);
             for (const auto entity : m_newPlants) {
                 ++m_publicationEntityVisits;
                 count += static_cast<std::size_t>(m_registry.all_of<T>(entity));
+            }
+            if constexpr (std::is_same_v<T, stage_detail::C::TerritoryBiasComponent>) {
+                count += m_addedBias.size();
             }
             if (count == 0) {
                 return;
@@ -329,6 +360,12 @@ public:
                         detached.storage.push(m_births[index]);
                     }
                 }
+                if constexpr (std::is_same_v<T, stage_detail::C::TerritoryBiasComponent>) {
+                    for (const auto entity : m_addedBias) {
+                        ++m_publicationEntityVisits;
+                        detached.storage.push(entity);
+                    }
+                }
             } catch (...) {
                 TrimIndex(detached.storage, size);
                 throw;
@@ -353,10 +390,15 @@ public:
             ++m_publicationEntityVisits;
             const auto live = original.create();
             assert(live == m_births[index]);
-            stage_detail::Components([&]<typename T> {
+            Components([&]<typename T> {
                 static_assert(std::is_nothrow_copy_constructible_v<T>);
                 stage_detail::Copy<T>(m_registry, m_newPlants[index], original, live);
             });
+        }
+        for (const auto entity : m_addedBias) {
+            ++m_publicationEntityVisits;
+            stage_detail::Copy<stage_detail::C::TerritoryBiasComponent>(
+                m_registry, entity, original, entity);
         }
         for (const auto entity : m_retained) {
             ++m_publicationEntityVisits;
@@ -364,7 +406,7 @@ public:
                 original.destroy(entity);
                 continue;
             }
-            stage_detail::Components([&]<typename T> {
+            Components([&]<typename T> {
                 static_assert(std::is_nothrow_copy_assignable_v<T>);
                 if constexpr (!std::is_empty_v<T>) {
                     if (const auto* value = m_registry.try_get<const T>(entity)) {
@@ -390,6 +432,14 @@ public:
     }
 
 private:
+    template<typename Function>
+    void Components(const Function& function) const {
+        stage_detail::Components(function, m_secondary);
+    }
+    bool m_secondary = false;
+    // At most one new territory output per retained participant; prepared before commit.
+    std::vector<entt::entity> m_addedBias;
+
     template<typename Storage>
     struct DetachedStorage {
         Storage& original;
