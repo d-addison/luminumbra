@@ -37,7 +37,7 @@ protected:
     FarFrozenCaptureLimits sampling{1, 400'000, 1, 1'000'000, 1};
     Plan::Limits limits{512, 2'000'000, {-100'000, 100'000, 200'000}};
     void SetUp() override {
-        auto params = Test::SyntheticTerrainParams();
+        auto params = Luminumbra::Test::SyntheticTerrainParams();
         params.caves_enabled = false;
         params.base_amplitude = params.peaks_amplitude = params.height_offset = 0;
         params.continental_spline = {{-1, 0}, {1, 0}};
