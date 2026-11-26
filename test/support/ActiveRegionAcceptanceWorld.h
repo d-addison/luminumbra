@@ -37,9 +37,12 @@ public:
         session.SetWeatherRainEnabled(false);
         session.SetWeatherEventsEnabled(false);
         session.SetFiniteHydrologyEnabled(false);
-        if (!session.CreateTransientWorld("Region acceptance", "1337", "default") ||
+        // Active-region saves require a persistent world identity, even after
+        // loading a snapshot. Keep the empty load to reset the ambient fields.
+        if (!session.CreateWorld("Region acceptance", "1337", "default") ||
             !session.LoadWorldStateFrom(root_.path() / "unmarked-snapshot")) {
-            throw std::runtime_error("cannot initialize region acceptance world");
+            throw std::runtime_error("cannot initialize region acceptance world: " +
+                                     session.GetWorldOpenError());
         }
         session.GetWorldSystem()->SetWaterHydrology(false, 0, 0);
         session.SetLocalPlayerSimulationPosition(Vec3(256, 0, 256), true);

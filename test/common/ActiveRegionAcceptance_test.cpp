@@ -75,8 +75,13 @@ void ReplayInputs(unsigned workers, bool reopen, std::vector<AcceptanceFrame>& f
         if (reopen && tick == 4) {
             // Persist an in-progress over-hold, immediately before freezing.
             EXPECT_EQ(record.over_hold, 1u);
-            const auto save = fixture.path() / "enabled-save";
-            ASSERT_TRUE(session->SaveWorldStateTo(save));
+            ASSERT_FALSE(session->GetMetadata().worldId.empty());
+            ASSERT_TRUE(session->IsSimulationTickBoundary());
+            // A canonical save acknowledges last_save in the live ledger as
+            // well as on disk, so the complete encoding must round-trip.
+            const auto save = session->GetWorldSaveDir();
+            ASSERT_TRUE(session->SaveWorldState())
+                << "Latest world open diagnostic: " << session->GetWorldOpenError();
             fixture.Configure(loaded);
             ASSERT_TRUE(loaded.LoadWorldStateFrom(save)) << loaded.GetWorldOpenError();
             EXPECT_EQ(loaded.GetActiveRegionLedger().encode(), ledger.encode());
@@ -265,8 +270,10 @@ TEST(ActiveRegionAcceptance, DisabledInputsLeaveHashesAndSaveMembersUnchanged) {
     EXPECT_EQ(inputs.GetRegionInputRejections().pins, 0u);
     const auto baseline = fixture.path() / "disabled-control";
     const auto submitted = fixture.path() / "disabled-inputs";
-    ASSERT_TRUE(control.SaveWorldStateTo(baseline));
-    ASSERT_TRUE(inputs.SaveWorldStateTo(submitted));
+    ASSERT_TRUE(control.SaveWorldStateTo(baseline))
+        << "Latest world open diagnostic: " << control.GetWorldOpenError();
+    ASSERT_TRUE(inputs.SaveWorldStateTo(submitted))
+        << "Latest world open diagnostic: " << inputs.GetWorldOpenError();
     const auto members = SaveMembers(baseline);
     ASSERT_FALSE(members.empty());
     EXPECT_EQ(SaveMembers(submitted), members);
