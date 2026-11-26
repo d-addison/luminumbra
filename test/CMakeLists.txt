@@ -381,6 +381,8 @@ add_executable(common_tests
     common/ServerHeadlessHygiene_test.cpp
     common/SimulationClock_test.cpp
     common/ActiveRegionLedger_test.cpp
+    tools/active_regions_dump_test.cpp
+    ../tools/active_regions_dump.cpp
     common/ActiveRegionPriority_test.cpp
     common/SimulationIdentityAllocator_test.cpp
     common/PlantCreationIdentity_test.cpp
