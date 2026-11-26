@@ -6965,9 +6965,11 @@ std::atomic<std::uint64_t>& DecodeCounter() {
 }
 } // namespace
 
-std::uint64_t WorldSaveService::decode_count_for_testing() {
+namespace detail {
+std::uint64_t decode_count_for_testing() {
     return DecodeCounter().load(std::memory_order_acquire);
 }
+} // namespace detail
 
 std::uint64_t WorldSaveService::record_compression_count_for_testing() {
     return RecordCompressionCounter().load(std::memory_order_relaxed);
