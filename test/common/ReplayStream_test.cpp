@@ -3077,7 +3077,7 @@ TEST(AuthorityBootDescriptor, MaximumSizeRoundtripAndLittleEndianLayout) {
     std::string error;
     ASSERT_TRUE(Luminumbra::world::EncodeAuthorityBootDescriptor(original, bytes, error));
     ASSERT_EQ(bytes.size(), AuthorityBoot::kMaxEncodedBytes);
-    const std::vector<std::uint8_t> prefix{'A',  'U',  'B',  'D', 1, 0, 8, 0, 0, 0, 0x98,
+    const std::vector<std::uint8_t> prefix{'A',  'U',  'B',  'D', 1, 0, 9, 0, 0, 0, 0x98,
                                            0xba, 0xdc, 0xfe, 0,   0, 0, 0, 0, 1, 0, 0};
     EXPECT_TRUE(std::equal(prefix.begin(), prefix.end(), bytes.begin()));
     const std::vector<std::uint8_t> suffix{8, 7, 6, 5, 4, 3, 2, 1, 7, 0, 0, 0, 1, 1, 1, 1};
