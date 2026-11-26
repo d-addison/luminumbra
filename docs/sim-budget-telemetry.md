@@ -283,6 +283,44 @@ Missing, malformed or duplicate-key selected presets and non-string biome-table
 paths refuse capture before launching the executable or creating evidence.
 Inputs are hashed again before publication; changes refuse a success manifest.
 
+## Representative comparison report
+
+Capture both endpoints with `--check-neutrality`, then write the report outside
+the checkout, retaining the original capture directories unchanged:
+
+```sh
+python3 -I -B tools/perf/report_sim_budget.py \
+  ../sim-budget-captures/before ../sim-budget-captures/after \
+  > ../sim-budget-captures/comparison.json
+```
+
+The JSON report retains all three presets and all 30 stage identities, including
+inactive stages. Each endpoint includes its measured revision, dirty flag,
+binary digest, resolved-input fixture hash, preset hash, seed, tick count and
+radii. Per-stage rows retain the original p50/p95/p99 and maximum milliseconds,
+sample count, total integer work and maximum per-tick work. Inactive durations
+remain null. Per-preset neutrality results include both runs' world/replay
+hashes, replay-work equality and effective simulation gates.
+
+The report revalidates the original artifacts and requires complete telemetry-off
+counterparts and the capture harness's populated roster, no-audio and 30-tick
+autosave workload. Both endpoints must match the strict comparator's seed,
+ticks, fixture hash, preset hash and radii, as well as effective gates. Different
+revisions and binary digests are retained; world hashes may differ across
+revisions. Missing or incompatible evidence refuses the report before writing
+any JSON to stdout. Timing ratios are advisory after/before ratios (null for
+inactive stages, a zero denominator or an unrepresentable ratio) and require
+the same host and build conditions to interpret; the tool cannot verify those
+conditions from the capture manifest.
+
+The existing proposal emitter supplies the after endpoint's `proposal` and
+`integer_proposal` with default integer headroom 3/2 (adjustable using
+`--headroom-num` and `--headroom-den`). Only the proposal's advisory p99 fields
+depend on durations; the integer proposal does not. Scheduler `RegionWork`
+remains unevaluated. This report hands a proposal to issue #141 and does not
+change enforced limits or establish native acceptance. `SimBudgetReportContract`
+registers the two-tick synthetic regressions without launching the engine.
+
 ## Executable checks
 
 Seven `SimBudgetTelemetry` gtests cover complete production artifact byte equality
