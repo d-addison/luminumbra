@@ -1462,14 +1462,16 @@ TEST(FoliageFieldPages, ElapsedConsumersPreserveResourceOrdering) {
     replay.Advance(registry, fields);
     // Historical replay consumes the plant feeder, while the standalone source
     // belongs only to the live step. Growth must see the result of both phases.
-    EXPECT_EQ(registry.get<C::SoilFeederComponent>(plant).absorbed, 200u);
+    // A Fruiting feeder draws uptake * 12 / 16 = 75 per step: two historical
+    // steps, then the live step.
+    EXPECT_EQ(registry.get<C::SoilFeederComponent>(plant).absorbed, 150u);
     EXPECT_EQ(fields.irrigation().sample({8, 8}, -1), 0);
     const auto stale_soil = fields.soil().sample({8, 8}, -1);
     replay.FinishLiveTick(registry, fields);
     const auto fresh_soil = fields.soil().sample({8, 8}, -1);
     EXPECT_LT(fresh_soil, stale_soil);
     EXPECT_GT(fields.irrigation().sample({8, 8}, -1), 0);
-    EXPECT_EQ(registry.get<C::SoilFeederComponent>(plant).absorbed, 300u);
+    EXPECT_EQ(registry.get<C::SoilFeederComponent>(plant).absorbed, 225u);
     unsigned samples = 0;
     std::vector<entt::entity> participants;
     F::RunRegionalPlantGrowthOnTick(
@@ -1488,7 +1490,7 @@ TEST(FoliageFieldPages, ElapsedConsumersPreserveResourceOrdering) {
     const auto committed = fields.serialize();
     EXPECT_TRUE(replay.FinishLiveTick(registry, fields).empty());
     EXPECT_EQ(fields.serialize(), committed);
-    EXPECT_EQ(registry.get<C::SoilFeederComponent>(plant).absorbed, 300u);
+    EXPECT_EQ(registry.get<C::SoilFeederComponent>(plant).absorbed, 225u);
 }
 
 } // namespace
