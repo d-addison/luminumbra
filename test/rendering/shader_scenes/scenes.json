@@ -205,7 +205,8 @@
     "tree-cutout": "d2f7312235786b11c22e66a155d2f4699ab7112bd80a65e30e88558a89705e95"
   },
   "regression_inputs": {
-    "res/shaders/froxel_inject.comp": "64db4d491132c4aa1dffd9b11019d2d4241d276b4bf8cc4e64afd6edd11ee3b8"
+    "res/shaders/froxel_inject.comp": "64db4d491132c4aa1dffd9b11019d2d4241d276b4bf8cc4e64afd6edd11ee3b8",
+    "res/shaders/water.frag": "8dbff0289803ce423d567eec75346d44b11d7a7ef324a0da8d818dd42f69ccef"
   },
   "schema": 3,
   "size": [
