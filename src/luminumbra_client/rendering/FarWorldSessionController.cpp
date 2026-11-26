@@ -96,7 +96,7 @@ struct FarWorldSessionController::Impl {
     std::size_t history_count = 0, pending_count = 0, tile_count = 0, successor_count = 0;
     bool queued = false;
     std::optional<std::uint64_t> frame;
-    std::uint64_t start_frame = 0, epoch = 0;
+    std::uint64_t start_frame = 0, epoch = 0, source_operations = 0;
 };
 FarWorldSessionController::FarWorldSessionController(FarWorldRenderer& renderer)
     : renderer_(renderer) {}
@@ -192,6 +192,8 @@ bool FarWorldSessionController::Request(std::span<const FarTileKey> keys) {
 void FarWorldSessionController::Refuse(FarWorldRefusal refusal,
                                        const Producer::FrozenResult& failure) {
     impl_->plan.Cancel();
+    if (impl_->producer)
+        impl_->producer->cancel_capture();
     const bool bound = renderer_.world_epoch() == impl_->epoch &&
                        renderer_.SessionMemoryPool(kFarTierCount) == pool_;
     if (bound)
@@ -207,6 +209,7 @@ void FarWorldSessionController::Begin() {
     auto& state = *impl_;
     state.plan.Reset();
     work_ = {};
+    state.source_operations = 0;
     state.start_frame = state.frame.value_or(0);
     const auto& clock = state.limits.capture.clock;
     const auto now = clock.now(clock.context);
@@ -362,18 +365,35 @@ FarWorldSessionController::Phase FarWorldSessionController::Pump(std::uint64_t f
         const auto& clock = state.limits.capture.clock;
         const auto before = clock.now(clock.context);
         const auto copied = state.producer->counters().copied_bytes;
-        // Two synchronous operations under the same publication fence: copy,
-        // then disk read/decode. Never pump this producer during frozen capture.
-        state.producer->pump_capture();
-        if (state.producer->capture_status().active)
-            state.producer->pump_capture();
+        // Source assembly shares the aggregate admission allowance. Each
+        // synchronous read remains independently bounded by the injected read
+        // limits; evidence/record merging is resumable one entry per unit.
+        const auto remaining = state.limits.admission_operations - state.source_operations;
+        if (!remaining) {
+            Refuse(FarWorldRefusal::AdmissionFailed,
+                   {Producer::Error::None, FarFrozenCaptureError::WorkLimit});
+            return phase_;
+        }
+        state.source_operations +=
+            state.producer->pump_capture(std::min(remaining, state.limits.operations_per_pump));
         const auto after = clock.now(clock.context);
-        work_.source_copied_bytes = state.producer->counters().copied_bytes - copied;
-        work_.source_ms = after >= before ? double(after - before) * 1000.0 /
-                                                double(state.limits.ticks_per_second)
-                                          : 0;
+        work_.source_copied_bytes += state.producer->counters().copied_bytes - copied;
+        const auto progress = state.producer->capture_progress();
+        work_.source_read_bytes = progress.compressed_bytes;
+        work_.source_decode_work = progress.decoded_bytes;
+        work_.source_ms += after >= before ? double(after - before) * 1000.0 /
+                                                 double(state.limits.ticks_per_second)
+                                           : 0;
         const auto status = state.producer->capture_status();
-        if (!status.latest_ready) {
+        if (status.active && status.error == Producer::Error::None && !status.paused) {
+            if (state.deadline.expired()) {
+                Refuse(FarWorldRefusal::AdmissionFailed, {Producer::Error::DeadlineExceeded});
+                return phase_;
+            }
+            renderer_.SetSessionRefresh(refusal_, failure_, work_);
+            return phase_;
+        }
+        if (status.error != Producer::Error::None || status.paused || !state.producer->capture()) {
             const Producer::FrozenResult failure{status.error != Producer::Error::None
                                                      ? status.error
                                                      : Producer::Error::AuthorityUnavailable};
@@ -410,7 +430,8 @@ FarWorldSessionController::Phase FarWorldSessionController::Pump(std::uint64_t f
         if (result.complete)
             PlanAdmission();
     } else if (phase_ == Phase::Admission) {
-        const auto remaining = state.limits.admission_operations - work_.admission_work;
+        const auto remaining =
+            state.limits.admission_operations - state.source_operations - work_.admission_work;
         if (!remaining) {
             Refuse(FarWorldRefusal::AdmissionFailed,
                    {Producer::Error::None, FarFrozenCaptureError::WorkLimit});
@@ -490,6 +511,8 @@ void FarWorldSessionController::Cancel() {
     CheckOwner();
     if (impl_) {
         impl_->plan.Cancel();
+        if (impl_->producer)
+            impl_->producer->cancel_capture();
         if (renderer_.world_epoch() == impl_->epoch &&
             renderer_.SessionMemoryPool(kFarTierCount) == pool_)
             renderer_.CancelAdmission();

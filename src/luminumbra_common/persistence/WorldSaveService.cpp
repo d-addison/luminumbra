@@ -9213,6 +9213,8 @@ WorldSaveService::AuthorityWindowReader::read(const AuthorityWindow& window,
         });
         result.membership = result.chunks.empty() ? AuthorityMembership::ProvenAbsent
                                                   : AuthorityMembership::Present;
+        result.compressed_bytes = budget.compressed;
+        result.decoded_bytes = budget.decoded;
         budget.committed_storage = true;
     } catch (const std::exception& failure) {
         result.membership = AuthorityMembership::Unavailable;

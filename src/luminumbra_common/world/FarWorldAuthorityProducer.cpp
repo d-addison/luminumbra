@@ -9,6 +9,7 @@
 #include <map>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <tuple>
 #include <utility>
 
@@ -371,7 +372,41 @@ struct FarWorldAuthorityProducer::Impl {
     std::shared_ptr<FarWorldAuthorityChanges> changes;
     Save::AuthorityWindowReader reader;
     CaptureLimits capture_limits{};
-    Save::AuthorityWindow capture_window{};
+    std::array<Save::AuthorityWindow, kSlots> capture_windows{};
+    std::size_t capture_count = 0;
+    CaptureProgress progress{};
+    struct Assembly {
+        using MemberEntry = std::pair<const std::pair<int, int>, Save::AuthorityMemberEvidence>;
+        using ChunkEntry = std::pair<const std::uint64_t, std::shared_ptr<const Chunk>>;
+        explicit Assembly(const std::shared_ptr<FarVolumeMemoryPool>& pool)
+            : members(FarVolumePoolAllocator<MemberEntry>(pool))
+            , chunks(FarVolumePoolAllocator<ChunkEntry>(pool)) {}
+        // Each read is bounded by read.members/read.records. Across at most
+        // kSlots reads these maps retain unique entries only, in the same pool.
+        std::map<std::pair<int, int>,
+                 Save::AuthorityMemberEvidence,
+                 std::less<>,
+                 FarVolumePoolAllocator<MemberEntry>>
+            members;
+        std::map<std::uint64_t,
+                 std::shared_ptr<const Chunk>,
+                 std::less<>,
+                 FarVolumePoolAllocator<ChunkEntry>>
+            chunks;
+        Save::AuthorityWindowResult read;
+        std::size_t tile = 0, cursor = 0;
+        enum class Phase {
+            Read,
+            Members,
+            Chunks,
+            Prepare,
+            PublishMembers,
+            PublishChunks,
+            Done
+        };
+        Phase phase = Phase::Read;
+    };
+    std::shared_ptr<Assembly> assembly;
     // At most one active and one serving capture. Volatile arrays in each are
     // bounded by copy_bytes; committed arrays and parser scratch by read limits.
     // The successor retains only the fixed wanted descriptors, never source data.
@@ -379,6 +414,7 @@ struct FarWorldAuthorityProducer::Impl {
     std::shared_ptr<FrozenComposition> frozen;
     std::uint64_t serial = 0;
     std::uint32_t age = 0;
+    Error Assemble();
     Error error = Error::None;
     // Diagnostic storage is included in the admitted Impl allocation.
     std::array<char, 256> read_error{};
@@ -459,6 +495,11 @@ FarWorldAuthorityProducer::Counters FarWorldAuthorityProducer::counters() const 
 }
 FarWorldAuthorityProducer::Error
 FarWorldAuthorityProducer::copy_published(const Save::AuthorityWindow& window, Images& output) {
+    return copy_published(std::span<const Save::AuthorityWindow>(&window, 1), output);
+}
+FarWorldAuthorityProducer::Error
+FarWorldAuthorityProducer::copy_published(std::span<const Save::AuthorityWindow> windows,
+                                          Images& output) {
     if (impl_->retired)
         return Error::AuthorityUnavailable;
     auto& state = *impl_->state;
@@ -466,7 +507,10 @@ FarWorldAuthorityProducer::copy_published(const Save::AuthorityWindow& window, I
     if (!ValidLimits(state.limits)) {
         return Error::InvalidLimits;
     }
-    if (!ValidWindow(window, state.limits.query_columns)) {
+    if (windows.empty() || windows.size() > kSlots ||
+        !std::all_of(windows.begin(), windows.end(), [&](const auto& window) {
+            return ValidWindow(window, state.limits.query_columns);
+        })) {
         return Error::InvalidWindow;
     }
     if (state.index_failed) {
@@ -484,47 +528,52 @@ FarWorldAuthorityProducer::copy_published(const Save::AuthorityWindow& window, I
     std::array<Selected, 2u * kSlots> selected{};
     std::size_t count = 0;
     std::uint64_t bytes = 0;
-    // Coordinate probes are capped by query_columns; records by index_records.
-    for (int x = window.min_chunk_x; x <= window.max_chunk_x; ++x) {
-        for (int z = window.min_chunk_z; z <= window.max_chunk_z; ++z) {
-            bool water_seen = false;
-            auto member = state.index.lower_bound({x, z, std::numeric_limits<int>::min()});
-            for (; member != state.index.end() && std::get<0>(member->first) == x &&
-                   std::get<1>(member->first) == z;
-                 ++member) {
-                ++state.counters.query_items;
-                const auto& sources = member->second;
-                const bool live = Eligible(sources.live), parked = Eligible(sources.parked);
-                const auto terrain = live && sources.live->has_terrain_authority() ? sources.live
-                                     : parked && sources.parked->has_terrain_authority()
-                                         ? sources.parked
-                                         : nullptr;
-                const auto water = live && sources.live->has_water_authority() ? sources.live
-                                   : parked && sources.parked->has_water_authority()
-                                       ? sources.parked
-                                       : nullptr;
-                if (water && std::exchange(water_seen, true)) {
-                    return Error::WaterUnavailable;
-                }
-                for (const auto& chunk : {terrain, water == terrain ? nullptr : water}) {
-                    if (!chunk) {
-                        continue;
-                    }
-                    const bool owns_terrain = chunk == terrain, owns_water = chunk == water;
-                    if (!Charge(1, sizeof(Image), state.limits.copy_bytes, bytes)) {
-                        return Error::CopyLimit;
-                    }
-                    const auto error =
-                        Validate(*chunk, owns_terrain, owns_water, state.limits.copy_bytes, bytes);
-                    if (error != Error::None) {
-                        return error;
-                    }
-                    selected[count++] = {.chunk = chunk,
-                                         .parked = chunk == sources.parked && chunk != sources.live,
-                                         .terrain = owns_terrain,
-                                         .water = owns_water};
-                }
+    // Scan only the admitted index (at most 512 entries), testing the union of
+    // at most 512 descriptors. Never probe unrequested columns between tiles.
+    std::optional<std::pair<int, int>> previous_column;
+    bool water_seen = false;
+    for (const auto& [key, members] : state.index) {
+        const auto [x, z, y] = key;
+        if (!std::any_of(
+                windows.begin(), windows.end(), [coords = IVec3{x, y, z}](const auto& window) {
+                    return Contains(window, coords);
+                })) {
+            continue;
+        }
+        const auto column = std::pair{x, z};
+        if (!previous_column || *previous_column != column) {
+            water_seen = false;
+            previous_column = column;
+        }
+        ++state.counters.query_items;
+        const auto& sources = members;
+        const bool live = Eligible(sources.live), parked = Eligible(sources.parked);
+        const auto terrain = live && sources.live->has_terrain_authority()       ? sources.live
+                             : parked && sources.parked->has_terrain_authority() ? sources.parked
+                                                                                 : nullptr;
+        const auto water = live && sources.live->has_water_authority()       ? sources.live
+                           : parked && sources.parked->has_water_authority() ? sources.parked
+                                                                             : nullptr;
+        if (water && std::exchange(water_seen, true)) {
+            return Error::WaterUnavailable;
+        }
+        for (const auto& chunk : {terrain, water == terrain ? nullptr : water}) {
+            if (!chunk) {
+                continue;
             }
+            const bool owns_terrain = chunk == terrain, owns_water = chunk == water;
+            if (!Charge(1, sizeof(Image), state.limits.copy_bytes, bytes)) {
+                return Error::CopyLimit;
+            }
+            const auto error =
+                Validate(*chunk, owns_terrain, owns_water, state.limits.copy_bytes, bytes);
+            if (error != Error::None) {
+                return error;
+            }
+            selected[count++] = {.chunk = chunk,
+                                 .parked = chunk == sources.parked && chunk != sources.live,
+                                 .terrain = owns_terrain,
+                                 .water = owns_water};
         }
     }
     try {
@@ -577,10 +626,15 @@ bool FarWorldAuthorityProducer::admit_saved_source(const std::filesystem::path& 
         impl_->set_read_error(error);
         return false;
     }
+    const bool partial = impl_->active && impl_->progress.reads != 0;
     impl_->source_ready = true;
     if (impl_->requested) {
-        impl_->active.reset();
-        impl_->queued = true;
+        cancel_capture();
+        impl_->queued = !partial;
+    }
+    if (partial) {
+        impl_->error = Error::CommittedReadRefused;
+        impl_->set_read_error("source changed");
     }
     return true;
 }
@@ -617,24 +671,30 @@ bool FarWorldAuthorityProducer::configure_capture(const CaptureLimits& limits) {
 }
 
 bool FarWorldAuthorityProducer::request_capture(std::span<const Save::AuthorityWindow> windows) {
-    if (!impl_->configured || !impl_->source_ready || windows.empty() || windows.size() > kSlots) {
+    if (!impl_->configured || !impl_->source_ready || windows.empty() || windows.size() > kSlots ||
+        !set_wanted(windows)) {
         return false;
     }
-    auto combined = windows.front();
+    // Preserve the capture plan's canonical tile order. Stable deduplication is
+    // bounded by kSlots squared and does not turn gaps into source reads.
+    impl_->capture_count = 0;
     for (const auto& window : windows) {
-        if (!ValidWindow(window, impl_->state->limits.query_columns)) {
-            return false;
+        const auto end =
+            impl_->capture_windows.begin() + static_cast<std::ptrdiff_t>(impl_->capture_count);
+        const auto equal = [&](const auto& entry) {
+            return std::tie(entry.min_chunk_x,
+                            entry.max_chunk_x,
+                            entry.min_chunk_z,
+                            entry.max_chunk_z) == std::tie(window.min_chunk_x,
+                                                           window.max_chunk_x,
+                                                           window.min_chunk_z,
+                                                           window.max_chunk_z);
+        };
+        if (std::none_of(impl_->capture_windows.begin(), end, equal)) {
+            impl_->capture_windows[impl_->capture_count++] = window;
         }
-        combined.min_chunk_x = std::min(combined.min_chunk_x, window.min_chunk_x);
-        combined.max_chunk_x = std::max(combined.max_chunk_x, window.max_chunk_x);
-        combined.min_chunk_z = std::min(combined.min_chunk_z, window.min_chunk_z);
-        combined.max_chunk_z = std::max(combined.max_chunk_z, window.max_chunk_z);
-    }
-    if (!ValidWindow(combined, impl_->state->limits.query_columns) || !set_wanted(windows)) {
-        return false;
     }
     impl_->requested = true;
-    impl_->capture_window = combined;
     impl_->queued = true;
     return true;
 }
@@ -648,86 +708,261 @@ bool FarWorldAuthorityProducer::needs_capture_boundary() const {
     return impl_->queued || state.all_dirty || state.overflow || state.pending_count != 0;
 }
 
+FarWorldAuthorityProducer::Error FarWorldAuthorityProducer::Impl::Assemble() {
+    auto& pending = *assembly;
+    auto& result = active->committed;
+    using Phase = Assembly::Phase;
+    switch (pending.phase) {
+        case Phase::Read: {
+            if (pending.tile == active->window_count) {
+                pending.phase = Phase::Prepare;
+                break;
+            }
+            auto limits = capture_limits.read;
+            limits.compressed_total_bytes -= progress.compressed_bytes;
+            limits.decoded_total_bytes -= progress.decoded_bytes;
+            if (!limits.compressed_total_bytes || !limits.decoded_total_bytes) {
+                set_read_error("read refused");
+                return Error::CommittedReadRefused;
+            }
+            const auto& window = active->windows[pending.tile];
+            auto read = reader.read(window, limits);
+            if (active->deadline.expired()) {
+                return Error::SourceReadExpired;
+            }
+            if (read.membership == Save::AuthorityMembership::Unavailable) {
+                set_read_error(read.error);
+                return Error::CommittedReadRefused;
+            }
+            if (progress.reads != 0 && (read.source_identity != result.source_identity ||
+                                        read.generation != result.generation)) {
+                set_read_error("source changed");
+                return Error::CommittedReadRefused;
+            }
+            result.source_identity = read.source_identity;
+            result.generation = read.generation;
+            progress.last_window = window;
+            progress.last_columns = static_cast<std::uint64_t>(std::int64_t(window.max_chunk_x) -
+                                                               window.min_chunk_x + 1) *
+                                    static_cast<std::uint64_t>(std::int64_t(window.max_chunk_z) -
+                                                               window.min_chunk_z + 1);
+            progress.last_members = read.members.size();
+            // The read's remaining allowances prove these additions cannot wrap.
+            progress.compressed_bytes += read.compressed_bytes;
+            progress.decoded_bytes += read.decoded_bytes;
+            progress.columns += progress.last_columns;
+            progress.members += progress.last_members;
+            ++progress.reads;
+            pending.read = std::move(read);
+            pending.cursor = 0;
+            pending.phase = Phase::Members;
+            break;
+        }
+        case Phase::Members:
+            if (pending.cursor == pending.read.members.size()) {
+                pending.cursor = 0;
+                pending.phase = Phase::Chunks;
+            } else {
+                const auto& member = pending.read.members[pending.cursor++];
+                const auto [found, inserted] =
+                    pending.members.emplace(std::pair{member.region_x, member.region_z}, member);
+                if (!inserted) {
+                    if (found->second.generation != member.generation) {
+                        set_read_error("source changed");
+                        return Error::CommittedReadRefused;
+                    }
+                    if (member.membership == Save::AuthorityMembership::Present) {
+                        found->second.membership = member.membership;
+                    }
+                }
+            }
+            break;
+        case Phase::Chunks:
+            if (pending.cursor == pending.read.chunks.size()) {
+                pending.read = {};
+                ++pending.tile;
+                pending.phase = Phase::Read;
+            } else {
+                const auto& chunk = pending.read.chunks[pending.cursor++];
+                if (!chunk) {
+                    return Error::AuthorityUnavailable;
+                }
+                pending.chunks.emplace(chunk->get_id(), chunk);
+            }
+            break;
+        case Phase::Prepare:
+            if (pending.members.size() > result.members.max_size() ||
+                pending.chunks.size() > result.chunks.max_size()) {
+                return Error::AllocationFailure;
+            }
+            // Exact capacities, bounded by the sum of the admitted per-read
+            // evidence/records, with at most kSlots reads. Payloads are shared.
+            result.members.reserve(pending.members.size());
+            result.chunks.reserve(pending.chunks.size());
+            pending.phase = Phase::PublishMembers;
+            break;
+        case Phase::PublishMembers:
+            if (pending.members.empty()) {
+                pending.phase = Phase::PublishChunks;
+            } else {
+                const auto entry = pending.members.begin();
+                result.members.push_back(entry->second);
+                pending.members.erase(entry);
+            }
+            break;
+        case Phase::PublishChunks:
+            if (pending.chunks.empty()) {
+                result.membership = result.chunks.empty() ? Save::AuthorityMembership::ProvenAbsent
+                                                          : Save::AuthorityMembership::Present;
+                result.compressed_bytes = progress.compressed_bytes;
+                result.decoded_bytes = progress.decoded_bytes;
+                pending.phase = Phase::Done;
+            } else {
+                const auto entry = pending.chunks.begin();
+                result.chunks.push_back(entry->second);
+                pending.chunks.erase(entry);
+            }
+            break;
+        case Phase::Done:
+            break;
+    }
+    return Error::None;
+}
+
 void FarWorldAuthorityProducer::pump_capture() {
-    if (!impl_->requested) {
-        return;
+    // Compatibility owner: one call per prepared frame, with copy and reads on
+    // separate boundaries. The controller supplies its explicit per-frame budget.
+    (void)pump_capture(std::numeric_limits<std::uint64_t>::max(), true);
+}
+std::uint64_t FarWorldAuthorityProducer::pump_capture(std::uint64_t budget) {
+    return pump_capture(budget, false);
+}
+std::uint64_t FarWorldAuthorityProducer::pump_capture(std::uint64_t budget, bool defer_reads) {
+    if (!impl_->requested || budget == 0) {
+        return 0;
     }
     const auto dirty = tick();
     impl_->queued = impl_->queued || dirty.tiles.any();
     if (impl_->active) {
-        // Check before increment so even the maximum finite deadline cannot wrap.
         if (impl_->age >= impl_->capture_limits.deadline_frames) {
-            impl_->active.reset();
+            cancel_capture();
             impl_->error = Error::DeadlineExceeded;
-            return;
+            return 0;
         }
         ++impl_->age;
         if (impl_->active->deadline.expired()) {
-            impl_->active.reset();
+            cancel_capture();
             impl_->error = Error::SourceReadExpired;
-            return;
+            return 0;
         }
         if (impl_->paused) {
-            return;
+            return 0;
         }
-        auto committed = read_committed(impl_->active->window, impl_->capture_limits.read);
-        if (impl_->active->deadline.expired()) {
-            impl_->active.reset();
-            impl_->error = Error::SourceReadExpired;
-            return;
-        }
-        if (committed.membership == Save::AuthorityMembership::Unavailable) {
-            impl_->active.reset();
-            impl_->error = Error::CommittedReadRefused;
-            impl_->set_read_error(committed.error);
-            return;
-        }
-        impl_->active->committed = std::move(committed);
-        impl_->serving = std::move(impl_->active);
-        impl_->error = Error::None;
-        return;
+    } else if (impl_->paused || !impl_->queued || !impl_->source_ready) {
+        return 0;
     }
-    if (impl_->paused || !impl_->queued || !impl_->source_ready) {
-        return;
-    }
-    impl_->queued = false;
-    const auto& clock = impl_->capture_limits.clock;
-    const auto start = clock.now(clock.context);
-    if (clock.max_ticks > std::numeric_limits<std::uint64_t>::max() - start) {
-        impl_->error = Error::InvalidLimits;
-        return;
-    }
-    const FarFrozenCaptureDeadline deadline{clock.now, clock.context, start + clock.max_ticks};
-    if (deadline.expired()) {
-        impl_->error = Error::SourceReadExpired;
-        return;
-    }
-    if (impl_->serial == std::numeric_limits<std::uint64_t>::max()) {
-        impl_->error = Error::AuthorityUnavailable;
-        return;
-    }
+    std::uint64_t work = 0;
     try {
-        auto candidate = std::allocate_shared<SourceCapture>(
-            FarVolumePoolAllocator<SourceCapture>(impl_->state->limits.memory));
-        candidate->window = impl_->capture_window;
-        candidate->deadline = deadline;
-        const auto error = copy_published(candidate->window, candidate->published);
-        if (candidate->deadline.expired()) {
-            impl_->error = Error::SourceReadExpired;
-            return;
+        if (!impl_->active) {
+            impl_->queued = false;
+            impl_->progress = {};
+            const auto& clock = impl_->capture_limits.clock;
+            const auto start = clock.now(clock.context);
+            if (clock.max_ticks > std::numeric_limits<std::uint64_t>::max() - start) {
+                impl_->error = Error::InvalidLimits;
+                return 0;
+            }
+            const FarFrozenCaptureDeadline deadline{
+                clock.now, clock.context, start + clock.max_ticks};
+            if (deadline.expired()) {
+                impl_->error = Error::SourceReadExpired;
+                return 0;
+            }
+            if (impl_->serial == std::numeric_limits<std::uint64_t>::max()) {
+                impl_->error = Error::AuthorityUnavailable;
+                return 0;
+            }
+            auto candidate =
+                std::allocate_shared<SourceCapture>(FarVolumePoolAllocator<SourceCapture>(memory_));
+            candidate->committed = Save::AuthorityWindowResult(memory_);
+            candidate->window_count = impl_->capture_count;
+            std::copy_n(impl_->capture_windows.begin(),
+                        candidate->window_count,
+                        candidate->windows.begin());
+            candidate->window = candidate->windows.front();
+            for (std::size_t index = 1; index < candidate->window_count; ++index) {
+                const auto& window = candidate->windows[index];
+                candidate->window.min_chunk_x =
+                    std::min(candidate->window.min_chunk_x, window.min_chunk_x);
+                candidate->window.max_chunk_x =
+                    std::max(candidate->window.max_chunk_x, window.max_chunk_x);
+                candidate->window.min_chunk_z =
+                    std::min(candidate->window.min_chunk_z, window.min_chunk_z);
+                candidate->window.max_chunk_z =
+                    std::max(candidate->window.max_chunk_z, window.max_chunk_z);
+            }
+            candidate->deadline = deadline;
+            const auto error = copy_published({candidate->windows.data(), candidate->window_count},
+                                              candidate->published);
+            ++work;
+            ++impl_->progress.operations;
+            if (deadline.expired() || error != Error::None) {
+                impl_->error = deadline.expired() ? Error::SourceReadExpired : error;
+                return work;
+            }
+            auto assembly = std::allocate_shared<Impl::Assembly>(
+                FarVolumePoolAllocator<Impl::Assembly>(memory_), memory_);
+            candidate->serial = ++impl_->serial;
+            impl_->active = std::move(candidate);
+            impl_->assembly = std::move(assembly);
+            impl_->age = 1;
+            impl_->error = Error::None;
+            impl_->read_error_size = 0;
+            if (defer_reads) {
+                return work;
+            }
         }
-        if (error != Error::None) {
-            impl_->error = error;
-            return;
+        while (work < budget) {
+            if (impl_->active->deadline.expired()) {
+                cancel_capture();
+                impl_->error = Error::SourceReadExpired;
+                break;
+            }
+            ++work;
+            ++impl_->progress.operations;
+            const auto error = impl_->Assemble();
+            if (error != Error::None) {
+                cancel_capture();
+                impl_->error = error;
+                break;
+            }
+            if (impl_->assembly->phase == Impl::Assembly::Phase::Done) {
+                if (impl_->active->deadline.expired()) {
+                    cancel_capture();
+                    impl_->error = Error::SourceReadExpired;
+                    break;
+                }
+                impl_->serving = std::move(impl_->active);
+                impl_->assembly.reset();
+                impl_->error = Error::None;
+                break;
+            }
         }
-        candidate->serial = ++impl_->serial;
-        impl_->active = std::move(candidate);
-        impl_->age = 1;
-        impl_->error = Error::None;
-        impl_->read_error_size = 0;
     } catch (const std::bad_alloc&) {
+        cancel_capture();
         impl_->error = Error::AllocationFailure;
     }
+    return work;
+}
+void FarWorldAuthorityProducer::cancel_capture() {
+    if (impl_->active) {
+        impl_->error = Error::AuthorityUnavailable;
+    }
+    impl_->assembly.reset();
+    impl_->active.reset();
+}
+FarWorldAuthorityProducer::CaptureProgress FarWorldAuthorityProducer::capture_progress() const {
+    return impl_->progress;
 }
 
 void FarWorldAuthorityProducer::fence_source_reads(bool paused) {
@@ -737,7 +972,7 @@ void FarWorldAuthorityProducer::fence_source_reads(bool paused) {
         impl_->paused = paused;
 }
 void FarWorldAuthorityProducer::invalidate_source() {
-    impl_->active.reset();
+    cancel_capture();
     impl_->source_ready = false;
     impl_->queued = !impl_->retired;
     impl_->error = Error::AuthorityUnavailable;
@@ -761,8 +996,14 @@ bool FarWorldAuthorityProducer::refresh_saved_source(const std::filesystem::path
         error = "Source reads are paused.";
         return false;
     }
+    const bool partial = impl_->active && impl_->progress.reads != 0;
     invalidate_source();
     const bool admitted = admit_saved_source(root, impl_->capture_limits.read, error);
+    if (admitted && partial) {
+        impl_->queued = false;
+        impl_->error = Error::CommittedReadRefused;
+        impl_->set_read_error("source changed");
+    }
     if (!admitted) {
         impl_->set_read_error(error);
     }
@@ -834,6 +1075,8 @@ struct FarWorldAuthorityProducer::FrozenContext {
     FarFrozenWorldSource world_source;
     FarFrozenCaptureSource frozen;
     FarFrozenRegion region;
+    Save::AuthorityWindow required{};
+    std::size_t committed_count = 0;
     // Fixed scratch bound: two published owners per slot and 512 committed records.
     std::array<FrozenRecord, 3u * kSlots> storage{};
     std::array<const FrozenRecord*, 3u * kSlots> water_storage{};
@@ -943,17 +1186,22 @@ struct FarWorldAuthorityProducer::FrozenComposition {
             request.key.z >= kFarVolumeExactCoordinateLimitMeters / tier->tile_edge_meters) {
             return {Error::None, FarFrozenCaptureError::InvalidRegion};
         }
-        const auto& window = source->window;
-        // Lower shared lattice contributors must also have been copied at the source boundary.
+        // A tile's complete halo must fit a requested window, never just the
+        // union's diagnostic bounding rectangle (which can contain gaps).
         Save::AuthorityWindow required;
         if (!Producer::source_window(request.key, required) ||
-            required.min_chunk_x < window.min_chunk_x ||
-            required.max_chunk_x > window.max_chunk_x ||
-            required.min_chunk_z < window.min_chunk_z ||
-            required.max_chunk_z > window.max_chunk_z) {
+            !std::any_of(source->windows.begin(),
+                         source->windows.begin() +
+                             static_cast<std::ptrdiff_t>(source->window_count),
+                         [&](const auto& window) {
+                             return required.min_chunk_x >= window.min_chunk_x &&
+                                    required.max_chunk_x <= window.max_chunk_x &&
+                                    required.min_chunk_z >= window.min_chunk_z &&
+                                    required.max_chunk_z <= window.max_chunk_z;
+                         })) {
             return {Error::InvalidWindow, FarFrozenCaptureError::None};
         }
-        if (source->published.size() > 2u * kSlots || source->committed.chunks.size() > kSlots) {
+        if (source->published.size() > 2u * kSlots) {
             return {Error::None, FarFrozenCaptureError::WorkLimit};
         }
 
@@ -968,6 +1216,7 @@ struct FarWorldAuthorityProducer::FrozenComposition {
                 policy,
                 limits,
                 pool);
+            context->required = required;
         } catch (const std::bad_alloc&) {
             return {Error::AllocationFailure, FarFrozenCaptureError::None};
         } catch (...) {
@@ -1046,8 +1295,12 @@ struct FarWorldAuthorityProducer::FrozenComposition {
                     cursor = c.count;
                     break;
                 }
-                if (cursor < published) {
-                    const auto& image = c.source->published[cursor];
+                const auto item = cursor++;
+                if (item < published) {
+                    const auto& image = c.source->published[item];
+                    if (!Contains(c.required, image.coords)) {
+                        break;
+                    }
                     c.storage[c.count++] = {image.coords,
                                             image.parked ? 1u : 0u,
                                             image.terrain_authority,
@@ -1057,10 +1310,22 @@ struct FarWorldAuthorityProducer::FrozenComposition {
                                             image.bed,
                                             image.depth};
                 } else {
-                    const auto& chunk = c.source->committed.chunks[cursor - published];
+                    const auto& chunk = c.source->committed.chunks[item - published];
                     if (!chunk) {
                         return {Error::AuthorityUnavailable, FarFrozenCaptureError::None};
                     }
+                    // The committed reader includes one extra contributor halo.
+                    const Save::AuthorityWindow halo{c.required.min_chunk_x - 1,
+                                                     c.required.max_chunk_x + 1,
+                                                     c.required.min_chunk_z - 1,
+                                                     c.required.max_chunk_z + 1};
+                    if (!Contains(halo, chunk->get_coords())) {
+                        break;
+                    }
+                    if (c.committed_count == kSlots) {
+                        return {Error::None, FarFrozenCaptureError::WorkLimit};
+                    }
+                    ++c.committed_count;
                     c.storage[c.count++] = {
                         chunk->get_coords(),
                         2,
@@ -1071,7 +1336,6 @@ struct FarWorldAuthorityProducer::FrozenComposition {
                         chunk->water_bed_mm,
                         chunk->water_depth_mm};
                 }
-                ++cursor;
                 std::push_heap(c.storage.begin(),
                                c.storage.begin() + static_cast<std::ptrdiff_t>(c.count),
                                before);

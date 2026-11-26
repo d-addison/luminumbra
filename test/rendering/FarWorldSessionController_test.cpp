@@ -209,6 +209,142 @@ TEST_F(FarWorldSessionController, FixtureWindowsReadAndOversizedWindowKeepsExact
     EXPECT_EQ(renderer.SessionMemoryPool(kFarTierCount)->refusals(), 0u);
 }
 
+TEST_F(FarWorldSessionController, UnsortedDuplicateWindowsReadOncePerTileInCanonicalOrder) {
+    limits.operations_per_pump = 325;
+    ASSERT_NO_FATAL_FAILURE(ConfigureSource());
+    const std::array<FarTileKey, 3> unsorted{{{5, 1, 0}, {5, 0, 0}, {5, 1, 0}}};
+    ASSERT_TRUE(controller.Request(unsorted));
+    std::uint64_t observed = 0;
+    const std::array<FarVolumeTileKey, 2> canonical{{{5, 0, 0}, {5, 1, 0}}};
+    for (unsigned pump = 0; pump < limits.capture.deadline_frames; ++pump) {
+        const auto phase = controller.Pump(++frame);
+        ASSERT_NE(phase, Controller::Phase::Refused) << int(controller.failure().source);
+        const auto progress = producer->capture_progress();
+        if (progress.reads != observed) {
+            ASSERT_EQ(progress.reads, observed + 1);
+            Save::AuthorityWindow expected;
+            ASSERT_TRUE(Producer::source_window(canonical[observed], expected));
+            EXPECT_EQ(progress.last_window.min_chunk_x, expected.min_chunk_x);
+            EXPECT_EQ(progress.last_window.min_chunk_z, expected.min_chunk_z);
+            EXPECT_LE(progress.last_columns, limits.source.query_columns);
+            EXPECT_LE(progress.last_members, limits.capture.read.members);
+            observed = progress.reads;
+        }
+        EXPECT_LE(progress.operations, (pump + 1u) * limits.operations_per_pump);
+        controller.Pump(frame); // duplicate frames neither advance nor age capture
+        EXPECT_EQ(producer->capture_progress().operations, progress.operations);
+        if (phase == Controller::Phase::Planning) {
+            break;
+        }
+        EXPECT_EQ(producer->capture(), nullptr);
+    }
+    EXPECT_EQ(controller.phase(), Controller::Phase::Planning);
+    EXPECT_EQ(observed, 2u);
+    ASSERT_NE(producer->capture(), nullptr);
+    EXPECT_EQ(producer->capture()->window_count, 2u);
+    EXPECT_EQ(producer->capture_progress().columns, 544'968u);
+    EXPECT_EQ(producer->capture_progress().members, 648u);
+    EXPECT_EQ(producer->capture()->committed.members.size(), 612u);
+}
+
+TEST_F(FarWorldSessionController, PublicationDuringIncrementalSourceQueuesSuccessor) {
+    limits.operations_per_pump = 325;
+    ASSERT_NO_FATAL_FAILURE(ConfigureSource());
+    auto live = std::make_shared<Chunk>(IVec3{0, 0, 0});
+    live->current_water_resolution.store(4);
+    live->water_bed_mm.assign(16, 0);
+    live->water_depth_mm.assign(16, 0);
+    live->set_water_authority();
+    live->set_state(ChunkState::Idle);
+    producer->changes()->membership(live, false, true);
+    ASSERT_TRUE(controller.Request(keys));
+    ASSERT_EQ(controller.Pump(++frame), Controller::Phase::Source);
+    live->water_depth_mm[0] = 1000;
+    live->mark_water_state_dirty();
+    for (unsigned pump = 0; pump < 3; ++pump) {
+        const auto phase = controller.Pump(++frame);
+        ASSERT_NE(phase, Controller::Phase::Refused);
+        if (phase == Controller::Phase::Planning) {
+            break;
+        }
+    }
+    EXPECT_EQ(controller.phase(), Controller::Phase::Planning);
+    EXPECT_TRUE(producer->capture_status().queued);
+    ASSERT_NE(producer->capture(), nullptr);
+    ASSERT_EQ(producer->capture()->published.size(), 1u);
+    EXPECT_EQ(producer->capture()->published[0].depth[0], 0);
+}
+
+TEST_F(FarWorldSessionController, SingleFrameCaptureDeadlineCompletesInOneSourcePump) {
+    // Completeness may accept one frame because the source phase now advances
+    // and ages exactly once per controller frame, including snapshot and read.
+    limits.capture.deadline_frames = 1;
+    ASSERT_TRUE(limits.Complete());
+    ASSERT_NO_FATAL_FAILURE(ConfigureSource());
+    ASSERT_TRUE(controller.Request(keys));
+    EXPECT_EQ(controller.Pump(++frame), Controller::Phase::Planning);
+    EXPECT_EQ(producer->capture_status().error, Producer::Error::None);
+    EXPECT_EQ(producer->capture_progress().reads, 1u);
+    EXPECT_TRUE(producer->capture_status().latest_ready);
+}
+
+TEST_F(FarWorldSessionController, SourceOperationExhaustionAndCancellationReleasePartialCapture) {
+    for (const bool cancel : {false, true}) {
+        SCOPED_TRACE(cancel);
+        limits.operations_per_pump = 2;
+        limits.admission_operations = 2;
+        ASSERT_NO_FATAL_FAILURE(ConfigureSource());
+        const auto pool = renderer.SessionMemoryPool(kFarTierCount);
+        ASSERT_NE(pool, nullptr);
+        const auto baseline = pool->used();
+        ASSERT_TRUE(controller.Request(keys));
+        ASSERT_EQ(controller.Pump(++frame), Controller::Phase::Source);
+        ASSERT_EQ(producer->capture_progress().reads, 1u);
+        ASSERT_TRUE(producer->capture_status().active);
+        if (cancel) {
+            controller.Cancel();
+            EXPECT_EQ(controller.phase(), Controller::Phase::Idle);
+            EXPECT_LT(pool->used(), baseline); // controller controls were released too
+        } else {
+            EXPECT_EQ(controller.Pump(++frame), Controller::Phase::Refused);
+            EXPECT_EQ(controller.failure().capture, FarFrozenCaptureError::WorkLimit);
+            EXPECT_EQ(pool->used(), baseline);
+        }
+        EXPECT_FALSE(producer->capture_status().active);
+        EXPECT_EQ(producer->capture(), nullptr);
+    }
+}
+
+TEST_F(FarWorldSessionController, IncrementalSourcePauseAndRefreshExpiryUnwind) {
+    limits.operations_per_pump = 2;
+    ASSERT_NO_FATAL_FAILURE(ConfigureSource());
+    const auto pool = renderer.SessionMemoryPool(kFarTierCount);
+    ASSERT_NE(pool, nullptr);
+    const auto baseline = pool->used();
+    ASSERT_TRUE(controller.Request(keys));
+    ASSERT_EQ(controller.Pump(++frame), Controller::Phase::Source);
+    producer->fence_source_reads(true);
+    EXPECT_EQ(controller.Pump(++frame), Controller::Phase::Refused);
+    EXPECT_EQ(controller.failure().source, Producer::Error::AuthorityUnavailable);
+    EXPECT_FALSE(producer->capture_status().active);
+    EXPECT_EQ(pool->used(), baseline);
+    producer->fence_source_reads(false);
+    limits.refresh_ticks = 3;
+    ASSERT_NO_FATAL_FAILURE(ConfigureSource());
+    const auto refreshed_pool = renderer.SessionMemoryPool(kFarTierCount);
+    ASSERT_NE(refreshed_pool, nullptr);
+    const auto refreshed_baseline = refreshed_pool->used();
+    ticks = 0;
+    clock_step = 1;
+    ASSERT_TRUE(controller.Request(keys));
+    EXPECT_EQ(controller.Pump(++frame), Controller::Phase::Refused);
+    EXPECT_EQ(controller.failure().source, Producer::Error::DeadlineExceeded);
+    EXPECT_EQ(producer->capture_progress().reads, 1u);
+    EXPECT_FALSE(producer->capture_status().active);
+    EXPECT_EQ(producer->capture(), nullptr);
+    EXPECT_EQ(refreshed_pool->used(), refreshed_baseline);
+}
+
 TEST_F(FarWorldSessionController, ContinuousEditsCompleteActiveTransaction) {
     ASSERT_TRUE(controller.Request(keys));
     ASSERT_EQ(controller.Pump(++frame), Controller::Phase::Planning);
@@ -501,7 +637,9 @@ TEST_F(FarWorldSessionController, OperationAllowancesStopActualPlanningAndAdmiss
     EXPECT_EQ(controller.work().capture_work, 1u);
     EXPECT_FALSE(producer->frozen_active());
     limits.planning_operations = 4'000'000;
-    limits.admission_operations = 1;
+    // Leave exactly the original one admission unit after charging source work
+    // to the same transaction allowance.
+    limits.admission_operations = producer->capture_progress().operations + 1;
     ASSERT_NO_FATAL_FAILURE(ConfigureSource());
     ASSERT_TRUE(controller.Request(keys));
     for (unsigned pump = 0; pump < 1024; ++pump) {
