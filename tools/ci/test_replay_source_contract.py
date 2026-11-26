@@ -1,6 +1,7 @@
 """Guard replay fixture symbol ownership without claiming native link coverage."""
 
 import ast
+import os
 from pathlib import Path
 import re
 import runpy
@@ -32,23 +33,28 @@ def read_source(path):
 
 class NamedFnvBasisContract(unittest.TestCase):
     def test_named_digest_sites_do_not_reintroduce_the_truncated_literal(self):
-        # These migrated domains retain explicit seed choices, including their test mirrors.
-        paths = (
-            "src/luminumbra_server/ServerWorldRunner.cpp",
-            "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
-            "test/net/net_soak_over_the_wire_test.cpp",
-            "test/common/replication_scale_test.cpp",
-            "test/common/WaterDeterminism_test.cpp",
-            "test/client/world_dressing_test.cpp",
-            "test/common/WaterSeedInputs_test.cpp",
-            "test/common/PlantProcgen_test.cpp",
-            "test/sim/photo_mode_test.cpp",
-        )
-        literal = re.compile(rb"(?<![0-9])1469598103934665603(?![0-9])")
-        for path in paths:
-            with self.subTest(path=path):
-                self.assertIsNone(literal.search((ROOT / path).read_bytes()),
-                                  "Use the named historical or standard basis")
+        # Split the spelling so this guard does not itself introduce a forbidden hit.
+        basis = b"146959810" b"3934665603"
+        literal = re.compile(rb"(?<![0-9])" + basis + rb"(?![0-9])")
+        allowed = {
+            ("src/luminumbra_common/core/IntegerPrimitives.h",
+             b"inline constexpr std::uint64_t kFnv1a64HistoricalBasis = " + basis + b"ull;"),
+            ("test/common/IntegerPrimitives_test.cpp",
+             b"EXPECT_EQ(Fnv1a64(nullptr, 0, kFnv1a64HistoricalBasis), " + basis + b"ull);"),
+            ("tools/perf/validate_foliage_evidence.py",
+             b"FNV1A64_HISTORICAL_BASIS = " + basis),
+        }
+        for directory in ("src", "test", "tools"):
+            for folder, directories, filenames in os.walk(ROOT / directory, onerror=self.fail):
+                directories.sort()
+                for filename in sorted(filenames):
+                    path = Path(folder) / filename
+                    relative = path.relative_to(ROOT).as_posix()
+                    for number, line in enumerate(path.read_bytes().splitlines(), 1):
+                        if literal.search(line):
+                            with self.subTest(path=relative, line=number):
+                                self.assertIn((relative, line.strip()), allowed,
+                                              f"{relative}:{number}: use the named historical basis")
 
 
 class ReplaySourceContract(unittest.TestCase):

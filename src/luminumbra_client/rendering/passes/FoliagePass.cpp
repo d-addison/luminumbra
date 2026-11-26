@@ -846,7 +846,7 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
         auto cell = [](float v) {
             return static_cast<long long>(std::floor(v / 16.0f));
         };
-        std::uint64_t sig = 1469598103934665603ull;
+        std::uint64_t sig = Core::kFnv1a64HistoricalBasis;
         auto mix = [&sig](std::uint64_t v) {
             sig ^= v;
             sig *= 1099511628211ull;
@@ -907,7 +907,7 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
             components.ground_revision = ground_acc;
             components.camera_cell = static_cast<std::uint64_t>(cell(camera_pos.x)) * 73856093ull ^
                                      (static_cast<std::uint64_t>(cell(camera_pos.z)) * 19349663ull);
-            std::uint64_t config_sig = 1469598103934665603ull;
+            std::uint64_t config_sig = Core::kFnv1a64HistoricalBasis;
             const auto config_mix = [&config_sig](std::uint64_t value) {
                 config_sig ^= value;
                 config_sig *= 1099511628211ull;
