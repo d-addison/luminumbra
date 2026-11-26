@@ -1087,10 +1087,23 @@ public:
     // Canonical collision lattice, independent of render LOD/residency. Uses committed or
     // edited authority when present, refuses incomplete authority instead of regenerating it.
     // Exactly (CHUNK_SIZE_X+1)*(CHUNK_SIZE_Z+1) samples; no world mutation.
-    bool sample_simulation_collision(i32 chunk_x, i32 chunk_z, std::span<float> heights) const;
+    // Legacy callers supply their original heightmap as baseline; regional callers
+    // retain the analytic/committed baseline independent of renderer residency.
+    bool sample_simulation_collision(i32 chunk_x,
+                                     i32 chunk_z,
+                                     std::span<float> heights,
+                                     std::span<const float> baseline = {}) const;
     // Owner-thread diagnostic: scalar terrain evaluations performed by collision sampling.
     u64 simulation_collision_terrain_evaluations() const {
         return m_collision_terrain_evaluations;
+    }
+    // Owner-thread edit stamp, including edits within an already prepared tick.
+    u64 collision_edit_revision() const {
+        return m_collision_edit_revision;
+    }
+    // Const owner-thread diagnostic: SDF inputs visited by collision projection.
+    u64 simulation_collision_sdf_samples() const {
+        return m_collision_sdf_samples;
     }
     bool durable_residency() const {
         return m_durable_residency;
@@ -1349,6 +1362,9 @@ private:
     std::function<std::shared_ptr<Chunk>(const IVec3&)> m_durable_chunk_loader;
     std::function<void(std::string)> m_durable_chunk_fault;
     mutable bool m_durable_read_failed = false;
+    // Derived column membership; never serialized or hashed.
+    std::unordered_map<u64, std::set<i32>> m_collision_layers;
+    void invalidate_collision_samples(const IVec3& coords);
     struct CollisionSamples {
         i32 x = 0;
         i32 z = 0;
@@ -1356,6 +1372,8 @@ private:
         u64 last_use = 0;
         float centre = 0;
         bool saved = false;
+        bool sdf = false;
+        bool projected = false;
         bool valid = false;
         bool complete = false;
         std::array<float, (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1)> heights{};
@@ -1365,6 +1383,8 @@ private:
     // are invalidated at committed inventory/loader changes and terrain revisions.
     mutable std::array<CollisionSamples, 128> m_collision_samples{};
     mutable u64 m_collision_terrain_evaluations = 0;
+    mutable u64 m_collision_sdf_samples = 0;
+    u64 m_collision_edit_revision = 0;
     mutable u64 m_collision_sample_clock = 0;
     bool m_evictions_suspended = false;
     // Only restoration prepares derived seeds; read-only hash/collision probes do no extra work.

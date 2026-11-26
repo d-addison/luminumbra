@@ -24,11 +24,15 @@
 #include "systems/PhysicsSystem.h"
 #include "systems/SHIELD_WorldSystem.h"
 #include "world/Chunk.h"
+#include "world/TerrainCollision.h"
 
 #include <glm/glm.hpp>
 
+#include <array>
 #include <cmath>
+#include <limits>
 #include <memory>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -307,3 +311,387 @@ TEST(SurfaceQuery, RestoredTerrainColliderReusesTheUninterruptedGeneration) {
     restored.shutdown();
     uninterrupted.shutdown();
 }
+
+namespace {
+class TerrainEditCollision : public ::testing::TestWithParam<bool> {
+protected:
+    void SetUp() override {
+        auto params = Luminumbra::Test::SyntheticTerrainParams();
+        params.base_amplitude = 0;
+        params.peaks_amplitude = 0;
+        params.height_offset = 8;
+        params.continental_spline = {{{-1, 0}}, {{1, 0}}};
+        params.caves_enabled = false;
+        world = std::make_unique<SHIELD_WorldSystem>(nullptr, nullptr, params, 4242);
+        world->set_durable_residency(GetParam());
+        physics.startup();
+        physics.set_world_system(world.get());
+        floor = MakeFlatFloorChunk({0, 0, 0}, 8);
+        world->GenerateChunkData(*floor);
+        ASSERT_TRUE(world->adopt_streamed_chunk(floor));
+        ASSERT_TRUE(physics.add_chunk_collision(*floor));
+        const std::array<Luminumbra::Vec3, 1> anchors{{{8, 16, 8}}};
+        ASSERT_TRUE(physics.prepare_simulation_collisions(anchors, 7));
+    }
+
+    void DropAvatar(float expected, float tolerance) {
+        const auto avatar = physics.create_avatar_character({8.25f, 16, 8.25f});
+        ASSERT_NE(avatar, PhysicsSystem::kInvalidAvatar);
+        for (int tick = 0; tick < 120; ++tick) {
+            ASSERT_TRUE(physics.prepare_simulation_collisions({}));
+            physics.update(1.0f / 60);
+            physics.update_avatars(1.0f / 60);
+        }
+        EXPECT_NEAR(physics.get_avatar_position(avatar).y, expected, tolerance);
+        EXPECT_TRUE(physics.is_avatar_grounded(avatar));
+    }
+
+    std::unique_ptr<SHIELD_WorldSystem> world;
+    PhysicsSystem physics;
+    std::shared_ptr<Chunk> floor;
+};
+} // namespace
+
+TEST_P(TerrainEditCollision, DigRefreshesRayAvatarAndBody) {
+    const auto saved_heightmap = floor->heightmap_data;
+    const auto initial = physics.audio_raycast({8.25f, 20, 8.25f}, {8.25f, -4, 8.25f});
+    ASSERT_TRUE(initial.hit);
+    EXPECT_NEAR(initial.hit_point.y, 8, 0.01f);
+    ASSERT_GT(world->EditTerrainVoxel({8, 8, 8}, 4, false, &physics), 0);
+    const std::array<Luminumbra::Vec3, 1> anchors{{{8, 16, 8}}};
+    ASSERT_TRUE(physics.prepare_simulation_collisions(anchors, 7)); // Same tick as before edit.
+    const auto dug = physics.audio_raycast({8.25f, 20, 8.25f}, {8.25f, -4, 8.25f});
+    ASSERT_TRUE(dug.hit);
+    EXPECT_LT(dug.hit_point.y, 5);
+    EXPECT_EQ(floor->heightmap_data, saved_heightmap);
+    const auto body = physics.create_dynamic_sphere({6.75f, 18, 8.25f}, {0, 0, 0}, 0.2f);
+    ASSERT_FALSE(body.IsInvalid());
+    DropAvatar(4.2f, 0.8f);
+    EXPECT_NEAR(physics.get_body_position(body).y, 4.4f, 0.8f);
+    const auto work = world->simulation_collision_sdf_samples();
+    const auto hash = physics.simulation_collision_hash();
+    for (int attempt = 0; attempt < 8; ++attempt)
+        ASSERT_TRUE(physics.prepare_simulation_collisions({}));
+    EXPECT_EQ(world->simulation_collision_sdf_samples(), work);
+    EXPECT_EQ(physics.simulation_collision_hash(), hash);
+}
+
+TEST_P(TerrainEditCollision, FillRefreshesRayAndAvatar) {
+    ASSERT_GT(world->EditTerrainVoxel({8, 8, 8}, 4, true, &physics), 0);
+    const auto filled = physics.audio_raycast({8.25f, 20, 8.25f}, {8.25f, 0, 8.25f});
+    ASSERT_TRUE(filled.hit);
+    EXPECT_GT(filled.hit_point.y, 11);
+    DropAvatar(11.8f, 0.8f);
+}
+
+TEST_P(TerrainEditCollision, SharedBorderAndVerticalSlabsRefreshTogether) {
+    auto neighbour = MakeFlatFloorChunk({1, 0, 0}, 8);
+    world->GenerateChunkData(*neighbour);
+    ASSERT_TRUE(world->adopt_streamed_chunk(neighbour));
+    ASSERT_TRUE(physics.add_chunk_collision(*neighbour));
+    ASSERT_GT(world->EditTerrainVoxel({16, 8, 8}, 3, false, &physics), 0);
+    for (const float x : {15.75f, 16.25f}) {
+        const auto dug = physics.audio_raycast({x, 20, 8.25f}, {x, -4, 8.25f});
+        ASSERT_TRUE(dug.hit);
+        EXPECT_LT(dug.hit_point.y, 6);
+    }
+    // A separate fill above the original surface must affect the column even
+    // though the original surface slab is outside the brush's vertical AABB.
+    auto upper = MakeFlatFloorChunk({0, 1, 0}, 8);
+    world->GenerateChunkData(*upper);
+    ASSERT_TRUE(world->adopt_streamed_chunk(upper));
+    ASSERT_GT(world->EditTerrainVoxel({8, 19, 8}, 2, true, &physics), 0);
+    const auto filled = physics.audio_raycast({8.25f, 24, 8.25f}, {8.25f, 0, 8.25f});
+    ASSERT_TRUE(filled.hit);
+    EXPECT_GT(filled.hit_point.y, 20);
+}
+
+TEST(SurfaceQuery, AuthoritativeCollisionProjectionRefusesPartialAndNonfiniteSdf) {
+    auto floor = MakeFlatFloorChunk({0, 0, 0}, 8);
+    floor->mark_sdf_loaded_or_edited();
+    std::array<float, 17 * 17> heights{};
+    heights.fill(8);
+    const auto original = heights;
+    EXPECT_TRUE(Luminumbra::World::OverlayTerrainCollision(*floor, heights));
+    floor->sdf_data.assign(1, -1);
+    EXPECT_FALSE(Luminumbra::World::OverlayTerrainCollision(*floor, heights));
+    EXPECT_EQ(heights, original);
+    floor->sdf_data.assign(17 * 17 * 17, -1);
+    floor->sdf_data.back() = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_FALSE(Luminumbra::World::OverlayTerrainCollision(*floor, heights));
+    EXPECT_EQ(heights, original);
+    floor->sdf_data.back() = std::numeric_limits<float>::infinity();
+    EXPECT_FALSE(Luminumbra::World::OverlayTerrainCollision(*floor, heights));
+    EXPECT_EQ(heights, original);
+    EXPECT_FALSE(Luminumbra::World::OverlayTerrainCollision(*floor, std::span<float>{}));
+}
+
+TEST(SurfaceQuery, GeneratedCollisionRetainsOriginalHeightBitsAndExtremeSdfIsFinite) {
+    auto floor = MakeFlatFloorChunk({0, 0, 0}, 8);
+    floor->sdf_data.assign(17 * 17 * 17, -1);
+    std::array<float, 17 * 17> heights{};
+    for (std::size_t index = 0; index < heights.size(); ++index)
+        heights[index] = 8 + static_cast<float>(index) / 1024;
+    const auto original = heights;
+    ASSERT_TRUE(Luminumbra::World::OverlayTerrainCollision(*floor, heights));
+    EXPECT_EQ(heights, original); // Non-authoritative SDF cannot change old collision bytes.
+    for (std::size_t z = 0; z < 17; ++z)
+        for (std::size_t y = 0; y < 17; ++y)
+            for (std::size_t x = 0; x < 17; ++x)
+                floor->sdf_data[x + y * 17 + z * 17 * 17] =
+                    y < 8 ? -std::numeric_limits<float>::max() : std::numeric_limits<float>::max();
+    floor->mark_sdf_loaded_or_edited();
+    ASSERT_TRUE(Luminumbra::World::OverlayTerrainCollision(*floor, heights));
+    for (const float height : heights)
+        EXPECT_EQ(height, 7.5f);
+}
+
+TEST(SurfaceQuery, CollisionProjectionKeepsRoofUntilTopSolidSurfaceIsRemoved) {
+    auto floor = MakeFlatFloorChunk({0, 0, 0}, 12.5f);
+    floor->sdf_data.assign(17 * 17 * 17, 1);
+    for (std::size_t z = 0; z < 17; ++z)
+        for (std::size_t y = 0; y < 17; ++y)
+            for (std::size_t x = 0; x < 17; ++x)
+                if (y < 4 || (y >= 10 && y <= 12))
+                    floor->sdf_data[x + y * 17 + z * 17 * 17] = -1;
+    floor->mark_sdf_loaded_or_edited();
+    std::array<float, 17 * 17> heights{};
+    heights.fill(12.5f);
+    ASSERT_TRUE(Luminumbra::World::OverlayTerrainCollision(*floor, heights));
+    for (const float height : heights)
+        EXPECT_EQ(height, 12.5f);
+    for (std::size_t z = 0; z < 17; ++z)
+        for (std::size_t y = 10; y <= 12; ++y)
+            for (std::size_t x = 0; x < 17; ++x)
+                floor->sdf_data[x + y * 17 + z * 17 * 17] = 1;
+    floor->mark_voxel_data_dirty();
+    ASSERT_TRUE(Luminumbra::World::OverlayTerrainCollision(*floor, heights));
+    for (const float height : heights)
+        EXPECT_EQ(height, 3.5f);
+}
+
+TEST_P(TerrainEditCollision, MalformedUpperAuthorityRetainsPublishedRegionGeometry) {
+    if (!GetParam()) {
+        // Standalone legacy refusal is exercised by the projection regression;
+        // here no existing collider may be replaced after shape preparation fails.
+        auto partial = MakeFlatFloorChunk({4, 0, 0}, 8);
+        partial->sdf_data.assign(1, -1);
+        partial->mark_sdf_loaded_or_edited();
+        PhysicsSystem standalone;
+        standalone.startup();
+        EXPECT_FALSE(standalone.add_chunk_collision(*partial));
+        EXPECT_FALSE(standalone.chunk_collision_body(partial->get_id()).has_value());
+        return;
+    }
+    const auto published = physics.simulation_collision_hash();
+    auto partial = MakeFlatFloorChunk({0, 1, 0}, 8);
+    partial->sdf_data.assign(1, -1);
+    partial->mark_sdf_loaded_or_edited();
+    ASSERT_TRUE(world->adopt_streamed_chunk(partial));
+    const std::array<Luminumbra::Vec3, 1> anchors{{{8, 16, 8}}};
+    EXPECT_FALSE(physics.prepare_simulation_collisions(anchors, 8));
+    EXPECT_EQ(physics.simulation_collision_hash(), published);
+    EXPECT_FALSE(physics.simulation_collisions_ready());
+    const auto hit = physics.audio_raycast({8.25f, 20, 8.25f}, {8.25f, 0, 8.25f});
+    ASSERT_TRUE(hit.hit);
+    EXPECT_NEAR(hit.hit_point.y, 8, 0.01f);
+}
+
+TEST(SurfaceQuery, RestoredLegacyColliderUsesProjectedSavedSlabsAndRejectsInvalidSamples) {
+    auto floor = MakeFlatFloorChunk({0, 0, 0}, 8);
+    auto upper = MakeFlatFloorChunk({0, 1, 0}, 8);
+    upper->sdf_data.assign(17 * 17 * 17, 1);
+    for (std::size_t z = 0; z < 17; ++z)
+        for (std::size_t y = 3; y <= 5; ++y)
+            for (std::size_t x = 0; x < 17; ++x)
+                upper->sdf_data[x + y * 17 + z * 17 * 17] = -1;
+    upper->mark_sdf_loaded_or_edited();
+    std::array<float, 17 * 17> heights{};
+    heights.fill(8);
+    ASSERT_TRUE(Luminumbra::World::OverlayTerrainCollision(*upper, heights));
+    PhysicsSystem original;
+    original.startup();
+    ASSERT_TRUE(original.add_chunk_collision(*floor, JPH::BodyID(), heights));
+    const auto saved = original.chunk_collision_body(floor->get_id());
+    ASSERT_TRUE(saved.has_value());
+    PhysicsSystem restored;
+    restored.startup();
+    EXPECT_FALSE(restored.add_chunk_collision(*floor, JPH::BodyID(), std::span(heights).first(1)));
+    EXPECT_FALSE(restored.chunk_collision_body(floor->get_id()).has_value());
+    const auto projected = heights;
+    for (const float invalid : {std::numeric_limits<float>::infinity(),
+                                std::numeric_limits<float>::quiet_NaN(),
+                                std::numeric_limits<float>::max(),
+                                std::numeric_limits<float>::lowest()}) {
+        heights.back() = invalid;
+        EXPECT_FALSE(restored.add_chunk_collision(*floor, JPH::BodyID(), heights));
+        EXPECT_FALSE(restored.chunk_collision_body(floor->get_id()).has_value());
+    }
+    ASSERT_TRUE(restored.add_chunk_collision(*floor, *saved, projected));
+    EXPECT_EQ(restored.chunk_collision_body(floor->get_id()), saved);
+    for (auto* current : {&original, &restored}) {
+        const auto hit = current->audio_raycast({8.25f, 24, 8.25f}, {8.25f, 0, 8.25f});
+        ASSERT_TRUE(hit.hit);
+        EXPECT_NEAR(hit.hit_point.y, 21.5f, 0.01f);
+    }
+}
+
+TEST_P(TerrainEditCollision, DigWakesSleepingSupportedBody) {
+    const auto body = physics.create_dynamic_sphere({8.25f, 9, 8.25f}, {0, 0, 0}, 0.2f);
+    ASSERT_FALSE(body.IsInvalid());
+    for (int tick = 0; tick < 180; ++tick) {
+        ASSERT_TRUE(physics.prepare_simulation_collisions({}));
+        physics.update(1.0f / 60);
+    }
+    ASSERT_FALSE(physics.body_is_active(body));
+    ASSERT_NEAR(physics.get_body_position(body).y, 8.2f, 0.1f);
+    ASSERT_GT(world->EditTerrainVoxel({8, 8, 8}, 4, false, &physics), 0);
+    EXPECT_TRUE(physics.body_is_active(body));
+    for (int tick = 0; tick < 120; ++tick) {
+        ASSERT_TRUE(physics.prepare_simulation_collisions({}));
+        physics.update(1.0f / 60);
+    }
+    EXPECT_LT(physics.get_body_position(body).y, 5);
+}
+
+TEST_P(TerrainEditCollision, ExactBrushBoundaryUpdatesPrecedingSharedLattice) {
+    auto neighbour = MakeFlatFloorChunk({1, 0, 0}, 8);
+    world->GenerateChunkData(*neighbour);
+    ASSERT_TRUE(world->adopt_streamed_chunk(neighbour));
+    ASSERT_TRUE(physics.add_chunk_collision(*neighbour));
+    ASSERT_EQ(world->EditTerrainVoxel({19, 7, 8}, 3, false, &physics), 2);
+    EXPECT_EQ(floor->sdf_data[16 + 7 * 17 + 8 * 17 * 17], 0);
+    EXPECT_GT(floor->voxel_revision(), 0u);
+    const auto hit = physics.audio_raycast({15.75f, 20, 8}, {15.75f, 0, 8});
+    ASSERT_TRUE(hit.hit);
+    EXPECT_LT(hit.hit_point.y, 7.8f);
+}
+
+TEST_P(TerrainEditCollision, PreparationIncludesMissingPrecedingSharedLattice) {
+    ASSERT_EQ(world->find_streamed_chunk({2, 0, 0}), nullptr);
+    ASSERT_TRUE(world->PrepareTerrainVoxelEdit({51, 7, 8}, 3));
+    const auto preceding = world->find_streamed_chunk({2, 0, 0});
+    ASSERT_NE(preceding, nullptr);
+    ASSERT_EQ(preceding->sdf_data.size(), 17u * 17u * 17u);
+    ASSERT_GT(world->EditTerrainVoxel({51, 7, 8}, 3, false, &physics), 0);
+    EXPECT_EQ(preceding->sdf_data[16 + 7 * 17 + 8 * 17 * 17], 0);
+}
+
+TEST_P(TerrainEditCollision, DigLowersColumnAcrossVerticalChunkBoundary) {
+    auto lower = MakeFlatFloorChunk({0, -1, 0}, 8);
+    world->GenerateChunkData(*lower);
+    ASSERT_TRUE(world->adopt_streamed_chunk(lower));
+    ASSERT_GT(world->EditTerrainVoxel({8, 8, 8}, 12, false, &physics), 0);
+    const auto hit = physics.audio_raycast({8.25f, 20, 8.25f}, {8.25f, -8, 8.25f});
+    ASSERT_TRUE(hit.hit);
+    EXPECT_LT(hit.hit_point.y, -3);
+}
+
+TEST(SurfaceQuery, DurableSlabCacheInvalidatesWhenInventoryIsRetiredOrReplaced) {
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0;
+    params.peaks_amplitude = 0;
+    params.height_offset = 8;
+    params.continental_spline = {{{-1, 0}}, {{1, 0}}};
+    params.caves_enabled = false;
+    auto world = std::make_unique<SHIELD_WorldSystem>(nullptr, nullptr, params, 4242);
+    world->set_durable_residency(true);
+    auto upper = MakeFlatFloorChunk({0, 1, 0}, 8);
+    upper->sdf_data.assign(17 * 17 * 17, 1);
+    for (std::size_t z = 0; z < 17; ++z)
+        for (std::size_t y = 3; y <= 5; ++y)
+            for (std::size_t x = 0; x < 17; ++x)
+                upper->sdf_data[x + y * 17 + z * 17 * 17] = -1;
+    upper->mark_sdf_loaded_or_edited();
+    world->set_durable_chunk_loader([upper](const IVec3&) { return upper; }, {});
+    std::array<float, 17 * 17> heights{};
+    EXPECT_FALSE(world->sample_simulation_collision(0, 0, heights, std::span(heights).first(1)));
+    for (const bool replace_inventory : {false, true}) {
+        world->remember_durable_chunks({upper->get_coords()});
+        ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+        EXPECT_EQ(heights[8 * 17 + 8], 21.5f);
+        const auto work = world->simulation_collision_sdf_samples();
+        ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+        EXPECT_EQ(world->simulation_collision_sdf_samples(), work);
+        if (replace_inventory)
+            world->replace_durable_chunks({});
+        else
+            world->forget_durable_chunks({upper->get_coords()});
+        ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+        EXPECT_EQ(heights[8 * 17 + 8], 8);
+    }
+}
+
+TEST(SurfaceQuery, LegacyAttachedWorldProjectsAnUnadoptedAuthoritativeChunk) {
+    auto world = MakeWorldSystem();
+    auto floor = MakeFlatFloorChunk({0, 0, 0}, 8);
+    floor->sdf_data.assign(17 * 17 * 17, 1);
+    for (std::size_t z = 0; z < 17; ++z)
+        for (std::size_t x = 0; x < 17; ++x)
+            floor->sdf_data[x + 3 * 17 + z * 17 * 17] = -1;
+    floor->mark_sdf_loaded_or_edited();
+    PhysicsSystem physics;
+    physics.startup();
+    physics.set_world_system(world.get());
+    ASSERT_TRUE(physics.add_chunk_collision(*floor));
+    const auto hit = physics.audio_raycast({8, 12, 8}, {8, 0, 8});
+    ASSERT_TRUE(hit.hit);
+    EXPECT_NEAR(hit.hit_point.y, 3.5f, 0.01f);
+    const auto saved = physics.chunk_collision_body(floor->get_id());
+    floor->sdf_data.resize(1);
+    floor->mark_voxel_data_dirty();
+    EXPECT_FALSE(physics.refresh_chunk_collision(*floor));
+    EXPECT_EQ(physics.chunk_collision_body(floor->get_id()), saved);
+    const auto retained = physics.audio_raycast({8, 12, 8}, {8, 0, 8});
+    ASSERT_TRUE(retained.hit);
+    EXPECT_NEAR(retained.hit_point.y, 3.5f, 0.01f);
+    floor->sdf_data.assign(17 * 17 * 17, -1);
+    floor->mark_voxel_data_dirty();
+    ASSERT_TRUE(physics.refresh_chunk_collision(*floor));
+    const auto replaced = physics.audio_raycast({8, 20, 8}, {8, 0, 8});
+    ASSERT_TRUE(replaced.hit);
+    EXPECT_NEAR(replaced.hit_point.y, 16, 0.01f);
+    const auto replacement_id = physics.chunk_collision_body(floor->get_id());
+    floor->heightmap_data.resize(1);
+    EXPECT_FALSE(physics.refresh_chunk_collision(*floor));
+    EXPECT_EQ(physics.chunk_collision_body(floor->get_id()), replacement_id);
+    // A valid worldgen surface moving to another slab retires the old owner.
+    floor->heightmap_data.assign(17 * 17, 24);
+    EXPECT_TRUE(physics.refresh_chunk_collision(*floor));
+    EXPECT_FALSE(physics.chunk_collision_body(floor->get_id()).has_value());
+}
+
+TEST(SurfaceQuery, DurableUpperSlabRefusesMissingUnknownAndUnreadableAuthority) {
+    for (int input = 0; input < 5; ++input) {
+        SCOPED_TRACE(input);
+        auto world = MakeWorldSystem();
+        world->set_durable_residency(true);
+        auto upper = MakeFlatFloorChunk({0, 1, 0}, 8);
+        upper->sdf_data.assign(17 * 17 * 17, -1);
+        if (input == 3)
+            upper->mark_sdf_loaded_or_edited();
+        else if (input == 4)
+            upper->set_water_authority();
+        auto placeholder = MakeFlatFloorChunk({0, 1, 0}, 8);
+        placeholder->set_water_authority();
+        ASSERT_TRUE(world->adopt_streamed_chunk(placeholder));
+        world->set_durable_chunk_loader(
+            [input, upper](const IVec3&) -> std::shared_ptr<Chunk> {
+                if (input == 0)
+                    return nullptr;
+                if (input == 2)
+                    throw std::runtime_error("unreadable terrain slab");
+                return upper;
+            },
+            {});
+        world->remember_durable_chunks({upper->get_coords()});
+        std::array<float, 17 * 17> baseline{};
+        baseline.fill(8);
+        auto heights = baseline;
+        EXPECT_EQ(world->sample_simulation_collision(0, 0, heights, baseline), input >= 3);
+        if (input >= 3)
+            EXPECT_EQ(heights[8 * 17 + 8], input == 3 ? 32.0f : 8.0f);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(LegacyAndRegion, TerrainEditCollision, ::testing::Bool());

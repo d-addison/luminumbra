@@ -15,6 +15,7 @@
 #include "luminumbra/core/Types.h"
 #include "systems/PhysicsSystem.h"
 #include "world/SurfaceWorkBudget.h"
+#include "world/TerrainCollision.h"
 #include <algorithm> // Required for std::max and std::min
 #include <array>
 #include <atomic>
@@ -678,10 +679,18 @@ void ClearUnavailableWaterMesh(const SHIELD_WorldSystem& world_system,
     ++owner.water_mesh_owner_version;
 }
 
+void RemoveCollisionLayer(std::unordered_map<u64, std::set<i32>>& columns, const IVec3& coords) {
+    const auto column =
+        columns.find(World::ActivationResidencyIndex::column_key(coords.x, coords.z));
+    if (column == columns.end())
+        return;
+    column->second.erase(coords.y);
+    if (column->second.empty())
+        columns.erase(column);
+}
+
 bool replace_chunk_collision(PhysicsSystem& physics_system, Luminumbra::Chunk& chunk) {
-    const ChunkID id = chunk.get_id();
-    physics_system.remove_chunk_collision(id);
-    if (!physics_system.add_chunk_collision(chunk)) {
+    if (!physics_system.refresh_chunk_collision(chunk)) {
         return false;
     }
     chunk.has_collision.store(true, std::memory_order_release);
@@ -803,6 +812,7 @@ bool SHIELD_WorldSystem::publish_front_generation_batch(bool force) {
         }
         if (chunk->pending_generation_ready.load(std::memory_order_acquire)) {
             chunk->pending_generation_ready.store(false, std::memory_order_release);
+            invalidate_collision_samples(chunk->get_coords());
             if (chunk->get_state() == Luminumbra::ChunkState::Loading) {
                 set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Idle);
             }
@@ -1138,8 +1148,10 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
                 chunk->material_data = std::move(chunk->pending_material_data);
                 chunk->mark_sdf_generated_current_params();
                 chunk->clear_voxel_data_dirty_after_generation();
-                if (replaced_authority)
+                if (replaced_authority) {
+                    invalidate_collision_samples(chunk->get_coords());
                     bump_far_lod_authority_revision(chunk->get_coords());
+                }
                 const auto resident = m_streaming_state.chunks.find(chunk->get_id());
                 if (resident != m_streaming_state.chunks.end() && resident->second == chunk)
                     publish_generated_column_span(*chunk);
@@ -4974,6 +4986,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     // the owner thread, against the exact version produced by those writers.
     for (const auto& built : chunks_to_build) {
         const auto& chunk = built.chunk;
+        invalidate_collision_samples(chunk->get_coords());
         const auto evidence = CaptureNearTerrainMeshEvidence(
             *this, *chunk, built.step, chunk->mesh_version.load(std::memory_order_acquire));
         std::vector<float> empty_densities;
@@ -5449,10 +5462,11 @@ bool SHIELD_WorldSystem::PrepareTerrainVoxelEdit(const Vec3& world_pos, float ra
     wait_for_streaming_jobs();
     if (promotion_pipeline_pending())
         return false;
-    const IVec3 lo = world_to_chunk_coords(world_pos - Vec3(radius_m));
+    // Include the preceding shared lattice, matching EditTerrainVoxel.
+    const IVec3 lo = world_to_chunk_coords(world_pos - Vec3(radius_m + 1.0f));
     const IVec3 hi = world_to_chunk_coords(world_pos + Vec3(radius_m));
     // Resolve every saved member before generating any procedural replacement.
-    // The validated footprint is at most 27 chunks.
+    // The validated footprint, including shared lattices, is at most 64 chunks.
     if (m_durable_residency) {
         for (int cz = lo.z; cz <= hi.z; ++cz)
             for (int cy = lo.y; cy <= hi.y; ++cy)
@@ -5463,7 +5477,7 @@ bool SHIELD_WorldSystem::PrepareTerrainVoxelEdit(const Vec3& world_pos, float ra
                 }
     }
     const auto worldgen_scope = acquire_worldgen_sample_scope();
-    // The validated bounds above cover at most 27 chunks of 17^3 samples.
+    // The validated bounds above cover at most 64 chunks of 17^3 samples.
     // Generate synchronously before editing; never replace saved/edited SDFs.
     for (int cz = lo.z; cz <= hi.z; ++cz)
         for (int cy = lo.y; cy <= hi.y; ++cy)
@@ -5490,6 +5504,7 @@ bool SHIELD_WorldSystem::PrepareTerrainVoxelEdit(const Vec3& world_pos, float ra
                     GenerateChunkData(*chunk, 1);
                     publish_generated_column_span(*chunk);
                     ++m_dirty_generation;
+                    invalidate_collision_samples(chunk->get_coords());
                     chunk->current_lod.store(-1, std::memory_order_release);
                     set_renderable_chunk_state(*chunk, ChunkState::Idle);
                 }
@@ -5546,7 +5561,8 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
                                      static_cast<std::size_t>(size_z);
 
     // Chunk-coord AABB the sphere can touch (carve may span several chunks).
-    const IVec3 lo = world_to_chunk_coords(world_pos - Vec3(radius_m, radius_m, radius_m));
+    // Include the preceding shared lattice at an exact chunk boundary.
+    const IVec3 lo = world_to_chunk_coords(world_pos - Vec3(radius_m + 1.0f));
     const IVec3 hi = world_to_chunk_coords(world_pos + Vec3(radius_m, radius_m, radius_m));
     // Validate the bounded edit footprint before changing any SDF. A corrupt
     // later member must not leave earlier chunks partially edited.
@@ -5619,6 +5635,8 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
                         }
                 if (changed) {
                     chunk->mark_voxel_data_dirty();
+                    ++m_collision_edit_revision;
+                    invalidate_collision_samples(chunk->get_coords());
                     try {
                         m_activation_index.content_changed(chunk->get_coords());
                         ++m_dirty_generation;
@@ -5638,6 +5656,26 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
         EnsureSurfaceReadyNear(world_pos, physics_system, rings, rings);
         if (m_durable_read_failed)
             return edited;
+        if (physics_system && !physics_system->simulation_collisions_enabled()) {
+            // A fill can live entirely above the original surface slab. Refresh
+            // that slab's body even when its render mesh needed no rebuild.
+            for (int cz = lo.z; cz <= hi.z; ++cz) {
+                for (int cx = lo.x; cx <= hi.x; ++cx) {
+                    const auto span = column_surface_span(cx, cz);
+                    const auto owner = find_streamed_chunk({cx, span.center_y, cz});
+                    if (owner)
+                        (void)replace_chunk_collision(*physics_system, *owner);
+                }
+            }
+        }
+        if (physics_system && physics_system->simulation_collisions_enabled()) {
+            // Keep the brush queryable even in an anchor-only host. Preparation
+            // retains every participating owner and replaces only changed shapes.
+            const std::array<Vec3, 1> edit_anchor{world_pos};
+            (void)physics_system->prepare_simulation_collisions(edit_anchor);
+        }
+        if (physics_system)
+            physics_system->wake_terrain_bodies(world_pos, radius_m);
         // Couple the water: a dig lowers the bed (drain), a fill raises it (dam). The bed
         // delta tracks the carve depth at the sphere center (~radius below the surface).
         const std::int32_t delta_mm =
@@ -7069,6 +7107,7 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
     m_water_columns_generated = 0;
     m_parked_columns.clear();
     m_durable_chunks.clear();
+    m_collision_layers.clear();
     for (auto& sample : m_collision_samples) {
         sample.valid = false;
     }
@@ -7199,6 +7238,21 @@ bool SHIELD_WorldSystem::capture_resident_chunk_ids(std::vector<ChunkID>& ids,
     return true;
 }
 
+void SHIELD_WorldSystem::invalidate_collision_samples(const IVec3& coords) {
+    // Owner publication only. Generation workers may bump region revisions, but
+    // cannot touch this owner-thread cache or its slab membership.
+    const auto source = find_streamed_chunk(coords);
+    if (source && source->has_terrain_authority())
+        m_collision_layers[World::ActivationResidencyIndex::column_key(coords.x, coords.z)].insert(
+            coords.y);
+    else if (!m_durable_chunks.contains(Chunk::calculate_id(coords)))
+        RemoveCollisionLayer(m_collision_layers, coords);
+    for (auto& sample : m_collision_samples) {
+        if (sample.x == coords.x && sample.z == coords.z)
+            sample.valid = false;
+    }
+}
+
 void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coords,
                                                          bool terrain_changed) {
     const auto floor_div = [](int value, int divisor) {
@@ -7258,6 +7312,8 @@ u64 SHIELD_WorldSystem::far_lod_region_authority_revision(i32 rx, i32 rz) const 
 }
 
 void SHIELD_WorldSystem::notify_far_lod_authority_changed(const IVec3& chunk_coords) {
+    invalidate_collision_samples(chunk_coords);
+    ++m_collision_edit_revision;
     if (const auto chunk = find_streamed_chunk(chunk_coords)) {
         chunk->invalidate_near_terrain_snapshot();
     }
@@ -7265,6 +7321,8 @@ void SHIELD_WorldSystem::notify_far_lod_authority_changed(const IVec3& chunk_coo
 }
 
 void SHIELD_WorldSystem::notify_far_lod_authority_durable(const IVec3& chunk_coords) {
+    // This notification can run on a persistence thread and changes no SDF.
+    // Owner-thread inventory publication invalidates collision samples separately.
     bump_far_lod_authority_revision(chunk_coords);
 }
 
@@ -7422,10 +7480,12 @@ bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(const FarLodSdfSnapshot
 
 bool SHIELD_WorldSystem::sample_simulation_collision(i32 chunk_x,
                                                      i32 chunk_z,
-                                                     std::span<float> heights) const {
+                                                     std::span<float> heights,
+                                                     std::span<const float> baseline) const {
     constexpr std::size_t kSide = CHUNK_SIZE_X + 1;
     static_assert(CHUNK_SIZE_X == CHUNK_SIZE_Z);
-    if (m_durable_read_failed || heights.size() != kSide * kSide || chunk_x < Chunk::kPackedMinXz ||
+    if (m_durable_read_failed || heights.size() != kSide * kSide ||
+        (!baseline.empty() && baseline.size() != heights.size()) || chunk_x < Chunk::kPackedMinXz ||
         chunk_x > Chunk::kPackedMaxXz || chunk_z < Chunk::kPackedMinXz ||
         chunk_z > Chunk::kPackedMaxXz) {
         return false;
@@ -7463,6 +7523,8 @@ bool SHIELD_WorldSystem::sample_simulation_collision(i32 chunk_x,
         cached.valid = false;
         cached.complete = false;
         cached.saved = false;
+        cached.sdf = false;
+        cached.projected = false;
         cached.x = chunk_x;
         cached.z = chunk_z;
         cached.generation = generation;
@@ -7525,6 +7587,48 @@ bool SHIELD_WorldSystem::sample_simulation_collision(i32 chunk_x,
             }
         }
         std::copy(cached.heights.begin(), cached.heights.end(), heights.begin());
+    }
+    if (!baseline.empty())
+        std::copy(baseline.begin(), baseline.end(), heights.begin());
+    if (cached.valid && cached.complete && cached.sdf) {
+        std::copy(cached.heights.begin(), cached.heights.end(), heights.begin());
+    } else if (!cached.projected) {
+        const auto layers =
+            m_collision_layers.find(World::ActivationResidencyIndex::column_key(chunk_x, chunk_z));
+        if (layers != m_collision_layers.end()) {
+            // Only this edited column's indexed slabs, in descending Y order. The
+            // fixed cache retains the result until a terrain revision invalidates it.
+            for (auto layer_it = layers->second.rbegin(); layer_it != layers->second.rend();
+                 ++layer_it) {
+                const IVec3 layer_coords(chunk_x, *layer_it, chunk_z);
+                auto authority = find_streamed_chunk(layer_coords);
+                if (!authority) {
+                    const auto parked = m_parked.find(Chunk::calculate_id(layer_coords));
+                    if (parked != m_parked.end())
+                        authority = parked->second.chunk;
+                }
+                const bool layer_expected =
+                    m_durable_chunks.contains(Chunk::calculate_id(layer_coords));
+                if (layer_expected && (!authority || !authority->has_terrain_authority()))
+                    authority = read_committed_chunk(layer_coords);
+                if (m_durable_read_failed ||
+                    (layer_expected && (!authority || !authority->has_simulation_authority())))
+                    return false;
+                if (!authority)
+                    continue;
+                if (authority->has_terrain_authority())
+                    m_collision_sdf_samples += authority->sdf_data.size();
+                if (!World::OverlayTerrainCollision(*authority, heights))
+                    return false;
+                cached.sdf |= authority->has_terrain_authority() && !authority->sdf_data.empty();
+            }
+        }
+        if (cached.sdf) {
+            std::copy(heights.begin(), heights.end(), cached.heights.begin());
+            cached.complete = true;
+        }
+        // Water-only and legacy empty-SDF inventories also finish this scan once.
+        cached.projected = true;
     }
     const bool valid = std::all_of(heights.begin(), heights.end(), [](float height) {
         constexpr float kMinHeight = static_cast<float>(Chunk::kPackedMinY) * CHUNK_SIZE_Y;
@@ -8148,6 +8252,8 @@ void SHIELD_WorldSystem::remember_durable_chunks(const std::vector<IVec3>& coord
         sample.valid = false;
     }
     for (const auto& coord : coords) {
+        m_collision_layers[World::ActivationResidencyIndex::column_key(coord.x, coord.z)].insert(
+            coord.y);
         const auto id = Chunk::calculate_id(coord);
         if (!m_durable_chunks.emplace(id, coord).second || !m_durable_residency)
             continue;
@@ -8161,7 +8267,15 @@ void SHIELD_WorldSystem::remember_durable_chunks(const std::vector<IVec3>& coord
 void SHIELD_WorldSystem::forget_durable_chunks(const std::vector<IVec3>& coords) {
     for (const auto& coord : coords) {
         const auto id = Chunk::calculate_id(coord);
-        if (m_durable_chunks.erase(id) == 0 || !m_durable_residency)
+        if (m_durable_chunks.erase(id) == 0)
+            continue;
+        if (!m_streaming_state.chunks.contains(id) && !m_parked.contains(id))
+            RemoveCollisionLayer(m_collision_layers, coord);
+        for (auto& sample : m_collision_samples) {
+            if (sample.x == coord.x && sample.z == coord.z)
+                sample.valid = false;
+        }
+        if (!m_durable_residency)
             continue;
         int rx = 0, rz = 0;
         Persistence::WorldSaveService::region_coords_for_chunk(coord, rx, rz);
@@ -8186,6 +8300,11 @@ void SHIELD_WorldSystem::replace_durable_chunks(const std::vector<IVec3>& coords
                 ++region;
         }
         ++m_digest_membership_revision;
+    }
+    // Inventory replacement is an explicit load boundary, never a tick traversal.
+    for (const auto& [id, coord] : m_durable_chunks) {
+        if (!m_streaming_state.chunks.contains(id) && !m_parked.contains(id))
+            RemoveCollisionLayer(m_collision_layers, coord);
     }
     m_durable_chunks.clear();
     remember_durable_chunks(coords);
@@ -8426,6 +8545,7 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
     }
     const bool adopted = m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;
     if (adopted && chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
+        invalidate_collision_samples(chunk->get_coords());
         bump_far_lod_authority_revision(chunk->get_coords());
     }
     if (adopted) {

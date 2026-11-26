@@ -4,15 +4,18 @@
 #include "../world/GameSession.h"
 #include "../world/PlayerAvatar.h"
 #include "SHIELD_WorldSystem.h"
+#include "world/TerrainCollision.h"
 
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/JobSystemThreadPool.h>
+#include <Jolt/Geometry/AABox.h>
 #include <Jolt/Geometry/Sphere.h>
 #include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
+#include <Jolt/Physics/Collision/BroadPhase/BroadPhaseQuery.h>
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/CollideShape.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
@@ -31,6 +34,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <exception>
@@ -1191,6 +1195,7 @@ struct PhysicsSystem::SimulationCollisions {
     std::size_t owner_visit_count = 0;
     bool ready = false;
     std::uint64_t tick = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t edit_revision = 0;
 };
 
 bool PhysicsSystem::simulation_collisions_enabled() const {
@@ -1199,7 +1204,8 @@ bool PhysicsSystem::simulation_collisions_enabled() const {
 
 bool PhysicsSystem::simulation_collisions_ready() const {
     return !simulation_collisions_enabled() || !m_simulation_collisions ||
-           m_simulation_collisions->ready;
+           (m_simulation_collisions->ready &&
+            m_simulation_collisions->edit_revision == m_world_system->collision_edit_revision());
 }
 
 std::uint32_t PhysicsSystem::non_simulation_body_count() const {
@@ -1326,7 +1332,8 @@ bool PhysicsSystem::prepare_simulation_collisions(std::span<const Vec3> anchors,
         m_simulation_collisions = std::make_unique<SimulationCollisions>();
     }
     auto& state = *m_simulation_collisions;
-    if (state.ready && tick != std::numeric_limits<std::uint64_t>::max() && state.tick == tick) {
+    if (state.ready && tick != std::numeric_limits<std::uint64_t>::max() && state.tick == tick &&
+        state.edit_revision == m_world_system->collision_edit_revision()) {
         return true;
     }
     state.ready = false;
@@ -1457,6 +1464,7 @@ bool PhysicsSystem::prepare_simulation_collisions(std::span<const Vec3> anchors,
     state.published_count = count;
     state.horizon = horizon;
     state.tick = tick;
+    state.edit_revision = m_world_system->collision_edit_revision();
     state.ready = true;
     return true;
 } catch (const std::exception&) {
@@ -1729,13 +1737,26 @@ bool PhysicsSystem::capture_chunk_collision_owners(
     return true;
 }
 
-bool PhysicsSystem::add_chunk_collision(Chunk& chunk, JPH::BodyID restored_id) {
+bool PhysicsSystem::add_chunk_collision(Chunk& chunk,
+                                        JPH::BodyID restored_id,
+                                        std::span<const float> restored_heights) {
+    return add_chunk_collision_impl(chunk, restored_id, restored_heights, false);
+}
+
+bool PhysicsSystem::refresh_chunk_collision(Chunk& chunk) {
+    return add_chunk_collision_impl(chunk, JPH::BodyID(), {}, true);
+}
+
+bool PhysicsSystem::add_chunk_collision_impl(Chunk& chunk,
+                                             JPH::BodyID restored_id,
+                                             std::span<const float> restored_heights,
+                                             bool replace_existing) {
     if (simulation_collisions_enabled()) {
         return true; // Render/warm-up/edit calls cannot mutate simulation's private bodies.
     }
     if (!m_body_interface)
         return true;
-    if (m_chunk_bodies.find(chunk.get_id()) != m_chunk_bodies.end())
+    if (!replace_existing && m_chunk_bodies.find(chunk.get_id()) != m_chunk_bodies.end())
         return true;
 
     constexpr std::size_t kHeightmapSide = CHUNK_SIZE_X + 1;
@@ -1745,7 +1766,7 @@ bool PhysicsSystem::add_chunk_collision(Chunk& chunk, JPH::BodyID restored_id) {
                              chunk.get_coords().x,
                              chunk.get_coords().y,
                              chunk.get_coords().z);
-        return true;
+        return !replace_existing;
     }
 
     // 1. Copy the cached heightmap data into a Jolt-compatible array.
@@ -1772,7 +1793,31 @@ bool PhysicsSystem::add_chunk_collision(Chunk& chunk, JPH::BodyID restored_id) {
     const int center_index = (CHUNK_SIZE_Z / 2) * resolution + (CHUNK_SIZE_X / 2);
     const float center_height = chunk.heightmap_data[static_cast<std::size_t>(center_index)];
     if (center_height < chunk_min_y || center_height >= chunk_max_y) {
+        if (replace_existing)
+            remove_chunk_collision(chunk.get_id());
         return true;
+    }
+
+    // Keep generated heightmaps and persistence bytes unchanged. Both live paths
+    // use the same authoritative SDF projection, including other vertical slabs.
+    std::span<float> collision_heights(height_samples.data(), height_samples.size());
+    if (!restored_heights.empty()) {
+        if (restored_heights.size() != collision_heights.size() ||
+            !std::all_of(restored_heights.begin(), restored_heights.end(), [](float height) {
+                return std::isfinite(height) &&
+                       height >= static_cast<float>(Chunk::kPackedMinY) * CHUNK_SIZE_Y &&
+                       height < (static_cast<float>(Chunk::kPackedMaxY) + 1) * CHUNK_SIZE_Y;
+            }))
+            return false;
+        std::copy(restored_heights.begin(), restored_heights.end(), collision_heights.begin());
+    } else if (m_world_system) {
+        if (!m_world_system->sample_simulation_collision(
+                cc.x, cc.z, collision_heights, chunk.heightmap_data))
+            return false;
+    }
+    // Also cover callers that have not adopted this chunk into the world yet.
+    if (restored_heights.empty() && !World::OverlayTerrainCollision(chunk, collision_heights)) {
+        return false;
     }
 
     // 2. Create the HeightFieldShape.
@@ -1790,15 +1835,20 @@ bool PhysicsSystem::add_chunk_collision(Chunk& chunk, JPH::BodyID restored_id) {
     if (result.HasError()) {
         LUMINUMBRA_CORE_ERROR(
             "HeightFieldShape error for chunk ({},{},{}): {}", cc.x, cc.y, cc.z, result.GetError());
-        return true;
+        return !replace_existing;
     }
 
     // Additional safety check
     if (!result.Get()) {
         LUMINUMBRA_CORE_ERROR(
             "HeightFieldShape creation returned null for chunk ({},{},{})", cc.x, cc.y, cc.z);
-        return true;
+        return !replace_existing;
     }
+
+    // Retain the published body through every sample/shape refusal. Removal frees
+    // the replacement slot and preserves legacy BodyID allocation ordering.
+    if (replace_existing)
+        remove_chunk_collision(chunk.get_id());
 
     // The position is baked into the shape, so the body itself can be created at the world origin.
     JPH::BodyCreationSettings body_settings(result.Get(),
@@ -1822,6 +1872,35 @@ bool PhysicsSystem::add_chunk_collision(Chunk& chunk, JPH::BodyID restored_id) {
     m_body_interface->AddBody(body->GetID(), JPH::EActivation::DontActivate);
     m_chunk_bodies[chunk.get_id()] = ChunkCollisionData{body->GetID()};
     return true;
+}
+
+void PhysicsSystem::wake_terrain_bodies(const Vec3& center, float radius) {
+    if (!m_jolt_system)
+        return;
+    class EditBodies final : public JPH::CollideShapeBodyCollector {
+    public:
+        void AddHit(const JPH::BodyID& id) override {
+            // The Jolt pool contains at most kPhysicsCapacity bodies, and the
+            // broadphase reports each at most once. Fixed storage cannot grow.
+            assert(count < ids.size());
+            ids[count++] = id;
+        }
+        std::array<JPH::BodyID, kPhysicsCapacity> ids{};
+        std::size_t count = 0;
+    } bodies;
+    const JPH::Vec3 origin(center.x, center.y, center.z);
+    const auto extent = JPH::Vec3::sReplicate(radius + 1.0f);
+    m_jolt_system->GetBroadPhaseQuery().CollideAABox(JPH::AABox(origin - extent, origin + extent),
+                                                     bodies);
+    const auto end = bodies.ids.begin() + static_cast<std::ptrdiff_t>(bodies.count);
+    std::sort(bodies.ids.begin(), end, [](JPH::BodyID left, JPH::BodyID right) {
+        return left.GetIndexAndSequenceNumber() < right.GetIndexAndSequenceNumber();
+    });
+    const auto active_end = std::remove_if(bodies.ids.begin(), end, [this](JPH::BodyID id) {
+        return m_body_interface->GetMotionType(id) != JPH::EMotionType::Dynamic;
+    });
+    m_body_interface->ActivateBodies(bodies.ids.data(),
+                                     static_cast<int>(active_end - bodies.ids.begin()));
 }
 
 void PhysicsSystem::remove_chunk_collision(ChunkID id) {

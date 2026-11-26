@@ -80,15 +80,23 @@ public:
     // Streaming admits up to 8192 chunks, with at most one terrain body each.
     // Frozen capsules must leave this many body slots free after allocation.
     static constexpr std::uint32_t kTerrainBodyHeadroom = 8192;
-    // False only when the body pool refuses creation; callers may retry later.
+    // False on invalid authoritative samples or body-pool refusal; callers may retry.
     bool add_chunk_collision(Chunk& chunk);
-    bool add_chunk_collision(Chunk& chunk, JPH::BodyID restored_id);
+    // Continuation may supply a column projected from all saved vertical slabs.
+    bool add_chunk_collision(Chunk& chunk,
+                             JPH::BodyID restored_id,
+                             std::span<const float> restored_heights = {});
+    // Prepare replacement geometry before removing an existing legacy collider.
+    bool refresh_chunk_collision(Chunk& chunk);
     // Const continuation diagnostic. Missing means this chunk has no terrain body.
     std::optional<JPH::BodyID> chunk_collision_body(ChunkID chunk_id) const;
     // Explicit-save capture only; refuses above the 8192-terrain-owner bound
     // before allocating. Output is sorted by chunk ID and unchanged on refusal.
     bool capture_chunk_collision_owners(std::vector<std::pair<ChunkID, JPH::BodyID>>& output) const;
     void remove_chunk_collision(ChunkID chunk_id);
+    // Owner-thread edit notification, for a finite positive brush accepted by the world.
+    // Wakes overlapping rigid bodies in BodyID order, including sleeping supports.
+    void wake_terrain_bodies(const Vec3& center, float radius);
     // Explicit continuation only. At most 128 private terrain bodies and sampled
     // columns; unused bodies retain their reserved IDs outside the broadphase.
     struct SimulationTerrainState {
@@ -352,6 +360,10 @@ public:
 
 private:
     bool capture_player_owner(World::PhysicsOwnerState& output) const;
+    bool add_chunk_collision_impl(Chunk& chunk,
+                                  JPH::BodyID restored_id,
+                                  std::span<const float> restored_heights,
+                                  bool replace_existing);
     bool restore_player_owner(const World::PhysicsOwnerState& state);
     bool capture_avatar_owner(std::size_t index, World::PhysicsOwnerState& output) const;
     bool restore_avatar_owner(const World::PhysicsOwnerState& state,
