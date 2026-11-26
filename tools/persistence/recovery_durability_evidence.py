@@ -392,7 +392,10 @@ def evaluate(root, expected_candidate, expected_builds, source_roots=()):
     return {"schema": "luminumbra.recovery_durability_verdict.v1", "candidate": expected_candidate,
             "builds": dict(expected_builds), "provenance": manifest["provenance"],
             "status": "complete" if complete else "incomplete",
-            "native_qualified": complete and manifest["provenance"] == "native",
+            # The validator cannot authenticate who produced a bundle, so a native
+            # label is only a declaration; qualification needs owner review.
+            "native_declared": complete and manifest["provenance"] == "native",
+            "native_qualified": False,
             "physical_power_loss_qualified": False, "scope": "recorded virtual storage stacks only",
             "environments": scopes, "checks": results,
             "artifacts": {name: hashlib.sha256(data).hexdigest() for name, data in sorted(artifacts.data.items())}}
@@ -414,7 +417,7 @@ def main(argv=None):
         result = evaluate(args.artifact_dir, args.expected_candidate, builds, args.source_root)
     except EVIDENCE_ERRORS as error:
         result = {"schema": "luminumbra.recovery_durability_verdict.v1", "status": "incomplete",
-                  "native_qualified": False, "physical_power_loss_qualified": False, "refusal": str(error)}
+                  "native_declared": False, "native_qualified": False, "physical_power_loss_qualified": False, "refusal": str(error)}
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["status"] == "complete" else 1
 

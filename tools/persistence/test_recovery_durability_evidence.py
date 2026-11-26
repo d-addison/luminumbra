@@ -200,6 +200,15 @@ class RecoveryDurabilityEvidenceContract(unittest.TestCase):
         self.assertEqual(len(first["checks"]), 54)
         self.assertFalse(first["native_qualified"])
 
+    def test_native_label_is_only_a_declaration(self):
+        self.manifest = copy.deepcopy(self.complete)
+        self.assertFalse(self.evaluate()["native_declared"])
+        self.manifest["provenance"] = "native"
+        result = self.evaluate()
+        self.assertEqual(result["status"], "complete")
+        self.assertTrue(result["native_declared"])
+        self.assertFalse(result["native_qualified"])
+
     def test_stale_build_lane_and_artifacts_are_incomplete(self):
         for target in ("candidate", "binary_sha256"):
             with self.subTest(target=target):

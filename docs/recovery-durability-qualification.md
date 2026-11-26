@@ -166,10 +166,12 @@ python3 -I -B tools/persistence/recovery_durability_evidence.py /path/to/evidenc
 
 Stdout is deterministic JSON; redirect it only outside source checkouts, after
 the evidence inputs are finalized. Exit zero means the diagnostic matrix is
-complete; exit one means incomplete/refused. `native_qualified` is true only
-for a complete bundle declared native. `physical_power_loss_qualified` is
-always false. `checks` lists every required cell; `artifacts` hashes every read
-input, including the manifest. Input order does not affect evaluation order,
+complete; exit one means incomplete/refused. `native_declared` is true only
+for a complete bundle declared native. The validator cannot authenticate the
+producer, so `native_qualified` and `physical_power_loss_qualified` are always
+false; native qualification needs owner review of the retained bundle.
+`checks` lists every required cell; `artifacts` hashes every read input,
+including the manifest. Input order does not affect evaluation order,
 but changing raw bytes changes their recorded hashes. Retain failed bundles,
 do not claim qualification from incomplete output, and do not publish actual
 native results until the final repaired candidate has been exercised.
