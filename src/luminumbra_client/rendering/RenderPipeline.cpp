@@ -13,6 +13,7 @@
 #include "ImpostorBake.h"  //  far-field tree impostor atlas (opt-in)
 #include "InProcessFlip.h" // Deterministic in-process FLIP image comparison.
 #include "Mesh.h"
+#include "PassShaderLayouts.h"
 #include "PixelIo.h"
 #include "RenderContext.h" // per-frame pass contract
 #include "RenderGraph.h"   // Declarative frame graph validated against the trace.
@@ -26,6 +27,7 @@
 #include "core/EngineVersion.h"
 #include "core/Log.h"
 #include "core/Profiler.h"
+#include "core/StrictNumeric.h"
 #include "luminumbra_client/core/PresentationClock.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/LightingComponents.h"
@@ -234,6 +236,106 @@ constexpr const char* kGpuTimerPassNames[] = {
 
 } // namespace
 
+// Owns the final colour step. The disabled branch delegates to the original
+// blit verbatim; the shared screen quad is supplied by the pipeline.
+class PostPass {
+public:
+    void init(const std::filesystem::path& root, RenderResourceRegistry& registry) {
+        m_shader = std::make_unique<Shader>((root / "res/shaders/ssao.vert").string().c_str(),
+                                            (root / "res/shaders/post.frag").string().c_str());
+        const auto* layout = FindPassExpectedLayout("post");
+        if (!m_shader->IsValid() || !layout || !m_shader->ValidateLayout(*layout))
+            throw std::runtime_error("Post shader initialization failed");
+        PassGl::label_gl_object(GL_PROGRAM, m_shader->Id(), "shader.post");
+
+        // Fixed bound: 32^3 RGBA texels (512 KiB of CPU float upload data).
+        constexpr u32 size = 32;
+        std::vector<float> texels(size * size * size * 4u);
+        for (u32 blue = 0; blue < size; ++blue)
+            for (u32 green = 0; green < size; ++green)
+                for (u32 red = 0; red < size; ++red) {
+                    const auto offset = ((blue * size + green) * size + red) * 4u;
+                    texels[offset] = static_cast<float>(red) / (size - 1u);
+                    texels[offset + 1u] = static_cast<float>(green) / (size - 1u);
+                    texels[offset + 2u] = static_cast<float>(blue) / (size - 1u);
+                    texels[offset + 3u] = 1.0f;
+                }
+        TextureDesc desc;
+        desc.width = desc.height = desc.depth = size;
+        desc.internal_format = GL_RGBA16F;
+        desc.format = GL_RGBA;
+        desc.type = GL_FLOAT;
+        desc.min_filter = desc.mag_filter = GL_LINEAR;
+        desc.wrap_s = desc.wrap_t = desc.wrap_r = GL_CLAMP_TO_EDGE;
+        desc.expected_layout = "sampled";
+        desc.debug_label = "post_look_lut";
+        m_lut = registry.create_texture("post_look_lut", desc).id;
+        if (!m_lut)
+            throw std::runtime_error("Post LUT allocation failed");
+        glTextureSubImage3D(m_lut, 0, 0, 0, 0, size, size, size, GL_RGBA, GL_FLOAT, texels.data());
+        if (glGetError() != GL_NO_ERROR)
+            throw std::runtime_error("Post LUT upload failed");
+    }
+
+    void destroy(RenderResourceRegistry& registry) {
+        registry.destroy_owned("post_look_lut");
+        m_lut = 0;
+        m_shader.reset();
+    }
+
+    Shader* shader() const {
+        return m_shader.get();
+    }
+    u32 lut() const {
+        return m_lut;
+    }
+
+    void execute(const RenderContext& ctx, u32 scene_color, bool enabled) const {
+        if (!enabled) {
+            FinalBlitPass{}.execute(ctx);
+            return;
+        }
+        LUMIN_PROFILE_ZONE_N("GL PostPass.execute");
+        const GLboolean depth_enabled = glIsEnabled(GL_DEPTH_TEST);
+        const GLboolean blend_enabled = glIsEnabled(GL_BLEND);
+        const GLboolean cull_enabled = glIsEnabled(GL_CULL_FACE);
+        GLint viewport[4]{};
+        glGetIntegerv(GL_VIEWPORT, viewport);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, ctx.dest_fbo().id);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glViewport(
+            0, 0, static_cast<GLsizei>(ctx.dest_width()), static_cast<GLsizei>(ctx.dest_height()));
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_BLEND);
+        glDisable(GL_CULL_FACE);
+        m_shader->use();
+        m_shader->setInt("u_scene", 0);
+        m_shader->setInt("u_lookLut", 1);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, scene_color);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_3D, m_lut);
+        glBindVertexArray(ctx.screen_quad_vao);
+        AttributedGl::Submit(glDrawArrays, GLenum{GL_TRIANGLE_STRIP}, 0, 4);
+        glBindVertexArray(0);
+        glBindTexture(GL_TEXTURE_3D, 0);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        if (depth_enabled)
+            glEnable(GL_DEPTH_TEST);
+        if (blend_enabled)
+            glEnable(GL_BLEND);
+        if (cull_enabled)
+            glEnable(GL_CULL_FACE);
+        glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+    }
+
+private:
+    std::unique_ptr<Shader> m_shader;
+    u32 m_lut = 0;
+};
+
 // --- CONSTRUCTOR / DESTRUCTOR ---
 
 RenderPipeline::RenderPipeline()
@@ -250,7 +352,7 @@ RenderPipeline::RenderPipeline()
     , m_plant_procgen_pass(std::make_unique<PlantProcgenPass>())
     , m_ground_decal_pass(std::make_unique<GroundDecalPass>())
     , m_debug_view_pass(std::make_unique<DebugViewPass>())
-    , m_final_blit_pass(std::make_unique<FinalBlitPass>())
+    , m_post_pass(std::make_unique<PostPass>())
     , m_aerial_pass(std::make_unique<AerialPass>())
     , m_god_rays_pass(std::make_unique<GodRaysPass>())
     , m_taau_pass(std::make_unique<TaauPass>())
@@ -378,13 +480,13 @@ bool RenderPipeline::startup(u32 screen_width,
     // startup; LUMIN_RENDER_SCALE overrides for an A/B. Clamped to
     // [0.5, 1.0] -- 1.0 is byte-identical (internal==output); < 1.0 renders the scene at the
     // internal extent and the taau/final-blit sampler upscales to output.
-    if (const auto value = Core::ReadEnvironment("LUMIN_RENDER_SCALE"); value && !value->empty()) {
-        const float s = std::strtof(value->c_str(), nullptr);
-        // The env knob WINS over the config-seeded set_render_scale for any PARSEABLE value:
+    if (const auto value = Core::ReadEnvironment("LUMIN_RENDER_SCALE")) {
+        float scale = 0.0f;
+        // A complete, finite positive override wins over the config-seeded set_render_scale:
         // clamp into [0.5,1.0] to match set_render_scale's clamp (so config=0.5 + env=2.0 -> 1.0,
-        // not a leaked 0.5). strtof returns 0.0 on garbage -> `s > 0.0f` rejects unparseable input.
-        if (s > 0.0f)
-            m_render_scale = std::clamp(s, 0.5f, 1.0f);
+        // not a leaked 0.5). Invalid input keeps the configured scale, matching main_client.
+        if (Core::ParseNumber(*value, scale) && scale > 0.0f)
+            m_render_scale = std::clamp(scale, 0.5f, 1.0f);
     }
     // Internal (scaled) render extent = round(output * scale); at 1.0, lround(N*1.0f)==N.
     m_internal_width = static_cast<u32>(std::lround(m_screen_width * m_render_scale));
@@ -406,6 +508,7 @@ bool RenderPipeline::startup(u32 screen_width,
         set_default_shadow_cascade_splits(m_shadow_pass->shadow_map());
 
         init_shaders();
+        m_post_pass->init(root_path, m_render_registry);
         m_lighting_pass->init_environment_brdf(m_render_registry);
         // SCALED intermediates render at internal res (== output at scale 1.0).
         m_lighting_pass->init_lighting_fbo(m_render_registry, m_internal_width, m_internal_height);
@@ -1751,6 +1854,7 @@ void RenderPipeline::enumerate_shaders(
     if (m_foliage_pass) {
         visit("foliage", m_foliage_pass->shader().get());
     } //
+    visit("post", m_post_pass->shader());
     visit("aerial_perspective", m_aerial_pass->shader().get()); //
     // the pipeline-owned post shaders, previously UNMONITORED by health.
     visit("god_rays", m_god_rays_pass->shader().get());
@@ -1843,6 +1947,7 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     stats.textures += count(m_treeImpostorAlbedo);
     stats.textures += count(m_treeImpostorNormal);
     stats.textures += count(m_materialLUT);
+    stats.textures += count(m_post_pass->lut());
     stats.textures += count(m_lighting_pass->environment_brdf_texture());
     stats.textures += count(m_water_pass->flat_normal_texture());
     stats.textures += count(m_water_pass->neutral_flow_texture());
@@ -4111,15 +4216,8 @@ void RenderPipeline::execute_stage_lightning_overlay(const Camera& camera) {
 
 void RenderPipeline::execute_stage_final_blit(const Camera& camera) {
     const float deltaTime = m_frame_prepared.delta_time;
-    // 9. FINAL BLIT TO SCREEN (or to the offscreen preview target, ).
-    // -T01: routed through the RenderContext seam (FinalBlitPass) — the
-    // first pass off RenderPipeline&. Byte-identical to the prior inline blit; the
-    // pipeline keeps the GPU-timer + stats orchestration around the call. The lit
-    // scene is adopted into the registry as "lit_scene" (wrap-existing, since the
-    // lighting FBO is still owned by LightingPass during the migration).
-    //  when a preview FBO is bound, the lit scene is copied into it
-    // instead of the default framebuffer (1:1 filtered blit). Default path
-    // (no target) is byte-identical.
+    // Final stage: PostPass owns the resolve/upscale. With the look LUT disabled
+    // (default) it runs the original FinalBlitPass, byte-identical to the prior blit.
     record_frame_stage("final_blit");
     begin_gpu_pass_timer(GpuTimerPass::FinalBlit);
     {
@@ -4138,7 +4236,9 @@ void RenderPipeline::execute_stage_final_blit(const Camera& camera) {
         ctx.registry = &m_render_registry;
         ctx.lit_scene =
             m_render_registry.adopt_fbo("lit_scene", m_lighting_pass->lighting_fbo().fbo_id);
-        m_final_blit_pass->execute(ctx);
+        ctx.screen_quad_vao = m_screen_quad_vao;
+        m_post_pass->execute(
+            ctx, m_lighting_pass->lighting_fbo().color_texture, m_post_lut_enabled);
     }
     m_last_render_pass_stats.final_blits++;
     end_gpu_pass_timer(GpuTimerPass::FinalBlit);
@@ -4824,6 +4924,7 @@ RenderContext RenderPipeline::make_taau_context() {
 // --- CLEANUP ---
 
 void RenderPipeline::cleanup_gpu_resources() {
+    m_post_pass->destroy(m_render_registry);
     // Release allocations while the captured context is current, including
     // startup failure. Repeated shutdown/destruction sees an empty owner.
     m_far_world->Shutdown();
@@ -4968,6 +5069,8 @@ void RenderPipeline::cleanup_gpu_resources() {
         m_debug_view_pass->reset_shader();
     } // render-only debug view
     m_aerial_pass->reset_shader();    //  aerial-perspective fullscreen shader
+    m_god_rays_pass->reset_shader();  // god-rays fullscreen shader
+    m_cloud_composite_shader.reset(); // half-res cloud composite program
     m_waterfall_pass->reset_shader(); // waterfall falling-sheet shader
     m_shadow_pass->reset_shader();
     m_ssao_pass->reset_shaders();
@@ -5397,6 +5500,13 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
         return;
     }
 
+    std::vector<std::int32_t> water_surface_cells;
+    if (ladder && !BuildFarWorldWaterSurfaceCells(
+                      payload.vertices, payload.indices, chunk.coords.y, water_surface_cells)) {
+        m_last_mesh_upload_stats.water_upload_failures++;
+        return;
+    }
+
     auto it = m_water_render_data.find(chunk.id);
     const bool version_reused =
         it != m_water_render_data.end() && it->second.mesh_version != payload.mesh_version;
@@ -5487,6 +5597,7 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
         m_render_registry.record_buffer_allocation(data.ebo_id, checked_sizes.index_bytes);
     }
     data.ladder_upload_version = ladder ? std::optional<u32>(payload.mesh_version) : std::nullopt;
+    data.water_surface_cells = std::move(water_surface_cells);
     data.element_count = index_count;
     data.mesh_version = payload.mesh_version;
     data.frames_since_inactive = 0;
@@ -5497,6 +5608,7 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
         it->second = data;
         previous.mesh_version = previous.element_count = previous.frames_since_inactive = 0;
         previous.ladder_upload_version.reset();
+        previous.water_surface_cells.clear();
         // At most kMaxFreeWaterRenderSlots spare GPU slots are retained.
         if (m_free_water_render_slots.size() < kMaxFreeWaterRenderSlots)
             m_free_water_render_slots.push_back(previous);
@@ -5614,6 +5726,7 @@ void RenderPipeline::unload_water_resources(ChunkID chunk_id) {
         data.element_count = 0;
         data.mesh_version = 0;
         data.ladder_upload_version.reset();
+        data.water_surface_cells.clear();
         data.frames_since_inactive = 0;
         if (m_free_water_render_slots.size() < kMaxFreeWaterRenderSlots) {
             m_free_water_render_slots.push_back(data);
@@ -6536,12 +6649,11 @@ void RenderPipeline::update_time_of_day(float deltaTime,
     // The LUMIN_MOON env read (parsed once) stays here as a client-config concern.
     static const float s_moon_env = [] {
         if (const auto value = Core::ReadEnvironment("LUMIN_MOON")) {
-            try {
-                return std::stof(*value);
-            } catch (...) {
-                // The static initializer bounds this diagnostic to once per process.
-                LUMINUMBRA_CORE_WARN("Invalid LUMIN_MOON; using configured illumination");
-            }
+            float illumination = -1.0f;
+            if (Core::ParseNumber(*value, illumination))
+                return illumination;
+            // The static initializer bounds this diagnostic to once per process.
+            LUMINUMBRA_CORE_WARN("Invalid LUMIN_MOON; using configured illumination");
         }
         return -1.0f;
     }();

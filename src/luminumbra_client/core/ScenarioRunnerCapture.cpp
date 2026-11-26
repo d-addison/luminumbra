@@ -21,9 +21,11 @@
 #include "luminumbra_common/world/GameSession.h"
 #include "nlohmann/json.hpp"
 #include "rendering/Camera.h"
+#include "rendering/DiagnosticReadback.h"
 #include "rendering/FarLodSystem.h"
 #include "rendering/PixelIo.h"
 #include "rendering/UploadBudget.h"
+#include "rendering/WaterVisibility.h"
 #include "rendering/WeatherRenderBridge.h"
 #include "rendering/passes/ParticlePass.h"
 #include "rendering/passes/WaterPass.h"
@@ -50,6 +52,44 @@ using namespace Luminumbra::Client::ScenarioHarness;
 using namespace Luminumbra::Client::App;
 
 namespace {
+
+// Completed-frame capture only. Reuse the diagnostic depth transport, including
+// its pack-state restoration. Never resample a different internal resolution into
+// colour coordinates: the pinned scenario capture must use matching extents.
+SkyPixelMask ReadScenarioSkyMask(const Luminumbra::Rendering::RenderPipeline& pipeline,
+                                 int width,
+                                 int height,
+                                 bool include_water = true) {
+    using namespace Luminumbra::Rendering;
+    if (width <= 0 || height <= 0 || width > 4096 || height > 4096 ||
+        pipeline.internal_width() != static_cast<unsigned int>(width) ||
+        pipeline.internal_height() != static_cast<unsigned int>(height)) {
+        return {};
+    }
+    const DiagnosticExtent extent{static_cast<unsigned int>(width),
+                                  static_cast<unsigned int>(height)};
+    std::size_t retained_bytes = 0;
+    if (!DiagnosticReadbackBudget(extent, retained_bytes)) {
+        return {};
+    }
+    const DiagnosticTargets unused_ids;
+    DiagnosticGlSource source(pipeline.gbuffer(), unused_ids, extent);
+    // At most 16M float depth samples (64 MiB), admitted before allocation.
+    std::vector<float> depth(static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+    if (!source.read_aov(DiagnosticAov::Depth, depth)) {
+        return {};
+    }
+    if (include_water && pipeline.isolation_config().renders(IsolationLayer::Water)) {
+        const auto& water = pipeline.water_visibility_mask();
+        if (!water.valid() || water.width != width || water.height != height) {
+            return {};
+        }
+        return BuildSkyPixelMask(depth, width, height, water.pixels);
+    }
+    // The frozen far-OFF replay exposes opaque depth, but deliberately does not
+    // regenerate water diagnostics. Sliver analysis only scans above the horizon.
+    return BuildSkyPixelMask(depth, width, height);
+}
 
 // Projects a world point into capture pixel coordinates using the same
 // projection the render pipeline builds. Returns false when the point is
@@ -516,6 +556,11 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
 }
 
 void ScenarioRunnerImpl::onPreRenderCapturePins() {
+    if (scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke() ||
+        scenario_config.creature_slice_smoke()) {
+        renderPipeline.set_water_visibility_capture_enabled(true);
+    }
+
     if (scenario_config.temporal_audit && scenario_config.temporal_audit->step) {
         const auto& command = *scenario_config.temporal_audit->step;
         RuntimeWorldSweepBackend backend{*this};
@@ -1850,6 +1895,13 @@ void ScenarioRunnerImpl::capturePlayerView(std::chrono::steady_clock::time_point
             int screenshot_height = 0;
             glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
             if (screenshot_width > 0 && screenshot_height > 0) {
+                const auto sky_mask =
+                    ReadScenarioSkyMask(renderPipeline, screenshot_width, screenshot_height);
+                if (!sky_mask.valid_for(screenshot_width, screenshot_height)) {
+                    (void)refuseScenarioCapture("scenario_geometry_readback_unavailable");
+                    return;
+                }
+
                 std::vector<unsigned char> frame_pixels(
                     static_cast<std::size_t>(screenshot_width) *
                     static_cast<std::size_t>(screenshot_height) * 3u);
@@ -1896,8 +1948,11 @@ void ScenarioRunnerImpl::capturePlayerView(std::chrono::steady_clock::time_point
                     capture.terrain_peak =
                         renderPipeline.terrain_peak_diagnostics(capture.station.target);
                 }
-                capture.sky = AnalyzePlayerViewPixels(
-                    frame_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
+                capture.sky = AnalyzePlayerViewPixels(frame_pixels,
+                                                      sky_mask,
+                                                      screenshot_width,
+                                                      screenshot_height,
+                                                      horizon_row_from_top);
                 capture.holes =
                     AnalyzeLodHolePixels(frame_pixels, screenshot_width, screenshot_height);
                 capture.coverage =
@@ -1922,7 +1977,7 @@ void ScenarioRunnerImpl::capturePlayerView(std::chrono::steady_clock::time_point
                         player_view_station_captures,
                         station_count,
                         gameSession->GetWorldSystem()->get_runtime_chunk_stats(),
-                        player_view_sky_enforced);
+                        true);
                 }
             }
         }
@@ -1979,6 +2034,13 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
                 int screenshot_height = 0;
                 glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
                 if (screenshot_width > 0 && screenshot_height > 0) {
+                    const auto sky_mask =
+                        ReadScenarioSkyMask(renderPipeline, screenshot_width, screenshot_height);
+                    if (!sky_mask.valid_for(screenshot_width, screenshot_height)) {
+                        (void)refuseScenarioCapture("scenario_geometry_readback_unavailable");
+                        return;
+                    }
+
                     std::vector<unsigned char> frame_pixels(
                         static_cast<std::size_t>(screenshot_width) *
                         static_cast<std::size_t>(screenshot_height) * 3u);
@@ -2033,8 +2095,11 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
                         glm::degrees(std::atan2(rendered_direction.z, rendered_direction.x));
                     capture.camera_pitch_degrees =
                         glm::degrees(std::asin(std::clamp(rendered_direction.y, -1.0f, 1.0f)));
-                    capture.sky = AnalyzePlayerViewPixels(
-                        frame_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
+                    capture.sky = AnalyzePlayerViewPixels(frame_pixels,
+                                                          sky_mask,
+                                                          screenshot_width,
+                                                          screenshot_height,
+                                                          horizon_row_from_top);
                     int band_top = 0;
                     int band_bottom = 0;
                     if (ComputeFarLodBoundaryBandRows(gameSession.get(),
@@ -2047,6 +2112,7 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
                                                       band_top,
                                                       band_bottom)) {
                         capture.boundary = AnalyzeFarLodBoundaryBand(frame_pixels,
+                                                                     sky_mask,
                                                                      screenshot_width,
                                                                      screenshot_height,
                                                                      band_top,
@@ -2057,6 +2123,7 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
                         std::uint64_t band_total_px = 0;
                         std::uint64_t band_sand_flat_px = 0;
                         AnalyzeFarLodBoundaryBandWater(frame_pixels,
+                                                       sky_mask,
                                                        screenshot_width,
                                                        screenshot_height,
                                                        band_top,
@@ -2077,7 +2144,7 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
                     }
                     // above-horizon thin-sliver scan (far ON).
                     capture.sky_sliver = AnalyzeFarLodHorizonSkySliver(
-                        frame_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
+                        sky_mask, screenshot_width, screenshot_height, horizon_row_from_top);
                     // Retained v1 counters belong only to effective Legacy.
                     // Ladder evidence uses the immutable ON value snapshot;
                     // the paired replay mutates neither scheduler nor snapshot.
@@ -2121,31 +2188,25 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
                     int far_off_sliver_px = -1;
                     if (renderPipeline.render_far_world_off_pair(*g_camera)) {
                         capture.paired_capture_preserved = true;
-                        std::vector<unsigned char> off_pixels(
-                            static_cast<std::size_t>(screenshot_width) *
-                            static_cast<std::size_t>(screenshot_height) * 3u);
-                        glReadBuffer(GL_BACK);
-                        glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                        glReadPixels(0,
-                                     0,
-                                     screenshot_width,
-                                     screenshot_height,
-                                     GL_RGB,
-                                     GL_UNSIGNED_BYTE,
-                                     off_pixels.data());
+                        const auto off_mask = ReadScenarioSkyMask(
+                            renderPipeline, screenshot_width, screenshot_height, false);
+                        if (!off_mask.valid_for(screenshot_width, screenshot_height)) {
+                            (void)refuseScenarioCapture("scenario_geometry_readback_unavailable");
+                            return;
+                        }
                         const auto off_sliver = AnalyzeFarLodHorizonSkySliver(
-                            off_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
+                            off_mask, screenshot_width, screenshot_height, horizon_row_from_top);
                         far_off_sliver_px = off_sliver.tallest_sliver_px;
                         // The retained ON diagnostic and scheduler were never mutated.
                         // Masked far-attributable analysis of the ON
                         // frame, cancelling the paired far-OFF intrusion
                         // pixels in a 3x3 neighborhood.
                         const auto attributable_sliver =
-                            AnalyzeFarLodHorizonSkySliver(frame_pixels,
+                            AnalyzeFarLodHorizonSkySliver(sky_mask,
                                                           screenshot_width,
                                                           screenshot_height,
                                                           horizon_row_from_top,
-                                                          &off_pixels);
+                                                          &off_mask);
                         capture.far_attributable_sliver_px = attributable_sliver.tallest_sliver_px;
                     } else {
                         // No far-OFF sample available: fall back to the
@@ -2176,7 +2237,7 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
                                                    median_of(farlod_baseline_gbuffer_samples),
                                                    median_of(farlod_far_gbuffer_samples),
                                                    render_pass_stats.gpu_timers_supported,
-                                                   farlod_horizon_sky_enforced);
+                                                   true);
                     }
                 }
             }
@@ -2461,6 +2522,13 @@ void ScenarioRunnerImpl::captureCreatureSlice(std::chrono::steady_clock::time_po
             int screenshot_height = 0;
             glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
             if (screenshot_width > 0 && screenshot_height > 0) {
+                const auto sky_mask =
+                    ReadScenarioSkyMask(renderPipeline, screenshot_width, screenshot_height);
+                if (!sky_mask.valid_for(screenshot_width, screenshot_height)) {
+                    (void)refuseScenarioCapture("scenario_geometry_readback_unavailable");
+                    return;
+                }
+
                 CreatureSliceCapture capture;
                 capture.elapsed_seconds = elapsed_play_seconds;
                 capture.plan = ProbeCreatureSlicePlan(gameSession.get(), creature_slice_scene);
@@ -2526,8 +2594,14 @@ void ScenarioRunnerImpl::captureCreatureSlice(std::chrono::steady_clock::time_po
                                                       static_cast<float>(screenshot_height));
                         }
                     }
-                    capture.composition = AnalyzeCreatureSliceComposition(
-                        comp_pixels, screenshot_width, screenshot_height, sx, sy, stim_x, stim_y);
+                    capture.composition = AnalyzeCreatureSliceComposition(comp_pixels,
+                                                                          sky_mask,
+                                                                          screenshot_width,
+                                                                          screenshot_height,
+                                                                          sx,
+                                                                          sy,
+                                                                          stim_x,
+                                                                          stim_y);
                 }
                 const std::string relative_path = want_before
                                                       ? "screenshots/creature-slice-before.ppm"

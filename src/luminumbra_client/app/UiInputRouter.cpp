@@ -17,6 +17,20 @@ InputContextPolicy LegacyPolicy(const UiInputOwnership& ownership) {
             ownership.rml_text_input || ownership.imgui_text_input};
 }
 } // namespace
+UiInputRouter::GameplayInputHold::GameplayInputHold(UiInputRouter& router, bool enabled)
+    : m_router(router)
+    , m_previous(router.m_gameplayInputHeld) {
+    if (enabled && !m_previous) {
+        m_router.m_gameplayInputHeld = true;
+        m_router.m_contexts.ReleaseHeldInput();
+    }
+}
+UiInputRouter::GameplayInputHold::~GameplayInputHold() {
+    if (m_router.m_gameplayInputHeld != m_previous) {
+        m_router.m_gameplayInputHeld = m_previous;
+        m_router.m_contexts.ReleaseHeldInput();
+    }
+}
 UiInputRouter::UiInputRouter()
     : m_legacyContext(m_contexts, LegacyPolicy(m_ownership))
     , m_consoleContext(m_contexts, {}) {
@@ -54,6 +68,8 @@ KeyRoute UiInputRouter::Key(int key, int action, bool console_toggle, bool devel
         return KeyRoute::Ignore;
     }
     m_contexts.KeyDown(key);
+    if (m_gameplayInputHeld)
+        return KeyRoute::Ignore;
     if (Owner() == InputOwner::Unfocused)
         return KeyRoute::Ignore;
     if (m_ownership.binding_capture)
@@ -99,13 +115,13 @@ InputOwner UiInputRouter::Character(unsigned int codepoint) const {
     return Owner();
 }
 bool UiInputRouter::GameplayAllowed() const {
-    return Owner() == InputOwner::Gameplay;
+    return !m_gameplayInputHeld && Owner() == InputOwner::Gameplay;
 }
 bool UiInputRouter::WorldShortcutsAllowed() const {
-    return m_ownership.in_world && !m_ownership.rml_interaction;
+    return !m_gameplayInputHeld && m_ownership.in_world && !m_ownership.rml_interaction;
 }
 bool UiInputRouter::GameplayKeyAllowed(int key) const {
-    return m_contexts.GameplayKeyAllowed(key);
+    return !m_gameplayInputHeld && m_contexts.GameplayKeyAllowed(key);
 }
 bool UiInputRouter::GameplayMouseAllowed() const {
     return GameplayAllowed();

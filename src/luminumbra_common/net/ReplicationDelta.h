@@ -69,25 +69,38 @@ LastEntitiesById(const std::vector<ReplEntityState>& entities) {
     delta.server_tick = current.server_tick;
     delta.snapshot_seq = current.snapshot_seq;
     delta.acked_usercmd_tick = current.acked_usercmd_tick;
-    // At most every current record changes, and every baseline record plus each
-    // explicit despawn can contribute a removal before deduplication.
-    delta.entities.reserve(current.entities.size());
-    if (baseline.entities.size() > delta.removed_ids.max_size() ||
-        current.removed_ids.size() > delta.removed_ids.max_size() - baseline.entities.size())
-        throw std::length_error("snapshot removal count exceeds capacity");
-    delta.removed_ids.reserve(baseline.entities.size() + current.removed_ids.size());
-
+    const auto changed = [&base](const ReplEntityState& entity) {
+        const auto it = ReplicationDeltaDetail::FindEntity(base, entity.entity_id);
+        return it == base.end() || it->entity->entity_id != entity.entity_id ||
+               !(*it->entity == entity);
+    };
     std::vector<std::uint32_t> seen;
     // Membership scratch holds one id per current input record.
     seen.reserve(current.entities.size());
+    std::size_t changed_count = 0;
     for (const ReplEntityState& e : current.entities) {
         seen.push_back(e.entity_id);
-        const auto it = ReplicationDeltaDetail::FindEntity(base, e.entity_id);
-        if (it == base.end() || it->entity->entity_id != e.entity_id || !(*it->entity == e)) {
+        if (changed(e))
+            ++changed_count;
+    }
+    // Output storage is bounded by emitted records, not the full input snapshots.
+    delta.entities.reserve(changed_count);
+    for (const ReplEntityState& e : current.entities) {
+        if (changed(e)) {
             delta.entities.push_back(e); // new or changed
         }
     }
     std::sort(seen.begin(), seen.end());
+    std::size_t removed_count = 0;
+    for (const ReplEntityState& e : baseline.entities) {
+        if (!std::binary_search(seen.begin(), seen.end(), e.entity_id))
+            ++removed_count;
+    }
+    // Include explicit removals before deduplication; check the sum before allocating.
+    if (removed_count > delta.removed_ids.max_size() ||
+        current.removed_ids.size() > delta.removed_ids.max_size() - removed_count)
+        throw std::length_error("snapshot removal count exceeds capacity");
+    delta.removed_ids.reserve(removed_count + current.removed_ids.size());
     for (const ReplEntityState& e : baseline.entities) {
         if (!std::binary_search(seen.begin(), seen.end(), e.entity_id))
             delta.removed_ids.push_back(e.entity_id);

@@ -319,8 +319,8 @@ nlohmann::json Vec3ToJson(const Luminumbra::Vec3& value);
 nlohmann::json IVec3ToJson(const Luminumbra::IVec3& value);
 
 // --- GL debug-output runtime counters ---
-// Cumulative KHR_debug message counters since boot. Incremented by the app's
-// GL debug callback (app/InputCallbacks.cpp), read by the runtime-state
+// Cumulative KHR_debug message counters since boot. Incremented by the installed
+// router (rendering/GlDebugOutput.cpp), read by the runtime-state
 // recorder's health snapshots and by every QA analysis writer. Client-lib
 // telemetry (not harness code): the shipping client records these too.
 struct GLDebugRuntimeCounters {
