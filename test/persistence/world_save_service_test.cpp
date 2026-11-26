@@ -15,6 +15,7 @@
 #include "luminumbra/core/Types.h"
 #include "persistence/CreatedWorldArtifacts.h"
 #include "persistence/PlantPersistence.h"
+#include "persistence/RecoveryDurability.h"
 #include "persistence/SaveTransaction.h"
 #include "persistence/SavedInputFile.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
@@ -2963,6 +2964,62 @@ TEST(WorldSaveService, DurableRemovalRefusesSubstitutedOccupant) {
     std::ifstream retained(save.path() / "retained-original", std::ios::binary);
     retained >> bytes;
     EXPECT_EQ(bytes, "original");
+}
+
+TEST(WorldSaveService, JournalFlushObservationRequiresAnAppendedCommit) {
+    using Luminumbra::Persistence::detail::NamespaceFlushObservation;
+    const TempSaveDir save("journal_flush_observation");
+    const auto journal = save.path() / "journal";
+    ASSERT_TRUE(std::filesystem::create_directory(journal));
+    const auto control = journal / "txn.json";
+    WorldSaveService::ArtifactIdentity identity{};
+    NamespaceFlushObservation observation{
+        .succeeded = true, .volume_known = true, .ntfs = true, .volume = 101};
+    ASSERT_TRUE(WorldSaveService::append_journal_record(
+        control, "{}\n", identity, nullptr, 0, &observation));
+    // Initial publication flushes bytes before retiring its source name. It supplies
+    // no observation that could authorize a later namespace operation's receipt.
+    EXPECT_FALSE(observation.succeeded);
+    EXPECT_FALSE(observation.volume_known);
+    ASSERT_TRUE(WorldSaveService::append_journal_record(
+        control, "{}\n", identity, nullptr, 0, &observation));
+    EXPECT_TRUE(observation.succeeded);
+    if (observation.volume_known) {
+        EXPECT_EQ(observation.volume, identity.front());
+    }
+#if !defined(_WIN32)
+    EXPECT_FALSE(observation.volume_known);
+    EXPECT_FALSE(observation.ntfs);
+#endif
+}
+
+TEST(WorldSaveService, FailedJournalAppendClearsFlushObservation) {
+    using Luminumbra::Persistence::kMaxSnapshotIndexBytes;
+    using Luminumbra::Persistence::detail::NamespaceFlushObservation;
+    const TempSaveDir save("journal_flush_refusal");
+    const auto journal = save.path() / "journal";
+    ASSERT_TRUE(std::filesystem::create_directory(journal));
+    const auto control = journal / "txn.json";
+    WorldSaveService::ArtifactIdentity identity{};
+    ASSERT_TRUE(WorldSaveService::append_journal_record(control, "{}\n", identity, nullptr));
+    for (const auto invalid : {0, 1, 2}) {
+        SCOPED_TRACE(invalid);
+        NamespaceFlushObservation observation{
+            .succeeded = true, .volume_known = true, .ntfs = true, .volume = 101};
+        auto expected = identity;
+        if (invalid == 0)
+            expected[1] ^= 1;
+        const auto reserve = invalid == 1 ? kMaxSnapshotIndexBytes : std::size_t{0};
+        const std::string record = invalid == 2 ? "unterminated" : "{}\n";
+        EXPECT_FALSE(WorldSaveService::append_journal_record(
+            control, record, expected, nullptr, reserve, &observation));
+        EXPECT_FALSE(observation.succeeded);
+        EXPECT_FALSE(observation.volume_known);
+        EXPECT_FALSE(observation.ntfs);
+        EXPECT_EQ(observation.volume, 0u);
+        std::ifstream input(control, std::ios::binary);
+        EXPECT_EQ(std::string(std::istreambuf_iterator<char>(input), {}), "{}\n");
+    }
 }
 
 TEST(WorldSaveService, IndexOnlySnapshotRefusesUnlistedInvalidSingleton) {
