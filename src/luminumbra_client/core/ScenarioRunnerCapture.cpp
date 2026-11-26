@@ -79,7 +79,11 @@ SkyPixelMask ReadScenarioSkyMask(const Luminumbra::Rendering::RenderPipeline& pi
     if (!source.read_aov(DiagnosticAov::Depth, depth)) {
         return {};
     }
-    if (include_water && pipeline.isolation_config().renders(IsolationLayer::Water)) {
+    // No forward submissions means no water coverage to merge. In particular,
+    // legacy captures need not have requested a visibility replay for a dry frame.
+    // Submitted water still requires its complete, matching visibility evidence.
+    if (include_water && pipeline.isolation_config().renders(IsolationLayer::Water) &&
+        pipeline.get_last_render_pass_stats().water_draws != 0) {
         const auto& water = pipeline.water_visibility_mask();
         if (!water.valid() || water.width != width || water.height != height) {
             return {};

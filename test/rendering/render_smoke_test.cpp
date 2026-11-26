@@ -12039,6 +12039,131 @@ TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLega
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
 
+TEST(RenderSmokeTest, TimedScenarioLegacyWaterCoverageRequiresCurrentEvidenceOnlyWhenSubmitted) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    using namespace Luminumbra::Client::App;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    int width = 0;
+    int height = 0;
+    glfwGetFramebufferSize(glfwGetCurrentContext(), &width, &height);
+    ASSERT_GE(width, 4);
+    ASSERT_GE(height, 4);
+    Luminumbra::TestSupport::ScopedTempFile temporary("timed-water-", ".ppm");
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(
+        static_cast<unsigned int>(width), static_cast<unsigned int>(height), SourceRoot()));
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(false);
+    pipeline.set_capture_diagnostics({.enabled = false, .probe = std::nullopt});
+    Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    entt::registry registry;
+    auto camera = std::make_unique<Camera>(glm::vec3(8, 12, 8), glm::vec3(0, 1, 0), -90, -89);
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    auto session = std::make_unique<Luminumbra::world::GameSession>();
+    session->SetJobSystem(&jobs);
+    const auto root = SourceRoot();
+    const auto root_text = root.string();
+    const std::string world_type = "synthetic";
+    ClientAppContext app;
+    enum class CoverageCase {
+        Dry,
+        Water,
+        MissingMask,
+        StaleMask,
+        Isolated
+    };
+    for (const auto coverage : {CoverageCase::Dry,
+                                CoverageCase::Water,
+                                CoverageCase::MissingMask,
+                                CoverageCase::StaleMask,
+                                CoverageCase::Isolated}) {
+        SCOPED_TRACE(static_cast<int>(coverage));
+        if (coverage == CoverageCase::Water) {
+            auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0));
+            chunk->set_state(Luminumbra::ChunkState::Ready);
+            chunk->water_mesh_vertices = {{{0, 6, 0}, {0, 1, 0}, 0u},
+                                          {{0, 6, 16}, {0, 1, 0}, 0u},
+                                          {{16, 6, 0}, {0, 1, 0}, 0u}};
+            chunk->water_mesh_indices = {0u, 1u, 2u};
+            chunk->water_mesh_version.store(1u);
+            ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+        }
+        pipeline.set_isolation_config(
+            {.layer_mask = coverage == CoverageCase::Isolated
+                               ? IsolationLayer::All & ~IsolationLayer::Water
+                               : IsolationLayer::All,
+             .backdrop = BackdropMode::Scene});
+        pipeline.set_water_visibility_capture_enabled(coverage == CoverageCase::Water ||
+                                                      coverage == CoverageCase::StaleMask);
+        const auto render = [&] {
+            pipeline.render_frame(
+                registry, world, *camera, 0.0f, false, UploadPresentation::Settled);
+        };
+        render();
+        if (coverage == CoverageCase::StaleMask) {
+            ASSERT_TRUE(pipeline.water_visibility_mask().valid());
+            pipeline.set_water_visibility_capture_enabled(false);
+            render();
+            pipeline.set_water_visibility_capture_enabled(true);
+        }
+        const bool submitted = coverage != CoverageCase::Dry && coverage != CoverageCase::Isolated;
+        ASSERT_EQ(pipeline.get_last_render_pass_stats().water_draws, submitted ? 1u : 0u);
+        ASSERT_EQ(pipeline.water_visibility_mask().valid(), coverage == CoverageCase::Water);
+        RuntimeScenarioConfig config;
+        config.scenario = "lod_ground_smoke";
+        config.timed_run_seconds = 0;
+        config.artifact_dir =
+            temporary.Path().parent_path() / std::to_string(static_cast<int>(coverage));
+        RuntimeStateRecorder recorder(config, camera);
+        RuntimeScenarioFrameRecorder frame_recorder(false, 0, config.artifact_dir, camera);
+        bool ready = true;
+        TimedCaptureResult result;
+        auto started = std::chrono::steady_clock::now() - std::chrono::seconds(2);
+        RuntimeReadinessReport readiness;
+        auto runner = CreateScenarioRunner({.window = glfwGetCurrentContext(),
+                                            .root_dir = root,
+                                            .root_path_str = root_text,
+                                            .scenario_config = config,
+                                            .runtime_state_recorder = recorder,
+                                            .lod_ground_frame_recorder = frame_recorder,
+                                            .jobSystem = jobs,
+                                            .gameSession = session,
+                                            .renderPipeline = pipeline,
+                                            .g_camera = camera,
+                                            .g_app = app,
+                                            .scenario_world_type = world_type,
+                                            .scenario_failed = result.failed,
+                                            .scenario_failure_reason = result.failure,
+                                            .scenario_ready = ready,
+                                            .scenario_frame_count = result.frame_count,
+                                            .scenario_play_started_at = started,
+                                            .last_readiness_report = readiness,
+                                            .exit_code = result.exit_code});
+        const auto reference = config.artifact_dir / "reference.ppm";
+        ASSERT_TRUE(WriteBackbufferPpm(reference, width, height));
+        runner->onPostRenderCapture(0.0f);
+        const bool refused =
+            coverage == CoverageCase::MissingMask || coverage == CoverageCase::StaleMask;
+        EXPECT_EQ(result.failed, refused) << result.failure;
+        if (refused) {
+            EXPECT_EQ(result.failure, "capture_diagnostics_scenario_geometry_readback_unavailable");
+            for (const auto* role : {"start", "mid", "end"}) {
+                EXPECT_FALSE(fs::exists(config.artifact_dir / "screenshots" /
+                                        (std::string("lod-ground-") + role + ".ppm")));
+            }
+            glfwSetWindowShouldClose(glfwGetCurrentContext(), false);
+        } else {
+            ExpectTimedCaptureBundles(config, reference, false, *session);
+        }
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    }
+}
+
 TEST(RenderSmokeTest, DiagnosticDestinationReservationExcludesOverlappingWritersAndCleansUp) {
     HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();

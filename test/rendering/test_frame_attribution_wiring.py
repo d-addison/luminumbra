@@ -5847,6 +5847,34 @@ class SweepCameraInputWiring(unittest.TestCase):
 
 
 class ScenarioGeometryMaskWiringTests(unittest.TestCase):
+    def test_water_evidence_is_required_only_for_submitted_forward_water(self):
+        capture = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
+        reader = block(capture, "SkyPixelMask ReadScenarioSkyMask(")
+        predicate = re.search(r"if \((include_water.*?)\) \{", reader, re.S).group(1)
+        for include_water, water_layer, water_draws in itertools.product(
+                (False, True), (False, True), (0, 1, 2**64 - 1)):
+            with self.subTest(include_water=include_water, water_layer=water_layer,
+                              water_draws=water_draws):
+                required = cpp_expression(predicate, **{
+                    "include_water": include_water,
+                    "pipeline.isolation_config().renders(IsolationLayer::Water)": water_layer,
+                    "pipeline.get_last_render_pass_stats().water_draws": water_draws,
+                })
+                self.assertEqual(required, include_water and water_layer and water_draws != 0)
+        # Dry frames still need readable depth; submitted water never bypasses
+        # validity or extent checks, including a missing or stale replay.
+        self.assertLess(reader.index("!source.read_aov("), reader.index("if (include_water"))
+        water = block(reader, "if (include_water")
+        self.assertIn("!water.valid() || water.width != width || water.height != height", water)
+        self.assertIn("return {};", water)
+        self.assertIn("BuildSkyPixelMask(depth, width, height, water.pixels)", water)
+        self.assertNotIn("capture_diagnostics_enabled()", reader)
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        self.assertIn("m_last_render_pass_stats = {};",
+                      block(pipeline, "void RenderPipeline::prepare_frame("))
+        self.assertIn("m_last_render_pass_stats.water_draws += water_stats.water_draws;",
+                      block(pipeline, "void RenderPipeline::execute_stage_water("))
+
     def test_sky_clear_value_does_not_erase_finite_geometry(self):
         harness = read(CLIENT / "core/RuntimeScenarioHarness.cpp")
         classifier = compact(block(harness, "SkyPixelMask BuildSkyPixelMask("))
