@@ -1131,12 +1131,21 @@ class FrameAttributionWiring(unittest.TestCase):
         for path, signature, storage in (
                 ("app/FrameAttribution.h", "inline bool& shader_first_use_collection_enabled()",
                  "static constinit bool enabled = false; return enabled;"),
-                ("rendering/AttributedGl.h", "inline Client::Attribution::ProgramFirstUse& programs()",
-                 "static Client::Attribution::ProgramFirstUse state; return state;"),
                 ("rendering/FarWorldReplay.h", "inline ReplayStateAccess*& active_replay_state()",
                  "static thread_local ReplayStateAccess* state = nullptr; return state;")):
             with self.subTest(path=path):
                 self.assertEqual(compact(block(read(CLIENT / path), signature)), storage)
+
+    def test_program_accessor_has_constant_initialized_storage_without_a_local_guard(self):
+        gl = read(CLIENT / "rendering/AttributedGl.h")
+        self.assertEqual(compact(block(gl, "inline Client::Attribution::ProgramFirstUse& programs()")),
+                         "return detail::program_storage.state;")
+        self.assertIn("inline constinit const ProgramStorage program_storage{};", gl)
+        self.assertEqual(compact(block(gl, "struct ProgramStorage")),
+                         "mutable Client::Attribution::ProgramFirstUse state;")
+        helper = read(CLIENT / "app/ProgramFirstUse.h")
+        self.assertIn("constexpr ProgramFirstUse() = default;", helper)
+        self.assertIn("std::optional<std::unordered_map<std::uint32_t, State>> m_programs;", helper)
 
     def test_all_program_lifetimes_and_submissions_use_first_use_attribution(self):
         # Enumerate the rendering and both UI backends, including state restores,
@@ -5809,6 +5818,32 @@ class PassCallerStateContract(unittest.TestCase):
         for call in ("glEnable(GL_DEPTH_TEST)", "glDepthFunc(GL_GREATER)",
                      "glDepthMask(GL_TRUE)", "glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer.fbo_id)"):
             self.assertLess(gbuffer.index(call), gbuffer.index("StaticDrawPass::CallerState authored_caller"))
+
+
+class SweepCameraInputWiring(unittest.TestCase):
+    def test_hold_covers_event_polling_driving_and_nested_capture(self):
+        loop = block(read(CLIENT / "main_client.cpp"),
+                     "while (!glfwWindowShouldClose(window))")
+        hold = ("const UiInputRouter::GameplayInputHold sweep_input_hold( "
+                "uiInputRouter, scenario_config.world_visual_sweep() || "
+                "scenario_config.temporal_audit);")
+        self.assertTrue(hold in compact(loop), "sweep input hold must begin the frame scope")
+        prefix = loop[:loop.index("const UiInputRouter::GameplayInputHold")]
+        self.assertFalse(re.sub(r"//[^\n]*", "", prefix).strip())
+        for consumer in ("glfwPollEvents()", "onGameStateInGame(deltaTime)",
+                         "onPreRenderWorldSweep()", "onPostRenderCapture(deltaTime)"):
+            self.assertIn(consumer, loop)
+        callbacks = read(CLIENT / "app/InputCallbacks.cpp")
+        refresh = block(callbacks, "void RefreshInputOwnership(")
+        changed = block(refresh, "if (b.router->SetOwnership(ownership))")
+        self.assertIn("app.input.firstMouse = true;", changed)
+        self.assertIn("player->ClearQueuedLiveInput();", changed)
+        for signature in ("void mouse_callback(", "void scroll_callback("):
+            callback = compact(block(callbacks, signature))
+            self.assertIn("if (bindings.router && !bindings.router->GameplayMouseAllowed()) "
+                          "return;", callback)
+        self.assertIn("g_playerController->SetLiveInputGate(", loop)
+        self.assertIn("uiInputRouter.GameplayKeyAllowed(key)", loop)
 
 
 class ScenarioGeometryMaskWiringTests(unittest.TestCase):

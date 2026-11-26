@@ -1,4 +1,5 @@
 #include "luminumbra_client/rendering/FarWorldOwnership.h"
+#include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/FarWantedSet.h"
 
 #include <cmath>
@@ -14,7 +15,9 @@ FarWorldLiveUpload Current(FarWorldLiveCell cell) {
 } // namespace
 
 TEST(FarWorldOwnership, TerrainAndWaterVersionsEligibilityAndMergedBitsAreIndependent) {
+    const std::array<std::int32_t, 1> surface_cells{0};
     auto upload = Current({-1, 0, -1, 0});
+    upload.water_surface_cells = surface_cells;
     upload.water_snapshot_version = upload.water_uploaded_version = 17;
     upload.water_uploaded_indices = 6;
     upload.water_valid_allocation = upload.water_pass_eligible = true;
@@ -54,6 +57,152 @@ TEST(FarWorldOwnership, TerrainAndWaterVersionsEligibilityAndMergedBitsAreIndepe
     EXPECT_FALSE(mask.Add(Current({0, 0, 0, 0})));
     EXPECT_FALSE(mask.Finish());
     EXPECT_FALSE(mask.OwnsWater({-8, 0, -8}));
+}
+
+TEST(FarWorldOwnership, SeabedTerrainKeepsStorageCellAndWaterOwnsSeaLevelSurface) {
+    std::array<Luminumbra::VoxelVertex, 3> vertices{};
+    vertices[0].position = {0, 48, 0};
+    vertices[1].position = {0, 48, 16};
+    vertices[2].position = {16, 48, 0};
+    const std::array<std::uint32_t, 3> indices{0, 1, 2};
+    std::vector<std::int32_t> surface_cells;
+    ASSERT_TRUE(BuildFarWorldWaterSurfaceCells(vertices, indices, -3, surface_cells));
+    EXPECT_EQ(surface_cells, (std::vector<std::int32_t>{0}));
+    auto upload = Current({-16, -3, -16, 0});
+    upload.water_snapshot_version = upload.water_uploaded_version = 17;
+    upload.water_uploaded_indices = indices.size();
+    upload.water_valid_allocation = upload.water_pass_eligible = true;
+    upload.water_surface_cells = surface_cells;
+    FarWorldOwnership mask;
+    mask.Begin(1);
+    ASSERT_TRUE(mask.Add(upload));
+    ASSERT_TRUE(mask.Finish());
+    EXPECT_TRUE(mask.Owns({-248, -40, -248}));
+    EXPECT_FALSE(mask.OwnsWater({-248, -40, -248}));
+    const std::array<double, 3> surface{-248, 0, -248};
+    EXPECT_TRUE(FarWorldFragmentInClip(surface, 1040)); // overlap band
+    EXPECT_TRUE(mask.OwnsWater(surface));
+    EXPECT_FALSE(mask.Owns(surface));
+    ASSERT_EQ(mask.cells().size(), 2u);
+    EXPECT_EQ(mask.cells()[0], (FarWorldLiveCell{-16, -3, -16, kFarWorldTerrainReady}));
+    EXPECT_EQ(mask.cells()[1], (FarWorldLiveCell{-16, 0, -16, kFarWorldWaterReady}));
+
+    ASSERT_TRUE(BuildFarWorldWaterSurfaceCells({}, {}, -3, surface_cells));
+    EXPECT_TRUE(surface_cells.empty());
+    upload.water_surface_cells = surface_cells;
+    upload.water_uploaded_indices = 0;
+    mask.Begin(2);
+    ASSERT_TRUE(mask.Add(upload));
+    ASSERT_TRUE(mask.Finish());
+    EXPECT_TRUE(mask.Owns({-248, -40, -248}));
+    EXPECT_FALSE(mask.OwnsWater(surface));
+    ASSERT_EQ(mask.cells().size(), 1u);
+    EXPECT_EQ(mask.cells()[0].reserved, kFarWorldTerrainReady);
+}
+
+TEST(FarWorldOwnership, WaterSurfaceCellsCoverSlopesWithoutFillingDisconnectedGaps) {
+    std::array<Luminumbra::VoxelVertex, 7> vertices{};
+    // Relative to storage Y=-3: a sloped surface crosses cells -1,0,1;
+    // a separate surface lies at Y=64 (cell 4). The unused vertex is ignored.
+    const std::array<float, 7> heights{47.875f, 64, 48, 112, 112, 112, 1000000};
+    for (std::size_t index = 0; index < vertices.size(); ++index)
+        vertices[index].position = {0, heights[index], 0};
+    const std::array<std::uint32_t, 9> indices{3, 4, 5, 0, 1, 2, 0, 1, 2};
+    std::vector<std::int32_t> cells;
+    ASSERT_TRUE(BuildFarWorldWaterSurfaceCells(vertices, indices, -3, cells));
+    EXPECT_EQ(cells, (std::vector<std::int32_t>{-1, 0, 1, 4}));
+}
+
+TEST(FarWorldOwnership, MaximumWaterSurfaceCellsFitExistingMaskBound) {
+    std::array<Luminumbra::VoxelVertex, 3> vertices{};
+    vertices[1].position.y = static_cast<float>((kFarWorldLiveCellLimit - 1) * 16);
+    const std::array<std::uint32_t, 3> indices{0, 1, 2};
+    std::vector<std::int32_t> cells;
+    ASSERT_TRUE(BuildFarWorldWaterSurfaceCells(vertices, indices, -3, cells));
+    ASSERT_EQ(cells.size(), kFarWorldLiveCellLimit);
+    EXPECT_EQ(cells.front(), -3);
+    EXPECT_EQ(cells.back(), static_cast<std::int32_t>(kFarWorldLiveCellLimit) - 4);
+    FarWorldLiveUpload upload;
+    upload.water_uploaded_indices = 3;
+    upload.water_valid_allocation = upload.water_pass_eligible = true;
+    upload.water_surface_cells = cells;
+    FarWorldOwnership mask;
+    mask.Begin(1);
+    ASSERT_TRUE(mask.Add(upload));
+    ASSERT_TRUE(mask.Finish());
+    EXPECT_EQ(mask.cells().size(), kFarWorldLiveCellLimit);
+}
+
+TEST(FarWorldOwnership, InvalidWaterSurfaceMetadataLeavesPriorCellsUnchanged) {
+    std::array<Luminumbra::VoxelVertex, 3> vertices{};
+    const std::array<std::uint32_t, 3> indices{0, 1, 2};
+    const std::vector<std::int32_t> prior{7};
+    auto cells = prior;
+    EXPECT_FALSE(BuildFarWorldWaterSurfaceCells(vertices, {}, 0, cells));
+    EXPECT_EQ(cells, prior);
+    EXPECT_FALSE(BuildFarWorldWaterSurfaceCells({}, indices, 0, cells));
+    EXPECT_EQ(cells, prior);
+    EXPECT_FALSE(BuildFarWorldWaterSurfaceCells(vertices, std::span(indices).first(2), 0, cells));
+    EXPECT_EQ(cells, prior);
+    EXPECT_FALSE(
+        BuildFarWorldWaterSurfaceCells(vertices, std::array<std::uint32_t, 3>{0, 1, 3}, 0, cells));
+    EXPECT_EQ(cells, prior);
+    for (const float height : {std::numeric_limits<float>::infinity(),
+                               std::numeric_limits<float>::quiet_NaN(),
+                               1e30f,
+                               -1e30f}) {
+        vertices[0].position.y = height;
+        EXPECT_FALSE(BuildFarWorldWaterSurfaceCells(vertices, indices, 0, cells));
+        EXPECT_EQ(cells, prior);
+    }
+    vertices[0].position.y = 16;
+    EXPECT_FALSE(BuildFarWorldWaterSurfaceCells(
+        vertices, indices, std::numeric_limits<std::int32_t>::max(), cells));
+    EXPECT_EQ(cells, prior);
+    vertices[0].position.y = -16;
+    EXPECT_FALSE(BuildFarWorldWaterSurfaceCells(
+        vertices, indices, std::numeric_limits<std::int32_t>::min(), cells));
+    EXPECT_EQ(cells, prior);
+    vertices[0].position.y = static_cast<float>(kFarWorldLiveCellLimit * 16);
+    EXPECT_FALSE(BuildFarWorldWaterSurfaceCells(vertices, indices, 0, cells));
+    EXPECT_EQ(cells, prior);
+    std::vector<Luminumbra::VoxelVertex> oversized_vertices(32u * 32u * 4u + 1u);
+    EXPECT_FALSE(BuildFarWorldWaterSurfaceCells(oversized_vertices, indices, 0, cells));
+    EXPECT_EQ(cells, prior);
+    std::vector<std::uint32_t> oversized_indices(32u * 32u * 6u + 3u);
+    EXPECT_FALSE(BuildFarWorldWaterSurfaceCells(vertices, oversized_indices, 0, cells));
+    EXPECT_EQ(cells, prior);
+}
+
+TEST(FarWorldOwnership, MissingOrOverLimitWaterCellsRefuseWholePublication) {
+    auto upload = Current({0, -3, 0, 0});
+    upload.water_uploaded_indices = 3;
+    upload.water_valid_allocation = upload.water_pass_eligible = true;
+    const std::array<std::int32_t, 2> surface_cells{0, 1};
+    const std::vector<std::int32_t> oversized(kFarWorldLiveCellLimit + 1, 0);
+    FarWorldOwnership mask;
+    for (int refusal = 0; refusal < 4; ++refusal) {
+        upload.water_surface_cells = surface_cells;
+        upload.cell.reserved = 0;
+        if (refusal == 0)
+            upload.water_surface_cells = {};
+        if (refusal == 1)
+            upload.water_surface_cells = oversized;
+        if (refusal == 2)
+            upload.cell.reserved = kFarWorldWaterReady;
+        mask.Begin(1, 2);
+        EXPECT_FALSE(mask.Add(upload)); // fourth case exhausts capacity after terrain + water
+        EXPECT_FALSE(mask.Finish());
+        EXPECT_TRUE(mask.cells().empty());
+    }
+    upload.cell.reserved = 0;
+    upload.valid_allocation = false;
+    mask.Begin(2);
+    ASSERT_TRUE(mask.Add(upload));
+    ASSERT_TRUE(mask.Finish());
+    EXPECT_TRUE(mask.OwnsWater({8, 0, 8}));
+    EXPECT_TRUE(mask.OwnsWater({8, 16, 8}));
+    EXPECT_FALSE(mask.Owns({8, -40, 8}));
 }
 
 TEST(FarWorldOwnership, CurrentStaleMissingFailedEvictedAndEmptyUploads) {
