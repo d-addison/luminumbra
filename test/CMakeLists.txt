@@ -382,6 +382,7 @@ add_executable(common_tests
     common/SimulationClock_test.cpp
     common/ActiveRegionLedger_test.cpp
     common/ActiveRegionPriority_test.cpp
+    common/ActiveRegionScale_test.cpp
     common/SimulationIdentityAllocator_test.cpp
     common/PlantCreationIdentity_test.cpp
     common/GroundObjectStore_test.cpp
@@ -2620,6 +2621,9 @@ set_tests_properties(StationDiscoveryContract StationDiscoveryCliSmoke
 add_test(NAME SimBudgetCaptureContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py")
 set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
+add_test(NAME ActiveRegionScaleReportContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_active_region_scale.py")
+set_tests_properties(ActiveRegionScaleReportContract PROPERTIES LABELS "simulation;tools" TIMEOUT 5)
 add_test(NAME SimBudgetGateContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_sim_budget_gate.py")
 set_tests_properties(SimBudgetGateContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)

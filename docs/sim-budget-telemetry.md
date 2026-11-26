@@ -266,6 +266,62 @@ Missing, malformed or duplicate-key selected presets and non-string biome-table
 paths refuse capture before launching the executable or creating evidence.
 Inputs are hashed again before publication; changes refuse a success manifest.
 
+## Synthetic ledger and indexed-save measurements
+
+The optional `LUMINUMBRA_BUILD_TOOLS` target `luminumbra_active_regions_bench`
+measures bounded synthetic fixtures without procedural streaming. Collect its
+raw samples and report outside the source tree with:
+
+```sh
+python3 -I -B tools/perf/active_region_scale.py \
+  --binary build/perf/bin/luminumbra_active_regions_bench \
+  --evidence-dir <new-evidence-directory>
+```
+
+Defaults are ledger sizes 8 and 32, four adopted durable chunks and three
+independent repetitions. `--sizes`, `--chunks` and `--repeats` select the matrix;
+the fixture caps are 524,288 ledger records, 4,096 chunks and 128 total runs
+(at most 16 sizes and 32 repetitions). These are tool allocation bounds,
+independent of shipping scheduler limits. Large runs require separate native
+qualification; this documentation records no measured timing values.
+
+Each run measures cold priority admission, unchanged warm priorities, an anchor
+change, reduction, freezing and idle eviction. Alternating records are marked
+populated and retained; other records are empty and unowned. Synthetic pressure
+uses a fixture-local finite configuration and a deterministic digest provider.
+Indexed saves include the requested number of pinned fixture ledger records and
+measure first publication, an unchanged save and a one-chunk SDF edit. Pairs of
+chunks share a region so sparse edits include a clean sibling;
+each pair occupies a separate region. These saves use real indexed persistence,
+with nonempty SDF and height payloads, without advancing simulation ticks.
+
+`sample-<size>-<repeat>.json` retains the command, workload, source revision,
+dirty flag, binary SHA-256, resolved fixture hash and fixture recipe version.
+Each native sample has schema `luminumbra.active_region_scale_samples.v1`.
+Only a complete, identity-consistent matrix publishes `report.json`, schema
+`luminumbra.active_region_scale_report.v1`. Missing, duplicate, malformed or
+mixed-identity samples refuse publication. Source, content and executable
+identity are checked again before publishing. Failed captures retain partial
+evidence and their synthetic saves; they never replace an existing directory.
+
+The report preserves individual `SaveWorkCounts`, snapshot-copy and priority
+comparison observations and interpolates elapsed p50/p95/p99/maximum using the
+same percentile convention as stage telemetry. Memory observations are logical
+record-value bytes, encoded scheduler/save ledger bytes and SDF/height value
+bytes, reported separately from populated/empty record counts. They exclude container nodes,
+scratch, allocator overhead and process RSS; they are not peak-memory estimates.
+Encoding and memory accounting occur outside the scheduler timer. Cache-dependent
+clean-sibling serialization counts remain separate raw observations.
+
+The fast `ActiveRegionScale` gtests check schedule and encoded-byte parity with
+and without observation, unchanged priority comparisons, and sparse-save work
+using four chunks. `ActiveRegionScaleReportContract` checks the Python report
+and capture refusal paths without launching the engine. Native execution and
+large-world measurements remain pending. Continue using
+`capture_sim_budget.py` for representative default, mountains and archipelago
+per-system telemetry; this synthetic harness adds no replacement stage telemetry,
+enforced limits, shipping simulation inputs, save fields or replay bytes.
+
 ## Executable checks
 
 Seven `SimBudgetTelemetry` gtests cover complete production artifact byte equality
