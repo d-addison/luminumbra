@@ -3056,20 +3056,14 @@ TEST(WorldSaveService, AbsentRegionRemovalRefusesNonDirectoryAncestors) {
         if (chunks_directory) {
             ASSERT_TRUE(std::filesystem::create_directory(chunks));
         }
-        const auto obstruction = chunks_directory ? chunks / "region" : chunks;
-        ASSERT_TRUE(WorldSaveService::create_file_durably(obstruction, "foreign"));
         SaveTransaction transaction(save.path(), 1, {}, &WorldSaveService::member_digest);
         std::vector<std::string> errors;
-        if (!chunks_directory) {
-            // A non-directory chunks entry is already refused when the transaction
-            // inventories the save, before any removal can reach it.
-            EXPECT_FALSE(transaction.begin(&errors));
-            EXPECT_FALSE(errors.empty());
-            EXPECT_EQ(ReadFileBytes(obstruction), "foreign");
-            EXPECT_FALSE(journal_pending(save.path()));
-            continue;
-        }
         ASSERT_TRUE(transaction.begin(&errors)) << ::testing::PrintToString(errors);
+        // The strict inventory refuses a foreign file at begin, so the obstruction
+        // appears only after the transaction has started, as a concurrent writer would.
+        const auto obstruction = chunks_directory ? chunks / "region" : chunks;
+        ASSERT_TRUE(WorldSaveService::create_file_durably(obstruction, "foreign"));
+        errors.clear();
         EXPECT_FALSE(WorldSaveService::remove_member(
             save.path(), "chunks/region/plant-identities.json", &errors));
         EXPECT_FALSE(errors.empty());
