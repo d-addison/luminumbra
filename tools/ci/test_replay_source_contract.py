@@ -1431,7 +1431,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         finish = self.function(source, "FinishJournal", "")
         self.assertLess(finish.index('PrepareReceipt('), finish.index('WorldSaveService::publish_restoration('))
         self.assertLess(finish.index('document.external_control = true;'), finish.index('bool all_retired'))
-        self.assertLess(finish.index('if (!all_retired)'), finish.index('"before-receipt-retirement"'))
+        self.assertLess(finish.index('if (!all_retired)'), finish.index('"crash-before-receipt-retirement"'))
         self.assertIn('if (!document.modern)', finish)
         self.assertIn('return FinishLegacyJournal(', finish)
         aliases = self.function(source, "ControlAliasLinks", "")
@@ -1439,19 +1439,27 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn('false, present)', aliases)
         inventory = self.function(source, "JournalInventory", "")
         self.assertIn('ControlAliasLinks(save_dir, document)', inventory)
+        notifications = self.function(source, "report_snapshot_step", "void ")
+        self.assertIn('.starts_with("journal.receipts.")', notifications)
+        for event in ('before-publication', 'after-publication',
+                      'publication-quarantined', 'retirement-quarantined'):
+            self.assertIn('"crash-receipt-' + event + '"', notifications)
+        self.assertNotIn('"receipt-recorded"', source)
+        self.assertIn('if (kNeedsFileReceipts &&', finish)
         recovery = self.function(source, "recover_pending_journal", "")
         self.assertLess(recovery.index('RecoverReceiptCarriers(save_dir, errors)'),
                         recovery.index('fs::symlink_status(journal, ec)'))
         rollback = self.function(source, "RollbackEntries", "")
         self.assertIn('const auto identity = missing ? entry->rollback_retired_identity : current;', rollback)
         self.assertIn('CompleteRemoval(save_dir,', rollback)
-        self.assertIn('"before-restoration-completion"', rollback)
+        self.assertIn('"crash-before-restoration-completion"', rollback)
         self.assertNotIn('if (!missing && !WorldSaveService::remove_owned_entry(', rollback)
 
     def test_transaction_v5_receipts_survive_control_cleanup_and_complete_absent_retries(self):
         source = read_source("src/luminumbra_common/persistence/SaveTransaction.cpp")
         self.assert_transaction_receipt_integration(source)
         for token in ('record.modern != out.modern',
+                      '"crash-receipt-before-publication"',
                       'root.size() != expected_fields',
                       'phase->get<std::uint64_t>() > 3',
                       'detail::CompleteNamespaceRetirement<require_ntfs>',

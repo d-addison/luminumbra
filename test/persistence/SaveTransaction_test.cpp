@@ -213,6 +213,11 @@ TreeMap UnregisteredStaging(const fs::path& save) {
     auto bytes = Get(journal_directory(save) / "txn.json");
     if (bytes.empty())
         bytes = Get(journal_directory(save) / "undo/cleanup.txn.json");
+    if (bytes.empty()) {
+        const auto carrier = FindReceiptCarrier(save);
+        if (!carrier.empty())
+            bytes = Get(carrier);
+    }
     std::string_view remaining(bytes);
     while (true) {
         const auto end = remaining.find('\n');
@@ -1972,7 +1977,7 @@ TEST(SaveTransaction, FullForwardJournalRetainsRollbackCapacity) {
         // thousands of synchronous writes. Subsequent ordinary writes consume it.
         const auto encoded = JournalRecords(save.path()).back().dump() + "\n";
         // v5 reserves completion records as well as restoration records.
-        constexpr std::size_t headroom = 256u * 1024u;
+        const auto headroom = transaction.rollback_reserve_bytes();
         const auto padding = kMaxSnapshotIndexBytes - headroom - Get(control).size();
         ASSERT_GT(padding, encoded.size());
         const auto record = std::string(padding - encoded.size(), ' ') + encoded;
@@ -2122,7 +2127,7 @@ TEST(SaveTransaction, AbsentCreateRetryCompletesBeforePayloadRollback) {
     std::string retained;
     for (int attempt = 0; attempt < 3; ++attempt) {
         HookGuard hook(+[](const char* step, const fs::path& path) {
-            if (std::string_view(step) == "before-namespace-completion" &&
+            if (std::string_view(step) == "crash-before-namespace-completion" &&
                 path.filename() == "snapshot.json")
                 throw std::runtime_error("index absence completion interrupted");
         });
@@ -2154,7 +2159,7 @@ TEST(SaveTransaction, AbortFlushFailureRetainsRecoveryEvidence) {
     ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
     {
         HookGuard hook(+[](const char* step, const fs::path&) {
-            if (std::string_view(step) == "before-namespace-completion")
+            if (std::string_view(step) == "crash-before-namespace-completion")
                 throw std::runtime_error("completion flush interrupted");
         });
         transaction.abort(nullptr);
@@ -2176,7 +2181,7 @@ TEST(SaveTransaction, MatchingRestoreFailureBlocksCleanup) {
     const auto evidence = Tree(save.path());
     {
         HookGuard hook(+[](const char* step, const fs::path& path) {
-            if (std::string_view(step) == "before-restoration-completion" &&
+            if (std::string_view(step) == "crash-before-restoration-completion" &&
                 path.filename() == "snapshot.json")
                 throw std::runtime_error("matching index completion interrupted");
         });
@@ -2190,8 +2195,9 @@ TEST(SaveTransaction, MatchingRestoreFailureBlocksCleanup) {
 }
 
 TEST(SaveTransaction, ReceiptDiscoverySurvivesControlAndDirectoryRetirement) {
-    for (const std::string_view interruption :
-         {"receipt-carrier-published", "journal-unlinked", "before-receipt-retirement"}) {
+    for (const std::string_view interruption : {"crash-receipt-carrier-published",
+                                                "journal-unlinked",
+                                                "crash-before-receipt-retirement"}) {
         SCOPED_TRACE(interruption);
         TempSave save;
         ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
@@ -2217,6 +2223,139 @@ TEST(SaveTransaction, ReceiptDiscoverySurvivesControlAndDirectoryRetirement) {
     }
 }
 
+TEST(SaveTransaction, AbortRetriesRecordedCleanupWithoutRepeatingRollback) {
+    for (const bool protect_member : {false, true}) {
+        for (const std::string_view interruption : {"crash-receipt-carrier-published",
+                                                    "journal-unlinked",
+                                                    "crash-before-receipt-retirement"}) {
+            SCOPED_TRACE(protect_member);
+            SCOPED_TRACE(interruption);
+            TempSave save;
+            ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+            const auto baseline = Tree(save.path());
+            SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+            ASSERT_TRUE(transaction.begin(nullptr));
+            ASSERT_TRUE(transaction.protect(protect_member
+                                                ? std::vector<std::string>{"world_info.json"}
+                                                : std::vector<std::string>{},
+                                            nullptr));
+            if (protect_member) {
+                ASSERT_TRUE(
+                    WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+            }
+            {
+                ReceiptInterruption() = interruption;
+                HookGuard hook(+[](const char* step, const fs::path&) {
+                    if (step == ReceiptInterruption())
+                        throw std::runtime_error("cleanup interrupted");
+                });
+                transaction.abort(nullptr);
+            }
+            EXPECT_TRUE(journal_pending(save.path()));
+            std::vector<std::string> errors;
+            transaction.abort(&errors);
+            EXPECT_TRUE(errors.empty());
+            EXPECT_EQ(Tree(save.path()), baseline);
+            EXPECT_FALSE(journal_pending(save.path()));
+            transaction.abort(nullptr);
+            EXPECT_EQ(Tree(save.path()), baseline);
+        }
+    }
+}
+
+TEST(SaveTransaction, AbortCleanupRetryRefusesPartialAndSubstitutedEvidence) {
+    for (const bool substitute : {false, true}) {
+        TempSave save;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        const auto baseline = Tree(save.path());
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+        {
+            HookGuard hook(+[](const char* step, const fs::path&) {
+                if (std::string_view(step) == "crash-receipt-carrier-published")
+                    throw std::runtime_error("cleanup interrupted");
+            });
+            transaction.abort(nullptr);
+        }
+        const auto carrier = FindReceiptCarrier(save.path());
+        ASSERT_FALSE(carrier.empty());
+        const auto recorded = Get(carrier);
+        const auto retained = save.path() / "retained-receipts";
+        if (substitute)
+            fs::rename(carrier, retained);
+        Put(carrier, "{partial");
+        const auto evidence = Tree(save.path());
+        std::vector<std::string> errors;
+        transaction.abort(&errors);
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(Tree(save.path()), evidence);
+        if (substitute) {
+            fs::remove(carrier);
+            fs::rename(retained, carrier);
+        } else {
+            Put(carrier, recorded);
+        }
+        transaction.abort(nullptr);
+        EXPECT_EQ(Tree(save.path()), baseline);
+        EXPECT_FALSE(journal_pending(save.path()));
+    }
+}
+
+TEST(SaveTransaction, RecordedFileReceiptsRemainAuthoritativeAcrossCompletionPhases) {
+    for (unsigned phase = 0; phase <= 3; ++phase) {
+        TempSave save;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        const auto baseline = Tree(save.path());
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+        const auto header = JournalRecords(save.path()).front();
+        {
+            HookGuard hook(+[](const char* step, const fs::path&) {
+                if (std::string_view(step) == "crash-receipt-carrier-published")
+                    throw std::runtime_error("cleanup interrupted");
+            });
+            transaction.abort(nullptr);
+        }
+        const auto carrier = FindReceiptCarrier(save.path());
+        ASSERT_FALSE(carrier.empty());
+        WorldSaveService::ArtifactIdentity control{}, undo_identity{};
+        bool missing = false;
+        const auto undo = journal_directory(save.path()) / "undo/0";
+        ASSERT_TRUE(WorldSaveService::artifact_identity(carrier, control, missing));
+        ASSERT_FALSE(missing);
+        ASSERT_TRUE(WorldSaveService::artifact_identity(undo, undo_identity, missing));
+        ASSERT_FALSE(missing);
+        auto receipt = header;
+        receipt["record"] = "receipt";
+        receipt["path"] = "journal/undo/0";
+        receipt["identity"] = undo_identity;
+        receipt["directory"] = false;
+        receipt["absent_only"] = false;
+        // Resetting an existing Windows receipt to Prepared is also a legal
+        // resurrection retry. POSIX must honour persisted file receipts too.
+        for (unsigned recorded = 0; recorded <= phase; ++recorded) {
+            receipt["phase"] = recorded;
+            ASSERT_TRUE(WorldSaveService::append_journal_record(
+                carrier, receipt.dump() + "\n", control, nullptr));
+        }
+        const auto retained = save.path() / "retained-undo";
+        fs::rename(undo, retained);
+        Put(undo, "foreign undo");
+        const auto evidence = Tree(save.path());
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        EXPECT_EQ(Tree(save.path()), evidence);
+        fs::remove(undo);
+        fs::rename(retained, undo);
+        EXPECT_NE(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        EXPECT_EQ(Tree(save.path()), baseline);
+        EXPECT_FALSE(journal_pending(save.path()));
+    }
+}
+
 TEST(SaveTransaction, CompletedReceiptsRefuseSubstitutedDirectoriesAndUnknownContents) {
     for (const bool substitute_directory : {false, true}) {
         TempSave save;
@@ -2227,7 +2366,7 @@ TEST(SaveTransaction, CompletedReceiptsRefuseSubstitutedDirectoriesAndUnknownCon
         ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
         {
             HookGuard hook(+[](const char* step, const fs::path&) {
-                if (std::string_view(step) == "receipt-carrier-published")
+                if (std::string_view(step) == "crash-receipt-carrier-published")
                     throw std::runtime_error("cleanup interrupted");
             });
             transaction.abort(nullptr);
@@ -2263,7 +2402,7 @@ TEST(SaveTransaction, ReceiptDiscoveryCompletesOnlyRecordedControlAliases) {
     ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
     {
         HookGuard hook(+[](const char* step, const fs::path&) {
-            if (std::string_view(step) == "receipt-carrier-published")
+            if (std::string_view(step) == "crash-receipt-carrier-published")
                 throw std::runtime_error("carrier publication interrupted");
         });
         transaction.abort(nullptr);
@@ -2294,7 +2433,7 @@ TEST(SaveTransaction, ReceiptDiscoveryRefusesMalformedOrForeignEvidence) {
     ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
     {
         HookGuard hook(+[](const char* step, const fs::path&) {
-            if (std::string_view(step) == "receipt-carrier-published")
+            if (std::string_view(step) == "crash-receipt-carrier-published")
                 throw std::runtime_error("carrier publication interrupted");
         });
         transaction.abort(nullptr);

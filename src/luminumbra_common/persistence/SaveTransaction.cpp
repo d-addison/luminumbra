@@ -48,6 +48,11 @@ namespace {
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 constexpr std::size_t kHashBlockBytes = 64u * 1024u;
+#if defined(_WIN32)
+constexpr bool kNeedsFileReceipts = true;
+#else
+constexpr bool kNeedsFileReceipts = false;
+#endif
 
 SaveTransaction*& ActiveTransaction() {
     static thread_local SaveTransaction* active = nullptr;
@@ -883,7 +888,7 @@ bool RecordReceipt(const fs::path& save_dir,
         return false;
     receipt.completion.phase = static_cast<detail::NamespaceReceiptPhase>(std::min(phase, 2u));
     receipt.retired = phase == 3;
-    report_snapshot_step("receipt-recorded", save_dir / receipt.path);
+    // append_journal_record already reports every durable disk transition.
     return true;
 }
 
@@ -996,7 +1001,12 @@ detail::NamespaceRetirementOutcome CompleteReceipt(const fs::path& save_dir,
                                             .name = path.filename(),
                                             .directory_identity = parent_identity,
                                             .report = &report_snapshot_step};
-    if (!stage && parent_identity != ArtifactIdentity{})
+    // A resurrected control alias can occupy the usual quarantine slot too.
+    // Remove each recorded link through its own bound name, without renaming
+    // one alias onto another. Inventory has already refused unrelated links.
+    if ((!stage ||
+         (document.external_control && receipt.completion.identity == document.control_identity)) &&
+        parent_identity != ArtifactIdentity{})
         stage = &local_stage;
     struct Operations {
         const fs::path& root;
@@ -1033,7 +1043,7 @@ detail::NamespaceRetirementOutcome CompleteReceipt(const fs::path& save_dir,
             return RecordReceipt(root, document, receipt, 1, control, errors, &latest_flush);
         }
         detail::NamespaceFlushObservation flush_later_commit() const {
-            report_snapshot_step("before-namespace-completion", root / receipt.path);
+            report_snapshot_step("crash-before-namespace-completion", root / receipt.path);
 #if defined(_WIN32)
             return latest_flush.succeeded
                        ? latest_flush
@@ -1075,6 +1085,65 @@ bool CompleteRemoval(const fs::path& save_dir,
                      std::vector<std::string>* errors,
                      bool directory = false,
                      const BoundPublicationStage* stage = nullptr) {
+#if !defined(_WIN32)
+    const auto recorded_slot = stage ? stage->directory / stage->name : fs::path{};
+    if (document.modern &&
+        !document.receipts.contains(
+            Filesystem::GenericUtf8PathString(path.lexically_relative(save_dir))) &&
+        (recorded_slot.empty() || !document.receipts.contains(Filesystem::GenericUtf8PathString(
+                                      recorded_slot.lexically_relative(save_dir))))) {
+        // POSIX has a namespace barrier. The existing ownership records plus
+        // repeated parent fsync suffice; per-file NTFS phase records would
+        // consume the bounded control stream before large saves can roll back.
+        const auto slot = stage ? stage->directory / stage->name : fs::path{};
+        for (const auto& candidate : {path, slot}) {
+            if (candidate.empty())
+                continue;
+            ArtifactIdentity parent_identity{};
+            bool parent_missing = false;
+            if (!WorldSaveService::artifact_identity(
+                    candidate.parent_path(), parent_identity, parent_missing, true))
+                return false;
+            const auto expected_parent =
+                candidate.parent_path() == journal_directory(save_dir) / "undo"
+                    ? document.undo_directory_identity
+                : candidate.parent_path() == journal_directory(save_dir) ? document.journal_identity
+                : candidate.parent_path() == save_dir                    ? document.root_identity
+                                                                         : ArtifactIdentity{};
+            if (!parent_missing && expected_parent != ArtifactIdentity{} &&
+                parent_identity != expected_parent)
+                return false;
+            const BoundPublicationStage local_stage{.directory = candidate.parent_path(),
+                                                    .name = candidate.filename(),
+                                                    .directory_identity = parent_identity,
+                                                    .report = &report_snapshot_step};
+            const bool control_alias =
+                document.external_control && identity == document.control_identity;
+            const auto* removal_stage =
+                candidate == path && stage && !control_alias ? stage : &local_stage;
+            ArtifactIdentity actual{};
+            bool missing = false;
+            const auto links = document.external_control && identity == document.control_identity
+                                   ? ControlAliasLinks(save_dir, document)
+                                   : std::numeric_limits<unsigned>::max();
+            if (links == 0 ||
+                !WorldSaveService::artifact_identity(
+                    candidate, actual, missing, directory, links) ||
+                (!missing && (actual != identity ||
+                              !WorldSaveService::remove_owned_entry(
+                                  candidate, identity, errors, directory, removal_stage))))
+                return false;
+            if (candidate == path && !document.cleanup)
+                report_snapshot_step("crash-before-namespace-completion", candidate);
+            if (!WorldSaveService::durable_flush_directory(
+                    NearestExistingDirectory(candidate.parent_path()), errors))
+                return false;
+            if (candidate == slot)
+                break;
+        }
+        return true;
+    }
+#endif
     if (!document.modern) {
         ArtifactIdentity actual{};
         bool missing = false;
@@ -1251,7 +1320,8 @@ bool RollbackEntries(const fs::path& save_dir,
         }
         if (entry->action == "create") {
             const auto identity = missing ? entry->rollback_retired_identity : current;
-            if (document.modern && identity == ArtifactIdentity{}) {
+            if (document.modern && identity == ArtifactIdentity{} &&
+                (kNeedsFileReceipts || document.receipts.contains(entry->path))) {
                 if (!PrepareReceipt(save_dir,
                                     document,
                                     destination,
@@ -1330,7 +1400,7 @@ bool RollbackEntries(const fs::path& save_dir,
             // A prior rename may have succeeded before its flush failed. Matching bytes
             // still require completion before any later (especially payload) entry changes.
             if (document.modern && previous_bytes)
-                report_snapshot_step("before-restoration-completion", destination);
+                report_snapshot_step("crash-before-restoration-completion", destination);
             if (previous_bytes &&
                 !WorldSaveService::complete_restoration(destination,
                                                         current,
@@ -1546,10 +1616,11 @@ bool FinishJournal(const fs::path& save_dir,
         AddError(errors, "snapshot receipt carrier ownership changed");
         return false;
     }
-    // All possible quarantine names were included by JournalInventory. Prepare
-    // their receipts before any control move or cleanup can unlink those names.
+    // POSIX has directory barriers; Windows retains a receipt even for an
+    // absent recorded alias, since a pre-completion crash may resurrect it.
     for (const auto& [path, identity] : files)
-        if (!PrepareReceipt(save_dir, document, path, identity, false, control, errors))
+        if (kNeedsFileReceipts &&
+            !PrepareReceipt(save_dir, document, path, identity, false, control, errors))
             return false;
     if (!PrepareReceipt(save_dir,
                         document,
@@ -1575,16 +1646,35 @@ bool FinishJournal(const fs::path& save_dir,
                 journal / "txn.json", carrier, {}, control, errors, &slot))
             return false;
         document.external_control = true;
-        report_snapshot_step("receipt-carrier-published", carrier);
+        report_snapshot_step("crash-receipt-carrier-published", carrier);
     }
     bool all_retired = true;
     for (const auto& [path, identity] : files) {
         if (identity == ArtifactIdentity{})
             continue;
         const auto name = Filesystem::GenericUtf8PathString(path.lexically_relative(save_dir));
-        auto& receipt = document.receipts.at(name);
         const auto slot = CleanupStage(save_dir, document.undo_directory_identity, path);
-        const auto outcome = CompleteReceipt(save_dir, document, receipt, control, &slot, errors);
+        const auto found = document.receipts.find(name);
+        if (found == document.receipts.end()) {
+            ArtifactIdentity actual{};
+            bool missing = false;
+            const auto links = document.external_control && identity == document.control_identity
+                                   ? ControlAliasLinks(save_dir, document)
+                                   : std::numeric_limits<unsigned>::max();
+            if (links == 0 ||
+                !WorldSaveService::artifact_identity(path, actual, missing, false, links) ||
+                (!missing && actual != identity))
+                return false;
+            // Missing POSIX inventory slots need no individual phase records:
+            // the directory receipts below repeat their namespace barriers.
+            if (missing)
+                continue;
+            if (!CompleteRemoval(save_dir, document, path, identity, control, errors, false, &slot))
+                return false;
+            continue;
+        }
+        const auto outcome =
+            CompleteReceipt(save_dir, document, found->second, control, &slot, errors);
         if (outcome == detail::NamespaceRetirementOutcome::Failed)
             return false;
         all_retired = all_retired && outcome == detail::NamespaceRetirementOutcome::Retired;
@@ -1602,7 +1692,7 @@ bool FinishJournal(const fs::path& save_dir,
         AddError(errors, "namespace receipts retained; filesystem durability unqualified");
         return true;
     }
-    report_snapshot_step("before-receipt-retirement", ReceiptCarrier(save_dir, document));
+    report_snapshot_step("crash-before-receipt-retirement", ReceiptCarrier(save_dir, document));
     const BoundPublicationStage carrier_slot{.directory = save_dir,
                                              .name = ReceiptCarrier(save_dir, document).filename(),
                                              .directory_identity = document.root_identity,
@@ -2164,6 +2254,22 @@ void set_snapshot_step_hook_for_testing(SnapshotStepHook hook) {
 
 void report_snapshot_step(const char* step, const fs::path& path) {
     if (SnapshotStepHook hook = StepHook()) {
+        // Receipt relocation is a control-file disk transition, like the
+        // initial journal publication. Keep it in the exhaustive disk walk;
+        // member-publication walks count only logical payload boundaries.
+        const std::string_view event(step);
+        if ((event == "before-replace" || event == "after-replace" ||
+             event == "publication-quarantined" || event == "retirement-quarantined") &&
+            Filesystem::GenericUtf8PathString(path.filename()).starts_with("journal.receipts.")) {
+            if (event == "before-replace")
+                step = "crash-receipt-before-publication";
+            else if (event == "after-replace")
+                step = "crash-receipt-after-publication";
+            else if (event == "publication-quarantined")
+                step = "crash-receipt-publication-quarantined";
+            else
+                step = "crash-receipt-retirement-quarantined";
+        }
         invalidate_snapshot_observations();
         hook(step, path);
     }
@@ -2637,7 +2743,7 @@ bool SaveTransaction::write_journal(std::vector<std::string>* errors) {
             AddError(errors, "snapshot receipt reservation exceeds control byte limit");
             return false;
         }
-        const auto receipt_bytes = 80u * (1024u + maximum_path_bytes);
+        const auto receipt_bytes = kNeedsFileReceipts ? 80u * (1024u + maximum_path_bytes) : 0u;
         if (rollback_entry_bytes > kMaxSnapshotIndexBytes - receipt_bytes) {
             AddError(errors, "snapshot rollback reservation exceeds control byte limit");
             return false;
@@ -2910,6 +3016,28 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
 }
 
 void SaveTransaction::abort(std::vector<std::string>* errors) {
+    if (m_state == State::CleanupPending) {
+        // A failed cleanup already appended phases; replay that stream instead
+        // of reconstructing a pre-cleanup document from the live entries.
+        const TransactionOwnership ownership;
+        JournalDocument document;
+        document.txn_id = m_txn_id;
+        document.control_identity = m_control_identity;
+        const auto journal = journal_directory(m_save_dir);
+        if (!MatchesIdentity(ReceiptCarrier(m_save_dir, document), m_control_identity) &&
+            !(MatchesIdentity(journal, m_journal_identity, true) &&
+              (MatchesIdentity(journal / "txn.json", m_control_identity) ||
+               MatchesIdentity(journal / "undo/cleanup.txn.json", m_control_identity)))) {
+            if (journal_pending(m_save_dir))
+                AddError(errors, "snapshot retry cleanup ownership changed");
+            else
+                m_state = State::RolledBack;
+            return;
+        }
+        if (recover_pending_journal(m_save_dir, errors) != RecoveryOutcome::Failed)
+            m_state = State::RolledBack;
+        return;
+    }
     if (m_state != State::Open && m_state != State::Committing) {
         return;
     }
@@ -2967,13 +3095,17 @@ void SaveTransaction::abort(std::vector<std::string>* errors) {
         } else {
             std::map<fs::path, ArtifactIdentity> inventory;
             if (JournalInventory(m_save_dir, document, m_control_identity, inventory, errors) &&
-                RollbackEntries(m_save_dir, document, m_control_identity, errors))
-                FinishJournal(m_save_dir, document, m_control_identity, errors);
+                RollbackEntries(m_save_dir, document, m_control_identity, errors)) {
+                m_state = State::CleanupPending;
+                if (FinishJournal(m_save_dir, document, m_control_identity, errors))
+                    m_state = State::RolledBack;
+            }
         }
     } catch (const std::exception& ex) {
         AddError(errors, std::string("snapshot rollback failed: ") + ex.what());
     }
-    m_state = State::RolledBack;
+    if (m_state != State::CleanupPending)
+        m_state = State::RolledBack;
     m_committed_actions.clear();
     m_ownership.reset();
     release_registration();

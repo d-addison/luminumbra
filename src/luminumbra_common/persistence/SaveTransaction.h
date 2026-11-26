@@ -198,8 +198,13 @@ public:
     // Joined writers acknowledge memory only at this transaction's durable commit point.
     // Aborted transactions discard their callbacks.
     void defer_until_commit(std::function<void()> action);
-    // Rolls back (Open -> RolledBack). No-op after commit.
+    // Rolls back; an explicit retry completes interrupted cleanup. No-op after commit.
     void abort(std::vector<std::string>* errors);
+
+    // Control bytes reserved for rollback and namespace completion, for admission diagnostics.
+    [[nodiscard]] std::size_t rollback_reserve_bytes() const {
+        return m_rollback_reserve;
+    }
 
     [[nodiscard]] bool committed() const {
         return m_state == State::Committed;
@@ -224,6 +229,7 @@ private:
         Committing,
         Committed,
         RollingBack,
+        CleanupPending,
         RolledBack
     };
     struct Entry {
@@ -283,8 +289,9 @@ private:
 // Test hook: invoked at real publication sites ("journal-published", "before-replace",
 // "after-retire", "after-replace", "before-delete", "after-delete", "commit-point",
 // "journal-unlinked", "before-rollback", "rollback-entry", "publication-quarantined",
-// "retirement-quarantined", "before-restoration-completion", "before-namespace-completion",
-// "receipt-recorded", "receipt-carrier-published", "before-receipt-retirement").
+// "retirement-quarantined", "crash-before-restoration-completion",
+// "crash-before-namespace-completion", "crash-receipt-carrier-published",
+// "crash-before-receipt-retirement").
 using SnapshotStepHook = void (*)(const char* step, const std::filesystem::path& path);
 void set_snapshot_step_hook_for_testing(SnapshotStepHook hook);
 void report_snapshot_step(const char* step, const std::filesystem::path& path);
