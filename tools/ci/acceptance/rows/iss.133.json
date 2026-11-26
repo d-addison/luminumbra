@@ -1,0 +1,18 @@
+{
+  "id": "iss.133",
+  "source": "docs/v0.3-acceptance.md#v032-far-budget-receipt-policy",
+  "statement": "The v0.3.2 version 2 receipt requires complete issue #133 budget evidence and independent owner-reviewed profile/candidate approval. The checker revalidates all 32 measurement cells, source and process identities, exact harness commands and existing timing/coverage checks; omitted, stale, mismatched, partial, Legacy or unavailable edit/bake evidence cannot pass. Receipt validation is implemented and synthetic controls are available. Full-scope implementation, native verification, merge and release remain independent and pending; v0.3.2 waits for full issue #133 scope. No measured limits or native qualification are claimed.",
+  "status": "needs-native-run",
+  "evidence": [
+    {"kind": "ctest", "ref": "FarBudgetReceiptPython"},
+    {"kind": "ctest", "ref": "FarBudgetPython"},
+    {"kind": "ctest", "ref": "V03AcceptanceReceiptContract"},
+    {"kind": "doc", "ref": "docs/v0.3-acceptance.md"},
+    {
+      "kind": "native",
+      "ref": "tools/ci/check_v03_receipt.py",
+      "command": "python3 tools/ci/check_v03_receipt.py <receipt.json> --require-version v0.3.2 --expected-revision <candidate-commit> --budget-approval <owner-reviewed-approval.json>",
+      "receipt_schema": "luminumbra.v03_acceptance.v2"
+    }
+  ]
+}

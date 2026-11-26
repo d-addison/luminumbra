@@ -60,6 +60,13 @@ $dispatch = $gateAst.Find({ param($node)
     $node.Name -eq "Assert-FarHorizonLegacyCompatibility"
 }, $true)
 if ($null -eq $dispatch) { throw "frontier gate compatibility boundary missing" }
+$visualDispatch = $gateAst.Find({ param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq "Assert-FarHorizonVisualStations"
+}, $true)
+if ($null -eq $visualDispatch) { throw "frontier gate visual boundary missing" }
+Invoke-Expression $visualDispatch.Extent.Text
+
 Invoke-Expression $dispatch.Extent.Text
 
 function Assert-WriterFixture {
@@ -126,6 +133,24 @@ try {
     foreach ($selection in @("ladder", "mixed")) {
         $selected = Read-WriterFixture -Directory (Join-Path $root $selection) -Mode $selection
         Assert-Test ($null -eq $selected.Analysis) "$selection emits no v1 Legacy artifact"
+        $visual = Read-JsonArtifact -Path (Join-Path (Join-Path $root $selection) "farlod-horizon-visual.json") -Schema "luminumbra.farlod_horizon.visual.v1"
+        Assert-FarHorizonVisualStations -Analysis $visual -Oracle $selected.Oracle
+        foreach ($fault in @("empty", "partial", "name", "camera", "missing_camera", "passed", "unknown_count")) {
+            $badVisual = $visual | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $fragment = "visual station"
+            switch ($fault) {
+                "empty" { $badVisual.stations = @() }
+                "partial" { $badVisual.stations = @($badVisual.stations[0]) }
+                "name" { $badVisual.stations[0].name = "other" }
+                "camera" { $badVisual.stations[0].camera.world_x += 1; $fragment = "stale visual camera" }
+                "missing_camera" { $badVisual.stations[0].camera.world_x = $null; $fragment = "non-finite" }
+                "passed" { $badVisual.stations[0].passed = $false }
+                "unknown_count" { $badVisual.aggregates.captured_stations = "2"; $fragment = "must be an integer" }
+            }
+            Assert-Rejected {
+                Assert-FarHorizonVisualStations -Analysis $badVisual -Oracle $selected.Oracle
+            } $fragment ("visual boundary " + $fault)
+        }
         Assert-Test ($selected.Oracle.mode -ceq "ladder") "$selection reports the final effective mode"
         Assert-Test ($selected.Oracle.complete -eq $false) "$selection incomplete fixture cannot qualify"
         Assert-Test (@($selected.Oracle.PSObject.Properties.Name) -cnotcontains "legacy") "$selection emits no Legacy aggregate"

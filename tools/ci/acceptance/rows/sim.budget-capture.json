@@ -1,12 +1,24 @@
 {
   "id": "sim.budget-capture",
   "source": "docs/sim-budget-telemetry.md",
-  "statement": "Per-system simulation tick work counts must be captured deterministically on representative worlds. SimBudgetCaptureContract validates synthetic artifacts and command construction; retained populated default/mountains/archipelago before/after captures with per-stage p50/p95/p99 durations and measured workload identities remain PENDING.",
+  "statement": "Per-system simulation tick work counts must be captured deterministically on representative worlds. SimBudgetCaptureContract validates synthetic artifacts and command construction. ActiveRegionScaleReportContract validates the separate synthetic ledger/save report, including mixed identities and missing samples; fast ActiveRegionScale regressions cover observational schedule/encoding parity and bounded save work. Retained populated default/mountains/archipelago captures and large-ledger/save measurements remain PENDING.",
   "status": "needs-native-run",
   "evidence": [
     {
       "kind": "ctest",
       "ref": "SimBudgetCaptureContract"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionScaleReportContract"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionScale.SmallLedgerPreservesScheduleAndEncodedBytes"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionScale.UnchangedPrioritiesAndSparseSaveHaveBoundedWork"
     },
     {
       "kind": "native",
