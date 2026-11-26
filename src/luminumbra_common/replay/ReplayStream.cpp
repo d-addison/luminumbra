@@ -50,8 +50,7 @@ world::AuthorityBootDescriptor CaptureReplayBoot(const world::GameSession& sessi
                                                  const world::WorldCalendar& calendar,
                                                  world::AuthorityBootDescriptor boot) {
     const auto values = session.EffectiveIdentityValues();
-    boot.authority_rules_revision =
-        luminumbra::core::SimulationIdentityValues::kAuthorityRulesRevision;
+    boot.authority_rules_revision = values.EffectiveAuthorityRulesRevision();
     boot.resolved_world_seed = seed;
     boot.system_config_identity = session.SystemConfigIdentity(calendar);
     static_assert(boot.system_gates.size() == values.enabled.size());
