@@ -7205,7 +7205,8 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
                                              std::vector<std::string>* errors,
                                              std::size_t rollback_reserve,
                                              detail::NamespaceFlushObservation* observation,
-                                             std::array<std::uint64_t, 8>* version) {
+                                             std::array<std::uint64_t, 8>* version,
+                                             const std::string* expected_bytes) {
     const SaveOwnership ownership;
     const auto expected_version = version ? *version : SavedInputFile::Version{};
     if (version)
@@ -7213,7 +7214,9 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
     if (observation)
         *observation = {};
     if (record.empty() || record.back() != '\n' || rollback_reserve > kMaxSnapshotIndexBytes ||
-        record.size() > kMaxSnapshotIndexBytes - rollback_reserve) {
+        record.size() > kMaxSnapshotIndexBytes - rollback_reserve ||
+        (expected_bytes && expected_bytes->size() > kMaxSnapshotIndexBytes) ||
+        (expected_version != SavedInputFile::Version{} && !expected_bytes)) {
         AddError(errors, "invalid snapshot journal record");
         return false;
     }
@@ -7392,6 +7395,18 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
         ok = SavedInputFile::native_version(file, current) && current == expected_version;
     }
     ok = ok && size <= kMaxSnapshotIndexBytes;
+    // Metadata can remain identical across an immediate same-size rewrite on
+    // ext4, tmpfs or NTFS. Compare every cached byte on this writable handle;
+    // the fixed 64 KiB buffer and 16 MiB control limit bound work and storage.
+    if (expected_bytes) {
+        ok = ok && size == expected_bytes->size();
+        for (std::size_t offset = 0; ok && offset < expected_bytes->size();) {
+            const auto count = std::min(tail.size(), expected_bytes->size() - offset);
+            ok = read_tail(offset, count) &&
+                 std::memcmp(tail.data(), expected_bytes->data() + offset, count) == 0;
+            offset += count;
+        }
+    }
     std::uint64_t published = 0;
     if (ok && size != 0) {
         ok = read_tail(size - 1, 1);

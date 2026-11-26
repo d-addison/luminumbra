@@ -26,6 +26,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -309,6 +310,8 @@ struct JournalDocument {
     std::size_t append_reserve = 0;
     std::uint64_t pending_receipt_bytes = 0;
     SavedInputFile::Version version{};
+    // Live cache only: exact admitted control bytes, bounded by kMaxSnapshotIndexBytes.
+    std::optional<std::string> cached_bytes;
     std::size_t parsed_records = 0;
     std::unordered_map<std::string, std::size_t> entry_indices;
     std::array<std::uint64_t, 3> root_identity{};
@@ -707,6 +710,11 @@ bool ApplyJournalRecords(std::string_view bytes,
                               Filesystem::GenericUtf8PathString(fs::path(entry.path).filename());
             if (identity != std::array<std::uint64_t, 3>{})
                 out.recorded_slots[slot].insert(identity);
+            // Publication can install incoming before a later entry records it
+            // as installed. Its removal receipt may already name the retired slot.
+            if (std::string_view(phase) == "retired" &&
+                entry.incoming_identity != std::array<std::uint64_t, 3>{})
+                out.recorded_slots[slot].insert(entry.incoming_identity);
         }
         for (const auto& [name, identity] :
              {std::pair{entry.undo_temporary, entry.undo_identity},
@@ -1024,11 +1032,26 @@ bool AppendMetadata(const fs::path& save_dir,
             }
         }
     }
-    // An unavailable stamp stays unavailable until a full replay. The append
-    // checks a known prefix and invalidates its stamp before any possible write.
+    // An unavailable stamp stays unavailable until a full replay. Cached bytes
+    // are checked independently of metadata before any possible write.
     auto* version = document.version == SavedInputFile::Version{} ? nullptr : &document.version;
-    return WorldSaveService::append_journal_record(
-        RecoveryControl(save_dir, document), bytes, control, errors, reserve, observation, version);
+    const auto* expected_bytes = document.cached_bytes ? &*document.cached_bytes : nullptr;
+    if (!WorldSaveService::append_journal_record(RecoveryControl(save_dir, document),
+                                                 bytes,
+                                                 control,
+                                                 errors,
+                                                 reserve,
+                                                 observation,
+                                                 version,
+                                                 expected_bytes))
+        return false;
+    if (document.cached_bytes) {
+        // Successful append guarantees a published delimiter and discards any
+        // incomplete tail. Its capacity check bounds this cache to 16 MiB too.
+        document.cached_bytes->resize(document.cached_bytes->rfind('\n') + 1u);
+        document.cached_bytes->append(bytes);
+    }
+    return true;
 }
 
 // Each buffer is bounded by kMaxSnapshotIndexBytes, including its delimiter.
@@ -3380,12 +3403,23 @@ bool SaveTransaction::read_live_journal(std::vector<std::string>* errors) {
             AddError(errors, "cannot inspect live snapshot journal");
             return false;
         }
-        if (state.valid && version == state.document.version)
+        std::string bytes, error;
+        if (!input.read(bytes, kMaxSnapshotIndexBytes)) {
+            state.valid = false;
+            AddError(errors, "cannot read live snapshot journal bytes");
+            return false;
+        }
+        SavedInputFile::Version after{};
+        if (!input.version(after) || after != version) {
+            state.valid = false;
+            AddError(errors, "live snapshot journal changed while reading");
+            return false;
+        }
+        if (state.valid && version == state.document.version && state.document.cached_bytes &&
+            bytes == *state.document.cached_bytes)
             return true;
         state.valid = false;
-        std::string bytes, error;
-        if (!input.read(bytes, kMaxSnapshotIndexBytes) ||
-            !ParseJournal(bytes, state.document, error) || !state.document.modern ||
+        if (!ParseJournal(bytes, state.document, error) || !state.document.modern ||
             state.document.cleanup || state.document.txn_id != m_txn_id ||
             state.document.base_generation != m_previous.generation ||
             state.document.new_generation != m_new_generation ||
@@ -3395,11 +3429,7 @@ bool SaveTransaction::read_live_journal(std::vector<std::string>* errors) {
             return false;
         }
         state.parsed_records += state.document.parsed_records;
-        SavedInputFile::Version after{};
-        if (!input.version(after) || after != version) {
-            AddError(errors, "live snapshot journal changed while reading");
-            return false;
-        }
+        state.document.cached_bytes = std::move(bytes);
     }
     std::map<fs::path, ArtifactIdentity> inventory;
     if (!JournalInventory(m_save_dir,
@@ -3517,8 +3547,15 @@ bool SaveTransaction::write_journal(std::vector<std::string>* errors) {
                                                      errors,
                                                      append_reserve,
                                                      nullptr,
-                                                     &document.version))
+                                                     &document.version,
+                                                     document.cached_bytes ? &*document.cached_bytes
+                                                                           : nullptr))
             return false;
+        if (document.cached_bytes) {
+            // Mirror the successful writer's unpublished-tail truncation.
+            document.cached_bytes->resize(document.cached_bytes->rfind('\n') + 1u);
+            document.cached_bytes->append(record);
+        }
         std::string error;
         if (!ApplyJournalRecords(record, document, error)) {
             AddError(errors, "cannot apply live snapshot journal record: " + error);

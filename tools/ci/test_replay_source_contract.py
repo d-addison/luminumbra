@@ -1521,8 +1521,12 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn('&document.version', writer)
         reader = self.function(source, 'read_live_journal', 'SaveTransaction::')
         self.assertIn('state.valid && version == state.document.version', reader)
-        self.assertLess(reader.index('version == state.document.version'),
-                        reader.index('input.read('))
+        self.assertIn('bytes == *state.document.cached_bytes', reader)
+        self.assertLess(reader.index('input.read('),
+                        reader.index('bytes == *state.document.cached_bytes'))
+        self.assertLess(reader.index('bytes == *state.document.cached_bytes'),
+                        reader.index('ParseJournal('))
+        self.assertIn('state.document.cached_bytes = std::move(bytes)', reader)
         self.assertIn('after != version', reader)
         completion = self.function(source, 'complete_owned_removal', 'SaveTransaction::')
         self.assertNotIn('ParseJournal(', completion)
@@ -1550,11 +1554,14 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         metadata = self.function(source, 'AppendMetadata', '')
         self.assertIn('document.version == SavedInputFile::Version{} ? nullptr : &document.version',
                       metadata)
+        self.assertIn('document.cached_bytes->append(bytes)', metadata)
+        self.assertIn('document.cached_bytes->append(record)', writer)
 
     def test_live_journal_work_is_incremental_and_revalidates_native_versions(self):
         source = read_source('src/luminumbra_common/persistence/SaveTransaction.cpp')
         self.assert_live_journal_work_is_incremental(source)
         for token in ('state.valid && version == state.document.version',
+                      'bytes == *state.document.cached_bytes',
                       'ApplyJournalRecords(record, document, error)',
                       '&document.version', 'after != version',
                       'member_document.entries.push_back(document.entries[recorded->second])'):
@@ -1568,6 +1575,15 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                         append.index('truncate_tail(published)'))
         self.assertLess(append.index('current == expected_version'),
                         append.index('write_bytes(record.data()'))
+        for token in ('expected_bytes->size() > kMaxSnapshotIndexBytes',
+                      'expected_version != SavedInputFile::Version{} && !expected_bytes',
+                      'size == expected_bytes->size()',
+                      'std::memcmp(tail.data(), expected_bytes->data() + offset, count) == 0'):
+            self.assertIn(token, append)
+        self.assertLess(append.index('std::memcmp('), append.index('truncate_tail(published)'))
+        self.assertLess(append.index('std::memcmp('), append.index('write_bytes(record.data()'))
+        stream = self.function(source, 'ApplyJournalRecords', '')
+        self.assertIn('out.recorded_slots[slot].insert(entry.incoming_identity)', stream)
         self.assertLess(append.index('write_bytes("\\n", 1) && flush()'),
                         append.index('SavedInputFile::native_version(file, appended_version)'))
         self.assertLess(append.index('SavedInputFile::native_version(file, appended_version)'),
@@ -1585,6 +1601,8 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                      'LiveJournalCacheRechecksControlAndDirectoryIdentities',
                      'LiveJournalCacheDoesNotAdoptChangesAfterAppendFlush',
                      'JournalAppendRequiresUnchangedVersionBeforeMutatingPrefix',
+                     'JournalAppendChecksEveryCachedByteBeforeTruncationOrWrite',
+                     'JournalAppendCachedBytesHandleBoundariesAndUnavailableControl',
                      'ForwardRemovalRefusesForeignMemberSlotsBeforeMutation',
                      'LiveJournalCacheRefusesMissingProtectedEntry'):
             self.assertIn('TEST(SaveTransaction, ' + name + ')', tests)

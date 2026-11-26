@@ -1339,11 +1339,12 @@ TEST(SaveTransaction, LiveJournalCacheDoesNotAdoptChangesAfterAppendFlush) {
 
 TEST(SaveTransaction, JournalAppendRequiresUnchangedVersionBeforeMutatingPrefix) {
     for (const std::string_view fault :
-         {"same length", "partial tail", "empty", "published hook"}) {
+         {"same length", "matching stamp", "partial tail", "empty", "published hook"}) {
         SCOPED_TRACE(fault);
         TempSave save;
         const auto control = save.path() / "control";
         Put(control, "first\n");
+        std::string cached = "first\n";
         WorldSaveService::ArtifactIdentity identity{};
         std::array<std::uint64_t, 8> version{};
         bool missing = false;
@@ -1358,34 +1359,163 @@ TEST(SaveTransaction, JournalAppendRequiresUnchangedVersionBeforeMutatingPrefix)
                 }
             });
             ASSERT_TRUE(WorldSaveService::append_journal_record(
-                control, "next\n", identity, nullptr, 0, nullptr, &version));
+                control, "next\n", identity, nullptr, 0, nullptr, &version, &cached));
+            cached += "next\n";
         } else {
             Put(control,
                 fault == "empty"          ? ""
                 : fault == "partial tail" ? "first\n{tail"
                                           : "other\n");
+            if (fault == "matching stamp") {
+                // Force metadata equality without changing timestamps: bytes
+                // must independently refuse the same-size immediate rewrite.
+                ASSERT_TRUE(WorldSaveService::artifact_version(control, version, missing));
+                ASSERT_FALSE(missing);
+            }
         }
         const auto evidence = Tree(save.path());
         EXPECT_FALSE(WorldSaveService::append_journal_record(
-            control, "next\n", identity, nullptr, 0, nullptr, &version));
+            control, "next\n", identity, nullptr, 0, nullptr, &version, &cached));
         EXPECT_EQ(version, (std::array<std::uint64_t, 8>{}));
         EXPECT_EQ(Tree(save.path()), evidence);
         Put(control, "first\n");
+        cached = "first\n";
         // Unknown stamps use the existing append path and return a new stamp.
         ASSERT_TRUE(WorldSaveService::append_journal_record(
-            control, "next\n", identity, nullptr, 0, nullptr, &version));
+            control, "next\n", identity, nullptr, 0, nullptr, &version, &cached));
+        cached += "next\n";
         EXPECT_NE(version, (std::array<std::uint64_t, 8>{}));
         EXPECT_EQ(Get(control), "first\nnext\n");
         ASSERT_TRUE(WorldSaveService::artifact_version(control, version, missing));
         ASSERT_FALSE(missing);
         ASSERT_TRUE(WorldSaveService::append_journal_record(
-            control, "last\n", identity, nullptr, 0, nullptr, &version));
+            control, "last\n", identity, nullptr, 0, nullptr, &version, &cached));
+        cached += "last\n";
         EXPECT_EQ(Get(control), "first\nnext\nlast\n");
         const auto completed = Tree(save.path());
         EXPECT_FALSE(WorldSaveService::append_journal_record(
-            control, "partial", identity, nullptr, 0, nullptr, &version));
+            control, "partial", identity, nullptr, 0, nullptr, &version, &cached));
         EXPECT_EQ(version, (std::array<std::uint64_t, 8>{}));
         EXPECT_EQ(Tree(save.path()), completed);
+    }
+}
+
+TEST(SaveTransaction, JournalAppendChecksEveryCachedByteBeforeTruncationOrWrite) {
+    for (const std::string_view fault : {"first block",
+                                         "middle block",
+                                         "last block",
+                                         "short read",
+                                         "empty cache",
+                                         "oversized cache",
+                                         "missing cache",
+                                         "unknown stamp",
+                                         "partial tail"}) {
+        SCOPED_TRACE(fault);
+        TempSave save;
+        const auto control = save.path() / "control";
+        std::string cached(2u * 65536u + 17u, 'a');
+        cached.back() = '\n';
+        Put(control, cached);
+        WorldSaveService::ArtifactIdentity identity{};
+        bool missing = false;
+        ASSERT_TRUE(WorldSaveService::artifact_identity(control, identity, missing));
+        ASSERT_FALSE(missing);
+        auto changed = cached;
+        if (fault == "empty cache") {
+            cached.clear();
+        } else if (fault == "oversized cache") {
+            cached.resize(kMaxSnapshotIndexBytes + 1u, 'a');
+        } else if (fault == "short read") {
+            changed.resize(65536u);
+        } else if (fault == "partial tail") {
+            changed += "{unpublished";
+        } else {
+            changed[fault == "middle block" ? 65536u
+                    : fault == "last block" ? changed.size() - 2u
+                                            : 0u] = 'b';
+        }
+        Put(control, changed);
+        std::array<std::uint64_t, 8> version{};
+        ASSERT_TRUE(WorldSaveService::artifact_version(control, version, missing));
+        ASSERT_FALSE(missing);
+        if (fault == "unknown stamp") {
+            version = {};
+        }
+        const auto evidence = Tree(save.path());
+        EXPECT_FALSE(
+            WorldSaveService::append_journal_record(control,
+                                                    "next\n",
+                                                    identity,
+                                                    nullptr,
+                                                    0,
+                                                    nullptr,
+                                                    &version,
+                                                    fault == "missing cache" ? nullptr : &cached));
+        EXPECT_EQ(version, (std::array<std::uint64_t, 8>{}));
+        EXPECT_EQ(Tree(save.path()), evidence);
+    }
+}
+
+TEST(SaveTransaction, JournalAppendCachedBytesHandleBoundariesAndUnavailableControl) {
+    for (const std::string_view state : {"matching",
+                                         "unknown stamp",
+                                         "no stamp",
+                                         "partial tail",
+                                         "empty",
+                                         "unpublished",
+                                         "missing",
+                                         "directory"}) {
+        SCOPED_TRACE(state);
+        TempSave save, held;
+        const auto control = save.path() / "control";
+        // Exercise more than two 64 KiB reads, including the final short block.
+        std::string cached(2u * 65536u + 17u, 'a');
+        cached.back() = '\n';
+        if (state == "empty") {
+            cached.clear();
+        } else if (state == "unpublished") {
+            cached.back() = 'a';
+        } else if (state == "partial tail") {
+            cached += "{unpublished";
+        }
+        Put(control, cached);
+        WorldSaveService::ArtifactIdentity identity{};
+        std::array<std::uint64_t, 8> version{};
+        bool missing = false;
+        ASSERT_TRUE(WorldSaveService::artifact_identity(control, identity, missing));
+        ASSERT_FALSE(missing);
+        ASSERT_TRUE(WorldSaveService::artifact_version(control, version, missing));
+        ASSERT_FALSE(missing);
+        if (state == "missing" || state == "directory") {
+            fs::rename(control, held.path() / "control");
+            if (state == "directory") {
+                ASSERT_TRUE(fs::create_directory(control));
+            }
+        } else if (state == "unknown stamp") {
+            version = {};
+        }
+        const auto evidence = Tree(save.path());
+        const bool accepted = state == "matching" || state == "unknown stamp" ||
+                              state == "no stamp" || state == "partial tail";
+        EXPECT_EQ(WorldSaveService::append_journal_record(control,
+                                                          "next\n",
+                                                          identity,
+                                                          nullptr,
+                                                          0,
+                                                          nullptr,
+                                                          state == "no stamp" ? nullptr : &version,
+                                                          &cached),
+                  accepted);
+        if (accepted) {
+            cached.resize(cached.rfind('\n') + 1u);
+            EXPECT_EQ(Get(control), cached + "next\n");
+            if (state != "no stamp") {
+                EXPECT_NE(version, (std::array<std::uint64_t, 8>{}));
+            }
+        } else {
+            EXPECT_EQ(version, (std::array<std::uint64_t, 8>{}));
+            EXPECT_EQ(Tree(save.path()), evidence);
+        }
     }
 }
 
@@ -3267,8 +3397,15 @@ TEST(SaveTransaction, ReceiptDiscoveryRefusesMalformedOrForeignEvidence) {
 }
 
 TEST(SaveTransaction, ReceiptSlotReuseExplicitlyResetsOnlyCompletedOwnedAbsence) {
-    for (const std::string_view phase :
-         {"prepared", "namespace", "foreign", "retired matching", "prepared matching"}) {
+    for (const std::string_view phase : {"prepared",
+                                         "namespace",
+                                         "flush",
+                                         "retired",
+                                         "foreign",
+                                         "namespace matching",
+                                         "flush matching",
+                                         "retired matching",
+                                         "prepared matching"}) {
         SCOPED_TRACE(phase);
         TempSave save;
         ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
@@ -3303,7 +3440,8 @@ TEST(SaveTransaction, ReceiptSlotReuseExplicitlyResetsOnlyCompletedOwnedAbsence)
               {"absent_only", false}}});
         records.push_back(receipt);
         const unsigned last_phase = (phase == "prepared" || phase == "prepared matching") ? 0u
-                                    : phase == "retired matching"                         ? 3u
+                                    : phase.starts_with("retired")                        ? 3u
+                                    : phase.starts_with("flush")                          ? 2u
                                                                                           : 1u;
         for (unsigned recorded = 1; recorded <= last_phase; ++recorded) {
             receipt["phase"] = recorded;
@@ -3312,14 +3450,17 @@ TEST(SaveTransaction, ReceiptSlotReuseExplicitlyResetsOnlyCompletedOwnedAbsence)
         Put(journal_directory(save.path()) / "txn.json", EncodeJournalRecords(records));
         const bool reused =
             WorldSaveService::write_member_bytes(save.path(), "world_info.json", "second");
-        EXPECT_EQ(reused, phase == "namespace" || phase.ends_with(" matching"));
+        EXPECT_EQ(reused,
+                  phase == "namespace" || phase == "flush" || phase == "retired" ||
+                      phase.ends_with(" matching"));
         EXPECT_EQ(Get(save.path() / "world_info.json"), reused ? "second" : "first");
         if (reused) {
             bool reset = false, next = false;
             for (const auto& record : JournalRecords(save.path())) {
                 if (record.at("record") == "receipt-reset") {
                     reset = true;
-                    EXPECT_EQ(record.at("receipts").at(0).at("identity"), nlohmann::json(original));
+                    EXPECT_EQ(record.at("receipts").at(0).at("identity"),
+                              nlohmann::json(phase.ends_with(" matching") ? installed : original));
                 } else if (record.at("record") == "receipt" &&
                            record.at("receipts").at(0).at("generation") == 1u) {
                     next = true;
@@ -3327,13 +3468,16 @@ TEST(SaveTransaction, ReceiptSlotReuseExplicitlyResetsOnlyCompletedOwnedAbsence)
                               nlohmann::json(installed));
                 }
             }
-            EXPECT_EQ(reset, phase == "namespace");
+            EXPECT_EQ(reset,
+                      phase == "namespace" || phase == "flush" || phase == "namespace matching" ||
+                          phase == "flush matching");
             EXPECT_EQ(next, phase != "prepared matching");
         } else {
             // Restore the admitted history before the transaction's ordinary abort.
             records.pop_back();
-            if (phase == "foreign")
+            if (phase == "foreign") {
                 records.pop_back();
+            }
             Put(journal_directory(save.path()) / "txn.json", EncodeJournalRecords(records));
         }
         transaction.abort(nullptr);
