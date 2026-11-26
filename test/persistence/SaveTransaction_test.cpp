@@ -649,6 +649,15 @@ TEST(SaveTransaction, NamespaceReceiptRetainedOnDifferentVolume) {
     EXPECT_TRUE(operations.retained);
     EXPECT_EQ(receipt.phase, ReceiptPhase::NamespaceDone);
     EXPECT_EQ(operations.trace.back(), "later-flush");
+    // The very same observation can qualify another receipt on its own volume.
+    ReceiptOperations same_volume;
+    same_volume.observation = operations.observation;
+    same_volume.durable.identity.front() = operations.observation.volume;
+    same_volume.occupant = same_volume.durable.identity;
+    auto qualified = same_volume.durable;
+    EXPECT_EQ(detail::CompleteNamespaceRetirement(qualified, same_volume), ReceiptOutcome::Retired);
+    EXPECT_TRUE(operations.retained);
+    EXPECT_FALSE(same_volume.retained);
 }
 
 TEST(SaveTransaction, NamespaceReceiptRetainedOnNonNtfsOrUnknownVolume) {
@@ -1880,10 +1889,11 @@ TEST(SaveTransaction, CompleteMalformedJournalRecordsAndForeignArtifactsRefuseBe
         const auto evidence = Tree(save.path());
         EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
         EXPECT_EQ(Tree(save.path()), evidence);
-        if (fault == 0)
+        if (fault == 0) {
             Put(control, complete);
-        else
+        } else {
             ASSERT_TRUE(fs::remove(foreign));
+        }
         transaction.abort(nullptr);
         EXPECT_FALSE(journal_pending(save.path()));
         EXPECT_EQ(Get(save.path() / "world_info.json"), "old");
@@ -2079,10 +2089,11 @@ TEST(SaveTransaction, RepeatedRecoveryReusesPublishedRetirementAndRestoration) {
             EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
         }
         const auto bytes = Get(journal_directory(save.path()) / "txn.json");
-        if (interruption == 0)
+        if (interruption == 0) {
             published = bytes;
-        else
+        } else {
             EXPECT_EQ(bytes, published);
+        }
     }
     ASSERT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::RolledBack);
     EXPECT_EQ(Tree(save.path()), baseline);
@@ -2131,18 +2142,20 @@ TEST(SaveTransaction, AbsentCreateRetryCompletesBeforePayloadRollback) {
                 path.filename() == "snapshot.json")
                 throw std::runtime_error("index absence completion interrupted");
         });
-        if (attempt == 0)
+        if (attempt == 0) {
             transaction.abort(nullptr);
-        else
+        } else {
             EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        }
         EXPECT_FALSE(fs::exists(snapshot_index_path(save.path())));
         EXPECT_EQ(Get(save.path() / "world_info.json"), "payload");
         EXPECT_TRUE(fs::exists(journal_directory(save.path()) / "txn.json"));
         const auto control = Get(journal_directory(save.path()) / "txn.json");
-        if (attempt == 0)
+        if (attempt == 0) {
             retained = control;
-        else
+        } else {
             EXPECT_EQ(control, retained);
+        }
     }
     EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::RolledBack);
     EXPECT_FALSE(fs::exists(save.path() / "world_info.json"));
@@ -2331,12 +2344,12 @@ TEST(SaveTransaction, RecordedFileReceiptsRemainAuthoritativeAcrossCompletionPha
         ASSERT_FALSE(missing);
         auto receipt = header;
         receipt["record"] = "receipt";
-        receipt["path"] = "journal/undo/0";
-        receipt["identity"] = undo_identity;
-        receipt["directory"] = false;
-        receipt["absent_only"] = false;
-        // Resetting an existing Windows receipt to Prepared is also a legal
-        // resurrection retry. POSIX must honour persisted file receipts too.
+        receipt["receipts"] = nlohmann::json::array({{{"path", "journal/undo/0"},
+                                                      {"identity", undo_identity},
+                                                      {"directory", false},
+                                                      {"absent_only", false}}});
+        // POSIX must honour persisted file receipts too; Windows preparation
+        // already recorded the same phase before carrier publication.
         for (unsigned recorded = 0; recorded <= phase; ++recorded) {
             receipt["phase"] = recorded;
             ASSERT_TRUE(WorldSaveService::append_journal_record(
@@ -2424,6 +2437,126 @@ TEST(SaveTransaction, ReceiptDiscoveryCompletesOnlyRecordedControlAliases) {
     EXPECT_FALSE(journal_pending(save.path()));
 }
 
+namespace {
+struct ReceiptBatchCapture {
+    unsigned stop_phase = 4;
+    std::size_t event = 0;
+    std::size_t removal = 0;
+    std::size_t flush = 0;
+    struct Published {
+        nlohmann::json record;
+        std::size_t removal;
+        std::size_t flush;
+    };
+    std::vector<Published> published;
+};
+
+ReceiptBatchCapture& BatchCapture() {
+    static ReceiptBatchCapture capture;
+    return capture;
+}
+
+void CaptureReceiptBatch(const char* step, const fs::path& path) {
+    auto& capture = BatchCapture();
+    ++capture.event;
+    const std::string_view event(step);
+    if (event == "crash-artifact-removed")
+        capture.removal = capture.event;
+    if (event == "crash-record-body-flushed")
+        capture.flush = capture.event;
+    if (event != "crash-record-published" ||
+        !path.filename().string().starts_with("journal.receipts."))
+        return;
+    std::istringstream input(Get(path));
+    nlohmann::json record;
+    std::string line;
+    while (std::getline(input, line))
+        record = nlohmann::json::parse(line);
+    if (record.at("record") != "receipt")
+        return;
+    capture.published.push_back({record, capture.removal, capture.flush});
+    const auto& receipts = record.at("receipts");
+    if (record.at("phase") == capture.stop_phase && receipts.size() == 2 &&
+        receipts.at(0).at("directory") == true && receipts.at(1).at("directory") == true)
+        throw std::runtime_error("directory batch interrupted");
+}
+} // namespace
+
+TEST(SaveTransaction, TornReceiptBatchAdvancesNoReceipt) {
+    for (const bool complete_body : {false, true}) {
+        TempSave save;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        const auto baseline = Tree(save.path());
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        BatchCapture() = {.stop_phase = 2, .published = {}};
+        {
+            HookGuard hook(&CaptureReceiptBatch);
+            transaction.abort(nullptr);
+        }
+        const auto carrier = FindReceiptCarrier(save.path());
+        ASSERT_FALSE(carrier.empty());
+        ASSERT_FALSE(BatchCapture().published.empty());
+        auto batch = BatchCapture().published.back().record;
+        ASSERT_EQ(batch.at("phase"), 2u);
+        ASSERT_EQ(batch.at("receipts").size(), 2u);
+        batch["phase"] = 3u;
+        const auto body = batch.dump();
+        // A full JSON body without its delimiter is unpublished too. The partial
+        // body includes the first receipt, which must not advance independently.
+        const auto cut = complete_body ? body.size() : body.find("},{") + 1;
+        ASSERT_GT(cut, 0u);
+        ASSERT_LE(cut, body.size());
+        Put(carrier, Get(carrier) + body.substr(0, cut));
+        BatchCapture() = {.stop_phase = 3, .published = {}};
+        {
+            HookGuard hook(&CaptureReceiptBatch);
+            EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        }
+        ASSERT_EQ(BatchCapture().published.size(), 1u);
+        EXPECT_EQ(BatchCapture().published.front().record.at("phase"), 3u);
+        EXPECT_EQ(BatchCapture().published.front().record.at("receipts"), batch.at("receipts"));
+        EXPECT_TRUE(journal_pending(save.path()));
+        EXPECT_NE(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        EXPECT_EQ(Tree(save.path()), baseline);
+    }
+}
+
+TEST(SaveTransaction, ReceiptPhaseBatchesFollowLaterCarrierFlush) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(),
+                           1,
+                           {{"world_info.json", "old metadata"},
+                            {"aether_state.efs", "old energy"},
+                            {"chunks/region/world-manifest.json", "old manifest"}}));
+    BatchCapture() = {};
+    {
+        HookGuard hook(&CaptureReceiptBatch);
+        ASSERT_TRUE(RunInventoryScenario(save.path()));
+    }
+    std::array<unsigned, 4> counts{};
+    for (const auto& published : BatchCapture().published) {
+        const auto phase = published.record.at("phase").get<unsigned>();
+        ASSERT_LT(phase, counts.size());
+        ++counts[phase];
+        EXPECT_GT(published.flush, published.removal);
+        const auto& receipts = published.record.at("receipts");
+        EXPECT_GE(receipts.size(), 2u);
+        if (phase == 3) {
+            EXPECT_GT(published.removal, 0u);
+        }
+    }
+    // Preparation is appended before carrier relocation; the capture starts at
+    // that relocation. Windows completes files then directories; POSIX only dirs.
+#if defined(_WIN32)
+    EXPECT_EQ(counts, (std::array<unsigned, 4>{0, 2, 2, 2}));
+#else
+    EXPECT_EQ(counts, (std::array<unsigned, 4>{0, 1, 1, 1}));
+#endif
+    EXPECT_FALSE(journal_pending(save.path()));
+}
+
 TEST(SaveTransaction, ReceiptDiscoveryRefusesMalformedOrForeignEvidence) {
     TempSave save;
     ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
@@ -2451,6 +2584,15 @@ TEST(SaveTransaction, ReceiptDiscoveryRefusesMalformedOrForeignEvidence) {
     // successful synchronous save/cleanup work for each malformed input.
     for (const std::string_view mutation : {"unknown phase",
                                             "phase order",
+                                            "phase regression",
+                                            "mixed phase regression",
+                                            "duplicate path",
+                                            "empty batch",
+                                            "nonarray batch",
+                                            "scalar receipt",
+                                            "invalid receipt flags",
+                                            "unknown receipt field",
+                                            "invalid reset",
                                             "negative phase",
                                             "escaped name",
                                             "foreign identity",
@@ -2469,14 +2611,45 @@ TEST(SaveTransaction, ReceiptDiscoveryRefusesMalformedOrForeignEvidence) {
             records.back()["phase"] = 4u;
         else if (mutation == "phase order")
             records.back()["phase"] = 2u;
-        else if (mutation == "negative phase")
+        else if (mutation == "phase regression") {
+            auto advanced = records.back();
+            advanced["phase"] = 1u;
+            records.push_back(advanced);
+            advanced["phase"] = 0u;
+            records.push_back(advanced);
+        } else if (mutation == "mixed phase regression") {
+            auto advanced = records.back();
+            advanced["receipts"] = nlohmann::json::array({advanced.at("receipts").back()});
+            advanced["phase"] = 1u;
+            records.push_back(advanced);
+            advanced["phase"] = 2u;
+            records.push_back(advanced);
+            advanced = original.back();
+            advanced["phase"] = 1u;
+            records.push_back(advanced);
+        } else if (mutation == "duplicate path") {
+            records.back()["receipts"].push_back(records.back()["receipts"].at(0));
+        } else if (mutation == "empty batch") {
+            records.back()["receipts"] = nlohmann::json::array();
+        } else if (mutation == "nonarray batch") {
+            records.back()["receipts"] = true;
+        } else if (mutation == "scalar receipt") {
+            records.back()["receipts"].at(0) = 7u;
+        } else if (mutation == "invalid receipt flags") {
+            records.back()["receipts"].at(0)["directory"] = true;
+            records.back()["receipts"].at(0)["absent_only"] = true;
+        } else if (mutation == "unknown receipt field") {
+            records.back()["receipts"].at(0)["unknown"] = true;
+        } else if (mutation == "invalid reset") {
+            records.back()["record"] = "receipt-reset";
+        } else if (mutation == "negative phase")
             records.back()["phase"] = -1;
         else if (mutation == "escaped name")
-            records.back()["path"] = "../world_info.json";
+            records.back()["receipts"].at(0)["path"] = "../world_info.json";
         else if (mutation == "foreign identity")
-            records.back()["identity"] = std::array<std::uint64_t, 3>{1, 2, 3};
+            records.back()["receipts"].at(0)["identity"] = std::array<std::uint64_t, 3>{1, 2, 3};
         else if (mutation == "zero identity")
-            records.back()["identity"] = std::array<std::uint64_t, 3>{};
+            records.back()["receipts"].at(0)["identity"] = std::array<std::uint64_t, 3>{};
         else if (mutation == "unknown metadata")
             records.back()["unknown"] = true;
         else if (mutation == "unknown version")
@@ -2486,14 +2659,16 @@ TEST(SaveTransaction, ReceiptDiscoveryRefusesMalformedOrForeignEvidence) {
         else if (mutation == "unknown kind")
             records.back()["record"] = "unknown";
         else if (mutation == "unknown inventory")
-            records.back()["path"] = "journal/undo/unrecorded";
+            records.back()["receipts"].at(0)["path"] = "journal/undo/unrecorded";
         else if (mutation == "unknown entry field") {
             ASSERT_FALSE(records.at(1).at("entries").empty());
             records.at(1).at("entries").at(0)["unknown"] = true;
         } else if (mutation == "foreign control") {
-            for (auto& record : records)
-                if (record.at("record") == "cleanup")
+            for (auto& record : records) {
+                if (record.at("record") == "cleanup") {
                     record["control_identity"] = std::array<std::uint64_t, 3>{1, 2, 3};
+                }
+            }
         }
         Put(carrier,
             mutation == "partial" ? valid.substr(0, valid.find('\n'))
@@ -2535,13 +2710,14 @@ TEST(SaveTransaction, RecoveryRestoresRetiringControlAndRefusesInvalidRetiringEv
             EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::NothingToDo);
         } else {
             fs::rename(control, saved_control);
-            if (std::string_view(input) == "directory")
+            if (std::string_view(input) == "directory") {
                 ASSERT_TRUE(fs::create_directory(slot));
-            else
+            } else {
                 Put(slot,
                     std::string_view(input) == "empty"     ? ""
                     : std::string_view(input) == "partial" ? "{"
                                                            : R"({"schema":"unknown"})");
+            }
             const auto evidence = Tree(save.path());
             EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
             EXPECT_EQ(Tree(save.path()), evidence);
@@ -3089,8 +3265,9 @@ void CheckWindowsTransitions(int batch, bool disk_events, bool recovery) {
     }
     // Earlier batches need not reach completion; the final batch must prove
     // that no unvisited transition lies beyond the unchanged enumeration bound.
-    if (last == bound)
+    if (last == bound) {
         EXPECT_TRUE(complete);
+    }
 }
 } // namespace
 

@@ -1414,13 +1414,24 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         stream = self.function(source, "ParseJournal", "")
         self.assertIn('record.modern != out.modern', stream)
         self.assertIn('journal receipt transition invalid', stream)
-        completion = self.function(source, "CompleteReceipt", "")
-        self.assertIn('detail::CompleteNamespaceRetirement<require_ntfs>', completion)
-        self.assertIn('RecordReceipt(root, document, receipt, 1, control, errors, &latest_flush)', completion)
-        self.assertIn('NearestExistingDirectory((root / receipt.path).parent_path())', completion)
-        self.assertIn('FlushReceiptCarrier(RecoveryControl(root, document), control)', completion)
-        later = completion.split('flush_later_commit()', 1)[1].split('bool record_flush_observed', 1)[0]
-        self.assertNotIn('RecordReceipt(', later)
+        completion = self.function(source, "CompleteReceipts", "")
+        self.assertIn('latest_flush.volume != receipt.completion.identity.front()', completion)
+        self.assertIn('!latest_flush.volume_known || !latest_flush.ntfs', completion)
+        self.assertIn('FlushReceiptCarrier(RecoveryControl(save_dir, document), control)', completion)
+        self.assertIn('NearestExistingDirectory((save_dir / receipt.path).parent_path())', completion)
+        self.assertLess(completion.index('WorldSaveService::remove_owned_entry('),
+                        completion.index('namespace_done, 1, control, errors, &latest_flush'))
+        self.assertLess(completion.index('namespace_done, 1, control, errors, &latest_flush'),
+                        completion.index('latest_flush.volume != receipt.completion.identity.front()'))
+        self.assertLess(completion.index('latest_flush.volume != receipt.completion.identity.front()'),
+                        completion.index('flush_observed, 2, control, errors'))
+        self.assertLess(completion.index('flush_observed, 2, control, errors'),
+                        completion.index('retired, 3, control, errors'))
+        encoder = self.function(source, "RecordReceipts", "")
+        self.assertIn('kMaxSnapshotIndexBytes - 1 - batch_bytes - comma', encoder)
+        self.assertLess(encoder.index('AppendMetadata('), encoder.index('receipts[i]->completion.phase'))
+        self.assertIn('journal duplicate receipt path', parse)
+        self.assertIn('next_phase == previous_phase + 1', stream)
         flush = self.function(source, "FlushReceiptCarrier", "")
         self.assertIn('actual == expected', flush)
         self.assertLess(flush.index('::FlushFileBuffers(file)'),
@@ -1429,7 +1440,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn('FILE_NAME_NORMALIZED | VOLUME_NAME_GUID', flush)
         self.assertIn('if (!::CloseHandle(file))', flush)
         finish = self.function(source, "FinishJournal", "")
-        self.assertLess(finish.index('PrepareReceipt('), finish.index('WorldSaveService::publish_restoration('))
+        self.assertLess(finish.index('PrepareReceipts('), finish.index('WorldSaveService::publish_restoration('))
         self.assertLess(finish.index('document.external_control = true;'), finish.index('bool all_retired'))
         self.assertLess(finish.index('if (!all_retired)'), finish.index('"crash-before-receipt-retirement"'))
         self.assertIn('if (!document.modern)', finish)
@@ -1445,7 +1456,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                       'publication-quarantined', 'retirement-quarantined'):
             self.assertIn('"crash-receipt-' + event + '"', notifications)
         self.assertNotIn('"receipt-recorded"', source)
-        self.assertIn('if (kNeedsFileReceipts &&', finish)
+        self.assertIn('if (kNeedsFileReceipts)', finish)
         recovery = self.function(source, "recover_pending_journal", "")
         self.assertLess(recovery.index('RecoverReceiptCarriers(save_dir, errors)'),
                         recovery.index('fs::symlink_status(journal, ec)'))
@@ -1462,7 +1473,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                       '"crash-receipt-before-publication"',
                       'root.size() != expected_fields',
                       'phase->get<std::uint64_t>() > 3',
-                      'detail::CompleteNamespaceRetirement<require_ntfs>',
+                      'latest_flush.volume != receipt.completion.identity.front()',
                       'RecoverReceiptCarriers(save_dir, errors)',
                       'const auto identity = missing ? entry->rollback_retired_identity : current;'):
             with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):
