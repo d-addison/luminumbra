@@ -576,6 +576,11 @@ private:
     const ChunkID m_id;
     void notify_lifecycle_change() const;
     std::atomic<ChunkState> m_state;
+    // Per-chunk binding fence; the queue itself is synchronized per index.
+    // Workers retain shared Chunk owners through state publication. Unbinding
+    // fences enqueue before eviction, and weak ownership permits index teardown.
+    mutable std::mutex m_lifecycle_mutex;
+    std::weak_ptr<ChunkLifecycleChanges> m_lifecycle_changes;
     std::atomic<bool> m_voxel_data_dirty{false};
     std::atomic<u8> m_sdf_provenance{static_cast<u8>(ChunkSdfProvenance::GeneratedCurrentParams)};
     std::atomic<u64> m_hash_revision{0};
