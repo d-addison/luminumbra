@@ -4,6 +4,7 @@
 
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/core/Log.h"
 
 #include <exception>
 #include <filesystem>
@@ -87,7 +88,11 @@ int Run(int argc, Arguments::ArgumentChar** argv) {
     if (!std::filesystem::create_directory(work_dir)) {
         throw std::invalid_argument("work directory already exists");
     }
+    // The engine logger is created lazily at trace level and ignores the global
+    // spdlog level, so create it now and silence it before anything can log.
+    // stdout must carry only the JSON document.
     spdlog::set_level(spdlog::level::off);
+    Log::GetCoreLogger()->set_level(spdlog::level::off);
     json result{{"schema", "luminumbra.active_region_scale_samples.v1"},
                 {"records_requested", records},
                 {"chunks_requested", chunks},
