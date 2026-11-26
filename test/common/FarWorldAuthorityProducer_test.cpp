@@ -1515,7 +1515,9 @@ TEST_F(FarWorldSourceCaptureTest, InvalidRequestsAndMissingSourcesNeverReplaceAc
     EXPECT_FALSE(cold.request_capture(single));
     ASSERT_TRUE(cold.configure_capture({reads, 3, SourceCaptureClock()}));
     EXPECT_FALSE(cold.request_capture(single));
-    const std::array<Save::AuthorityWindow, 2> wide{{{0, 0, 0, 0}, {100, 100, 0, 0}}};
+    // Disjoint windows are read separately, so only a single window that alone
+    // exceeds the per-read column bound is an invalid request.
+    const std::array<Save::AuthorityWindow, 1> wide{{{0, 100, 0, 0}}};
     EXPECT_FALSE(producer.request_capture(wide));
     auto invalid = reads;
     invalid.decoded_total_bytes = 0;
