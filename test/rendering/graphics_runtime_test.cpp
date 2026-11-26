@@ -1,7 +1,9 @@
 #include "../fixtures/TerrainFixtureParams.h"
 #include "luminumbra_client/app/FrameAttribution.h"
 #include "luminumbra_client/app/GraphicsSessionOverrides.h"
+#include "luminumbra_client/core/RuntimeScenarioConfig.h"
 #include "luminumbra_client/rendering/FarLodSystem.h"
+#include "luminumbra_client/rendering/GlDebugOutput.h"
 #include "luminumbra_client/rendering/GraphicsRuntimeConfig.h"
 #include "luminumbra_client/rendering/RenderPipeline.h"
 #include "luminumbra_client/rendering/RenderResourceRegistry.h"
@@ -34,6 +36,104 @@
 namespace {
 using namespace Luminumbra::Rendering;
 using namespace luminumbra::core;
+
+namespace GlRuntime = Luminumbra::Client::ScenarioHarness;
+
+class GLDebugRuntime : public ::testing::Test {
+protected:
+    void SetUp() override {
+        saved_ = GlRuntime::CurrentGLDebugRuntimeStats();
+    }
+
+    void TearDown() override {
+        // Synthetic messages must not contaminate later scenario health checks.
+        auto& counters = GlRuntime::GetGLDebugRuntimeCounters();
+        counters.messages.store(saved_.messages, std::memory_order_relaxed);
+        counters.errors.store(saved_.errors, std::memory_order_relaxed);
+        counters.warnings.store(saved_.warnings, std::memory_order_relaxed);
+        counters.notifications.store(saved_.notifications, std::memory_order_relaxed);
+    }
+
+    static void ExpectStats(const GlRuntime::GLDebugRuntimeStats& expected) {
+        const auto runtime = GlRuntime::CurrentGLDebugRuntimeStats();
+        EXPECT_EQ(runtime.messages, expected.messages);
+        EXPECT_EQ(runtime.errors, expected.errors);
+        EXPECT_EQ(runtime.warnings, expected.warnings);
+        EXPECT_EQ(runtime.notifications, expected.notifications);
+        const auto rendering = GlDebug::GetGlDebugCounters();
+        EXPECT_EQ(rendering.total, runtime.messages);
+        EXPECT_EQ(rendering.errors, runtime.errors);
+        EXPECT_EQ(rendering.warnings, runtime.warnings);
+        EXPECT_EQ(rendering.notifications, runtime.notifications);
+    }
+
+private:
+    GlRuntime::GLDebugRuntimeStats saved_;
+};
+
+TEST_F(GLDebugRuntime, RouterErrorsReachScenarioHealthCounters) {
+    auto expected = GlRuntime::CurrentGLDebugRuntimeStats();
+    GlDebug::debug_message_router(GL_DEBUG_SOURCE_API,
+                                  GL_DEBUG_TYPE_ERROR,
+                                  1,
+                                  GL_DEBUG_SEVERITY_LOW,
+                                  -1,
+                                  "synthetic GL error",
+                                  nullptr);
+    ++expected.messages;
+    ++expected.errors;
+    ExpectStats(expected);
+}
+
+TEST_F(GLDebugRuntime, RouterPreservesSeverityAndTypeClassification) {
+    constexpr std::array<GLenum, 10> types{GL_DEBUG_TYPE_ERROR,
+                                           GL_DEBUG_TYPE_DEPRECATED_BEHAVIOR,
+                                           GL_DEBUG_TYPE_UNDEFINED_BEHAVIOR,
+                                           GL_DEBUG_TYPE_PORTABILITY,
+                                           GL_DEBUG_TYPE_PERFORMANCE,
+                                           GL_DEBUG_TYPE_MARKER,
+                                           GL_DEBUG_TYPE_PUSH_GROUP,
+                                           GL_DEBUG_TYPE_POP_GROUP,
+                                           GL_DEBUG_TYPE_OTHER,
+                                           GL_NONE};
+    constexpr std::array<GLenum, 5> severities{GL_DEBUG_SEVERITY_HIGH,
+                                               GL_DEBUG_SEVERITY_MEDIUM,
+                                               GL_DEBUG_SEVERITY_LOW,
+                                               GL_DEBUG_SEVERITY_NOTIFICATION,
+                                               GL_NONE};
+    auto expected = GlRuntime::CurrentGLDebugRuntimeStats();
+    // Fifty bounded combinations include unknown enums, null messages and repeated calls.
+    for (const GLenum type : types) {
+        for (const GLenum severity : severities) {
+            SCOPED_TRACE(::testing::Message() << "type=" << type << " severity=" << severity);
+            GlDebug::debug_message_router(GL_NONE, type, 2, severity, 0, nullptr, nullptr);
+            ++expected.messages;
+            if (type == GL_DEBUG_TYPE_ERROR || severity == GL_DEBUG_SEVERITY_HIGH) {
+                ++expected.errors;
+            } else if (severity == GL_DEBUG_SEVERITY_NOTIFICATION) {
+                ++expected.notifications;
+            } else {
+                ++expected.warnings;
+            }
+            ExpectStats(expected);
+        }
+    }
+}
+
+TEST_F(GLDebugRuntime, RouterPreservesSuppressedDriverIds) {
+    const auto expected = GlRuntime::CurrentGLDebugRuntimeStats();
+    for (const GLuint id : {131169u, 131185u, 131218u, 131204u}) {
+        SCOPED_TRACE(id);
+        GlDebug::debug_message_router(GL_DEBUG_SOURCE_API,
+                                      GL_DEBUG_TYPE_ERROR,
+                                      id,
+                                      GL_DEBUG_SEVERITY_HIGH,
+                                      -1,
+                                      "suppressed driver error",
+                                      nullptr);
+        ExpectStats(expected);
+    }
+}
 
 ResolvedGraphics Resolve(GraphicsPreset preset, const GraphicsOverrides& overrides = {}) {
     GraphicsSettings settings;

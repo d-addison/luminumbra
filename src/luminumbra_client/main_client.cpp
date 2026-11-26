@@ -4802,6 +4802,10 @@ int main(int argc, char* argv[]) {
         }
     }
     while (!glfwWindowShouldClose(window)) {
+        // Cover event polling, scenario driving and nested sweep renders. Scope
+        // exit restores live input on completion, early exit and exceptions.
+        const UiInputRouter::GameplayInputHold sweep_input_hold(
+            uiInputRouter, scenario_config.world_visual_sweep() || scenario_config.temporal_audit);
         LUMIN_PROFILE_FRAME_N("Client");
         // Release weather before any frame writer, including menu previews.
         g_app.hud.photoWeather.Restore(renderPipeline);

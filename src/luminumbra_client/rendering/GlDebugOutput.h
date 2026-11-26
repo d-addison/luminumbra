@@ -45,16 +45,26 @@ namespace Luminumbra::Rendering::GlDebug {
 //   * glEnable(GL_DEBUG_OUTPUT) and glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS) so each
 //     message is delivered on the thread/callstack of the GL call that caused it.
 //   * glDebugMessageCallback(...) -> the logger router below.
-//   * Suppresses GL_DEBUG_SEVERITY_NOTIFICATION (and a few chatty NVIDIA buffer-
-//     residency / redundant-state ids) via glDebugMessageControl, unless the env
-//     value is "verbose" (LUMIN_GL_DEBUG=verbose) which keeps notifications.
+//   * Suppresses GL_DEBUG_SEVERITY_NOTIFICATION via glDebugMessageControl unless
+//     LUMIN_GL_DEBUG=verbose. The router always suppresses known noisy driver ids.
 bool InstallGlDebugCallback();
 
 // True once InstallGlDebugCallback has actually installed the callback. Lets
 // callers cheaply skip building debug-group label strings when nothing consumes them.
 bool IsGlDebugInstalled();
 
-// Cumulative message counters since install (diagnostic; render-only telemetry).
+// Driver callback shared by installation and direct diagnostic message delivery.
+// Records runtime health telemetry without requiring a GL context. Suppresses the
+// known noisy driver ids before counting; ERROR type or HIGH severity is an error.
+void GLAPIENTRY debug_message_router(GLenum source,
+                                     GLenum type,
+                                     GLuint id,
+                                     GLenum severity,
+                                     GLsizei length,
+                                     const GLchar* message,
+                                     const void* user_param);
+
+// Cumulative message counters shared with runtime health (render-only telemetry).
 // Useful for a "GL emitted N errors this run" health line / FrameScan-style report.
 struct GlDebugCounters {
     unsigned long long total = 0;

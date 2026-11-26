@@ -10,6 +10,7 @@
 #include <stdexcept>
 
 #include "../FarLodSystem.h"
+#include "../FarWorldRenderer.h"
 #include "../PassShaderLayouts.h"      // enumerable ExpectedLayout registry
 #include "../RenderResourceRegistry.h" // /: registry-owned G-buffer
 #include "../TerrainAnchor.h"
@@ -1258,12 +1259,15 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             impostor_candidate &&
             ((input.submitted_live_terrain && input.submitted_live_terrain->covers(cp.position)) ||
              (input.resident_live_terrain && input.resident_live_terrain->covers(cp.position)));
-        // Ladder exposes no per-position coverage here; unknown support refuses.
-        // Never substitute the inactive Legacy owner for selected Ladder terrain.
+        // Query only the selected owner's confirmed terrain submissions. Unknown
+        // Ladder support must never borrow coverage from the inactive Legacy owner.
         const bool far_terrain_resident =
             impostor_candidate && !live_terrain_owned && input.far_selection.submit &&
-            input.far_selection.effective == FarWorldMode::Legacy && input.legacy_far &&
-            input.legacy_far->terrain_resident_at(cp.position);
+            (input.far_selection.effective == FarWorldMode::Legacy
+                 ? input.legacy_far && input.legacy_far->terrain_resident_at(cp.position)
+                 : input.ladder_terrain_coverage &&
+                       input.ladder_terrain_coverage->Covers(
+                           {cp.position.x, cp.position.y, cp.position.z}));
         const auto submission = SelectStaticPropSubmission(
             input.far_selection, impostor_candidate, live_terrain_owned, far_terrain_resident);
         if (submission == StaticPropSubmission::Refused) {
