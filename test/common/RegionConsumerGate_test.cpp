@@ -33,6 +33,7 @@
 #include "luminumbra_common/systems/PlantCoarse.h"
 #include "luminumbra_common/systems/PlantDiseaseSystem.h"
 #include "luminumbra_common/systems/PollinationSystem.h"
+#include "luminumbra_common/systems/RegionElapsedTicks.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/SoilNutrientSystem.h"
 #include "luminumbra_common/world/Chunk.h"
@@ -1103,6 +1104,76 @@ TEST(RegionConsumerGate, EmptyUnknownAndInvalidOwnersAreBlockedOnlyWithInstalled
     EXPECT_TRUE(gate.Allows(entity));
     registry.get<C::PlantRegionComponent>(entity).owner_x = 0;
     EXPECT_FALSE(gate.Allows(entity));
+}
+
+TEST(RegionElapsedTicks, LegacyDueFrozenAndZeroWindows) {
+    entt::registry registry;
+    const auto entity = registry.create();
+    const std::array<RegionKey, 4> due{{{0, 0}, {1, 0}, {2, 0}, {-1, -1}}};
+    const std::map<RegionKey, std::uint32_t> windows{
+        {{0, 0}, 8}, {{1, 0}, 0}, {{-1, -1}, 65536}, {{3, 0}, 32}};
+    const W::RegionElapsedTicks elapsed(windows);
+    const RegionConsumerGate gate(registry, due, elapsed);
+    const RegionConsumerGate legacy_due(registry, due);
+    const RegionConsumerGate legacy;
+    const RegionConsumerGate empty_due(registry, {}, elapsed);
+    const std::map<RegionKey, std::uint32_t> empty_windows;
+    const RegionConsumerGate empty_elapsed(registry, due, W::RegionElapsedTicks(empty_windows));
+    EXPECT_EQ(W::RegionElapsedTicks{}.ForOwner({123, -456}), 1u);
+    EXPECT_EQ(elapsed.ForOwner({0, 0}), 8u);
+    EXPECT_EQ(elapsed.ForOwner({1, 0}), 0u);
+    EXPECT_EQ(elapsed.ForOwner({2, 0}), 0u);
+    EXPECT_EQ(legacy.ElapsedTicks(entity), 1u);
+    EXPECT_EQ(
+        RegionConsumerGate(RegionConsumerGate::PlantIdentity::Simulation).ElapsedTicks(entity), 1u);
+    EXPECT_EQ(gate.ElapsedTicks(entity), 0u); // No transform or saved owner.
+    auto& position = registry.emplace<C::TransformComponent>(entity).position;
+    struct Case {
+        float x;
+        bool allowed;
+        std::uint32_t ticks;
+    };
+    const std::array cases{Case{4, true, 8},
+                           Case{513, true, 0},
+                           Case{1025, true, 0},  // Due, but no elapsed window.
+                           Case{1537, false, 0}, // Frozen/not due, despite a map entry.
+                           Case{-0.5f, true, 65536},
+                           Case{std::numeric_limits<float>::infinity(), false, 0},
+                           Case{std::numeric_limits<float>::quiet_NaN(), false, 0}};
+    for (const auto& item : cases) {
+        SCOPED_TRACE(item.x);
+        position = {item.x, 0, item.x < 0 ? -0.5f : 4.0f};
+        EXPECT_EQ(gate.Allows(entity), item.allowed);
+        EXPECT_EQ(gate.AllowsPosition(position), item.allowed);
+        EXPECT_EQ(gate.ElapsedTicks(entity), item.ticks);
+        EXPECT_EQ(gate.ElapsedTicksAtPosition(position), item.ticks);
+        EXPECT_EQ(legacy_due.ElapsedTicks(entity), item.allowed ? 1u : 0u);
+        EXPECT_EQ(legacy.ElapsedTicks(entity), 1u);
+        EXPECT_EQ(legacy.ElapsedTicksAtPosition(position), 1u);
+        EXPECT_EQ(empty_due.ElapsedTicks(entity), 0u);
+        EXPECT_EQ(empty_elapsed.ElapsedTicks(entity), 0u);
+    }
+    // Persistent plant ownership wins even when the transform is invalid or absent.
+    registry.emplace<C::PlantRegionComponent>(entity, std::uint64_t{1}, -1, -1, std::uint64_t{0});
+    EXPECT_EQ(gate.ElapsedTicks(entity), 65536u);
+    registry.remove<C::TransformComponent>(entity);
+    EXPECT_EQ(gate.ElapsedTicks(entity), 65536u);
+    registry.get<C::PlantRegionComponent>(entity).owner_x = 9;
+    EXPECT_EQ(gate.ElapsedTicks(entity), 0u);
+
+    std::vector<std::uint64_t> scratch;
+    const RegionConsumerGate scratch_gate(
+        registry, due, scratch, RegionConsumerGate::PlantIdentity::Simulation, elapsed);
+    auto& owner = registry.get<C::PlantRegionComponent>(entity);
+    owner.owner_x = 1;
+    owner.owner_z = 0;
+    EXPECT_TRUE(scratch_gate.UsesSimulationPlantIdentity());
+    EXPECT_TRUE(scratch_gate.Allows(entity));
+    EXPECT_EQ(scratch_gate.ElapsedTicks(entity), 0u);
+    // Installing an elapsed view never opts existing one-step consumers into elapsed rules.
+    registry.emplace<C::MortalComponent>(entity).lifespan_ticks = 100;
+    luminumbra::ai::RunLifespanOnTick(registry, 1, scratch_gate);
+    EXPECT_EQ(registry.get<C::MortalComponent>(entity).age_ticks, 1u);
 }
 
 TEST(RegionConsumerGate, AdmissionWorkScalesWithDueOwnersAndQueriedParticipants) {

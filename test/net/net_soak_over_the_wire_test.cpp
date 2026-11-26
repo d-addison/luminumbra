@@ -55,6 +55,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "luminumbra_common/core/IntegerPrimitives.h"
 #include "luminumbra_common/net/LockstepSession.h"     // TcpListener / TcpTransport
 #include "luminumbra_common/net/ReplicationEndpoint.h" // ReplicationServer / ReplicationClient
 #include "luminumbra_common/net/ReplicationProtocol.h" // UsercmdMsg / ReplEntityState
@@ -115,7 +116,7 @@ std::uint64_t HashEntityStates(std::vector<ReplEntityState> es) {
     std::sort(es.begin(), es.end(), [](const ReplEntityState& a, const ReplEntityState& b) {
         return a.entity_id < b.entity_id;
     });
-    std::uint64_t h = 1469598103934665603ull; // FNV-1a offset basis
+    std::uint64_t h = Luminumbra::Core::kFnv1a64HistoricalBasis;
     auto mix = [&h](std::uint64_t v) {
         h ^= v;
         h *= 1099511628211ull;

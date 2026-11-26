@@ -588,39 +588,91 @@ TEST(MenuPresentation, DisabledRuntimeCollectorLeavesNoPhasesForTheNextFrame) {
 
 TEST(MenuPresentation, ProgramFirstUseIncludesBindingAndTheFirstSubmissionOnly) {
     namespace Gl = Luminumbra::Rendering::AttributedGl;
+    const auto before = Gl::programs().attributed_calls();
+    const auto lookups = Gl::programs().registry_lookups();
+    // Recreate the same name twice; storage/accessor initialization must neither
+    // reset the counters nor change which binds and submissions are attributed.
+    for (std::uint64_t iteration = 0; iteration < 2; ++iteration) {
+        const PhaseFrameScope frame(true);
+        const PhaseScope parent(Phase::MenuScene);
+        const auto program = Gl::CreateProgram([] { return std::uint32_t{71}; });
+        int binds = 0;
+        const auto bind = [&](std::uint32_t name) {
+            EXPECT_EQ(name, program);
+            EXPECT_FALSE(parent.is_current());
+            ++binds;
+        };
+        Gl::UseProgram(bind, program);
+        Gl::UseProgram(bind, program); // Uniform setup can bind without submitting.
+        EXPECT_EQ(binds, 2);
+        EXPECT_TRUE(parent.is_current());
+        EXPECT_EQ(frame.snapshot().completed_scopes(Phase::ShaderFirstUse), 2u);
+        int submissions = 0;
+        Gl::Submit(
+            [&](int groups) {
+                EXPECT_EQ(groups, 3);
+                EXPECT_FALSE(parent.is_current()); // Scope is still open during dispatch/draw.
+                EXPECT_EQ(frame.snapshot().completed_scopes(Phase::ShaderFirstUse), 2u);
+                ++submissions;
+            },
+            3);
+        EXPECT_TRUE(parent.is_current());
+        EXPECT_EQ(frame.snapshot().completed_scopes(Phase::ShaderFirstUse), 3u);
+        Gl::UseProgram([&](std::uint32_t) { EXPECT_TRUE(parent.is_current()); }, program);
+        Gl::Submit([&] {
+            EXPECT_TRUE(parent.is_current());
+            ++submissions;
+        });
+        EXPECT_EQ(submissions, 2);
+        EXPECT_EQ(frame.snapshot().completed_scopes(Phase::ShaderFirstUse), 3u);
+        EXPECT_EQ(Gl::programs().attributed_calls(), before + 3 * (iteration + 1));
+        EXPECT_EQ(Gl::programs().registry_lookups(), lookups);
+        Gl::DeleteProgram([](std::uint32_t) {}, program);
+    }
+}
+
+TEST(MenuPresentation, EmptyProgramRegistryPreservesUntrackedCallsAndCounters) {
     const PhaseFrameScope frame(true);
     const PhaseScope parent(Phase::MenuScene);
-    const auto program = Gl::CreateProgram([] { return std::uint32_t{71}; });
-    int binds = 0;
-    const auto bind = [&](std::uint32_t name) {
-        EXPECT_EQ(name, program);
-        EXPECT_FALSE(parent.is_current());
-        ++binds;
-    };
-    Gl::UseProgram(bind, program);
-    Gl::UseProgram(bind, program); // Uniform setup can bind without submitting.
-    EXPECT_EQ(binds, 2);
-    EXPECT_TRUE(parent.is_current());
-    EXPECT_EQ(frame.snapshot().completed_scopes(Phase::ShaderFirstUse), 2u);
-    int submissions = 0;
-    Gl::Submit(
-        [&](int groups) {
-            EXPECT_EQ(groups, 3);
-            EXPECT_FALSE(parent.is_current()); // Scope is still open during dispatch/draw.
-            EXPECT_EQ(frame.snapshot().completed_scopes(Phase::ShaderFirstUse), 2u);
-            ++submissions;
-        },
-        3);
-    EXPECT_TRUE(parent.is_current());
-    EXPECT_EQ(frame.snapshot().completed_scopes(Phase::ShaderFirstUse), 3u);
-    Gl::UseProgram([&](std::uint32_t) { EXPECT_TRUE(parent.is_current()); }, program);
-    Gl::Submit([&] {
-        EXPECT_TRUE(parent.is_current());
-        ++submissions;
-    });
-    EXPECT_EQ(submissions, 2);
-    EXPECT_EQ(frame.snapshot().completed_scopes(Phase::ShaderFirstUse), 3u);
-    Gl::DeleteProgram([](std::uint32_t) {}, program);
+    ProgramFirstUse programs;
+    EXPECT_FALSE(programs.pending());
+    EXPECT_EQ(programs.attributed_calls(), 0u);
+    EXPECT_EQ(programs.registry_lookups(), 0u);
+    int calls = 0;
+    // Exercise absent names both before and after lazy registry construction.
+    for (std::uint64_t iteration = 0; iteration < 2; ++iteration) {
+        programs.deleted(999);
+        programs.use(
+            [&](std::uint32_t name) {
+                EXPECT_EQ(name, 999u);
+                EXPECT_TRUE(parent.is_current());
+                ++calls;
+            },
+            std::uint32_t{999});
+        EXPECT_FALSE(programs.pending());
+        programs.submit([&] {
+            EXPECT_TRUE(parent.is_current());
+            ++calls;
+        });
+        const auto failed = programs.created(0);
+        EXPECT_EQ(failed.name, 0u);
+        programs.use(
+            [&](std::uint32_t name) {
+                EXPECT_EQ(name, 0u);
+                EXPECT_TRUE(parent.is_current());
+                ++calls;
+            },
+            failed);
+        programs.submit([&] { ++calls; });
+        programs.use([](std::uint32_t) {}, std::uint32_t{0});
+        EXPECT_FALSE(programs.pending());
+        EXPECT_EQ(programs.registry_lookups(), iteration + 1);
+        EXPECT_EQ(programs.attributed_calls(), 0u);
+        programs.created(7);
+        programs.deleted(7);
+    }
+    EXPECT_EQ(calls, 8);
+    EXPECT_EQ(frame.snapshot().completed_scopes(Phase::ShaderFirstUse), 0u);
 }
 
 TEST(MenuPresentation, ProgramDeletionAndHandleReuseStartANewFirstUse) {

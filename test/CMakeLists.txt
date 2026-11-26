@@ -381,7 +381,10 @@ add_executable(common_tests
     common/ServerHeadlessHygiene_test.cpp
     common/SimulationClock_test.cpp
     common/ActiveRegionLedger_test.cpp
+    tools/active_regions_dump_test.cpp
+    ../tools/active_regions_dump.cpp
     common/ActiveRegionPriority_test.cpp
+    common/ActiveRegionAcceptance_test.cpp
     common/SimulationIdentityAllocator_test.cpp
     common/PlantCreationIdentity_test.cpp
     common/GroundObjectStore_test.cpp
@@ -568,7 +571,7 @@ add_executable(temporal_sweep_test
     rendering/temporal_sweep_test.cpp)
 target_include_directories(temporal_sweep_test PRIVATE ../src ../src/luminumbra_client)
 target_link_libraries(temporal_sweep_test PRIVATE
-    capture_profile_test_support
+    capture_profile_test_support command_registry_test_support
     gtest_main luminumbra_common nlohmann_json glm)
 luminumbra_configure_first_party_target(temporal_sweep_test)
 
@@ -1816,6 +1819,7 @@ add_executable(frontier_gates_test
     persistence/water_cursor_hash_test.cpp
     persistence/save_load_corruption_corpus_test.cpp
     persistence/SaveTransaction_test.cpp
+    persistence/recovery_durability_test.cpp
 )
 
 # The region consumer regressions also exceed the default COFF section count.
@@ -2025,8 +2029,12 @@ luminumbra_configure_first_party_target(inspector_registry_test)
 # Developer foundations compile directly, without the client or graphics libraries.
 add_library(command_registry_test_support STATIC
     ../src/luminumbra_common/core/CommandRegistry.cpp
+    ../src/luminumbra_client/app/UiInputService.cpp
+    ../src/luminumbra_client/app/UiInputRouter.cpp
 )
-target_include_directories(command_registry_test_support PUBLIC ../src/luminumbra_common)
+target_include_directories(command_registry_test_support
+    PUBLIC ../src/luminumbra_common
+    PRIVATE ../src/luminumbra_client)
 luminumbra_configure_first_party_target(command_registry_test_support)
 
 add_executable(developer_console_pure_test
@@ -2037,8 +2045,6 @@ add_executable(developer_console_pure_test
     ../src/luminumbra_client/debug/DeveloperCommandRegistry.cpp
     ../src/luminumbra_client/debug/DeveloperConsole.cpp
     ../src/luminumbra_client/debug/DeveloperLogSink.cpp
-    ../src/luminumbra_client/app/UiInputService.cpp
-    ../src/luminumbra_client/app/UiInputRouter.cpp
 )
 target_include_directories(developer_console_pure_test PRIVATE
     ../src/luminumbra_client ../src/luminumbra_common)
@@ -2620,6 +2626,9 @@ set_tests_properties(StationDiscoveryContract StationDiscoveryCliSmoke
 add_test(NAME SimBudgetCaptureContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py")
 set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
+add_test(NAME RegionalAdmissionReportContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_regional_admission_report.py")
+set_tests_properties(RegionalAdmissionReportContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
 add_test(NAME SimBudgetNeutralityContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py"
         SimBudgetNeutralityTests)

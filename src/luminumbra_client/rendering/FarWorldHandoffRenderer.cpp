@@ -68,6 +68,7 @@ void FarWorldHandoffRenderer::CheckOwner() const {
         throw std::logic_error("Far-world handoff ownership/reentrancy");
 }
 void FarWorldHandoffRenderer::Unbind() noexcept {
+    terrain_coverage_.Clear();
     if (driver_ && driver_->ValidContext()) {
         driver_->UnbindLiveOwnership();
         driver_->BindVertexArray(0);
@@ -319,6 +320,7 @@ bool FarWorldHandoffRenderer::AdvanceFrame(std::uint64_t frame,
 }
 void FarWorldHandoffRenderer::BeginLiveOwnership(std::uint64_t frame, std::size_t limit) {
     CheckOwner();
+    terrain_coverage_.Clear();
     ownership_.Begin(frame, limit);
 }
 bool FarWorldHandoffRenderer::AddLiveUpload(const FarWorldLiveUpload& upload) {
@@ -332,6 +334,7 @@ bool FarWorldHandoffRenderer::FinishLiveOwnership() {
 FarWorldSubmitStats FarWorldHandoffRenderer::Submit(const std::array<double, 3>& camera,
                                                     const FarWorldPrepareDraw& prepare) {
     Guard const guard(*this);
+    terrain_coverage_.Begin(camera);
     FarWorldSubmitStats stats;
     diagnostic_.submission = {};
     for (std::size_t i = 0; i < diagnostic_.draw_count; ++i)
@@ -418,6 +421,7 @@ FarWorldSubmitStats FarWorldHandoffRenderer::Submit(const std::array<double, 3>&
                 return;
             }
             ++c.stats.draws;
+            c.owner.terrain_coverage_.RecordSubmitted(record);
             if (diagnostic_index < c.owner.diagnostic_.draw_count) {
                 auto& diagnostic = c.owner.diagnostic_.draws[diagnostic_index];
                 if (diagnostic.identity == record.identity)
