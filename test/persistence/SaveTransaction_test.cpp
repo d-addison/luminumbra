@@ -157,6 +157,18 @@ std::string Get(const fs::path& file) {
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
+std::string_view& ReceiptInterruption() {
+    static std::string_view selected;
+    return selected;
+}
+
+fs::path FindReceiptCarrier(const fs::path& save) {
+    for (const auto& child : fs::directory_iterator(save))
+        if (child.path().filename().string().starts_with("journal.receipts."))
+            return child.path();
+    return {};
+}
+
 std::vector<nlohmann::json> JournalRecords(const fs::path& save) {
     std::istringstream input(Get(journal_directory(save) / "txn.json"));
     std::vector<nlohmann::json> records;
@@ -201,6 +213,11 @@ TreeMap UnregisteredStaging(const fs::path& save) {
     auto bytes = Get(journal_directory(save) / "txn.json");
     if (bytes.empty())
         bytes = Get(journal_directory(save) / "undo/cleanup.txn.json");
+    if (bytes.empty()) {
+        const auto carrier = FindReceiptCarrier(save);
+        if (!carrier.empty())
+            bytes = Get(carrier);
+    }
     std::string_view remaining(bytes);
     while (true) {
         const auto end = remaining.find('\n');
@@ -632,6 +649,15 @@ TEST(SaveTransaction, NamespaceReceiptRetainedOnDifferentVolume) {
     EXPECT_TRUE(operations.retained);
     EXPECT_EQ(receipt.phase, ReceiptPhase::NamespaceDone);
     EXPECT_EQ(operations.trace.back(), "later-flush");
+    // The very same observation can qualify another receipt on its own volume.
+    ReceiptOperations same_volume;
+    same_volume.observation = operations.observation;
+    same_volume.durable.identity.front() = operations.observation.volume;
+    same_volume.occupant = same_volume.durable.identity;
+    auto qualified = same_volume.durable;
+    EXPECT_EQ(detail::CompleteNamespaceRetirement(qualified, same_volume), ReceiptOutcome::Retired);
+    EXPECT_TRUE(operations.retained);
+    EXPECT_FALSE(same_volume.retained);
 }
 
 TEST(SaveTransaction, NamespaceReceiptRetainedOnNonNtfsOrUnknownVolume) {
@@ -796,8 +822,10 @@ TEST(SaveTransaction, HistoricalV4JournalStillDecodesAndRecovers) {
     auto records = JournalRecords(save.path());
     ASSERT_FALSE(records.empty());
     // Pin the historical schema independently of the current writer constant.
-    for (auto& record : records)
+    for (auto& record : records) {
         record["schema"] = "luminumbra.journal.v4";
+        record.erase("record");
+    }
     Put(journal_directory(save.path()) / "txn.json", EncodeJournalRecords(records));
     EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::RolledBack);
     EXPECT_EQ(Tree(save.path()), baseline);
@@ -1861,10 +1889,11 @@ TEST(SaveTransaction, CompleteMalformedJournalRecordsAndForeignArtifactsRefuseBe
         const auto evidence = Tree(save.path());
         EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
         EXPECT_EQ(Tree(save.path()), evidence);
-        if (fault == 0)
+        if (fault == 0) {
             Put(control, complete);
-        else
+        } else {
             ASSERT_TRUE(fs::remove(foreign));
+        }
         transaction.abort(nullptr);
         EXPECT_FALSE(journal_pending(save.path()));
         EXPECT_EQ(Get(save.path() / "world_info.json"), "old");
@@ -1957,7 +1986,8 @@ TEST(SaveTransaction, FullForwardJournalRetainsRollbackCapacity) {
         // A valid whitespace-padded duplicate reaches the byte boundary without
         // thousands of synchronous writes. Subsequent ordinary writes consume it.
         const auto encoded = JournalRecords(save.path()).back().dump() + "\n";
-        constexpr std::size_t headroom = 16384;
+        // v5 reserves completion records as well as restoration records.
+        const auto headroom = transaction.rollback_reserve_bytes();
         const auto padding = kMaxSnapshotIndexBytes - headroom - Get(control).size();
         ASSERT_GT(padding, encoded.size());
         const auto record = std::string(padding - encoded.size(), ' ') + encoded;
@@ -2059,10 +2089,11 @@ TEST(SaveTransaction, RepeatedRecoveryReusesPublishedRetirementAndRestoration) {
             EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
         }
         const auto bytes = Get(journal_directory(save.path()) / "txn.json");
-        if (interruption == 0)
+        if (interruption == 0) {
             published = bytes;
-        else
+        } else {
             EXPECT_EQ(bytes, published);
+        }
     }
     ASSERT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::RolledBack);
     EXPECT_EQ(Tree(save.path()), baseline);
@@ -2096,6 +2127,560 @@ TEST(SaveTransaction, RecoveryCanResumeAfterTailTruncationBodyFlushAndDelimiterP
     }
 }
 
+TEST(SaveTransaction, AbsentCreateRetryCompletesBeforePayloadRollback) {
+    TempSave save;
+    SaveTransaction transaction(save.path(), 1, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "payload"));
+    ASSERT_TRUE(
+        WorldSaveService::durable_write_file(snapshot_index_path(save.path()), "new index"));
+    std::string retained;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        HookGuard hook(+[](const char* step, const fs::path& path) {
+            if (std::string_view(step) == "crash-before-namespace-completion" &&
+                path.filename() == "snapshot.json")
+                throw std::runtime_error("index absence completion interrupted");
+        });
+        if (attempt == 0) {
+            transaction.abort(nullptr);
+        } else {
+            EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        }
+        EXPECT_FALSE(fs::exists(snapshot_index_path(save.path())));
+        EXPECT_EQ(Get(save.path() / "world_info.json"), "payload");
+        EXPECT_TRUE(fs::exists(journal_directory(save.path()) / "txn.json"));
+        const auto control = Get(journal_directory(save.path()) / "txn.json");
+        if (attempt == 0) {
+            retained = control;
+        } else {
+            EXPECT_EQ(control, retained);
+        }
+    }
+    EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::RolledBack);
+    EXPECT_FALSE(fs::exists(save.path() / "world_info.json"));
+    EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::NothingToDo);
+}
+
+TEST(SaveTransaction, AbortFlushFailureRetainsRecoveryEvidence) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+    const auto baseline = Tree(save.path());
+    SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+    {
+        HookGuard hook(+[](const char* step, const fs::path&) {
+            if (std::string_view(step) == "crash-before-namespace-completion")
+                throw std::runtime_error("completion flush interrupted");
+        });
+        transaction.abort(nullptr);
+    }
+    EXPECT_TRUE(fs::exists(journal_directory(save.path()) / "txn.json"));
+    EXPECT_FALSE(fs::is_empty(journal_directory(save.path()) / "undo"));
+    EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::RolledBack);
+    EXPECT_EQ(Tree(save.path()), baseline);
+}
+
+TEST(SaveTransaction, MatchingRestoreFailureBlocksCleanup) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+    const auto baseline = Tree(save.path());
+    SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+    const auto evidence = Tree(save.path());
+    {
+        HookGuard hook(+[](const char* step, const fs::path& path) {
+            if (std::string_view(step) == "crash-before-restoration-completion" &&
+                path.filename() == "snapshot.json")
+                throw std::runtime_error("matching index completion interrupted");
+        });
+        transaction.abort(nullptr);
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+    }
+    EXPECT_EQ(Tree(save.path()), evidence);
+    EXPECT_EQ(Get(save.path() / "world_info.json"), "new");
+    EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::RolledBack);
+    EXPECT_EQ(Tree(save.path()), baseline);
+}
+
+TEST(SaveTransaction, ReceiptDiscoverySurvivesControlAndDirectoryRetirement) {
+    for (const std::string_view interruption : {"crash-receipt-carrier-published",
+                                                "journal-unlinked",
+                                                "crash-before-receipt-retirement"}) {
+        SCOPED_TRACE(interruption);
+        TempSave save;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        const auto baseline = Tree(save.path());
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+        {
+            ReceiptInterruption() = interruption;
+            HookGuard hook(+[](const char* step, const fs::path&) {
+                if (step == ReceiptInterruption())
+                    throw std::runtime_error("receipt retirement interrupted");
+            });
+            transaction.abort(nullptr);
+        }
+        EXPECT_FALSE(fs::exists(journal_directory(save.path()) / "txn.json"));
+        EXPECT_TRUE(!FindReceiptCarrier(save.path()).empty());
+        EXPECT_TRUE(journal_pending(save.path()));
+        EXPECT_NE(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        EXPECT_EQ(Tree(save.path()), baseline);
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::NothingToDo);
+    }
+}
+
+TEST(SaveTransaction, AbortRetriesRecordedCleanupWithoutRepeatingRollback) {
+    for (const bool protect_member : {false, true}) {
+        for (const std::string_view interruption : {"crash-receipt-carrier-published",
+                                                    "journal-unlinked",
+                                                    "crash-before-receipt-retirement"}) {
+            SCOPED_TRACE(protect_member);
+            SCOPED_TRACE(interruption);
+            TempSave save;
+            ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+            const auto baseline = Tree(save.path());
+            SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+            ASSERT_TRUE(transaction.begin(nullptr));
+            ASSERT_TRUE(transaction.protect(protect_member
+                                                ? std::vector<std::string>{"world_info.json"}
+                                                : std::vector<std::string>{},
+                                            nullptr));
+            if (protect_member) {
+                ASSERT_TRUE(
+                    WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+            }
+            {
+                ReceiptInterruption() = interruption;
+                HookGuard hook(+[](const char* step, const fs::path&) {
+                    if (step == ReceiptInterruption())
+                        throw std::runtime_error("cleanup interrupted");
+                });
+                transaction.abort(nullptr);
+            }
+            EXPECT_TRUE(journal_pending(save.path()));
+            std::vector<std::string> errors;
+            transaction.abort(&errors);
+            EXPECT_TRUE(errors.empty());
+            EXPECT_EQ(Tree(save.path()), baseline);
+            EXPECT_FALSE(journal_pending(save.path()));
+            transaction.abort(nullptr);
+            EXPECT_EQ(Tree(save.path()), baseline);
+        }
+    }
+}
+
+TEST(SaveTransaction, AbortCleanupRetryRefusesPartialAndSubstitutedEvidence) {
+    for (const bool substitute : {false, true}) {
+        TempSave save;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        const auto baseline = Tree(save.path());
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+        {
+            HookGuard hook(+[](const char* step, const fs::path&) {
+                if (std::string_view(step) == "crash-receipt-carrier-published")
+                    throw std::runtime_error("cleanup interrupted");
+            });
+            transaction.abort(nullptr);
+        }
+        const auto carrier = FindReceiptCarrier(save.path());
+        ASSERT_FALSE(carrier.empty());
+        const auto recorded = Get(carrier);
+        const auto retained = save.path() / "retained-receipts";
+        if (substitute)
+            fs::rename(carrier, retained);
+        Put(carrier, "{partial");
+        const auto evidence = Tree(save.path());
+        std::vector<std::string> errors;
+        transaction.abort(&errors);
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(Tree(save.path()), evidence);
+        if (substitute) {
+            fs::remove(carrier);
+            fs::rename(retained, carrier);
+        } else {
+            Put(carrier, recorded);
+        }
+        transaction.abort(nullptr);
+        EXPECT_EQ(Tree(save.path()), baseline);
+        EXPECT_FALSE(journal_pending(save.path()));
+    }
+}
+
+TEST(SaveTransaction, RecordedFileReceiptsRemainAuthoritativeAcrossCompletionPhases) {
+    for (unsigned phase = 0; phase <= 3; ++phase) {
+        TempSave save;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        const auto baseline = Tree(save.path());
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+        const auto header = JournalRecords(save.path()).front();
+        {
+            HookGuard hook(+[](const char* step, const fs::path&) {
+                if (std::string_view(step) == "crash-receipt-carrier-published")
+                    throw std::runtime_error("cleanup interrupted");
+            });
+            transaction.abort(nullptr);
+        }
+        const auto carrier = FindReceiptCarrier(save.path());
+        ASSERT_FALSE(carrier.empty());
+        WorldSaveService::ArtifactIdentity control{}, undo_identity{};
+        bool missing = false;
+        const auto undo = journal_directory(save.path()) / "undo/0";
+        ASSERT_TRUE(WorldSaveService::artifact_identity(carrier, control, missing));
+        ASSERT_FALSE(missing);
+        ASSERT_TRUE(WorldSaveService::artifact_identity(undo, undo_identity, missing));
+        ASSERT_FALSE(missing);
+        auto receipt = header;
+        receipt["record"] = "receipt";
+        receipt["receipts"] = nlohmann::json::array({{{"path", "journal/undo/0"},
+                                                      {"identity", undo_identity},
+                                                      {"directory", false},
+                                                      {"absent_only", false}}});
+        // POSIX must honour persisted file receipts too; Windows preparation
+        // already recorded the same phase before carrier publication.
+        for (unsigned recorded = 0; recorded <= phase; ++recorded) {
+            receipt["phase"] = recorded;
+            ASSERT_TRUE(WorldSaveService::append_journal_record(
+                carrier, receipt.dump() + "\n", control, nullptr));
+        }
+        const auto retained = save.path() / "retained-undo";
+        fs::rename(undo, retained);
+        Put(undo, "foreign undo");
+        const auto evidence = Tree(save.path());
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        EXPECT_EQ(Tree(save.path()), evidence);
+        fs::remove(undo);
+        fs::rename(retained, undo);
+        EXPECT_NE(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        EXPECT_EQ(Tree(save.path()), baseline);
+        EXPECT_FALSE(journal_pending(save.path()));
+    }
+}
+
+TEST(SaveTransaction, CompletedReceiptsRefuseSubstitutedDirectoriesAndUnknownContents) {
+    for (const bool substitute_directory : {false, true}) {
+        TempSave save;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+        {
+            HookGuard hook(+[](const char* step, const fs::path&) {
+                if (std::string_view(step) == "crash-receipt-carrier-published")
+                    throw std::runtime_error("cleanup interrupted");
+            });
+            transaction.abort(nullptr);
+        }
+        const auto journal = journal_directory(save.path());
+        const auto retained = save.path() / "retained-journal";
+        if (substitute_directory) {
+            fs::rename(journal, retained);
+            fs::create_directory(journal);
+        } else {
+            Put(journal / "undo/unknown", "foreign");
+        }
+        const auto evidence = Tree(save.path());
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        EXPECT_EQ(Tree(save.path()), evidence);
+        if (substitute_directory) {
+            fs::remove(journal);
+            fs::rename(retained, journal);
+        } else {
+            fs::remove(journal / "undo/unknown");
+        }
+        EXPECT_NE(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+    }
+}
+
+TEST(SaveTransaction, ReceiptDiscoveryCompletesOnlyRecordedControlAliases) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+    const auto baseline = Tree(save.path());
+    SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+    {
+        HookGuard hook(+[](const char* step, const fs::path&) {
+            if (std::string_view(step) == "crash-receipt-carrier-published")
+                throw std::runtime_error("carrier publication interrupted");
+        });
+        transaction.abort(nullptr);
+    }
+    const auto carrier = FindReceiptCarrier(save.path());
+    ASSERT_FALSE(carrier.empty());
+    // Model both link-publication interruption and namespace resurrection on
+    // every platform; no symlink privilege or native crash harness is required.
+    fs::create_hard_link(carrier, journal_directory(save.path()) / "txn.json");
+    const auto foreign = save.path() / "foreign-control-alias";
+    fs::create_hard_link(carrier, foreign);
+    const auto evidence = Tree(save.path());
+    EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+    EXPECT_EQ(Tree(save.path()), evidence);
+    fs::remove(foreign);
+    fs::create_hard_link(carrier, journal_directory(save.path()) / "undo/cleanup.txn.json");
+    EXPECT_NE(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+    EXPECT_EQ(Tree(save.path()), baseline);
+    EXPECT_FALSE(journal_pending(save.path()));
+}
+
+namespace {
+struct ReceiptBatchCapture {
+    unsigned stop_phase = 4;
+    std::size_t event = 0;
+    std::size_t removal = 0;
+    std::size_t flush = 0;
+    struct Published {
+        nlohmann::json record;
+        std::size_t removal;
+        std::size_t flush;
+    };
+    std::vector<Published> published;
+};
+
+ReceiptBatchCapture& BatchCapture() {
+    static ReceiptBatchCapture capture;
+    return capture;
+}
+
+void CaptureReceiptBatch(const char* step, const fs::path& path) {
+    auto& capture = BatchCapture();
+    ++capture.event;
+    const std::string_view event(step);
+    if (event == "crash-artifact-removed")
+        capture.removal = capture.event;
+    if (event == "crash-record-body-flushed")
+        capture.flush = capture.event;
+    if (event != "crash-record-published" ||
+        !path.filename().string().starts_with("journal.receipts."))
+        return;
+    std::istringstream input(Get(path));
+    nlohmann::json record;
+    std::string line;
+    while (std::getline(input, line))
+        record = nlohmann::json::parse(line);
+    if (record.at("record") != "receipt")
+        return;
+    capture.published.push_back({record, capture.removal, capture.flush});
+    const auto& receipts = record.at("receipts");
+    if (record.at("phase") == capture.stop_phase && receipts.size() == 2 &&
+        receipts.at(0).at("directory") == true && receipts.at(1).at("directory") == true)
+        throw std::runtime_error("directory batch interrupted");
+}
+} // namespace
+
+TEST(SaveTransaction, TornReceiptBatchAdvancesNoReceipt) {
+    for (const bool complete_body : {false, true}) {
+        TempSave save;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        const auto baseline = Tree(save.path());
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        BatchCapture() = {.stop_phase = 2, .published = {}};
+        {
+            HookGuard hook(&CaptureReceiptBatch);
+            transaction.abort(nullptr);
+        }
+        const auto carrier = FindReceiptCarrier(save.path());
+        ASSERT_FALSE(carrier.empty());
+        ASSERT_FALSE(BatchCapture().published.empty());
+        auto batch = BatchCapture().published.back().record;
+        ASSERT_EQ(batch.at("phase"), 2u);
+        ASSERT_EQ(batch.at("receipts").size(), 2u);
+        batch["phase"] = 3u;
+        const auto body = batch.dump();
+        // A full JSON body without its delimiter is unpublished too. The partial
+        // body includes the first receipt, which must not advance independently.
+        const auto cut = complete_body ? body.size() : body.find("},{") + 1;
+        ASSERT_GT(cut, 0u);
+        ASSERT_LE(cut, body.size());
+        Put(carrier, Get(carrier) + body.substr(0, cut));
+        BatchCapture() = {.stop_phase = 3, .published = {}};
+        {
+            HookGuard hook(&CaptureReceiptBatch);
+            EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        }
+        ASSERT_EQ(BatchCapture().published.size(), 1u);
+        EXPECT_EQ(BatchCapture().published.front().record.at("phase"), 3u);
+        EXPECT_EQ(BatchCapture().published.front().record.at("receipts"), batch.at("receipts"));
+        EXPECT_TRUE(journal_pending(save.path()));
+        EXPECT_NE(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        EXPECT_EQ(Tree(save.path()), baseline);
+    }
+}
+
+TEST(SaveTransaction, ReceiptPhaseBatchesFollowLaterCarrierFlush) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(),
+                           1,
+                           {{"world_info.json", "old metadata"},
+                            {"aether_state.efs", "old energy"},
+                            {"chunks/region/world-manifest.json", "old manifest"}}));
+    BatchCapture() = {};
+    {
+        HookGuard hook(&CaptureReceiptBatch);
+        ASSERT_TRUE(RunInventoryScenario(save.path()));
+    }
+    std::array<unsigned, 4> counts{};
+    for (const auto& published : BatchCapture().published) {
+        const auto phase = published.record.at("phase").get<unsigned>();
+        ASSERT_LT(phase, counts.size());
+        ++counts[phase];
+        EXPECT_GT(published.flush, published.removal);
+        const auto& receipts = published.record.at("receipts");
+        EXPECT_GE(receipts.size(), 2u);
+        if (phase == 3) {
+            EXPECT_GT(published.removal, 0u);
+        }
+    }
+    // Preparation is appended before carrier relocation; the capture starts at
+    // that relocation. Windows completes files then directories; POSIX only dirs.
+#if defined(_WIN32)
+    EXPECT_EQ(counts, (std::array<unsigned, 4>{0, 2, 2, 2}));
+#else
+    EXPECT_EQ(counts, (std::array<unsigned, 4>{0, 1, 1, 1}));
+#endif
+    EXPECT_FALSE(journal_pending(save.path()));
+}
+
+TEST(SaveTransaction, ReceiptDiscoveryRefusesMalformedOrForeignEvidence) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+    SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+    {
+        HookGuard hook(+[](const char* step, const fs::path&) {
+            if (std::string_view(step) == "crash-receipt-carrier-published")
+                throw std::runtime_error("carrier publication interrupted");
+        });
+        transaction.abort(nullptr);
+    }
+    const auto carrier = FindReceiptCarrier(save.path());
+    ASSERT_FALSE(carrier.empty());
+    const auto valid = Get(carrier);
+    std::istringstream lines(valid);
+    std::vector<nlohmann::json> original;
+    std::string line;
+    while (std::getline(lines, line))
+        original.push_back(nlohmann::json::parse(line));
+    ASSERT_EQ(original.back().at("record"), "receipt");
+    // One tiny retained transaction exercises all decode refusals without repeating
+    // successful synchronous save/cleanup work for each malformed input.
+    for (const std::string_view mutation : {"unknown phase",
+                                            "phase order",
+                                            "phase regression",
+                                            "mixed phase regression",
+                                            "duplicate path",
+                                            "empty batch",
+                                            "nonarray batch",
+                                            "scalar receipt",
+                                            "invalid receipt flags",
+                                            "unknown receipt field",
+                                            "invalid reset",
+                                            "negative phase",
+                                            "escaped name",
+                                            "foreign identity",
+                                            "zero identity",
+                                            "unknown metadata",
+                                            "unknown version",
+                                            "mixed versions",
+                                            "unknown kind",
+                                            "unknown inventory",
+                                            "unknown entry field",
+                                            "foreign control",
+                                            "partial"}) {
+        SCOPED_TRACE(mutation);
+        auto records = original;
+        if (mutation == "unknown phase")
+            records.back()["phase"] = 4u;
+        else if (mutation == "phase order")
+            records.back()["phase"] = 2u;
+        else if (mutation == "phase regression") {
+            auto advanced = records.back();
+            advanced["phase"] = 1u;
+            records.push_back(advanced);
+            advanced["phase"] = 0u;
+            records.push_back(advanced);
+        } else if (mutation == "mixed phase regression") {
+            auto advanced = records.back();
+            advanced["receipts"] = nlohmann::json::array({advanced.at("receipts").back()});
+            advanced["phase"] = 1u;
+            records.push_back(advanced);
+            advanced["phase"] = 2u;
+            records.push_back(advanced);
+            advanced = original.back();
+            advanced["phase"] = 1u;
+            records.push_back(advanced);
+        } else if (mutation == "duplicate path") {
+            records.back()["receipts"].push_back(records.back()["receipts"].at(0));
+        } else if (mutation == "empty batch") {
+            records.back()["receipts"] = nlohmann::json::array();
+        } else if (mutation == "nonarray batch") {
+            records.back()["receipts"] = true;
+        } else if (mutation == "scalar receipt") {
+            records.back()["receipts"].at(0) = 7u;
+        } else if (mutation == "invalid receipt flags") {
+            records.back()["receipts"].at(0)["directory"] = true;
+            records.back()["receipts"].at(0)["absent_only"] = true;
+        } else if (mutation == "unknown receipt field") {
+            records.back()["receipts"].at(0)["unknown"] = true;
+        } else if (mutation == "invalid reset") {
+            records.back()["record"] = "receipt-reset";
+        } else if (mutation == "negative phase")
+            records.back()["phase"] = -1;
+        else if (mutation == "escaped name")
+            records.back()["receipts"].at(0)["path"] = "../world_info.json";
+        else if (mutation == "foreign identity")
+            records.back()["receipts"].at(0)["identity"] = std::array<std::uint64_t, 3>{1, 2, 3};
+        else if (mutation == "zero identity")
+            records.back()["receipts"].at(0)["identity"] = std::array<std::uint64_t, 3>{};
+        else if (mutation == "unknown metadata")
+            records.back()["unknown"] = true;
+        else if (mutation == "unknown version")
+            records.front()["schema"] = "luminumbra.journal.v6";
+        else if (mutation == "mixed versions")
+            records.back()["schema"] = "luminumbra.journal.v4";
+        else if (mutation == "unknown kind")
+            records.back()["record"] = "unknown";
+        else if (mutation == "unknown inventory")
+            records.back()["receipts"].at(0)["path"] = "journal/undo/unrecorded";
+        else if (mutation == "unknown entry field") {
+            ASSERT_FALSE(records.at(1).at("entries").empty());
+            records.at(1).at("entries").at(0)["unknown"] = true;
+        } else if (mutation == "foreign control") {
+            for (auto& record : records) {
+                if (record.at("record") == "cleanup") {
+                    record["control_identity"] = std::array<std::uint64_t, 3>{1, 2, 3};
+                }
+            }
+        }
+        Put(carrier,
+            mutation == "partial" ? valid.substr(0, valid.find('\n'))
+                                  : EncodeJournalRecords(records));
+        const auto evidence = Tree(save.path());
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        EXPECT_EQ(Tree(save.path()), evidence);
+    }
+    Put(carrier, valid);
+    EXPECT_NE(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+}
+
 TEST(SaveTransaction, RecoveryRejectsUnparsableJournal) {
     TempSave save;
     Put(journal_directory(save.path()) / "txn.json", "garbage");
@@ -2125,13 +2710,14 @@ TEST(SaveTransaction, RecoveryRestoresRetiringControlAndRefusesInvalidRetiringEv
             EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::NothingToDo);
         } else {
             fs::rename(control, saved_control);
-            if (std::string_view(input) == "directory")
+            if (std::string_view(input) == "directory") {
                 ASSERT_TRUE(fs::create_directory(slot));
-            else
+            } else {
                 Put(slot,
                     std::string_view(input) == "empty"     ? ""
                     : std::string_view(input) == "partial" ? "{"
                                                            : R"({"schema":"unknown"})");
+            }
             const auto evidence = Tree(save.path());
             EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
             EXPECT_EQ(Tree(save.path()), evidence);
@@ -2679,8 +3265,9 @@ void CheckWindowsTransitions(int batch, bool disk_events, bool recovery) {
     }
     // Earlier batches need not reach completion; the final batch must prove
     // that no unvisited transition lies beyond the unchanged enumeration bound.
-    if (last == bound)
+    if (last == bound) {
         EXPECT_TRUE(complete);
+    }
 }
 } // namespace
 

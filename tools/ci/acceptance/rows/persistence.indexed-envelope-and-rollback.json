@@ -1,7 +1,7 @@
 {
   "id": "persistence.indexed-envelope-and-rollback",
   "source": "docs/active-regions.md#file-and-compatibility",
-  "statement": "Indexed metadata uses version 3 while region containers remain version 2. Indexed envelope witnesses preserve legacy admission and require an index after upgrade. Compound indexed saves restore the committed tree and pending acknowledgements on failure; creation retains failed cleanup evidence in its artifact registry. Ownership checks cover publication, rollback and retirement on both platforms. Region digest work and client autosave refusal gates have registered regressions. Native execution and crash qualification remain pending.",
+  "statement": "Indexed metadata uses version 3 while region containers remain version 2. Indexed envelope witnesses preserve legacy admission and require an index after upgrade. Compound indexed saves restore the committed tree and pending acknowledgements on failure; creation retains failed cleanup evidence in its artifact registry. Ownership checks cover publication, rollback and retirement on both platforms. Region digest work and client autosave refusal gates have registered regressions. Journal v5 retains independent identity-bound receipt streams through namespace completion, later same-volume NTFS flush observation and separate retirement, with historical v4 recovery preserved. Other Windows filesystems retain receipts with durability unqualified. Service-level removal integration, native execution and abrupt VM reset qualification remain pending.",
   "status": "partial",
   "requirements": [
     "ar.file.006",
@@ -26,7 +26,13 @@
     "indexed.persistence.018",
     "indexed.persistence.019",
     "indexed.persistence.020",
-    "indexed.persistence.021"
+    "indexed.persistence.021",
+    "indexed.persistence.022",
+    "indexed.persistence.023",
+    "indexed.persistence.024",
+    "indexed.persistence.025",
+    "indexed.persistence.026",
+    "indexed.persistence.027"
   ],
   "evidence": [
     {

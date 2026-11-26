@@ -1,0 +1,10 @@
+{
+  "id": "render.far-budget-harness",
+  "source": "docs/far-streaming-budgets.md#far-streaming-budget-measurements",
+  "statement": "The issue #133 measurement harness defines all 16 world/profile/display groups, expands settled/traversal cells with cold phases, pins available fixture inputs, reports missing native identities and issue #132 commit/all-tier bake evidence as incomplete, reuses render validity, floor checks and process custody, and emits source-indexed measurements outside the checkout. Candidate caps and reserve remain unavailable. Native verification, budget approval, enforcement, qualification, merge and release remain pending.",
+  "status": "covered",
+  "evidence": [
+    {"kind": "ctest", "ref": "FarBudgetPython"},
+    {"kind": "ctest", "ref": "FarBudgetRunnerPython"}
+  ]
+}
