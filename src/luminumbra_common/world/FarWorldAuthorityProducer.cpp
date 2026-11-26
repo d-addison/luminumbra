@@ -386,6 +386,7 @@ struct FarWorldAuthorityProducer::Impl {
         read_error_size = std::min(value.size(), read_error.size() - 1);
         std::copy_n(value.begin(), read_error_size, read_error.begin());
     }
+    bool retired = false;
     bool configured = false, source_ready = false, queued = false, paused = false,
          requested = false;
 };
@@ -400,13 +401,15 @@ FarWorldAuthorityProducer::FarWorldAuthorityProducer(const Limits& limits,
     }
     impl_ = std::allocate_shared<Impl>(FarVolumePoolAllocator<Impl>(memory_), limits);
 }
-FarWorldAuthorityProducer::~FarWorldAuthorityProducer() = default;
+FarWorldAuthorityProducer::~FarWorldAuthorityProducer() {
+    retire();
+}
 std::shared_ptr<FarWorldAuthorityChanges> FarWorldAuthorityProducer::changes() const {
     return impl_->changes;
 }
 bool FarWorldAuthorityProducer::set_wanted(std::span<const Save::AuthorityWindow> wanted) {
     auto& state = *impl_->state;
-    if (!ValidLimits(state.limits) || wanted.size() > kSlots ||
+    if (impl_->retired || !ValidLimits(state.limits) || wanted.size() > kSlots ||
         !std::all_of(wanted.begin(), wanted.end(), [&](const auto& window) {
             return ValidWindow(window, state.limits.query_columns);
         })) {
@@ -421,6 +424,8 @@ bool FarWorldAuthorityProducer::set_wanted(std::span<const Save::AuthorityWindow
     return true;
 }
 FarWorldAuthorityProducer::DirtyTiles FarWorldAuthorityProducer::tick() {
+    if (impl_->retired)
+        return {};
     auto& state = *impl_->state;
     const std::lock_guard lock(state.mutex);
     DirtyTiles dirty;
@@ -453,6 +458,8 @@ FarWorldAuthorityProducer::Counters FarWorldAuthorityProducer::counters() const 
 }
 FarWorldAuthorityProducer::Error
 FarWorldAuthorityProducer::copy_published(const Save::AuthorityWindow& window, Images& output) {
+    if (impl_->retired)
+        return Error::AuthorityUnavailable;
     auto& state = *impl_->state;
     const std::lock_guard lock(state.mutex);
     if (!ValidLimits(state.limits)) {
@@ -560,8 +567,8 @@ FarWorldAuthorityProducer::copy_published(const Save::AuthorityWindow& window, I
 bool FarWorldAuthorityProducer::admit_saved_source(const std::filesystem::path& root,
                                                    const Save::AuthorityReadLimits& limits,
                                                    std::string& error) {
-    if (impl_->paused) {
-        error = "Source reads are paused.";
+    if (impl_->retired || impl_->paused) {
+        error = impl_->retired ? "Source binding is retired." : "Source reads are paused.";
         return false;
     }
     if (!impl_->reader.admit(root, limits, error)) {
@@ -590,12 +597,12 @@ FarWorldAuthorityProducer::read_committed(const Save::AuthorityWindow& window,
 }
 bool FarWorldAuthorityProducer::configure_capture(const CaptureLimits& limits) {
     const auto& read = limits.read;
-    if (!ValidLimits(impl_->state->limits) || limits.deadline_frames == 0 || !limits.clock.now ||
-        limits.clock.max_ticks == 0 || read.members == 0 || read.records == 0 ||
-        read.headers == 0 || read.probes == 0 || read.compressed_member_bytes == 0 ||
-        read.compressed_total_bytes == 0 || read.decoded_member_bytes == 0 ||
-        read.decoded_total_bytes == 0 || read.control_bytes == 0 ||
-        read.compressed_member_bytes > read.compressed_total_bytes ||
+    if (impl_->retired || !ValidLimits(impl_->state->limits) || limits.deadline_frames == 0 ||
+        !limits.clock.now || limits.clock.max_ticks == 0 || read.members == 0 ||
+        read.records == 0 || read.headers == 0 || read.probes == 0 ||
+        read.compressed_member_bytes == 0 || read.compressed_total_bytes == 0 ||
+        read.decoded_member_bytes == 0 || read.decoded_total_bytes == 0 ||
+        read.control_bytes == 0 || read.compressed_member_bytes > read.compressed_total_bytes ||
         read.decoded_member_bytes > read.decoded_total_bytes || impl_->active) {
         return false;
     }
@@ -721,13 +728,27 @@ void FarWorldAuthorityProducer::pump_capture() {
 void FarWorldAuthorityProducer::fence_source_reads(bool paused) {
     // Reads are synchronous and retain no handles. Returning closes admission;
     // there are no outstanding completions or workers to discard or join.
-    impl_->paused = paused;
+    if (!impl_->retired)
+        impl_->paused = paused;
 }
 void FarWorldAuthorityProducer::invalidate_source() {
     impl_->active.reset();
     impl_->source_ready = false;
-    impl_->queued = true;
+    impl_->queued = !impl_->retired;
     impl_->error = Error::AuthorityUnavailable;
+}
+void FarWorldAuthorityProducer::retire() {
+    impl_->retired = true;
+    // Retire first: no subsequent source operation can reacquire eligibility.
+    cancel_frozen();
+    invalidate_source();
+    impl_->serving.reset();
+    impl_->requested = false;
+    impl_->paused = true;
+    impl_->capture_limits = {};
+}
+bool FarWorldAuthorityProducer::retired() const {
+    return impl_->retired;
 }
 bool FarWorldAuthorityProducer::refresh_saved_source(const std::filesystem::path& root,
                                                      std::string& error) {
@@ -1257,7 +1278,7 @@ FarWorldAuthorityProducer::FrozenResult FarWorldAuthorityProducer::start_frozen(
     const FarFrozenCaptureLimits& limits,
     const std::shared_ptr<FarVolumeMemoryPool>& pool) {
     cancel_frozen();
-    if (!world) {
+    if (impl_->retired || !world) {
         return {Error::AuthorityUnavailable, FarFrozenCaptureError::None};
     }
     try {

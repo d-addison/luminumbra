@@ -287,6 +287,14 @@ public:
         return m_counters;
     }
 
+    // Boot-only continuation after publication and lifecycle changes have drained.
+    // Each omitted streaming update observes the census twice; unsigned counters wrap
+    // exactly as repeated observations do. This accessor never observes resident items.
+    const LifecycleCounts& continue_quiescent_observations(std::uint64_t updates) {
+        m_counters.lifecycle_snapshots += updates * 2u;
+        return m_lifecycle_counts;
+    }
+
     void invalidate_spans() {
         for (auto& [key, column] : m_columns) {
             (void)key;

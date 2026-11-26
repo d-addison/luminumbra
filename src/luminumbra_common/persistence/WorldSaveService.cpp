@@ -1,5 +1,6 @@
 #include "WorldSaveService.h"
 #include "CreatedWorldArtifacts.h"
+#include "RecoveryDurability.h"
 #include "RegionFileWriteGuard.h"
 #include "ReplacementOutputFile.h"
 #include "WorldSaveEncoding.h"
@@ -779,6 +780,7 @@ public:
     };
     enum class Mode {
         Inspect,
+        Complete,
         Create,
         Deferred,
         Directory
@@ -793,9 +795,13 @@ public:
     void open(Mode mode) {
 #if defined(_WIN32)
         const DWORD access = mode == Mode::Directory ? FILE_READ_ATTRIBUTES
-                             : mode == Mode::Create  ? GENERIC_READ | GENERIC_WRITE
-                                                     : GENERIC_READ | DELETE;
-        const DWORD sharing = mode == Mode::Create || mode == Mode::Directory
+                             : mode == Mode::Create || mode == Mode::Complete
+                                 ? GENERIC_READ | GENERIC_WRITE
+                                 : GENERIC_READ | DELETE;
+        // Completion holds the verified name against rename/removal and excludes writers
+        // until its flush finishes. Inspection/publication retain their existing sharing.
+        const DWORD sharing = mode == Mode::Complete ? FILE_SHARE_READ
+                              : mode == Mode::Create || mode == Mode::Directory
                                   ? FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
                                   : FILE_SHARE_READ | FILE_SHARE_DELETE;
         m_handle = ::CreateFileW(m_path.c_str(),
@@ -7413,11 +7419,57 @@ bool WorldSaveService::publish_restoration(const std::filesystem::path& temp,
                 temp, destination, expected, incoming, errors, source_stage, retired_stage))
             return false;
     }
-    if (!durable_flush_directory(destination.parent_path(), errors) ||
-        (temp.parent_path() != destination.parent_path() &&
-         !durable_flush_directory(temp.parent_path(), errors)))
+    if (!complete_restoration(destination,
+                              incoming,
+                              {destination.parent_path(),
+                               temp.parent_path(),
+                               source_stage ? source_stage->directory : std::filesystem::path{},
+                               retired_stage ? retired_stage->directory : std::filesystem::path{}},
+                              errors))
         return false;
     report_snapshot_step("after-replace", destination);
+    return true;
+}
+
+bool WorldSaveService::complete_restoration(const std::filesystem::path& destination,
+                                            const ArtifactIdentity& expected,
+                                            const std::array<std::filesystem::path, 4>& parents,
+                                            std::vector<std::string>* errors,
+                                            unsigned max_links) {
+    const SaveOwnership ownership;
+    const auto publication = LockPublication(destination);
+    struct Operations {
+        StagingFile file;
+        std::vector<std::string>* diagnostics;
+        unsigned allowed_links;
+
+        bool bind(const ArtifactIdentity& identity) {
+            file.open(StagingFile::Mode::Complete);
+            StagingIdentity actual{};
+            return identity != ArtifactIdentity{} && file.identity(actual, false, allowed_links) &&
+                   std::equal(identity.begin(), identity.end(), actual.begin());
+        }
+        bool flush_file() const {
+            return file.flush();
+        }
+        bool close_file() {
+            return file.close();
+        }
+        bool flush_parent(const std::filesystem::path& parent) const {
+            return WorldSaveService::durable_flush_directory(parent, diagnostics);
+        }
+    } operations{StagingFile(destination, StagingFile::Mode::Deferred), errors, max_links};
+#if defined(_WIN32)
+    constexpr bool flush_file = true;
+#else
+    constexpr bool flush_file = false;
+#endif
+    if (!detail::CompleteRestoration<flush_file>(operations, expected, parents)) {
+        AddError(errors,
+                 "cannot complete owned snapshot restoration: " +
+                     Filesystem::GenericUtf8PathString(destination));
+        return false;
+    }
     return true;
 }
 
@@ -7991,6 +8043,15 @@ bool RecoverReplayPair(const std::filesystem::path& directory) {
         // when an occupant actually exists (an empty old trace is still undone).
         const bool restored =
             old_trace != PairIdentity{} && trace_identity != PairIdentity{} && trace_bytes == undo;
+        // This caller also retries a restoration through matching bytes. Repeat completion
+        // before retiring its undo journal, including a prior post-publication flush failure.
+        if (old_trace != PairIdentity{} && (trace_identity == old_trace || restored) &&
+            !WorldSaveService::complete_restoration(companion,
+                                                    trace_identity,
+                                                    {directory, directory, {}, {}},
+                                                    nullptr,
+                                                    std::numeric_limits<unsigned>::max()))
+            return false;
         if (trace_identity != old_trace && !restored) {
             if (trace_identity != new_trace && trace_identity != PairIdentity{})
                 return false;

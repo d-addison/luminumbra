@@ -3,6 +3,7 @@
 #include "FrameAttribution.h"
 
 #include <cstdint>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 
@@ -22,7 +23,7 @@ namespace Luminumbra::Client::Attribution {
 // at the first draw/dispatch, including indirect and instanced submissions.
 class ProgramFirstUse {
 public:
-    ProgramFirstUse() = default;
+    constexpr ProgramFirstUse() = default;
     ProgramFirstUse(const ProgramFirstUse&) = delete;
     ProgramFirstUse& operator=(const ProgramFirstUse&) = delete;
     struct State {
@@ -41,16 +42,20 @@ public:
     Program created(std::uint32_t program) {
         if (program == 0)
             return {};
-        const auto entry = m_programs.insert_or_assign(program, State{}).first;
+        if (!m_programs)
+            m_programs.emplace();
+        const auto entry = m_programs->insert_or_assign(program, State{}).first;
         return {.name = program, .state = &entry->second};
     }
     void deleted(std::uint32_t program) {
-        const auto entry = m_programs.find(program);
-        if (entry == m_programs.end())
+        if (!m_programs)
+            return;
+        const auto entry = m_programs->find(program);
+        if (entry == m_programs->end())
             return;
         if (m_bound == &entry->second)
             m_bound = &no_program;
-        m_programs.erase(entry);
+        m_programs->erase(entry);
     }
     void bind(const Program& program) {
         m_bound = program.state;
@@ -109,8 +114,11 @@ public:
 private:
     LUMINUMBRA_FIRST_USE_COLD Program lookup(std::uint32_t program) {
         ++m_registry_lookups;
-        const auto entry = m_programs.find(program);
-        return {.name = program, .state = entry == m_programs.end() ? &no_program : &entry->second};
+        if (!m_programs)
+            return {.name = program, .state = &no_program};
+        const auto entry = m_programs->find(program);
+        return {.name = program,
+                .state = entry == m_programs->end() ? &no_program : &entry->second};
     }
     template<typename Function>
     LUMINUMBRA_FIRST_USE_COLD void use_attributed(Function function, std::uint32_t program) {
@@ -126,7 +134,9 @@ private:
         const PhaseScope phase(Phase::ShaderFirstUse);
         function(std::forward<Args>(args)...);
     }
-    std::unordered_map<std::uint32_t, State> m_programs;
+    // The disengaged registry permits constant initialization. Construct it only
+    // on program creation; handle binds/submissions never check its initialization.
+    std::optional<std::unordered_map<std::uint32_t, State>> m_programs;
     State* m_bound = &no_program;
     std::uint64_t m_attributed_calls = 0;
     std::uint64_t m_registry_lookups = 0;

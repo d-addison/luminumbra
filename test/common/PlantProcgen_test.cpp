@@ -11,6 +11,7 @@
 #include <glm/glm.hpp>
 
 #include "luminumbra_common/components/PlantComponents.h"
+#include "luminumbra_common/core/IntegerPrimitives.h"
 #include "luminumbra_common/systems/PlantProcgen.h"
 
 namespace {
@@ -26,7 +27,7 @@ Comp::PlantGenomeComponent UniformGenome(float v) {
 }
 
 std::uint64_t HashMesh(const std::vector<glm::vec3>& mesh) {
-    std::uint64_t h = 1469598103934665603ull; // FNV-1a 64 offset basis
+    std::uint64_t h = Luminumbra::Core::kFnv1a64HistoricalBasis;
     for (const glm::vec3& vert : mesh) {
         const float comps[3] = {vert.x, vert.y, vert.z};
         for (float f : comps) {

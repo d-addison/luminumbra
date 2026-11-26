@@ -28,6 +28,7 @@
 #include "luminumbra_common/components/PackHunterComponents.h"
 #include "luminumbra_common/components/TerritoryComponents.h"
 #include "luminumbra_common/core/Environment.h"
+#include "luminumbra_common/core/IntegerPrimitives.h"
 #include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/core/Profiler.h"
 #include "luminumbra_common/core/SystemConfig.h" // sim.water_high_res (host==peer)
@@ -1095,7 +1096,7 @@ std::string ServerWorldRunner::ComputeAvailabilityDigest() {
     }
     std::sort(ready_ids.begin(), ready_ids.end());
 
-    std::uint64_t h = 1469598103934665603ull; // FNV-1a 64-bit offset basis
+    std::uint64_t h = Luminumbra::Core::kFnv1a64HistoricalBasis;
     const auto mix = [&h](std::int64_t v) {
         const auto u = static_cast<std::uint64_t>(v);
         for (int b = 0; b < 8; ++b) {

@@ -1337,6 +1337,87 @@ void WaterSystem::inject_water_sources(entt::registry& registry, bool determinis
     }
 }
 
+bool WaterSystem::TryContinueSleepingBootPasses(
+    entt::registry& registry,
+    const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& chunks,
+    std::uint64_t skipped) {
+    if (skipped == 0 || skipped > 240 || m_active_chunks != &chunks || !m_boot_settle_mode ||
+        m_boot_paused || m_regional_scheduling || m_rain_mm_per_tick > 0 ||
+        (m_weather_rain && m_weather_rain_scale_mm > 0))
+        return false;
+    // Boot-only proof, bounded by the resident set already participating in every boot pass.
+    // Read directly: public snapshots also advance observation diagnostics.
+    for (const auto& [id, chunk] : chunks) {
+        (void)id;
+        if (!chunk || !chunk->has_water_sim.load(std::memory_order_acquire) ||
+            !chunk->is_water_sleeping.load(std::memory_order_relaxed) ||
+            chunk->pending_lod.load(std::memory_order_acquire) >= 0 ||
+            (chunk->get_state() != ChunkState::Ready && chunk->get_state() != ChunkState::Idle) ||
+            GetWaterResolution(*chunk) != m_sim_resolution ||
+            !HasCompleteWaterGrid(*chunk, m_sim_resolution) ||
+            chunk->water_edge_flux.size() != 2u * GetWaterCellCount(m_sim_resolution))
+            return false;
+    }
+    std::int64_t sources = 0;
+    if (!chunks.empty()) {
+        const auto source_view = registry.view<const Components::TransformComponent,
+                                               const Components::FlowingWaterSourceComponent>();
+        for (const auto entity : source_view) {
+            // Observations count every registry source, including nonresident sources.
+            if (sources == std::numeric_limits<std::int64_t>::max())
+                return false;
+            ++sources;
+            const auto& position =
+                source_view.get<const Components::TransformComponent>(entity).position;
+            const auto rate =
+                source_view.get<const Components::FlowingWaterSourceComponent>(entity).flow_rate;
+            // Refuse malformed source coordinates before the legacy float-to-int conversion.
+            if (!world::ActiveRegionLedger::valid_anchor(position) ||
+                position.y < static_cast<float>(Chunk::kPackedMinY) * CHUNK_SIZE_Y ||
+                position.y >= (static_cast<float>(Chunk::kPackedMaxY) + 1.0f) * CHUNK_SIZE_Y ||
+                !std::isfinite(rate))
+                return false;
+            auto coords = SHIELD_WorldSystem::world_to_chunk_coords(position);
+            auto resident = chunks.find(Chunk::calculate_id(coords));
+            if (resident == chunks.end()) {
+                coords.y = 0;
+                resident = chunks.find(Chunk::calculate_id(coords));
+            }
+            if (resident == chunks.end())
+                continue;
+            const float cell_area =
+                (static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(m_sim_resolution)) *
+                (static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(m_sim_resolution));
+            const float water_added = rate * SECONDS_PER_TICK / cell_area;
+            // Even a saturated grid wakes on a positive attempt, regardless of accepted volume.
+            if (QuantizedWaterMm(water_added * 1000.0f + 0.5f) > 0)
+                return false;
+        }
+    }
+    if (m_debug_sources_seen < 0)
+        return false;
+    const auto remaining = std::numeric_limits<std::int64_t>::max() - m_debug_sources_seen;
+    if (static_cast<std::uint64_t>(sources) > static_cast<std::uint64_t>(remaining) / skipped)
+        return false;
+
+    m_debug_sources_seen += sources * static_cast<std::int64_t>(skipped);
+    m_cells_stepped_last_update = 0;
+    m_grid_candidates_visited_last_update = chunks.size();
+    // Empty-map updates return before normalizing these legacy counters.
+    if (!chunks.empty()) {
+        m_dbg_awake_water_chunks = 0;
+        m_dbg_cells_simmed = 0;
+        m_dbg_last_source_mm = 0;
+        m_dbg_last_sink_mm = 0;
+        m_dbg_mass_ok = true;
+        m_dbg_seam_wet_pairs = 0;
+    }
+    m_seed_attribution.precomputed_columns = 0;
+    m_seed_attribution.fallback_columns = 0;
+    m_seed_attribution.stale_columns = 0;
+    return true;
+}
+
 void WaterSystem::update(entt::registry& registry,
                          const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks,
                          bool deterministic_authority) {

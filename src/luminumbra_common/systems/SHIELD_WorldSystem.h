@@ -433,6 +433,12 @@ public:
                        const TerrainGenParams& params,
                        int seed);
     ~SHIELD_WorldSystem();
+    // Final owner-thread teardown after capture retirement and registry cleanup.
+    // Drain without publication, then detach borrowed services so retained const
+    // capture owners may be destroyed after the session and its job system.
+    void release_session_services();
+    // Const teardown diagnostic: no borrowed services or session callbacks remain.
+    bool session_services_released() const;
 
     // Generates voxel data for a chunk. target_step is the meshing step this
     // generation must support: step <= 1 (default) generates the full 17^3
@@ -872,6 +878,28 @@ public:
     // drain the flood transient. Boot-only; live play is untouched. See
     // WaterSystem::SetBootSettleMode for the full rationale.
     void SetWaterBootSettleMode(bool on);
+
+    // Owner-thread boot only, immediately after update + wait_for_streaming_jobs.
+    // The caller keeps registry, anchors and configuration fixed across omitted passes.
+    // Refusal changes nothing; successful continuation preserves all non-timing observations.
+    bool TryCompleteBootWaterSettle(entt::registry& registry,
+                                    const std::vector<Vec3>& anchors,
+                                    PhysicsSystem* physics_system,
+                                    std::uint64_t skipped);
+    // Const owner-thread diagnostic: queue-history slots, cursor, count, activation phase.
+    [[nodiscard]] std::array<std::size_t, 11> boot_settle_bookkeeping() const {
+        return {m_recent_queue_depths[0],
+                m_recent_queue_depths[1],
+                m_recent_queue_depths[2],
+                m_recent_queue_depths[3],
+                m_recent_queue_depths[4],
+                m_recent_queue_depths[5],
+                m_recent_queue_depths[6],
+                m_recent_queue_depths[7],
+                m_recent_queue_depth_cursor,
+                m_recent_queue_depth_count,
+                static_cast<std::size_t>(m_update_tick_counter)};
+    }
 
     // loaded-boot water pause: a session booted from a save must not advance
     // water during Boot (the restored mid-flow state is authoritative). See
