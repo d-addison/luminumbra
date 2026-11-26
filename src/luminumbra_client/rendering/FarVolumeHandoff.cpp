@@ -1197,6 +1197,7 @@ void FarVolumeHandoff::Reject(Entry& entry, FarVolumeFrameResult& result) {
     entry.completion.reset();
     entry.eligibility = FarVolumeEligibility::RequestRejected;
     ++result.rejected;
+    ++result.tiers[entry.key->tier - 1].rejected;
     result.horizon_refused |= entry.key->tier == World::kFarTierCount;
 }
 FarVolumeFrameResult FarVolumeHandoff::AdvanceFrame(double x,
@@ -1229,6 +1230,8 @@ FarVolumeFrameResult FarVolumeHandoff::AdvanceFrame(double x,
                 const auto& request = entry.target->wanted;
                 auto completion = tier->queue.TakeCompleted(request.identity, request.intent);
                 if (completion) {
+                    ++result.completed;
+                    ++result.tiers[request.identity.key.tier - 1].completed;
                     tier->queue.Forget(request.identity.key);
                     if ((completion->status() == FarVolumeBuildStatus::Ready ||
                          completion->status() == FarVolumeBuildStatus::ReadyEmpty) &&
@@ -1264,6 +1267,7 @@ FarVolumeFrameResult FarVolumeHandoff::AdvanceFrame(double x,
             const auto bytes = UploadBytes(*entry.completion);
             if (bytes > limits.upload_bytes) {
                 ++result.upload_attempts;
+                ++result.tiers[n - 1].upload_attempts;
                 entry.upload_failure = FarVolumeUploadError::ByteLimit;
                 Reject(entry, result);
                 continue;
@@ -1271,6 +1275,7 @@ FarVolumeFrameResult FarVolumeHandoff::AdvanceFrame(double x,
             if (bytes > limits.upload_bytes - result.upload_bytes)
                 continue;
             ++result.upload_attempts;
+            ++result.tiers[n - 1].upload_attempts;
             const auto& request = entry.target->wanted;
             auto* pool = memory_.Pool(n);
             if (bytes > pool->limit() || pool->used() > pool->limit() - bytes) {
@@ -1281,6 +1286,7 @@ FarVolumeFrameResult FarVolumeHandoff::AdvanceFrame(double x,
             const auto remaining = limits.upload_bytes - result.upload_bytes;
             // Attempt allowance is independent of retained GPU admission.
             result.upload_bytes += bytes;
+            result.tiers[n - 1].upload_bytes += bytes;
             FarVolumeUploadError error = FarVolumeUploadError::Stale;
             if (entry.completion->identity() != request.identity ||
                 !UploadFarVolume(*entry.completion,
@@ -1298,7 +1304,9 @@ FarVolumeFrameResult FarVolumeHandoff::AdvanceFrame(double x,
             entry.completion.reset();
             entry.eligibility = FarVolumeEligibility::Settled;
             ++result.uploaded;
+            ++result.tiers[n - 1].uploaded;
             result.successful_upload_bytes += bytes;
+            result.tiers[n - 1].successful_upload_bytes += bytes;
         }
     }
     for (std::size_t n = tiers_.size(); n > 0; --n) {
@@ -1319,6 +1327,7 @@ FarVolumeFrameResult FarVolumeHandoff::AdvanceFrame(double x,
             if (tier.queue.ResultCapacity(held) == 0)
                 break;
             ++result.build_attempts;
+            ++result.tiers[n - 1].build_attempts;
             const auto& request = entry.target->wanted;
             const std::array key{request.identity.key};
             if (entry.eligibility == FarVolumeEligibility::Wanted) {
@@ -1350,6 +1359,7 @@ FarVolumeFrameResult FarVolumeHandoff::AdvanceFrame(double x,
             }
             const auto dispatched = tier.queue.Pump(1, key, held);
             result.dispatched += dispatched;
+            result.tiers[n - 1].dispatched += dispatched;
             entry.eligibility =
                 dispatched ? FarVolumeEligibility::Building : FarVolumeEligibility::Pending;
         }
