@@ -470,6 +470,150 @@ class FixtureHashTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
+    def test_oversized_hash_inputs_are_admitted_before_any_read(self):
+        original = fixture_paths.open_regular
+        reads = []
+
+        @contextlib.contextmanager
+        def guarded(root, path, **kwargs):
+            with original(root, path, **kwargs) as stream:
+                wrapped = mock.Mock(wraps=stream)
+                wrapped.read.side_effect = lambda *args: reads.append(args) or stream.read(*args)
+                yield wrapped
+
+        for suffix in (".json", ".bin"):
+            path = self.root / ("oversized" + suffix)
+            path.write_bytes(b"x" * 17)
+            with self.subTest(suffix=suffix), \
+                    mock.patch.object(module, "MAX_FIXTURE_FILE_BYTES", 16, create=True), \
+                    mock.patch.object(module, "open_regular", guarded, create=True), \
+                    mock.patch.object(fixture_paths, "open_regular", guarded):
+                with self.assertRaisesRegex(ValueError, "oversized fixture file"):
+                    module.canonical_file_digest(path)
+                self.assertEqual(reads, [])
+
+    def test_hash_admission_uses_owning_descriptor_before_wrapping(self):
+        original = os.fdopen
+        failure = OSError("read refused after admission")
+
+        @contextlib.contextmanager
+        def reader(descriptor, *args, **kwargs):
+            with original(descriptor, *args, **kwargs) as stream:
+                def read(count=-1):
+                    self.assertEqual(count, 17)
+                    stream.read(1)
+                    raise failure
+                # Descriptor ownership stays inside open_regular, including
+                # when a wrapping reader only exposes its read operation.
+                yield types.SimpleNamespace(read=read)
+
+        for suffix in (".json", ".bin"):
+            path = self.root / ("input" + suffix)
+            path.write_bytes(b"x")
+            with self.subTest(suffix=suffix), \
+                    mock.patch.object(module, "MAX_FIXTURE_FILE_BYTES", 16, create=True), \
+                    mock.patch.object(os, "fdopen", reader):
+                with self.assertRaises(OSError) as caught:
+                    module.canonical_file_digest(path)
+                self.assertIs(caught.exception, failure)
+
+    def test_tree_and_transitive_dependency_hashes_share_file_admission(self):
+        import resolved_fixture
+
+        common = self.root / "data/common"
+        presets = self.root / "worlds/atlas/presets"
+        common.mkdir(parents=True)
+        presets.mkdir(parents=True)
+        for name in resolved_fixture.PRESETS:
+            write(presets, name + ".json", "{}")
+        write(common, "large.bin", "x" * 257)
+        with mock.patch.object(module, "MAX_FIXTURE_FILE_BYTES", 256, create=True):
+            for scope in module.SCOPES:
+                with self.subTest(scope=scope), self.assertRaisesRegex(ValueError, "oversized fixture file"):
+                    module.fixture_hash(common, scope=scope)
+            with self.subTest(consumer="resolved common"), \
+                    self.assertRaisesRegex(ValueError, "oversized fixture file"):
+                resolved_fixture.resolved_fixture_hash(self.root)
+            (common / "large.bin").unlink()
+            write(presets, "default.json", json.dumps({
+                "generation_params": {"biomes": {"table": "first.json"}}}))
+            write(self.root / "data", "first.json", json.dumps({
+                "generation_params": {"biomes": {"table": "large.json"}}}))
+            write(self.root / "data", "large.json", "x" * 257)
+            for consume in (lambda: module.fixture_hash(presets, reference_root=self.root / "data"),
+                            lambda: resolved_fixture.resolved_fixture_hash(self.root)):
+                with self.subTest(consumer=consume), self.assertRaisesRegex(ValueError, "oversized fixture file"):
+                    consume()
+
+    def test_hash_reads_bound_growth_and_propagate_io_errors(self):
+        original = fixture_paths.open_regular
+        for suffix in (".json", ".bin"):
+            path = self.root / ("input" + suffix)
+            path.write_bytes(b"x")
+            for failure in ("growing", "unreadable", "partial"):
+                reads = []
+
+                @contextlib.contextmanager
+                def guarded(root, selected, **kwargs):
+                    with original(root, selected, **kwargs) as stream:
+                        wrapped = mock.Mock(wraps=stream)
+
+                        def read(count=-1):
+                            self.assertTrue(0 < count <= 17, "unbounded fixture read")
+                            reads.append(count)
+                            if failure == "growing":
+                                return b"x" * count
+                            raise OSError("denied" if failure == "unreadable" else "partial read failure")
+                        wrapped.read.side_effect = read
+                        yield wrapped
+
+                with self.subTest(suffix=suffix, failure=failure), \
+                        mock.patch.object(module, "MAX_FIXTURE_FILE_BYTES", 16, create=True), \
+                        mock.patch.object(module, "open_regular", guarded, create=True), \
+                        mock.patch.object(fixture_paths, "open_regular", guarded):
+                    with self.assertRaises((ValueError, OSError)):
+                        module.canonical_file_digest(path)
+                    self.assertEqual(reads, [17])
+
+    def test_streamed_hashes_match_original_digest_with_bounded_blocks(self):
+        original = fixture_paths.open_regular
+        raw = bytes(range(256)) * 8193
+        path = self.root / "blocks.bin"
+        path.write_bytes(raw)
+        reads = []
+
+        @contextlib.contextmanager
+        def guarded(root, selected, **kwargs):
+            with original(root, selected, **kwargs) as stream:
+                wrapped = mock.Mock(wraps=stream)
+
+                def read(count=-1):
+                    self.assertTrue(0 < count <= 1024 * 1024, "unbounded fixture read")
+                    reads.append(count)
+                    # Short blocks are legal; the hash must continue to EOF.
+                    return stream.read(min(count, 65536))
+                wrapped.read.side_effect = read
+                yield wrapped
+
+        with mock.patch.object(module, "open_regular", guarded, create=True), \
+                mock.patch.object(fixture_paths, "open_regular", guarded):
+            self.assertEqual(module.canonical_file_digest(path), hashlib.sha256(raw).hexdigest())
+        self.assertGreater(len(reads), 2)
+        for payload in (b"", b"\0\xff\r\n", b"{broken", b"\xff", b"\xef\xbb\xbf{\"b\":2,\"_doc\":0,\"a\":1}"):
+            for suffix in (".json", ".bin"):
+                path = self.root / ("boundary" + suffix)
+                path.write_bytes(payload)
+                canonical = payload
+                if suffix == ".json":
+                    try:
+                        canonical = json.dumps(module.strip_comment_keys(json.loads(payload.decode("utf-8-sig"))),
+                                               sort_keys=True, separators=(",", ":")).encode()
+                    except (ValueError, UnicodeError):
+                        pass
+                with self.subTest(payload=payload, suffix=suffix), \
+                        mock.patch.object(module, "MAX_FIXTURE_FILE_BYTES", len(payload), create=True):
+                    self.assertEqual(module.canonical_file_digest(path), hashlib.sha256(canonical).hexdigest())
+
     def test_text_reader_matches_universal_newlines_and_encoding_errors(self):
         path = self.root / "text.json"
         for raw in (b"one\ntwo\nthree\n", b"one\r\ntwo\r\nthree\r\n",
@@ -1007,7 +1151,15 @@ class FixtureHashTests(unittest.TestCase):
                     if scope == "headless-server" and name in module.SERVER_RENDER_ONLY_FILES:
                         continue
                     expected.update(name.encode("utf-8") + b"\0")
-                    expected.update(module.canonical_file_digest(path).encode("ascii") + b"\n")
+                    # Independent pre-streaming byte oracle for every shipped file.
+                    raw = path.read_bytes()
+                    if path.suffix.lower() == ".json":
+                        try:
+                            raw = json.dumps(module.strip_comment_keys(json.loads(raw.decode("utf-8-sig"))),
+                                             sort_keys=True, separators=(",", ":")).encode("utf-8")
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            pass
+                    expected.update(hashlib.sha256(raw).hexdigest().encode("ascii") + b"\n")
                 if relative == "worlds/atlas/presets":
                     # Presets reference common data outside their hashed tree.
                     # Their identity must now bind those bytes too.

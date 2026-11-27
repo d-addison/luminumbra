@@ -15,7 +15,9 @@ import copy
 import hashlib
 import os
 from pathlib import Path
+import re
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -89,6 +91,143 @@ def write_new(root, name, raw):
     with target.open("xb") as output:
         check.require(output.write(raw) == len(raw), "short evidence write")
         output.flush()
+
+
+def check_linux_loader(path, *, library_names=None):
+    """Refuse ELF imports which can bypass the private library search directory."""
+    library_names = {os.fsencode(path.name)} if library_names is None else library_names
+    with open_regular(path.parent, path) as stream:
+        size = os.fstat(stream.fileno()).st_size
+
+        def read_at(offset, count):
+            check.require(0 <= offset <= size and 0 <= count <= size - offset,
+                          "cannot isolate Linux dependencies: invalid ELF range")
+            stream.seek(offset)
+            raw = stream.read(count)
+            check.require(len(raw) == count, "cannot isolate Linux dependencies: truncated ELF")
+            return raw
+
+        ident = read_at(0, 16)
+        check.require(ident[:4] == b"\x7fELF" and ident[4] in (1, 2)
+                      and ident[5] in (1, 2) and ident[6] == 1,
+                      "cannot isolate Linux dependencies: unsupported executable/library format")
+        endian = "<" if ident[5] == 1 else ">"
+        wide = ident[4] == 2
+        header_format = endian + ("HHIQQQIHHHHHH" if wide else "HHIIIIIHHHHHH")
+        header = struct.unpack(header_format, read_at(16, struct.calcsize(header_format)))
+        offset, stride, count = header[4], header[8], header[9]
+        ph_format = endian + ("IIQQQQQQ" if wide else "IIIIIIII")
+        ph_size = struct.calcsize(ph_format)
+        # Bound both metadata scans to 4096 entries (at most 224 KiB of headers).
+        check.require(stride == ph_size and count <= 4096,
+                      "cannot isolate Linux dependencies: unsupported ELF program headers")
+        headers = [struct.unpack(ph_format, read_at(offset + index * stride, stride))
+                   for index in range(count)]
+        loads, dynamics = [], []
+        for row in headers:
+            start, address, length = (row[2], row[3], row[5]) if wide else (row[1], row[2], row[4])
+            if row[0] == 1:  # PT_LOAD maps the dynamic string table's virtual address.
+                loads.append((start, address, length))
+            elif row[0] == 2:  # PT_DYNAMIC
+                dynamics.append((start, length))
+        check.require(len(dynamics) <= 1, "cannot isolate Linux dependencies: multiple dynamic tables")
+        if not dynamics:
+            return  # A static executable has no loader search to redirect.
+        offset, length = dynamics[0]
+        dyn_format = endian + ("qQ" if wide else "iI")
+        stride = struct.calcsize(dyn_format)
+        check.require(length % stride == 0 and 0 < length // stride <= 4096,
+                      "cannot isolate Linux dependencies: invalid dynamic table size")
+        tags = []
+        for index in range(length // stride):
+            tag, value = struct.unpack(dyn_format, read_at(offset + index * stride, stride))
+            if tag == 0:  # DT_NULL
+                break
+            # RPATH precedes LD_LIBRARY_PATH. Auditors and filter objects can
+            # introduce imports outside the ordinary DT_NEEDED search contract.
+            check.require(tag not in (15, 0x6FFFFEFB, 0x6FFFFEFC, 0x7FFFFFFD, 0x7FFFFFFF),
+                          "cannot isolate Linux dependencies: RPATH/audit/filter dynamic tag")
+            tags.append((tag, value))
+        else:
+            check.require(False, "cannot isolate Linux dependencies: unterminated dynamic table")
+        runpaths = [value for tag, value in tags if tag == 29]  # DT_RUNPATH
+        check.require(len(runpaths) <= 1, "cannot isolate Linux dependencies: ambiguous RUNPATH")
+        references = [(tag, value) for tag, value in tags if tag in (1, 14, 29)]  # NEEDED, SONAME, RUNPATH
+        if not references:
+            return
+        strings = [value for tag, value in tags if tag == 5]  # DT_STRTAB
+        lengths = [value for tag, value in tags if tag == 10]  # DT_STRSZ
+        check.require(len(strings) == len(lengths) == 1,
+                      "cannot isolate Linux dependencies: missing/ambiguous dynamic strings")
+        mappings = [(start + strings[0] - address, length - (strings[0] - address))
+                    for start, address, length in loads
+                    if address <= strings[0] < address + length]
+        check.require(len(mappings) == 1 and lengths[0] <= mappings[0][1],
+                      "cannot isolate Linux dependencies: unmapped dynamic strings")
+        needed, directories = [], []
+        staged = os.path.normpath(os.fsencode(path.parent))
+        for tag, name in references:
+            check.require(name < lengths[0], "cannot isolate Linux dependencies: invalid import offset")
+            # Each import or RUNPATH must terminate within this 4096-byte buffer.
+            raw = read_at(mappings[0][0] + name, min(4096, lengths[0] - name))
+            dependency, terminator, _ = raw.partition(b"\0")
+            if tag == 29:
+                check.require(terminator, "cannot isolate Linux dependencies: unterminated RUNPATH")
+                # Only complete ORIGIN tokens have known, object-local semantics.
+                origin_token = rb"\$(?:ORIGIN(?![A-Za-z0-9_])|\{ORIGIN\})"
+                # glibc also accepts semicolons as search-path separators.
+                for entry in re.split(b"[:;]", dependency):
+                    check.require(b"$" not in re.sub(origin_token, b"", entry),
+                                  "cannot isolate Linux dependencies: unsupported RUNPATH token")
+                    expanded = re.sub(origin_token, lambda match: os.fsencode(path.parent), entry)
+                    check.require(entry and os.path.isabs(expanded),
+                                  "cannot isolate Linux dependencies: empty/relative RUNPATH entry")
+                    directory = os.path.normpath(expanded)
+                    if directory != staged:
+                        directories.append(directory)
+                continue
+            check.require(terminator and dependency and b"/" not in dependency and b"$" not in dependency,
+                          "cannot isolate Linux dependencies: path-bearing/invalid import")
+            check.require(tag != 14 or dependency in library_names,
+                          "cannot isolate Linux dependencies: SONAME missing from staged set")
+            if tag == 1 and dependency not in library_names:
+                needed.append(dependency)
+        # At most 4096 dynamic tags by 2048 entries in the bounded RUNPATH.
+        # Probe names only: never open or follow an unstaged file or symlink.
+        for dependency in needed:
+            for directory in directories:
+                try:
+                    os.lstat(os.path.join(directory, dependency))
+                except (FileNotFoundError, NotADirectoryError):
+                    continue  # No RUNPATH candidate; allow the system default search.
+                check.require(False, "cannot isolate Linux dependencies: RUNPATH resolves unstaged "
+                              + os.fsdecode(dependency))
+
+
+def loader_environment(binary):
+    """Select sibling libraries without changing the recorded engine overrides."""
+    if os.name == "nt":
+        # Windows searches the application directory before PATH for staged DLLs;
+        # LD_* and DYLD_* do not control its native loader.
+        return {}
+    if sys.platform.startswith("linux"):
+        directory = str(binary.parent)
+        # The loader splits on both delimiters and expands dynamic path tokens.
+        check.require(not any(char in directory for char in (":", ";", "$")),
+                      "cannot isolate Linux dependencies: unsafe staged library directory")
+        libraries = staged_libraries(binary)
+        names = {os.fsencode(path.name) for path in [binary, *libraries]}
+        check_linux_loader(binary, library_names=names)
+        for library in libraries:
+            # DT_NEEDED basenames need not end in .so; inspect the entire staged
+            # set, including DLL/dylib names, rather than trusting the suffix.
+            check_linux_loader(library, library_names=names)
+        return {"LD_LIBRARY_PATH": directory}
+    # DYLD_LIBRARY_PATH alone cannot guarantee isolation of macOS install names
+    # (and hardened executables can ignore it). No other POSIX loader is assumed.
+    check.require(not staged_libraries(binary),
+                  "cannot isolate staged libraries on this platform")
+    return {}
 
 
 def capture(args, runner=None):
@@ -183,6 +322,7 @@ def capture_snapshot(args, runner, directory):
     root, binary, dump_binary = snapshot_inputs(root, binary, dump_binary, directory)
     check.require(identity == identities(repository, root, binary, dump_binary, args.preset, runner),
                   "input snapshot identity mismatch")
+    loaders = {path.as_posix(): loader_environment(path) for path in (binary, dump_binary)}
     systems = check.read(root, "data/common/systems.json")
     preset = check.read(root, "worlds/atlas/presets/" + args.preset + ".json")
     evidence.mkdir(parents=True)  # Exclusive: existing, partial evidence is never reused.
@@ -210,10 +350,13 @@ def capture_snapshot(args, runner, directory):
     # Pass a private environment copy. Neither successful nor failed calls mutate
     # the caller's worker/throttle settings. All other engine overrides are absent.
     environment = {key: value for key, value in os.environ.items()
-                   if not key.upper().startswith("LUMINUMBRA_")}
+                   if not key.upper().startswith("LUMINUMBRA_")
+                   and (os.name == "nt" or (key not in ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT")
+                                            and not key.startswith("DYLD_")))}
 
     def invoke(argv, log_name, worker=None, stdout_name=None):
         env = environment.copy()
+        env.update(loaders[argv[0]])
         overrides = {}
         if worker is not None:
             overrides = {"LUMINUMBRA_JOB_WORKERS": str(worker), "LUMINUMBRA_JOB_THROTTLE": "0"}
