@@ -696,12 +696,20 @@ public:
     // Empty expected identity requests exclusive creation.
     // An optional observation describes only an appended commit's final successful flush,
     // using volume metadata from that same handle. Initial publication supplies no observation.
+    // Cached callers supply exact expected_bytes (bounded by kMaxSnapshotIndexBytes),
+    // compared through the writable handle before truncation or append. A nonzero
+    // version additionally requires those bytes and matching handle metadata.
+    // The version is replaced from the bound object after the delimiter flush;
+    // Windows retains an attribute-only handle across writer close for settled timestamps.
+    // Zero means unavailable or failed (including initial publication); readers must reload.
     static bool append_journal_record(const std::filesystem::path& path,
                                       const std::string& record,
                                       ArtifactIdentity& identity,
                                       std::vector<std::string>* errors,
                                       std::size_t rollback_reserve = 0,
-                                      detail::NamespaceFlushObservation* observation = nullptr);
+                                      detail::NamespaceFlushObservation* observation = nullptr,
+                                      std::array<std::uint64_t, 8>* version = nullptr,
+                                      const std::string* expected_bytes = nullptr);
     // Recovery operations require the recorded object, including at the destructive operation.
     // A file with more than max_links names is reported as neither identified nor missing.
     static bool artifact_identity(const std::filesystem::path& path,
