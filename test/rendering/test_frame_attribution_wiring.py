@@ -178,6 +178,38 @@ class MenuCaptureEvaluation:
         return "Ready" if requested else "Waiting"
 
 
+class FarWorldProfilerCaptureWiring(unittest.TestCase):
+    def test_missing_capture_is_distinct_from_captured_nonadvancement(self):
+        profiler = block(read(CLIENT / "app/DebugOverlays.cpp"), "void DrawGpuProfilerContents(")
+        frame = profiler[profiler.index("if (!fw.captured)"):profiler.index("const auto budget_display")]
+        self.assertIn('"Frame streaming work unavailable (snapshot unavailable)."',
+                      block(frame, "if (!fw.captured)"))
+        self.assertIn('"Frame streaming work unavailable (no Ladder advancement)."',
+                      block(frame, "else {"))
+        condition = re.search(r"else if \((.*?)\) \{", frame).group(1)
+        for captured, advanced, ladder in itertools.product((False, True), repeat=3):
+            with self.subTest(captured=captured, advanced=advanced, ladder=ladder):
+                work = cpp_expression(condition, **{
+                    "fw.advanced": advanced, "fw.selection.effective": int(ladder),
+                    "FarWorldMode::Ladder": 1})
+                actual = "unavailable" if not captured else "work" if work else "no advancement"
+                expected = ("unavailable" if not captured else
+                            "work" if advanced and ladder else "no advancement")
+                self.assertEqual(actual, expected)
+
+        missing_tier = block(profiler, "if (!tier_display.diagnostic)")
+        self.assertIn('"(snapshot unavailable)."', block(missing_tier, "if (!fw.captured)"))
+        self.assertNotIn("snapshot unavailable", block(missing_tier, "else {"))
+        self.assertIn("continue;", missing_tier)
+        # Missing captures cannot reach the per-tier no-advancement message,
+        # including when stale tier/pool values happen to be present.
+        projection = block(read(CLIENT / "rendering/FarWorldBudgetDisplay.h"),
+                           "ProjectFarWorldBudgetDisplay(")
+        self.assertIn("if (!snapshot.captured) return display;", compact(projection))
+        self.assertLess(projection.index("if (!snapshot.captured)"),
+                        projection.index("display[i].diagnostic ="))
+
+
 class GameplayPhotoRelease(unittest.TestCase):
     """Trace the shipping exit boundary without running native code or GL."""
 
