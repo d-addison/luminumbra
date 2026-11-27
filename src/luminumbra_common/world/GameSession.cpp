@@ -7248,7 +7248,10 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     // Commit the validated cursor only after every refusing load step passes.
     m_worldSystem->SetWaterSimWindowCursor(saved.water_sim_cursor);
     m_lastLoadedChunkCount = adopted;
-    m_restoredWorldSnapshot = saved.snapshot_present;
+    // An empty initial snapshot is still a fresh world. Cold canonical water
+    // may exist only in the durable inventory, outside the retained footprint.
+    m_restoredWorldSnapshot =
+        saved.snapshot_present && (loaded.size() > 0 || !saved.durable_inventory.empty());
     LUMINUMBRA_CORE_INFO("World state loaded: {} chunks adopted ({} in snapshot) from {}",
                          adopted,
                          loaded.size(),
