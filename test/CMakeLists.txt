@@ -2640,6 +2640,10 @@ add_test(NAME ActiveRegionEvidenceContract
 set_tests_properties(ActiveRegionCaptureContract ActiveRegionEvidenceContract
     PROPERTIES LABELS "simulation;tools" TIMEOUT 5)
 
+add_test(NAME RegionalCadenceCaptureContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_regional_cadence.py")
+set_tests_properties(RegionalCadenceCaptureContract PROPERTIES LABELS "simulation;tools" TIMEOUT 5)
+
 add_test(NAME SimBudgetCaptureContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py")
 set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
