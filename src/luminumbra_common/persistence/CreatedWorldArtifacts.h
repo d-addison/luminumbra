@@ -651,9 +651,75 @@ public:
         m_borrowed_root = false;
     }
 
+    struct OwnedFile {
+        std::filesystem::path path;
+        std::array<std::uint64_t, 3> identity{};
+    };
+
+    // Complete the admitted snapshot subset as one batch while its v5 journal
+    // still exists. The concrete operation removes non-snapshot entries from
+    // the batch; those stay owned by this registry's separate creation policy.
+    template<typename Admit, typename Complete>
+    void complete_files(const std::filesystem::path& control_directory,
+                        Admit&& admitted,
+                        Complete&& complete) {
+        // The caller has validated the control directory's closed inventory.
+        // Keep the registry's refusal of every other untracked child before
+        // changing any namespace, including siblings of an admitted member.
+        for (std::size_t index = 0; index < m_count; ++index) {
+            const auto& artifact = m_artifacts[index];
+            if (!validate(artifact))
+                continue;
+            validate_parents(artifact);
+            if (artifact.directory && !(m_borrowed_root && index == 0)) {
+                for (const auto& child : std::filesystem::directory_iterator(artifact.path)) {
+                    if (!tracked(child.path()) && child.path() != control_directory &&
+                        !admitted(child.path()))
+                        throw std::runtime_error("Untracked world artifact: " +
+                                                 Filesystem::GenericUtf8PathString(child.path()));
+                }
+            }
+        }
+        std::vector<OwnedFile> files;
+        files.reserve(m_count); // Bounded by kCreationArtifactCapacity.
+        for (std::size_t index = 0; index < m_count; ++index) {
+            const auto& artifact = m_artifacts[index];
+            if (artifact.directory || !artifact.identity)
+                continue;
+            validate_parents(artifact);
+            validate(artifact); // Missing is retryable; a foreign occupant refuses.
+#if defined(_WIN32)
+            const auto identity = std::array<std::uint64_t, 3>{artifact.identity->volume,
+                                                               artifact.identity->file_high,
+                                                               artifact.identity->file_low};
+#else
+            const auto identity =
+                std::array<std::uint64_t, 3>{static_cast<std::uint64_t>(artifact.identity->device),
+                                             static_cast<std::uint64_t>(artifact.identity->inode),
+                                             0};
+#endif
+            files.push_back({.path = artifact.path, .identity = identity});
+        }
+        // A retained Windows handle can defer a delete disposition. Release the
+        // handles before completion, but keep every identity until it succeeds.
+        for (const auto& file : files)
+            find_artifact(file.path).retained = ScopedFile{};
+        if (!complete(files))
+            throw std::runtime_error("Could not complete created snapshot file removal.");
+        for (const auto& file : files) {
+            auto& artifact = find_artifact(file.path);
+            artifact.retained = ScopedFile{};
+            artifact.identity.reset();
+        }
+    }
+
     // Preflight the entire journal and every owned directory before deleting
     // anything. Never follow symlinks, adopt unknown entries, or remove trees.
     // Keep the journal on failure so its diagnostics and retry remain possible.
+    // The never-committed world's empty save root, chunks and chunks/region
+    // directories hold no committed state and are outside the receipt inventory.
+    // Snapshot files complete through complete_files before the journal retires;
+    // the registry keeps the remaining identities until this cleanup succeeds.
     std::string rollback() {
         if (m_count == 0)
             return {};

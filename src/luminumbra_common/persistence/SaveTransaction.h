@@ -18,6 +18,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <stop_token>
 #include <string>
@@ -184,8 +185,20 @@ public:
     static bool publication_stages(const std::filesystem::path& destination,
                                    BoundPublicationStage& source,
                                    BoundPublicationStage& retired);
+    // Completes only ownership admitted by the active v5 inventory. nullopt means
+    // this caller is outside that transaction; false preserves evidence for retry.
+    // publication=false admits recorded staging only, never adopts scanned debris.
+    static std::optional<bool> complete_owned_removal(const std::filesystem::path& path,
+                                                      std::vector<std::string>* errors,
+                                                      bool publication = true);
     static bool check_publication_target(const std::filesystem::path& destination,
                                          std::vector<std::string>* errors);
+    // Copy retained versions from a still-live matching writer for same-handle
+    // recovery checks. Without that writer, leave recorded recovery state unchanged.
+    static bool recovery_versions(const std::filesystem::path& destination,
+                                  const std::array<std::uint64_t, 3>& control,
+                                  std::array<std::array<std::uint64_t, 8>, 3>& versions,
+                                  std::vector<std::string>* errors);
     // A writer may supply a digest of its admitted output, bound to the installed native
     // version. Commit reuses it only for the standard member validator and an unchanged file.
     void remember_written_digest(const std::filesystem::path& destination,
@@ -205,6 +218,10 @@ public:
     [[nodiscard]] std::size_t rollback_reserve_bytes() const {
         return m_rollback_reserve;
     }
+
+    // Const work diagnostic: journal records parsed and inventory entries visited
+    // by this live writer, including reloads. Recovery after the writer closes is excluded.
+    [[nodiscard]] std::array<std::size_t, 2> journal_work() const;
 
     [[nodiscard]] bool committed() const {
         return m_state == State::Committed;
@@ -253,11 +270,14 @@ private:
         std::array<std::uint64_t, 8> incoming_version{};
     };
     bool check_member_version(const Entry& entry, std::vector<std::string>* errors) const;
+    bool read_live_journal(std::vector<std::string>* errors);
     bool write_journal(std::vector<std::string>* errors);
     // Hands the thread's active slot back once this transaction can no longer publish.
     void release_registration() noexcept;
 
     std::unique_ptr<TransactionOwnership> m_ownership;
+    struct JournalState;
+    std::unique_ptr<JournalState> m_journal_state;
     std::filesystem::path m_save_dir;
     std::uint64_t m_tick = 0;
     std::vector<std::array<float, 3>> m_anchors;

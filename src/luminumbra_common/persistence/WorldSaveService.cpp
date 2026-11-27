@@ -129,6 +129,13 @@ bool HasValidWaterColumnState(const Chunk& chunk) {
     return true;
 }
 
+namespace {
+std::vector<const std::shared_mutex*>& HeldPublicationMutexes() {
+    thread_local std::vector<const std::shared_mutex*> held;
+    return held;
+}
+} // namespace
+
 namespace detail {
 
 struct RegionFileSync {
@@ -137,12 +144,11 @@ struct RegionFileSync {
 };
 
 namespace {
-RegionFileSync& RegionFileSyncFor(const std::filesystem::path& path) {
+std::size_t RegionFileStripeFor(const std::filesystem::path& path) {
     // Fixed storage bounds synchronization overhead regardless of world size.
     // Hash the generated filename so relative/absolute world paths and Windows
     // case differences select the same stripe. Collisions may delay publication;
     // readers never acquire the writer mutex that covers compression or fsync.
-    static std::array<RegionFileSync, 256> stripes;
     std::size_t hash = 0;
     const auto filename = path.filename().native();
     for (const auto character : filename) {
@@ -150,17 +156,37 @@ RegionFileSync& RegionFileSyncFor(const std::filesystem::path& path) {
             character >= 'A' && character <= 'Z' ? character + ('a' - 'A') : character;
         hash = hash * 31u + static_cast<std::size_t>(folded);
     }
-    return stripes[hash % stripes.size()];
+    return hash % 256u;
+}
+
+RegionFileSync& RegionFileSyncFor(const std::filesystem::path& path) {
+    static std::array<RegionFileSync, 256> stripes;
+    return stripes[RegionFileStripeFor(path)];
 }
 } // namespace
 
+// Const diagnostic of the actual publication stripe; does not acquire a gate.
+std::size_t file_publication_stripe_for_testing(const std::filesystem::path& path) {
+    return RegionFileStripeFor(path);
+}
+
 FilePublicationReadGuard::FilePublicationReadGuard(const std::filesystem::path& path)
     : m_sync(&RegionFileSyncFor(path)) {
+    // Completion can read a journal whose filename collides with the member
+    // currently being published. Its owning thread already excludes writers
+    // and readers on this stripe; do not recursively acquire a shared lock.
+    const auto& held = HeldPublicationMutexes();
+    if (std::find(held.begin(), held.end(), &m_sync->publication) != held.end()) {
+        m_sync = nullptr;
+        return;
+    }
     m_sync->publication.lock_shared();
 }
 
 FilePublicationReadGuard::~FilePublicationReadGuard() {
-    m_sync->publication.unlock_shared();
+    if (m_sync) {
+        m_sync->publication.unlock_shared();
+    }
 }
 
 RegionFileWriteGuard::RegionFileWriteGuard(const std::filesystem::path&) {}
@@ -332,22 +358,54 @@ void AcquirePublicationLock(std::unique_lock<std::shared_mutex>& lock,
     }
 }
 
+// Exclusive publication gate that its owning thread may re-enter. Recorded
+// removal completion retires a world member through remove_owned_entry while
+// the publisher (PublishProtectedMember, durable_remove) already holds that
+// member's gate; locking a std::shared_mutex twice from one thread is undefined
+// and fails with EDEADLK on glibc. Readers on this thread borrow that ownership.
+class PublicationLock {
+public:
+    PublicationLock() = default;
+    PublicationLock(const PublicationLock&) = delete;
+    PublicationLock& operator=(const PublicationLock&) = delete;
+    PublicationLock(PublicationLock&& other) noexcept = default;
+    PublicationLock& operator=(PublicationLock&&) = delete;
+    ~PublicationLock() {
+        if (!m_lock.owns_lock())
+            return;
+        auto& held = HeldPublicationMutexes();
+        const auto found = std::find(held.begin(), held.end(), m_lock.mutex());
+        if (found != held.end())
+            held.erase(found);
+    }
+
+    void acquire(std::shared_mutex& mutex, detail::RegionFileSync& sync) {
+        auto& held = HeldPublicationMutexes();
+        if (std::find(held.begin(), held.end(), &mutex) != held.end())
+            return;
+        m_lock = std::unique_lock(mutex, std::defer_lock);
+        AcquirePublicationLock(m_lock, sync);
+        held.push_back(&mutex);
+    }
+
+private:
+    std::unique_lock<std::shared_mutex> m_lock;
+};
+
 struct PublicationLocks {
-    std::unique_lock<std::shared_mutex> clock_pair;
-    std::unique_lock<std::shared_mutex> file;
+    PublicationLock clock_pair;
+    PublicationLock file;
 };
 
 PublicationLocks LockPublication(const std::filesystem::path& path) {
     auto& sync = detail::RegionFileSyncFor(path);
-    PublicationLocks locks{.clock_pair =
-                               std::unique_lock(ClockPairPublicationMutex(), std::defer_lock),
-                           .file = std::unique_lock(sync.publication, std::defer_lock)};
+    PublicationLocks locks;
     // Readers comparing ledger and clock need one consistent pair, including
     // across a rewind. Writers keep the installed ledger tick <= clock tick.
     // Only replacement holds this gate; staging and fsync never acquire it.
     if (path.filename() == "world_info.json" || path.filename() == "active-regions.arl")
-        AcquirePublicationLock(locks.clock_pair, sync);
-    AcquirePublicationLock(locks.file, sync);
+        locks.clock_pair.acquire(ClockPairPublicationMutex(), sync);
+    locks.file.acquire(sync.publication, sync);
     return locks;
 }
 
@@ -1662,7 +1720,8 @@ bool StagingNameEquals(const std::filesystem::path& name, const std::filesystem:
 // active in-process writer. Independently launched processes sharing a save
 // directory are outside the persistence ownership contract. Best effort: one
 // pass over the staging directory, outside strict save scans.
-std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
+std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination,
+                                    bool world_owned = false) {
     std::error_code list_error;
     const auto directory =
         destination.has_parent_path() ? destination.parent_path() : std::filesystem::path(".");
@@ -1692,6 +1751,15 @@ std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
                 ++reclaimed;
             continue;
         }
+        if (world_owned) {
+            const auto completed =
+                SaveTransaction::complete_owned_removal(entry.path(), nullptr, false);
+            if (completed.has_value()) {
+                if (*completed)
+                    ++reclaimed;
+                continue;
+            }
+        }
         StagingFile abandoned(entry.path(), StagingFile::Mode::Inspect);
         StagingIdentity identity{};
         if (abandoned.identity(identity) && abandoned.remove_bound())
@@ -1707,8 +1775,11 @@ bool PublishProtectedMember(const std::filesystem::path& temp,
                             std::vector<std::string>* errors,
                             const BoundPublicationStage* source_stage = nullptr,
                             const BoundPublicationStage* retired_stage = nullptr) {
+    // Explicit stages belong to journal replay, whose recorded identities and
+    // rollback slots are authoritative even if a live writer remains registered.
+    const bool recorded_restoration = source_stage || retired_stage;
     BoundPublicationStage source_slot, retired_slot;
-    if (!source_stage &&
+    if (!recorded_restoration &&
         SaveTransaction::publication_stages(destination, source_slot, retired_slot)) {
         source_stage = &source_slot;
         retired_stage = &retired_slot;
@@ -1721,13 +1792,21 @@ bool PublishProtectedMember(const std::filesystem::path& temp,
         return false;
     }
     if (expected != std::array<std::uint64_t, 3>{}) {
-        StagingFile current(destination, StagingFile::Mode::Inspect);
-        StagingIdentity actual{};
-        if (!current.identity(actual) ||
-            !std::equal(expected.begin(), expected.end(), actual.begin()) ||
-            !current.remove_bound(false, retired_stage)) {
-            AddError(errors, "snapshot publication occupant changed");
-            return false;
+        const auto completed = recorded_restoration
+                                   ? std::optional<bool>{}
+                                   : SaveTransaction::complete_owned_removal(destination, errors);
+        if (completed.has_value()) {
+            if (!*completed)
+                return false;
+        } else {
+            StagingFile current(destination, StagingFile::Mode::Inspect);
+            StagingIdentity actual{};
+            if (!current.identity(actual) ||
+                !std::equal(expected.begin(), expected.end(), actual.begin()) ||
+                !current.remove_bound(false, retired_stage)) {
+                AddError(errors, "snapshot publication occupant changed");
+                return false;
+            }
         }
         report_snapshot_step("after-retire", destination);
     }
@@ -3019,11 +3098,15 @@ bool WriteRegionFile(const std::filesystem::path& path,
     WrittenRegionDigest written;
     std::string admission_error;
     const auto root = path.parent_path().parent_path().parent_path();
-    const bool admitted = SaveTransaction::active_for(root) &&
-                          DigestRegionRecords(path, records, written.digest, admission_error);
+    const auto* active = SaveTransaction::active_for(root);
+    const bool admitted =
+        active && DigestRegionRecords(path, records, written.digest, admission_error);
     std::filesystem::path temp_path;
     const auto staging = WorldSaveService::region_staging_path(path);
-    ReclaimAbandonedStaging(staging);
+    if (active)
+        ReclaimAbandonedStaging(staging, true);
+    else
+        ReclaimAbandonedStaging(staging);
     if (admitted)
         written.observation_revision = snapshot_observation_revision();
     if (!WriteDurableRegionTemp(staging,
@@ -4822,6 +4905,8 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
     const auto destination = save_dir / "world_info.json";
     if (artifacts)
         artifacts->reserve_file(destination);
+    else if (scope.engaged())
+        ReclaimAbandonedStaging(destination, true);
     else
         ReclaimAbandonedStaging(destination);
     if (!artifacts && FileBytesEqual(destination, output_bytes))
@@ -5381,10 +5466,13 @@ bool WorldSaveService::PreparedPlantWrite::publish(const std::filesystem::path& 
     // Like ledger staging, abandoned plant copies must live outside the strict
     // region scan. Reclaim them even when the new roster is empty.
     const auto staging = save_dir / path.filename();
-    ReclaimAbandonedStaging(staging);
+    if (scope.engaged())
+        ReclaimAbandonedStaging(staging, true);
+    else
+        ReclaimAbandonedStaging(staging);
     const auto identity_path = plant_identities_path(save_dir);
     const detail::RegionFileWriteGuard identity_guard(identity_path);
-    ReclaimAbandonedStaging(save_dir / identity_path.filename());
+    ReclaimAbandonedStaging(save_dir / identity_path.filename(), true);
     // Protect both before publishing either; the index commits their binding last.
     if (auto* active = SaveTransaction::active_for(save_dir);
         active &&
@@ -6953,7 +7041,7 @@ bool WorldSaveService::upsert_container_records(const SaveOwnership&,
         if (!AdmitRegionWrite(raw_records, errors))
             return false;
         if (!changed) {
-            ReclaimAbandonedStaging(region_staging_path(region_file));
+            ReclaimAbandonedStaging(region_staging_path(region_file), true);
             return !scope || scope->commit(errors);
         }
         return WriteRegionFile(region_file, raw_records, errors) &&
@@ -7116,12 +7204,19 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
                                              ArtifactIdentity& expected,
                                              std::vector<std::string>* errors,
                                              std::size_t rollback_reserve,
-                                             detail::NamespaceFlushObservation* observation) {
+                                             detail::NamespaceFlushObservation* observation,
+                                             std::array<std::uint64_t, 8>* version,
+                                             const std::string* expected_bytes) {
     const SaveOwnership ownership;
+    const auto expected_version = version ? *version : SavedInputFile::Version{};
+    if (version)
+        *version = {};
     if (observation)
         *observation = {};
     if (record.empty() || record.back() != '\n' || rollback_reserve > kMaxSnapshotIndexBytes ||
-        record.size() > kMaxSnapshotIndexBytes - rollback_reserve) {
+        record.size() > kMaxSnapshotIndexBytes - rollback_reserve ||
+        (expected_bytes && expected_bytes->size() > kMaxSnapshotIndexBytes) ||
+        (expected_version != SavedInputFile::Version{} && !expected_bytes)) {
         AddError(errors, "invalid snapshot journal record");
         return false;
     }
@@ -7295,7 +7390,23 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
             throw;
         }
     };
+    if (ok && expected_version != SavedInputFile::Version{}) {
+        SavedInputFile::Version current{};
+        ok = SavedInputFile::native_version(file, current) && current == expected_version;
+    }
     ok = ok && size <= kMaxSnapshotIndexBytes;
+    // Metadata can remain identical across an immediate same-size rewrite on
+    // ext4, tmpfs or NTFS. Compare every cached byte on this writable handle;
+    // the fixed 64 KiB buffer and 16 MiB control limit bound work and storage.
+    if (expected_bytes) {
+        ok = ok && size == expected_bytes->size();
+        for (std::size_t offset = 0; ok && offset < expected_bytes->size();) {
+            const auto count = std::min(tail.size(), expected_bytes->size() - offset);
+            ok = read_tail(offset, count) &&
+                 std::memcmp(tail.data(), expected_bytes->data() + offset, count) == 0;
+            offset += count;
+        }
+    }
     std::uint64_t published = 0;
     if (ok && size != 0) {
         ok = read_tail(size - 1, 1);
@@ -7366,7 +7477,29 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
         }
 #endif
     }
+    SavedInputFile::Version appended_version{};
+#if defined(_WIN32)
+    // Last-write times can settle at the last writer close. Bind a non-writing
+    // handle to the same object first, then query it after that close, never by path.
+    const HANDLE version_file =
+        ok && version ? ::ReOpenFile(file,
+                                     FILE_READ_ATTRIBUTES,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                     FILE_FLAG_OPEN_REPARSE_POINT)
+                      : INVALID_HANDLE_VALUE;
+#else
+    if (ok && version && !SavedInputFile::native_version(file, appended_version))
+        appended_version = {};
+#endif
     const bool closed = close();
+#if defined(_WIN32)
+    if (version_file != INVALID_HANDLE_VALUE) {
+        if (ok && closed && !SavedInputFile::native_version(version_file, appended_version))
+            appended_version = {};
+        if (!::CloseHandle(version_file))
+            appended_version = {};
+    }
+#endif
     if (!ok || !closed) {
         AddError(errors, "snapshot journal append failed or exceeded control byte limit");
         return false;
@@ -7374,6 +7507,8 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
     report_snapshot_step("crash-record-published", path);
     if (observation)
         *observation = completed_flush;
+    if (version)
+        *version = appended_version;
     return true;
 }
 
@@ -7523,6 +7658,20 @@ bool WorldSaveService::durable_remove(const std::filesystem::path& path,
     const auto publish = LockPublication(path);
     if (!AllowPublication(path, true, errors))
         return false;
+    ArtifactIdentity expected_identity{}, incoming_identity{};
+    if (SaveTransaction::publication_identity(path, expected_identity, incoming_identity)) {
+        report_snapshot_step("before-delete", path);
+        PublicationRevision().fetch_add(1, std::memory_order_relaxed);
+        if (!SaveTransaction::check_publication_target(path, errors))
+            return false;
+        if (ActiveFacts() != nullptr)
+            ActiveFacts()->invalidate_presence_facts();
+        const auto completed = SaveTransaction::complete_owned_removal(path, errors);
+        if (!completed.has_value() || !*completed)
+            return false;
+        report_snapshot_step("after-delete", path);
+        return true;
+    }
     StagingFile retained(path, StagingFile::Mode::Inspect);
     StagingIdentity expected{};
     if (!retained.identity(expected)) {
@@ -7786,7 +7935,8 @@ bool WorldSaveService::write_member_bytes(const std::filesystem::path& save_dir,
     if (!scope.ok())
         return false;
     const std::filesystem::path destination = save_dir / relative;
-    ReclaimAbandonedStaging(scope.engaged() ? save_dir / destination.filename() : destination);
+    ReclaimAbandonedStaging(scope.engaged() ? save_dir / destination.filename() : destination,
+                            true);
     if (FileBytesEqual(destination, bytes))
         return scope.commit(errors);
     if (auto* transaction = SaveTransaction::active_for(save_dir);
@@ -8379,8 +8529,13 @@ bool WorldSaveService::write_file_durably(const std::filesystem::path& destinati
                                           std::vector<std::string>* errors,
                                           CreatedWorldArtifacts* artifacts) {
     const SaveGuard guard;
-    if (!artifacts)
-        ReclaimAbandonedStaging(destination);
+    if (!artifacts) {
+        ArtifactIdentity expected{}, incoming{};
+        if (SaveTransaction::publication_identity(destination, expected, incoming))
+            ReclaimAbandonedStaging(destination, true);
+        else
+            ReclaimAbandonedStaging(destination);
+    }
     const auto staging = artifacts ? region_staging_path(destination) : destination;
     return WriteFileDurably(destination, bytes, staging, errors, nullptr, artifacts);
 }
@@ -8536,12 +8691,20 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
 
 void WorldSaveService::reclaim_file_staging(const std::filesystem::path& destination) {
     const SaveGuard guard;
-    ReclaimAbandonedStaging(destination);
+    ReclaimAbandonedStaging(destination, [&] {
+        ArtifactIdentity expected{}, incoming{};
+        return SaveTransaction::publication_identity(destination, expected, incoming);
+    }());
 }
 
 bool WorldSaveService::remove_file_and_staging(const std::filesystem::path& destination,
                                                std::vector<std::string>* errors) {
     const SaveGuard guard;
+    ArtifactIdentity expected{}, incoming{};
+    if (SaveTransaction::publication_identity(destination, expected, incoming)) {
+        ReclaimAbandonedStaging(destination, true);
+        return durable_remove(destination, errors);
+    }
     ReclaimAbandonedStaging(destination);
     std::error_code error;
     std::filesystem::remove(destination, error);
@@ -10004,7 +10167,7 @@ bool WorldSaveService::PreparedWorldWrite::publish(std::vector<std::string>* err
             return false;
         const AncestorFlushBatch directory_flushes(prepared->save_dir);
         for (const auto& path : prepared->unchanged_regions)
-            ReclaimAbandonedStaging(region_staging_path(path));
+            ReclaimAbandonedStaging(region_staging_path(path), true);
         for (auto& [path, records] : prepared->regions) {
             if (!WriteRegionFile(path, records, errors))
                 return false;

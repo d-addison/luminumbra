@@ -4551,8 +4551,8 @@
     {
       "id": "indexed.persistence.016",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Creation alone may retire its journal before artifact rollback, because no previous commit exists and the created-artifacts registry retains identities and failed-rollback evidence until cleanup succeeds.",
-      "text": "Creation alone may retire its journal before artifact rollback, because no previous commit exists and the created-artifacts registry retains identities and failed-rollback evidence until cleanup succeeds."
+      "quote": "Initial creation completes admitted snapshot files through the v5 journal before clearing registry identities, while remaining artifact rollback may follow journal retirement because no previous commit exists and the registry retains failed-cleanup evidence.",
+      "text": "Initial creation completes admitted snapshot files through the v5 journal before clearing registry identities, while remaining artifact rollback may follow journal retirement because no previous commit exists and the registry retains failed-cleanup evidence."
     },
     {
       "id": "indexed.persistence.017",
@@ -5265,8 +5265,8 @@
     {
       "id": "indexed.persistence.022",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Receipt phases record namespace completion, a later successful same-volume NTFS file flush, and separate receipt retirement, while POSIX repeats directory fsync.",
-      "text": "Receipt phases record namespace completion, a later successful same-volume NTFS file flush, and separate receipt retirement, while POSIX repeats directory fsync."
+      "quote": "Receipt phases record namespace completion, a later successful same-volume NTFS file flush, and separate receipt retirement while POSIX repeats directory fsync, with immutable per-path generations starting at zero and advancing only after retirement or explicit reset.",
+      "text": "Receipt phases record namespace completion, a later successful same-volume NTFS file flush, and separate receipt retirement while POSIX repeats directory fsync, with immutable per-path generations starting at zero and advancing only after retirement or explicit reset."
     },
     {
       "id": "indexed.persistence.023",
@@ -5295,8 +5295,8 @@
     {
       "id": "indexed.persistence.027",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Ordinary service-level removal and artifact-registry cleanup completion remain pending.",
-      "text": "Ordinary service-level removal and artifact-registry cleanup completion remain pending."
+      "quote": "World-owned v5 removal, publication retirement and recorded staging cleanup use explicit namespace completion, with empty never-committed save-root, chunks and chunks/region directories excluded because they hold no committed state and non-world removals plus ledger staging cleanup excluded and unqualified on Windows under issue #1324.",
+      "text": "World-owned v5 removal, publication retirement and recorded staging cleanup use explicit namespace completion, with empty never-committed save-root, chunks and chunks/region directories excluded because they hold no committed state and non-world removals plus ledger staging cleanup excluded and unqualified on Windows under issue #1324."
     },
     {
       "id": "ar.field-evidence.001",
