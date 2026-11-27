@@ -4348,11 +4348,12 @@ TEST(WaterSeedInputs, SessionRegionalParticipantsIgnoreCameraStreamingAndWorkerR
 } // namespace
 
 namespace {
-TEST(WaterSeedInputs, DefaultAuthorityProfileKeepsLegacyWaterWithActiveRegionsOn) {
+TEST(WaterSeedInputs, ExplicitLegacyAuthorityProfileKeepsLegacyWaterWithActiveRegionsOn) {
     const TestSupport::HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    world::GameSession session;
+    const world::GameSession::AuthorityProfileOptions profile{.regional_water = false};
+    world::GameSession session(profile, world::GameSession::AuthorityProfileTestOnly{});
     session.SetRootPath(root.root_string());
     session.SetJobSystem(&jobs);
     session.SetActiveRegionsEnabled(true);
@@ -4632,7 +4633,8 @@ TEST(WaterSeedInputs, RegionalWaterProfileIsDormantWithActiveRegionsOff) {
     JobSystem jobs;
     jobs.startup(1);
     const world::GameSession::AuthorityProfileOptions profile{.regional_water = true};
-    world::GameSession legacy;
+    const world::GameSession::AuthorityProfileOptions legacy_profile{.regional_water = false};
+    world::GameSession legacy(legacy_profile, world::GameSession::AuthorityProfileTestOnly{});
     world::GameSession candidate(profile, world::GameSession::AuthorityProfileTestOnly{});
     for (auto* session : {&legacy, &candidate}) {
         session->SetRootPath(root.root_string());
@@ -4697,7 +4699,8 @@ TEST(WaterSeedInputs, FlagOffPreparedAndDirectLoadsPreserveIndependentLegacyWate
     std::vector<std::string> errors;
     for (const bool prepared : {false, true}) {
         SCOPED_TRACE(prepared);
-        world::GameSession session;
+        const world::GameSession::AuthorityProfileOptions profile{.regional_water = false};
+        world::GameSession session(profile, world::GameSession::AuthorityProfileTestOnly{});
         session.SetJobSystem(&jobs);
         session.SetRootPath(root.root_string());
         session.SetActiveRegionsEnabled(true);

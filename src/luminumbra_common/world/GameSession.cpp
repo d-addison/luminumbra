@@ -335,7 +335,8 @@ bool GameSession::PrepareInitialSimulation(int surface_radius,
         !World::SurfaceRadiiSupported(surface_radius, collision_radius)) {
         return false;
     }
-    const bool loaded = RestoredOwnerContinuation() || GetLastLoadedChunkCount() > 0;
+    const bool loaded =
+        RestoredOwnerContinuation() || RestoredWorldSnapshot() || GetLastLoadedChunkCount() > 0;
     struct WaterPauseGuard {
         Systems::SHIELD_WorldSystem& world;
         bool loaded;
@@ -368,7 +369,8 @@ bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
     auto* ws = m_worldSystem.get();
     auto* phys = m_physicsSystem.get();
     const auto* continuation = RestoredOwnerContinuation();
-    const bool water_loaded_from_save = continuation || GetLastLoadedChunkCount() > 0;
+    const bool water_loaded_from_save =
+        continuation || RestoredWorldSnapshot() || GetLastLoadedChunkCount() > 0;
     const bool regional_boot = m_activeRegionsEnabled && m_authorityProfile.regional_water;
     // Regional boot uses the shipping selector and cell budget, on a transient
     // uncounted timeline. Only canonical columns participate; render layers
@@ -2098,6 +2100,7 @@ void GameSession::ResetWorldSystems() {
     m_regionRequiresIndex = false;
     m_simulationEventBus.clear();
     m_lastLoadedChunkCount = 0;
+    m_restoredWorldSnapshot = false;
     m_preparedInitialChunks.reset();
     m_lastSaveTick = -1;
     m_lastSaveMs = 0.0;
@@ -6559,6 +6562,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
                 DisableFarWorldAuthorityProducer();
                 ++m_worldRevision;
                 m_lastLoadedChunkCount = 0;
+                m_restoredWorldSnapshot = false;
                 m_worldUsable = false;
                 // Refused snapshots invalidate resident chunks, but never publish staged members.
                 m_worldSystem->clear_world(m_physicsSystem.get());
@@ -7046,6 +7050,7 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     m_foliageStep.reset();
     m_plantTerrainCache.reset();
     m_lastLoadedChunkCount = 0;
+    m_restoredWorldSnapshot = false;
     // Owner physics was restored above after clearing the previous world. A
     // second clear would destroy its admitted collision horizon and BodyIDs.
     if (m_activeRegionsEnabled && m_authorityProfile.regional_water &&
@@ -7193,6 +7198,7 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     // Commit the validated cursor only after every refusing load step passes.
     m_worldSystem->SetWaterSimWindowCursor(saved.water_sim_cursor);
     m_lastLoadedChunkCount = adopted;
+    m_restoredWorldSnapshot = saved.snapshot_present;
     LUMINUMBRA_CORE_INFO("World state loaded: {} chunks adopted ({} in snapshot) from {}",
                          adopted,
                          loaded.size(),

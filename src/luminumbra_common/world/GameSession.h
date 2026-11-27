@@ -349,6 +349,10 @@ public:
     std::size_t GetLastLoadedChunkCount() const {
         return m_lastLoadedChunkCount;
     }
+    // Snapshot admission is independent of initial resident-chunk retention.
+    bool RestoredWorldSnapshot() const {
+        return m_restoredWorldSnapshot;
+    }
     std::filesystem::path GetWorldSaveDir() const;
     std::vector<IVec3> TakeInitialChunkLoadList();
 
@@ -1056,6 +1060,7 @@ private:
     // diagnostics alone never change this; only coherent adoption enables it.
     bool m_worldUsable = false;
     std::size_t m_lastLoadedChunkCount = 0;
+    bool m_restoredWorldSnapshot = false;
     std::optional<std::vector<IVec3>> m_preparedInitialChunks;
     std::vector<std::filesystem::path> m_requiredClientAssets;
 
