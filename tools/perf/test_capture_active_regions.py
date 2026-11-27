@@ -550,7 +550,8 @@ class ActiveRegionCaptureContract(unittest.TestCase):
         cmake = (root / "test/CMakeLists.txt").read_text()
         standalone = (root / "tools/ci/ci_paths.py").read_text()
         for name, filename in (("ActiveRegionCaptureContract", "test_capture_active_regions.py"),
-                               ("ActiveRegionEvidenceContract", "test_check_active_regions.py")):
+                               ("ActiveRegionEvidenceContract", "test_check_active_regions.py"),
+                               ("ActiveRegionRecordEvidenceContract", "test_check_active_region_records.py")):
             self.assertIn(f'add_test(NAME {name}\n    COMMAND "${{Python3_EXECUTABLE}}" -I -B '
                           f'"${{CMAKE_SOURCE_DIR}}/tools/perf/{filename}")', cmake)
             self.assertIn(f'"tools/perf/{filename}",', standalone.split("PYTHON_MODULES =", 1)[0])

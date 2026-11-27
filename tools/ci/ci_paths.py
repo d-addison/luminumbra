@@ -84,6 +84,7 @@ PYTHON_TESTS = (
     "tools/perf/test_capture_active_regions.py",
     "tools/perf/test_capture_regional_cadence.py",
     "tools/perf/test_check_active_regions.py",
+    "tools/perf/test_check_active_region_records.py",
     "tools/perf/test_capture_sim_budget.py",
     "tools/perf/test_active_region_scale.py",
     "tools/perf/test_field_page_evidence.py",
