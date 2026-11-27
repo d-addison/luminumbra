@@ -389,6 +389,158 @@ public:
     HookGuard& operator=(const HookGuard&) = delete;
 };
 
+TreeMap RemovalTree(const fs::path& root) {
+    auto tree = Tree(root);
+    // These fixtures contain only the bounded transaction inventory and payloads.
+    for (const auto& child : fs::recursive_directory_iterator(root)) {
+        if (child.is_directory()) {
+            tree.emplace(child.path().lexically_relative(root).generic_string() + "/", "");
+        }
+    }
+    return tree;
+}
+
+struct JournalRemovalMutation {
+    std::string_view fault{};
+    fs::path retained{};
+    TreeMap evidence{};
+    bool observed = false;
+};
+
+JournalRemovalMutation& RemovalMutation() {
+    static JournalRemovalMutation mutation;
+    return mutation;
+}
+
+void MutateJournalAfterRead(const fs::path& path, bool opened) {
+    auto& mutation = RemovalMutation();
+    if (opened || path.filename() != "txn.json" || mutation.observed)
+        return;
+    mutation.observed = true;
+    const auto original = Get(path);
+    const auto timestamp = fs::last_write_time(path);
+    if (mutation.fault == "same size") {
+        WorldSaveService::ArtifactIdentity before{}, after{};
+        bool missing = false;
+        ASSERT_TRUE(WorldSaveService::artifact_identity(path, before, missing));
+        ASSERT_FALSE(missing);
+        auto changed = original;
+        ASSERT_FALSE(changed.empty());
+        changed.front() = '#';
+        Put(path, changed);
+        fs::last_write_time(path, timestamp);
+        ASSERT_TRUE(WorldSaveService::artifact_identity(path, after, missing));
+        ASSERT_FALSE(missing);
+        ASSERT_EQ(after, before);
+        ASSERT_EQ(fs::file_size(path), original.size());
+        ASSERT_EQ(fs::last_write_time(path), timestamp);
+    } else if (mutation.fault == "empty") {
+        Put(path, "");
+    } else if (mutation.fault == "partial") {
+        Put(path, original.substr(0, original.size() / 2));
+    } else if (mutation.fault == "oversized") {
+        Put(path, std::string(kMaxSnapshotIndexBytes + 1u, ' '));
+    } else if (mutation.fault == "missing" || mutation.fault == "foreign identity" ||
+               mutation.fault == "directory") {
+        fs::rename(path, mutation.retained);
+        if (mutation.fault == "foreign identity") {
+            Put(path, original);
+        } else if (mutation.fault == "directory") {
+            ASSERT_TRUE(fs::create_directory(path));
+        }
+    }
+    mutation.evidence = RemovalTree(path.parent_path().parent_path());
+}
+
+class JournalRemovalReadObserver {
+public:
+    JournalRemovalReadObserver() {
+        detail::set_file_read_observer_for_testing(&MutateJournalAfterRead);
+    }
+    ~JournalRemovalReadObserver() {
+        detail::set_file_read_observer_for_testing(nullptr);
+    }
+    JournalRemovalReadObserver(const JournalRemovalReadObserver&) = delete;
+    JournalRemovalReadObserver& operator=(const JournalRemovalReadObserver&) = delete;
+};
+
+void CheckCachedJournalRemoval(const std::string_view fault) {
+    for (const std::string_view operation : {"publication", "staging", "absent publication"}) {
+        SCOPED_TRACE(operation);
+        SCOPED_TRACE(fault);
+        TempSave save, held;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        const auto baseline = Tree(save.path());
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        const std::string member =
+            operation == "absent publication" ? "chunks/region/r.1.0.lmr" : "world_info.json";
+        ASSERT_TRUE(transaction.protect({member}, nullptr));
+        fs::path incoming;
+        if (operation == "staging") {
+            WorldSaveService::ArtifactIdentity identity{};
+            ASSERT_TRUE(WorldSaveService::prepare_restoration(
+                save.path() / member, "incoming", incoming, identity, nullptr));
+        }
+        ASSERT_TRUE(SaveTransaction::prepare_publication(save.path() / member, incoming, nullptr));
+        const auto target = operation == "staging" ? incoming : save.path() / member;
+#if defined(_WIN32)
+        {
+            // Retry a prepared receipt: preparation now appends nothing before
+            // removal, so the append writer cannot protect this mutation.
+            const HookGuard hook(+[](const char* step, const fs::path&) {
+                if (std::string_view(step) == "crash-record-published")
+                    throw std::runtime_error("interrupt prepared removal receipt");
+            });
+            EXPECT_THROW((void)SaveTransaction::complete_owned_removal(
+                             target, nullptr, operation != "staging"),
+                         std::runtime_error);
+        }
+        // Reload the durable preparation and prime the cache for the retry.
+        ASSERT_TRUE(SaveTransaction::prepare_publication(save.path() / member, incoming, nullptr));
+#endif
+        const auto control = journal_directory(save.path()) / "txn.json";
+        const auto original = Get(control);
+        const auto work = transaction.journal_work();
+        RemovalMutation() = {.fault = fault, .retained = held.path() / "control"};
+        std::vector<std::string> errors;
+        std::optional<bool> completed;
+        {
+            // The observer mutates only after the journal handle closes. Its
+            // version comparison has already selected the cache, even where
+            // ctime cannot be restored, without bypassing production checks.
+            const JournalRemovalReadObserver observer;
+            completed =
+                SaveTransaction::complete_owned_removal(target, &errors, operation != "staging");
+        }
+        ASSERT_TRUE(RemovalMutation().observed);
+        ASSERT_TRUE(completed.has_value());
+        if (completed.has_value()) {
+            EXPECT_EQ(*completed, fault == "unchanged");
+        }
+        // A cache hit parses no records; the removal's own inventory check remains.
+        EXPECT_EQ(transaction.journal_work()[0], work[0]);
+        if (fault == "unchanged") {
+            EXPECT_TRUE(errors.empty());
+            EXPECT_FALSE(fs::exists(target));
+        } else {
+            ASSERT_FALSE(errors.empty());
+            EXPECT_NE(errors.front().find("journal bytes"), std::string::npos);
+            EXPECT_EQ(RemovalTree(save.path()), RemovalMutation().evidence);
+            EXPECT_EQ(transaction.journal_work(), work);
+            if (fs::exists(RemovalMutation().retained)) {
+                fs::remove(control);
+                fs::rename(RemovalMutation().retained, control);
+            } else {
+                Put(control, original);
+            }
+        }
+        transaction.abort(nullptr);
+        EXPECT_EQ(Tree(save.path()), baseline);
+        EXPECT_FALSE(journal_pending(save.path()));
+    }
+}
+
 #if defined(__linux__)
 std::size_t OpenDescriptorCount() {
     std::error_code error;
@@ -1435,6 +1587,21 @@ TEST(SaveTransaction, LiveJournalCacheDoesNotAdoptChangesAfterAppendFlush) {
     transaction.abort(nullptr);
     EXPECT_EQ(Get(save.path() / "world_info.json"), "old");
     EXPECT_FALSE(journal_pending(save.path()));
+}
+
+TEST(SaveTransaction, LiveJournalCachedBytesRefuseSameSizeRewriteBeforeRemoval) {
+    CheckCachedJournalRemoval("same size");
+}
+
+TEST(SaveTransaction, LiveJournalCachedBytesRefuseUnavailableOrIncompleteControlBeforeRemoval) {
+    for (const std::string_view fault :
+         {"empty", "partial", "oversized", "missing", "foreign identity", "directory"}) {
+        CheckCachedJournalRemoval(fault);
+    }
+}
+
+TEST(SaveTransaction, LiveJournalCachedBytesAllowUnmodifiedRemovalWithoutReplay) {
+    CheckCachedJournalRemoval("unchanged");
 }
 
 TEST(SaveTransaction, JournalAppendRequiresUnchangedVersionBeforeMutatingPrefix) {

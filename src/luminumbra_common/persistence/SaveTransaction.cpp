@@ -334,6 +334,23 @@ struct JournalDocument {
     std::array<std::uint64_t, 3> undo_directory_identity{};
 };
 
+bool VerifyCachedJournalBytes(const fs::path& save_dir,
+                              const JournalDocument& document,
+                              const WorldSaveService::ArtifactIdentity& control,
+                              std::vector<std::string>* errors) {
+    const SavedInputFile input(journal_directory(save_dir) / "txn.json");
+    WorldSaveService::ArtifactIdentity identity{};
+    // The comparison buffer is bounded by kMaxSnapshotIndexBytes, like the cache.
+    std::string bytes;
+    if (!document.cached_bytes || !input.identity(identity) || identity != control ||
+        !input.read(bytes, kMaxSnapshotIndexBytes) || bytes != *document.cached_bytes) {
+        AddError(errors,
+                 "live snapshot journal bytes changed or cannot be verified before removal");
+        return false;
+    }
+    return true;
+}
+
 auto LatestReceipt(JournalDocument& document, const std::string& path) {
     const auto found =
         document.receipts.upper_bound({path, std::numeric_limits<std::uint64_t>::max()});
@@ -3462,6 +3479,11 @@ std::optional<bool> SaveTransaction::complete_owned_removal(const fs::path& path
     auto& state = *transaction->m_journal_state;
     auto& document = state.document;
     state.valid = false; // Any interrupted completion must reload its durable prefix.
+    // Versions can survive an in-place rewrite. Both branches can mutate without
+    // appending, including retries whose receipt preparation writes no record.
+    if (!VerifyCachedJournalBytes(
+            transaction->m_save_dir, document, transaction->m_control_identity, errors))
+        return false;
     document.append_reserve = transaction->m_rollback_reserve;
     const auto complete = [&]() -> bool {
         if (!publication) {
