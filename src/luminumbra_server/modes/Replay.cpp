@@ -1,3 +1,4 @@
+#include "JsonArtifact.h"
 #include "ModeHelpers.h"
 #include "Modes.h"
 #include "luminumbra_common/persistence/ReplacementOutputFile.h"
@@ -502,8 +503,8 @@ int RunReplay(const ServerCliOptions& options) {
                 fs::create_directories(artifact_path.parent_path(), ec);
             }
             std::ofstream out(artifact_path);
-            if (out.is_open()) {
-                out << artifact.dump(2) << "\n";
+            // The divergence still returns 1 below; a failed write must not hide its log line.
+            if (Luminumbra::Server::WriteJsonArtifact(out, artifact, options.artifact_path)) {
                 LUMINUMBRA_CORE_INFO("replay divergence artifact written: {}",
                                      options.artifact_path);
             }
@@ -548,13 +549,10 @@ int RunReplay(const ServerCliOptions& options) {
             fs::create_directories(artifact_path.parent_path(), ec);
         }
         std::ofstream out(artifact_path);
-        if (out.is_open()) {
-            out << artifact.dump(2) << "\n";
-            LUMINUMBRA_CORE_INFO("replay roundtrip artifact written: {}", options.artifact_path);
-        } else {
-            LUMINUMBRA_CORE_ERROR("replay: failed to write artifact '{}'", options.artifact_path);
+        if (!Luminumbra::Server::WriteJsonArtifact(out, artifact, options.artifact_path)) {
             return 1;
         }
+        LUMINUMBRA_CORE_INFO("replay roundtrip artifact written: {}", options.artifact_path);
     }
 
     const bool passed = start_match && end_hash_match && executed == contents->tick_count;
