@@ -2716,6 +2716,24 @@ class FarVolumeAdmissionSourceContract(unittest.TestCase):
         self.assertNotIn("Cancel(", forget)
 
 
+class ServerArtifactWriterContract(unittest.TestCase):
+    def test_mode_artifacts_close_and_check_the_stream_before_success(self):
+        # A writer that checks only is_open() reports success after a short or
+        # failed write. Every mode serializes its artifact through the helper.
+        modes = sorted((ROOT / MODES).glob("*.cpp"))
+        self.assertTrue(modes)
+        for path in modes:
+            with self.subTest(mode=path.stem):
+                self.assertNotRegex(read_source(path.relative_to(ROOT)), r"<<\s*\w+\.dump\(")
+        for mode in ("AetherBench", "WindBench", "WeatherBench"):
+            with self.subTest(mode=mode):
+                source = read_source(f"{MODES}{mode}.cpp")
+                self.assertIn('#include "JsonArtifact.h"', source)
+                write = source.index("WriteJsonArtifact(out, artifact, options.artifact_path)")
+                self.assertLess(write, source.index("artifact written: {}", write))
+                self.assertNotIn("is_open()", source)
+
+
 def load_tests(loader, tests, pattern):
     tests.addTests(loader.discover(str(ROOT / "test/tools"),
                                    pattern="test_region_authority_wiring.py",
