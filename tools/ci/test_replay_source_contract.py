@@ -1474,8 +1474,8 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertLess(retained, completion.index('WorldSaveService::artifact_identity('))
         self.assertLess(retained, completion.index('RecordReceipts('))
         finish = self.function(source, "FinishJournal", "")
-        guard = finish.index('if (file_outcome == detail::NamespaceRetirementOutcome::Retained &&')
-        self.assertLess(finish.index('return true;', guard),
+        guard = finish.index('if (file_outcome == detail::NamespaceRetirementOutcome::Retained)')
+        self.assertLess(finish.index('return IsolateRetainedJournal(save_dir, document, errors);', guard),
                         finish.index('CompleteReceipts(save_dir, document, directory_removals'))
         self.assertIn('&ReceiptFor(document, "journal").completion.stable_volume', finish)
 
@@ -1484,10 +1484,42 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assert_receipt_removal_retains_unknown_volume(source)
         for original, replacement in (
             ('if (!removal.receipt->completion.stable_volume.known())', 'if (false)'),
-            ('if (file_outcome == detail::NamespaceRetirementOutcome::Retained &&', 'if (false &&'),
+            ('if (file_outcome == detail::NamespaceRetirementOutcome::Retained)', 'if (false)'),
         ):
             with self.subTest(original=original), self.assertRaises((AssertionError, ValueError)):
                 self.assert_receipt_removal_retains_unknown_volume(source.replace(original, replacement))
+
+    def assert_retained_journal_isolation(self, source):
+        isolate = self.function(source, "IsolateRetainedJournal", "")
+        self.assertIn('WorldSaveService::retain_owned_directory(journal_directory(save_dir),', isolate)
+        self.assertIn('RetainedJournal(save_dir, document)', isolate)
+        recovery = self.function(source, "RecoverReceiptCarriers", "")
+        self.assertLess(recovery.index('RetainedJournalInventory(save_dir, document, files)'),
+                        recovery.index('if (!FinishJournal('))
+        coexistence = recovery[recovery.index('const bool unqualified'):]
+        self.assertIn('#if defined(_WIN32)\n', coexistence)
+        self.assertIn('if (!item.second.completion.stable_volume.known() || !current_volume.known())', coexistence)
+        self.assertIn('item.second.completion.phase ==', coexistence)
+        self.assertIn('detail::NamespaceReceiptPhase::Prepared', coexistence)
+        prepare = self.function(source, "PrepareReceipts", "")
+        self.assertIn('ReceiptVolumesConflict(found->second, candidate)', prepare)
+        self.assertIn('ReceiptVolumesConflict(found->second, receipt)', prepare)
+        self.assertLess(prepare.index('ReceiptVolumesConflict('), prepare.index('RecordReceipts('))
+        admission = self.function(source, "begin", "SaveTransaction::")
+        self.assertLess(admission.index('recovery == RecoveryOutcome::RetainedIncomplete'),
+                        admission.index('m_state = State::Open;'))
+
+    def test_retained_journals_and_completed_legacy_carriers_allow_later_transactions(self):
+        source = read_source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        self.assert_retained_journal_isolation(source)
+        for token in ('WorldSaveService::retain_owned_directory(journal_directory(save_dir),',
+                      'RetainedJournalInventory(save_dir, document, files)',
+                      'if (!item.second.completion.stable_volume.known() || !current_volume.known())',
+                      'ReceiptVolumesConflict(found->second, candidate)',
+                      'ReceiptVolumesConflict(found->second, receipt)',
+                      'recovery == RecoveryOutcome::RetainedIncomplete'):
+            with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):
+                self.assert_retained_journal_isolation(source.replace(token, 'removed'))
 
     def assert_consumed_receipt_volume_sources(self, source):
         observe = self.function(source, "ObserveReceiptVolume", "")
@@ -1603,7 +1635,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertNotIn('"receipt-recorded"', source)
         self.assertIn('if (kNeedsFileReceipts)', finish)
         recovery = self.function(source, "recover_pending_journal", "")
-        self.assertLess(recovery.index('RecoverReceiptCarriers(save_dir, errors, retained_journal)'),
+        self.assertLess(recovery.index('RecoverReceiptCarriers(save_dir, errors, admission_blocked)'),
                         recovery.index('fs::symlink_status(journal, ec)'))
         rollback = self.function(source, "RollbackEntries", "")
         self.assertIn('const auto identity = missing ? entry->rollback_retired_identity : current;', rollback)
@@ -1855,7 +1887,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                       'root.size() != expected_fields',
                       'phase->get<std::uint64_t>() > 3',
                       '!detail::QualifiesNamespaceFlush(receipt.completion.stable_volume, latest_flush)',
-                      'RecoverReceiptCarriers(save_dir, errors, retained_journal)',
+                      'RecoverReceiptCarriers(save_dir, errors, admission_blocked)',
                       'const auto identity = missing ? entry->rollback_retired_identity : current;'):
             with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):
                 self.assert_transaction_receipt_integration(source.replace(token, 'removed', 1))

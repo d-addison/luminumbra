@@ -126,7 +126,9 @@ enum class RecoveryOutcome : std::uint8_t {
     NothingToDo,
     DiscardedStale,
     RolledBack,
-    Failed
+    Failed,
+    // Loading is safe, but absent containers cannot isolate incomplete evidence.
+    RetainedIncomplete
 };
 
 // Idempotent recovery follows the protected identities and undo records. Failed appends a

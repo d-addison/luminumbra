@@ -42,6 +42,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -7604,6 +7605,100 @@ bool WorldSaveService::artifact_version(const std::filesystem::path& path,
     missing = error == std::errc::no_such_file_or_directory ||
               (!error && !std::filesystem::exists(status));
     return missing;
+}
+
+bool WorldSaveService::retain_owned_directory(const std::filesystem::path& source,
+                                              const std::filesystem::path& destination,
+                                              const ArtifactIdentity& expected,
+                                              const ArtifactIdentity& expected_parent,
+                                              std::vector<std::string>* errors) {
+    const SaveOwnership ownership;
+    const auto publish = LockPublication(source);
+    const auto name = destination.filename();
+    // Receipt carrier components bound this sibling name to at most 128 units.
+    if (source.parent_path() != destination.parent_path() || name.empty() ||
+        name.native().size() > 128 || name == "." || name == "..")
+        return false;
+#if defined(_WIN32)
+    const auto open_directory = [](const std::filesystem::path& path, DWORD access) {
+        return ::CreateFileW(path.c_str(),
+                             access | FILE_READ_ATTRIBUTES,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             nullptr,
+                             OPEN_EXISTING,
+                             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                             nullptr);
+    };
+    const Filesystem::NativeFileOwner parent(open_directory(source.parent_path(), 0));
+    const auto matches = [](HANDLE file, const ArtifactIdentity& identity) {
+        BY_HANDLE_FILE_INFORMATION info{};
+        return file != INVALID_HANDLE_VALUE && ::GetFileType(file) == FILE_TYPE_DISK &&
+               ::GetFileInformationByHandle(file, &info) &&
+               (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
+               (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+               ArtifactIdentity{
+                   info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow} == identity;
+    };
+    if (!matches(parent.get(), expected_parent))
+        return false;
+    const Filesystem::NativeFileOwner directory(
+        open_directory(Detail::WindowsPublicationPath(parent.get()) / source.filename(), DELETE));
+    if (!matches(directory.get(), expected))
+        return false;
+    // Rename the verified handle relative to the pinned parent. No path reopen,
+    // replacement, or deletion occurs, including when stable metadata is unknown.
+    alignas(FILE_RENAME_INFO) std::array<std::byte, sizeof(FILE_RENAME_INFO) + 256> storage{};
+    auto* rename_info = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
+    rename_info->ReplaceIfExists = FALSE;
+    rename_info->RootDirectory = parent.get();
+    rename_info->FileNameLength = static_cast<DWORD>(name.native().size() * sizeof(wchar_t));
+    std::memcpy(rename_info->FileName, name.c_str(), rename_info->FileNameLength);
+    if (!::SetFileInformationByHandle(
+            directory.get(),
+            FileRenameInfo,
+            rename_info,
+            static_cast<DWORD>(offsetof(FILE_RENAME_INFO, FileName) + rename_info->FileNameLength)))
+        return false;
+#else
+    const Filesystem::NativeFileOwner parent(
+        ::open(source.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    const Filesystem::NativeFileOwner directory(::openat(
+        parent.get(), source.filename().c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    const auto matches = [](int file, const ArtifactIdentity& identity) {
+        struct stat info {};
+        return file >= 0 && ::fstat(file, &info) == 0 && S_ISDIR(info.st_mode) &&
+               ArtifactIdentity{static_cast<std::uint64_t>(info.st_dev),
+                                static_cast<std::uint64_t>(info.st_ino),
+                                0} == identity;
+    };
+    if (!matches(parent.get(), expected_parent) || !matches(directory.get(), expected) ||
+        Detail::RenameWithoutReplacement(
+            parent.get(), source.filename().c_str(), parent.get(), name.c_str()) != 0)
+        return false;
+    // The destination is the inventoried quarantine. Check the moved entry
+    // before admitting a writer; a substituted entry is restored, never unlinked.
+    struct stat moved {};
+    if (::fstatat(parent.get(), name.c_str(), &moved, AT_SYMLINK_NOFOLLOW) != 0 ||
+        !S_ISDIR(moved.st_mode) ||
+        ArtifactIdentity{static_cast<std::uint64_t>(moved.st_dev),
+                         static_cast<std::uint64_t>(moved.st_ino),
+                         0} != expected) {
+        (void)Detail::RenameWithoutReplacement(
+            parent.get(), name.c_str(), parent.get(), source.filename().c_str());
+        return false;
+    }
+    int flushed = 0;
+    do {
+        flushed = ::fsync(parent.get());
+    } while (flushed != 0 && errno == EINTR);
+    if (flushed != 0) {
+        AddError(errors, "cannot flush retained journal parent");
+        return false;
+    }
+#endif
+    (void)errors;
+    PublicationRevision().fetch_add(1, std::memory_order_relaxed);
+    return true;
 }
 
 bool WorldSaveService::remove_owned_entry(const std::filesystem::path& path,

@@ -724,6 +724,13 @@ public:
     static bool artifact_version(const std::filesystem::path& path,
                                  std::array<std::uint64_t, 8>& version,
                                  bool& missing);
+    // Nondestructively isolate a receipt-inventoried directory in the same parent.
+    // Both identities are checked on bound no-reparse handles; never replace a name.
+    static bool retain_owned_directory(const std::filesystem::path& source,
+                                       const std::filesystem::path& destination,
+                                       const ArtifactIdentity& identity,
+                                       const ArtifactIdentity& parent_identity,
+                                       std::vector<std::string>* errors);
     // A supplied known stable volume must also match the handle used for removal.
     // Windows refuses a supplied unknown identity; callers retain its receipt.
     static bool remove_owned_entry(const std::filesystem::path& path,
