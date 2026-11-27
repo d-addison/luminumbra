@@ -183,6 +183,17 @@ std::vector<nlohmann::json> JournalRecords(const fs::path& save) {
     return records;
 }
 
+std::array<std::uint64_t, 2> StableVolumeWords(const fs::path& root) {
+    WorldSaveService::ArtifactIdentity identity{};
+    detail::StableVolumeIdentity volume{};
+    bool missing = false;
+    if (!WorldSaveService::artifact_identity(
+            root, identity, missing, true, std::numeric_limits<unsigned>::max(), &volume) ||
+        missing)
+        throw std::runtime_error("cannot identify receipt volume");
+    return volume.words;
+}
+
 const nlohmann::json& LastEntryRecord(const std::vector<nlohmann::json>& records) {
     const auto found = std::find_if(records.rbegin(), records.rend(), [](const auto& record) {
         return record.at("record") == "entry" && !record.at("entries").empty();
@@ -580,10 +591,15 @@ using FlushObservation = detail::NamespaceFlushObservation;
 // One artifact, one durable receipt, and at most one injected failure per attempt.
 // Reconstructing the receipt from durable models restarting between any two phases.
 struct ReceiptOperations {
-    Receipt durable{.identity = {7, 11, 13}, .phase = ReceiptPhase::Prepared};
+    Receipt durable{.identity = {7, 11, 13},
+                    .phase = ReceiptPhase::Prepared,
+                    .stable_volume = {.words = {17, 23}}};
     std::array<std::uint64_t, 3> occupant = durable.identity;
-    FlushObservation observation{
-        .succeeded = true, .volume_known = true, .ntfs = true, .volume = 7};
+    FlushObservation observation{.succeeded = true,
+                                 .volume_known = true,
+                                 .ntfs = true,
+                                 .volume = 7,
+                                 .stable_volume = {.words = {17, 23}}};
     bool present = true;
     bool retained = true;
     bool unknown_namespace = false;
@@ -602,7 +618,8 @@ struct ReceiptOperations {
         trace.emplace_back("prepare");
         if (failure == "prepare")
             return false;
-        durable = {.identity = expected, .phase = ReceiptPhase::Prepared};
+        durable.identity = expected;
+        durable.phase = ReceiptPhase::Prepared;
         return true;
     }
     bool remove_owned(const std::array<std::uint64_t, 3>& expected) {
@@ -616,7 +633,8 @@ struct ReceiptOperations {
         trace.emplace_back("namespace-record");
         if (failure == "namespace-record")
             return false;
-        durable = {.identity = expected, .phase = ReceiptPhase::NamespaceDone};
+        durable.identity = expected;
+        durable.phase = ReceiptPhase::NamespaceDone;
         return true;
     }
     FlushObservation flush_later_commit() {
@@ -627,9 +645,10 @@ struct ReceiptOperations {
                                const FlushObservation& observed) {
         trace.emplace_back("flush-record");
         if (failure == "flush-record" || !observed.succeeded || !observed.volume_known ||
-            !observed.ntfs || observed.volume != expected.front())
+            !observed.ntfs || observed.stable_volume != durable.stable_volume)
             return false;
-        durable = {.identity = expected, .phase = ReceiptPhase::FlushObserved};
+        durable.identity = expected;
+        durable.phase = ReceiptPhase::FlushObserved;
         return true;
     }
     bool retire_receipt(const std::array<std::uint64_t, 3>& expected) {
@@ -657,7 +676,8 @@ TEST(SaveTransaction, NamespaceReceiptRetainedWithoutLaterFlush) {
 
 TEST(SaveTransaction, NamespaceReceiptRetainedOnDifferentVolume) {
     ReceiptOperations operations;
-    operations.observation.volume = 19;
+    operations.observation.stable_volume.words = {29, 31};
+    ASSERT_EQ(operations.observation.volume, operations.durable.identity.front());
     auto receipt = operations.durable;
     EXPECT_EQ(detail::CompleteNamespaceRetirement(receipt, operations), ReceiptOutcome::Retained);
     EXPECT_TRUE(operations.retained);
@@ -666,12 +686,66 @@ TEST(SaveTransaction, NamespaceReceiptRetainedOnDifferentVolume) {
     // The very same observation can qualify another receipt on its own volume.
     ReceiptOperations same_volume;
     same_volume.observation = operations.observation;
-    same_volume.durable.identity.front() = operations.observation.volume;
+    same_volume.durable.stable_volume = operations.observation.stable_volume;
     same_volume.occupant = same_volume.durable.identity;
     auto qualified = same_volume.durable;
     EXPECT_EQ(detail::CompleteNamespaceRetirement(qualified, same_volume), ReceiptOutcome::Retired);
     EXPECT_TRUE(operations.retained);
     EXPECT_FALSE(same_volume.retained);
+}
+
+TEST(SaveTransaction, NamespaceReceiptMissingStableIdentityRetainsEveryPhase) {
+    for (const auto phase :
+         {ReceiptPhase::Prepared, ReceiptPhase::NamespaceDone, ReceiptPhase::FlushObserved}) {
+        for (const bool artifact_missing : {false, true}) {
+            ReceiptOperations operations;
+            operations.present = false;
+            operations.durable.phase = phase;
+            if (artifact_missing) {
+                operations.durable.stable_volume = {};
+            } else {
+                operations.observation.stable_volume = {};
+            }
+            auto receipt = operations.durable;
+            // A v6 FlushObserved phase already qualified both identities durably.
+            const auto expected = phase == ReceiptPhase::FlushObserved && !artifact_missing
+                                      ? ReceiptOutcome::Retired
+                                      : ReceiptOutcome::Retained;
+            EXPECT_EQ(detail::CompleteNamespaceRetirement(receipt, operations), expected);
+            EXPECT_EQ(operations.retained, expected == ReceiptOutcome::Retained);
+        }
+    }
+}
+
+TEST(SaveTransaction, VolumeGuidIdentityCanonicalizesAndRefusesUnknownPaths) {
+    const auto identity = detail::VolumeIdentityFromGuidPath(
+        LR"(\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\world)");
+    ASSERT_TRUE(identity.known());
+    EXPECT_EQ(identity.words,
+              (std::array<std::uint64_t, 2>{0x0123456789abcdef, 0x0123456789abcdef}));
+    EXPECT_EQ(identity,
+              detail::VolumeIdentityFromGuidPath(
+                  LR"(\\?\Volume{01234567-89AB-CDEF-0123-456789ABCDEF}\OTHER~1)"));
+    EXPECT_NE(identity,
+              detail::VolumeIdentityFromGuidPath(
+                  LR"(\\?\Volume{01234567-89ab-cdef-0123-456789abcdee}\world)"));
+    for (const std::wstring_view invalid :
+         {L"",
+          LR"(C:\world)",
+          LR"(\\server\world)",
+          LR"(\\?\Volume{01234567-89ab-cdef-0123-456789abcdef})",
+          LR"(\\?\Volume{01234567889ab-cdef-0123-456789abcdef}\)",
+          LR"(\\?\Volume{g1234567-89ab-cdef-0123-456789abcdef}\)",
+          LR"(\\?\Volume{00000000-0000-0000-0000-000000000000}\)"}) {
+        EXPECT_FALSE(detail::VolumeIdentityFromGuidPath(invalid).known());
+    }
+#if defined(_WIN32)
+    EXPECT_FALSE(detail::VolumeIdentityFromHandle(INVALID_HANDLE_VALUE).known());
+#endif
+    const std::wstring_view valid = LR"(\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\)";
+    for (std::size_t size = 0; size < valid.size(); ++size) {
+        EXPECT_FALSE(detail::VolumeIdentityFromGuidPath(valid.substr(0, size)).known());
+    }
 }
 
 TEST(SaveTransaction, NamespaceReceiptRetainedOnNonNtfsOrUnknownVolume) {
@@ -2090,7 +2164,7 @@ TEST(SaveTransaction, CreationRollbackCompletesRecordedTemporaryOutsideRegistry)
     ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
     const auto entry = LastEntryRecord(JournalRecords(root)).at("entries").at(0);
     // Interrupted undo publication leaves its identity-bound temporary in the
-    // neutral root, outside the creation registry but inside the v5 inventory.
+    // neutral root, outside the creation registry but inside the v6 inventory.
     const auto temporary = root / entry.at("undo_temporary").get<std::string>();
     fs::rename(journal_directory(root) / entry.at("undo").get<std::string>(), temporary);
     transaction.abort(nullptr);
@@ -2520,7 +2594,8 @@ TEST(SaveTransaction, RecoveryFailureAlwaysAppendsDiagnostic) {
                                         {"generation", 0u},
                                         {"identity", identity},
                                         {"directory", false},
-                                        {"absent_only", false}}});
+                                        {"absent_only", false},
+                                        {"stable_volume", StableVolumeWords(save.path())}}});
             records.push_back(receipt);
             Put(journal / "txn.json", EncodeJournalRecords(records));
         } else {
@@ -2691,7 +2766,7 @@ TEST(SaveTransaction, FullForwardJournalRetainsRollbackCapacity) {
         // A valid whitespace-padded duplicate reaches the byte boundary without
         // thousands of synchronous writes. Subsequent ordinary writes consume it.
         const auto encoded = LastEntryRecord(JournalRecords(save.path())).dump() + "\n";
-        // v5 reserves completion records as well as restoration records.
+        // v6 reserves completion records as well as restoration records.
         const auto headroom = transaction.rollback_reserve_bytes();
         const auto padding = kMaxSnapshotIndexBytes - headroom - Get(control).size();
         ASSERT_GT(padding, encoded.size());
@@ -3059,10 +3134,12 @@ TEST(SaveTransaction, RecordedFileReceiptsRemainAuthoritativeAcrossCompletionPha
         ASSERT_FALSE(missing);
         auto receipt = header;
         receipt["record"] = "receipt";
-        receipt["receipts"] = nlohmann::json::array({{{"path", "journal/undo/0"},
-                                                      {"identity", undo_identity},
-                                                      {"directory", false},
-                                                      {"absent_only", false}}});
+        receipt["receipts"] =
+            nlohmann::json::array({{{"path", "journal/undo/0"},
+                                    {"identity", undo_identity},
+                                    {"directory", false},
+                                    {"absent_only", false},
+                                    {"stable_volume", StableVolumeWords(save.path())}}});
         // POSIX must honour persisted file receipts too; Windows preparation
         // already recorded the same phase before carrier publication.
         for (unsigned recorded = 0; recorded <= phase; ++recorded) {
@@ -3183,10 +3260,12 @@ TEST(SaveTransaction, CleanupReplaysCreateAndAbsentOnlyReceiptsBeforeRetirement)
             ASSERT_FALSE(missing);
             record["record"] = "receipt";
             record["phase"] = 0u;
-            record["receipts"] = nlohmann::json::array({{{"path", "world_info.json"},
-                                                         {"identity", identity},
-                                                         {"directory", false},
-                                                         {"absent_only", absent_only}}});
+            record["receipts"] =
+                nlohmann::json::array({{{"path", "world_info.json"},
+                                        {"identity", identity},
+                                        {"directory", false},
+                                        {"absent_only", absent_only},
+                                        {"stable_volume", StableVolumeWords(save.path())}}});
             {
                 HookGuard hook(+[](const char* step, const fs::path&) {
                     if (std::string_view(step) == "crash-before-receipt-retirement")
@@ -3408,29 +3487,21 @@ TEST(SaveTransaction, ReceiptDiscoveryRefusesMalformedOrForeignEvidence) {
     ASSERT_EQ(original.back().at("record"), "receipt");
     // One tiny retained transaction exercises all decode refusals without repeating
     // successful synchronous save/cleanup work for each malformed input.
-    for (const std::string_view mutation : {"unknown phase",
-                                            "phase order",
-                                            "phase regression",
-                                            "mixed phase regression",
-                                            "duplicate path",
-                                            "empty batch",
-                                            "nonarray batch",
-                                            "scalar receipt",
-                                            "invalid receipt flags",
-                                            "unknown receipt field",
-                                            "invalid reset",
-                                            "negative phase",
-                                            "escaped name",
-                                            "foreign identity",
-                                            "zero identity",
-                                            "unknown metadata",
-                                            "unknown version",
-                                            "mixed versions",
-                                            "unknown kind",
-                                            "unknown inventory",
-                                            "unknown entry field",
-                                            "foreign control",
-                                            "partial"}) {
+    for (const std::string_view mutation : {"unknown phase",          "phase order",
+                                            "phase regression",       "mixed phase regression",
+                                            "duplicate path",         "empty batch",
+                                            "nonarray batch",         "scalar receipt",
+                                            "invalid receipt flags",  "unknown receipt field",
+                                            "missing stable volume",  "partial stable volume",
+                                            "nonarray stable volume", "negative stable volume",
+                                            "overflow stable volume", "changed stable volume",
+                                            "invalid reset",          "negative phase",
+                                            "escaped name",           "foreign identity",
+                                            "zero identity",          "unknown metadata",
+                                            "unknown version",        "mixed versions",
+                                            "version downgrade",      "unknown kind",
+                                            "unknown inventory",      "unknown entry field",
+                                            "foreign control",        "partial"}) {
         SCOPED_TRACE(mutation);
         auto records = original;
         if (mutation == "unknown phase")
@@ -3466,6 +3537,21 @@ TEST(SaveTransaction, ReceiptDiscoveryRefusesMalformedOrForeignEvidence) {
             records.back()["receipts"].at(0)["absent_only"] = true;
         } else if (mutation == "unknown receipt field") {
             records.back()["receipts"].at(0)["unknown"] = true;
+        } else if (mutation == "missing stable volume") {
+            records.back()["receipts"].at(0).erase("stable_volume");
+        } else if (mutation == "partial stable volume") {
+            records.back()["receipts"].at(0)["stable_volume"] = {1u};
+        } else if (mutation == "nonarray stable volume") {
+            records.back()["receipts"].at(0)["stable_volume"] = true;
+        } else if (mutation == "negative stable volume") {
+            records.back()["receipts"].at(0)["stable_volume"] = {-1, 2};
+        } else if (mutation == "overflow stable volume") {
+            records.back()["receipts"].at(0)["stable_volume"] = {1e38, 2u};
+        } else if (mutation == "changed stable volume") {
+            auto advanced = records.back();
+            advanced["phase"] = 1u;
+            advanced["receipts"].at(0)["stable_volume"] = {71u, 73u};
+            records.push_back(advanced);
         } else if (mutation == "invalid reset") {
             records.back()["record"] = "receipt-reset";
         } else if (mutation == "negative phase")
@@ -3479,10 +3565,15 @@ TEST(SaveTransaction, ReceiptDiscoveryRefusesMalformedOrForeignEvidence) {
         else if (mutation == "unknown metadata")
             records.back()["unknown"] = true;
         else if (mutation == "unknown version")
-            records.front()["schema"] = "luminumbra.journal.v6";
+            records.front()["schema"] = "luminumbra.journal.v7";
         else if (mutation == "mixed versions")
             records.back()["schema"] = "luminumbra.journal.v4";
-        else if (mutation == "unknown kind")
+        else if (mutation == "version downgrade") {
+            records.back()["schema"] = "luminumbra.journal.v5";
+            for (auto& receipt : records.back()["receipts"]) {
+                receipt.erase("stable_volume");
+            }
+        } else if (mutation == "unknown kind")
             records.back()["record"] = "unknown";
         else if (mutation == "unknown inventory")
             records.back()["receipts"].at(0)["path"] = "journal/undo/unrecorded";
@@ -3505,6 +3596,85 @@ TEST(SaveTransaction, ReceiptDiscoveryRefusesMalformedOrForeignEvidence) {
     }
     Put(carrier, valid);
     EXPECT_NE(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+}
+
+namespace {
+enum class ReceiptEncoding {
+    Current,
+    SerialOnly,
+    UnknownVolume
+};
+void CheckReceiptVersionRoundTrip(ReceiptEncoding encoding) {
+    const bool historical = encoding == ReceiptEncoding::SerialOnly;
+    const bool missing_identity = encoding == ReceiptEncoding::UnknownVolume;
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+    SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+    {
+        const HookGuard hook(+[](const char* step, const fs::path&) {
+            if (std::string_view(step) == "crash-receipt-carrier-published")
+                throw std::runtime_error("receipt round trip interrupted");
+        });
+        transaction.abort(nullptr);
+    }
+    const auto carrier = FindReceiptCarrier(save.path());
+    ASSERT_FALSE(carrier.empty());
+    std::istringstream lines(Get(carrier));
+    std::vector<nlohmann::json> records;
+    std::string line;
+    std::size_t receipt_count = 0;
+    while (std::getline(lines, line)) {
+        auto record = nlohmann::json::parse(line);
+        EXPECT_EQ(record.at("schema"), "luminumbra.journal.v6");
+        if (record.contains("receipts")) {
+            for (auto& receipt : record["receipts"]) {
+                EXPECT_EQ(receipt.at("stable_volume"),
+                          nlohmann::json(StableVolumeWords(save.path())));
+                ++receipt_count;
+                if (historical) {
+                    receipt.erase("stable_volume");
+                } else if (missing_identity) {
+                    receipt["stable_volume"] = std::array<std::uint64_t, 2>{};
+                }
+            }
+        }
+        if (historical) {
+            record["schema"] = "luminumbra.journal.v5";
+        }
+        records.push_back(std::move(record));
+    }
+    ASSERT_GT(receipt_count, 0u);
+    Put(carrier, EncodeJournalRecords(records));
+    EXPECT_NE(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+    EXPECT_EQ(Get(save.path() / "world_info.json"), "old");
+#if defined(_WIN32)
+    if (historical || missing_identity) {
+        EXPECT_TRUE(fs::exists(carrier));
+        const auto retained = Get(carrier);
+        EXPECT_NE(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        EXPECT_EQ(Get(carrier), retained);
+    } else {
+        EXPECT_FALSE(fs::exists(carrier));
+    }
+#else
+    EXPECT_FALSE(fs::exists(carrier));
+#endif
+}
+} // namespace
+
+TEST(SaveTransaction, V6ReceiptRoundTripsStableVolumeIdentity) {
+    CheckReceiptVersionRoundTrip(ReceiptEncoding::Current);
+}
+
+TEST(SaveTransaction, V6MissingStableIdentityDecodesWithoutQualification) {
+    CheckReceiptVersionRoundTrip(ReceiptEncoding::UnknownVolume);
+}
+
+TEST(SaveTransaction, HistoricalV5ReceiptsDecodeWithoutSerialOnlyQualification) {
+    CheckReceiptVersionRoundTrip(ReceiptEncoding::SerialOnly);
 }
 
 TEST(SaveTransaction, ReceiptSlotReuseExplicitlyResetsOnlyCompletedOwnedAbsence) {
@@ -3548,7 +3718,8 @@ TEST(SaveTransaction, ReceiptSlotReuseExplicitlyResetsOnlyCompletedOwnedAbsence)
                : phase.ends_with(" matching") ? installed
                                               : original},
               {"directory", false},
-              {"absent_only", false}}});
+              {"absent_only", false},
+              {"stable_volume", StableVolumeWords(save.path())}}});
         records.push_back(receipt);
         const unsigned last_phase = (phase == "prepared" || phase == "prepared matching") ? 0u
                                     : phase.starts_with("retired")                        ? 3u
@@ -3617,11 +3788,13 @@ TEST(SaveTransaction, PendingReceiptCapacityIsReservedBeforeForwardCompletion) {
     });
     auto receipt = records.front();
     receipt["record"] = "receipt";
-    receipt["receipts"] = nlohmann::json::array({{{"path", "journal/undo/retired.world_info.json"},
-                                                  {"generation", 0u},
-                                                  {"identity", installed},
-                                                  {"directory", false},
-                                                  {"absent_only", false}}});
+    receipt["receipts"] =
+        nlohmann::json::array({{{"path", "journal/undo/retired.world_info.json"},
+                                {"generation", 0u},
+                                {"identity", installed},
+                                {"directory", false},
+                                {"absent_only", false},
+                                {"stable_volume", StableVolumeWords(save.path())}}});
     for (unsigned phase = 0; phase <= 1; ++phase) {
         receipt["phase"] = phase;
         records.push_back(receipt);
@@ -3720,7 +3893,8 @@ TEST(SaveTransaction, ReceiptGenerationsRetainEachRecordedPublicationIdentity) {
                                     {"generation", 0u},
                                     {"identity", original},
                                     {"directory", false},
-                                    {"absent_only", false}}});
+                                    {"absent_only", false},
+                                    {"stable_volume", StableVolumeWords(save.path())}}});
         // Four phase records per generation. The second identity was bound by a
         // preceding entry record, even though the slot's final identity is different.
         for (unsigned generation = 0; generation < 2; ++generation) {

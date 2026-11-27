@@ -81,7 +81,7 @@ struct SnapshotIndex {
 };
 
 inline constexpr const char* kSnapshotIndexSchema = "luminumbra.snapshot.v1";
-inline constexpr const char* kJournalSchema = "luminumbra.journal.v5";
+inline constexpr const char* kJournalSchema = "luminumbra.journal.v6";
 inline constexpr std::size_t kMaxSnapshotMembers = 1'048'576;
 inline constexpr std::size_t kMaxSnapshotIndexBytes = 16u * 1024u * 1024u;
 inline constexpr const char* kSnapshotIndexRelativePath = "chunks/region/snapshot.json";
@@ -185,7 +185,7 @@ public:
     static bool publication_stages(const std::filesystem::path& destination,
                                    BoundPublicationStage& source,
                                    BoundPublicationStage& retired);
-    // Completes only ownership admitted by the active v5 inventory. nullopt means
+    // Completes only ownership admitted by the active journal inventory. nullopt means
     // this caller is outside that transaction; false preserves evidence for retry.
     // publication=false admits recorded staging only, never adopts scanned debris.
     static std::optional<bool> complete_owned_removal(const std::filesystem::path& path,

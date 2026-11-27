@@ -900,6 +900,17 @@ public:
         return closed;
     }
 
+    detail::StableVolumeIdentity stable_volume() const {
+#if defined(_WIN32)
+        return detail::VolumeIdentityFromHandle(m_handle);
+#else
+        struct stat info {};
+        if (m_descriptor < 0 || ::fstat(m_descriptor, &info) != 0)
+            return {};
+        return {.words = {static_cast<std::uint64_t>(info.st_dev), 1}};
+#endif
+    }
+
     bool identity(StagingIdentity& result, bool directory = false, unsigned links = 1) const {
 #if defined(_WIN32)
         BY_HANDLE_FILE_INFORMATION info{};
@@ -7446,22 +7457,13 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
     if (ok && observation) {
         completed_flush.succeeded = true;
 #if defined(_WIN32)
-        // Both queries use the SAME verified handle as FlushFileBuffers above.
-        // A remote server can report NTFS, so require a local volume GUID too.
-        // The extended Win32 path bound includes its terminating UTF-16 null.
-        std::array<wchar_t, 32768> final_name{};
-        const auto name_length =
-            ::GetFinalPathNameByHandleW(file,
-                                        final_name.data(),
-                                        static_cast<DWORD>(final_name.size()),
-                                        FILE_NAME_NORMALIZED | VOLUME_NAME_GUID);
-        const bool local_volume =
-            name_length != 0 && name_length < final_name.size() &&
-            std::wstring_view(final_name.data(), name_length).starts_with(L"\\\\?\\Volume{");
+        // Query the SAME verified handle as FlushFileBuffers above. A local GUID
+        // excludes remote NTFS reports and survives drive-letter remounts.
+        completed_flush.stable_volume = detail::VolumeIdentityFromHandle(file);
         // The filesystem name has its own fixed bound, independent of volume labels.
         std::array<wchar_t, 64> filesystem_name{};
         DWORD serial = 0;
-        if (local_volume &&
+        if (completed_flush.stable_volume.known() &&
             ::GetVolumeInformationByHandleW(file,
                                             nullptr,
                                             0,
@@ -7475,6 +7477,10 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
             completed_flush.volume = serial;
             completed_flush.ntfs = std::wstring_view(filesystem_name.data()) == L"NTFS";
         }
+#else
+        completed_flush.volume_known = true;
+        completed_flush.volume = actual.front();
+        completed_flush.stable_volume = {.words = {actual.front(), 1}};
 #endif
     }
     SavedInputFile::Version appended_version{};
@@ -7516,13 +7522,18 @@ bool WorldSaveService::artifact_identity(const std::filesystem::path& path,
                                          ArtifactIdentity& result,
                                          bool& missing,
                                          bool directory,
-                                         unsigned max_links) {
+                                         unsigned max_links,
+                                         detail::StableVolumeIdentity* stable_volume) {
     result = {};
+    if (stable_volume)
+        *stable_volume = {};
     missing = false;
     StagingFile bound(path, directory ? StagingFile::Mode::Directory : StagingFile::Mode::Inspect);
     StagingIdentity identity{};
     if (bound.identity(identity, directory, max_links)) {
         std::copy_n(identity.begin(), result.size(), result.begin());
+        if (stable_volume)
+            *stable_volume = bound.stable_volume();
         return true;
     }
     std::error_code error;
@@ -7551,7 +7562,8 @@ bool WorldSaveService::remove_owned_entry(const std::filesystem::path& path,
                                           const ArtifactIdentity& expected,
                                           std::vector<std::string>* errors,
                                           bool directory,
-                                          const BoundPublicationStage* stage) {
+                                          const BoundPublicationStage* stage,
+                                          const detail::StableVolumeIdentity* stable_volume) {
     const SaveOwnership ownership;
     const auto publish = LockPublication(path);
     PublicationRevision().fetch_add(1, std::memory_order_relaxed);
@@ -7559,6 +7571,7 @@ bool WorldSaveService::remove_owned_entry(const std::filesystem::path& path,
     StagingIdentity identity{};
     if (!bound.identity(identity, directory, std::numeric_limits<unsigned>::max()) ||
         !std::equal(expected.begin(), expected.end(), identity.begin()) ||
+        (stable_volume && stable_volume->known() && bound.stable_volume() != *stable_volume) ||
         !bound.remove_bound(directory, stage)) {
         AddError(errors,
                  "snapshot artifact ownership changed: " + Filesystem::GenericUtf8PathString(path));

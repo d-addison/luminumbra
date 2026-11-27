@@ -4521,8 +4521,8 @@
     {
       "id": "indexed.persistence.011",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Journal v5 binds undo, publication and quarantine identities before either POSIX move, retains historical v4 decoding, and records identity-bound receipts discoverable as `<save>/journal.receipts.<txn_id>.<volume>.<file_id_high>.<file_id_low>` after control-file cleanup;",
-      "text": "Journal v5 binds undo, publication and quarantine identities before either POSIX move, retains historical v4 decoding, and records identity-bound receipts discoverable as `<save>/journal.receipts.<txn_id>.<volume>.<file_id_high>.<file_id_low>` after control-file cleanup;"
+      "quote": "Journal v6 binds undo, publication and quarantine identities before either POSIX move, retains historical v4 and v5 decoding, and records identity-bound receipts discoverable as `<save>/journal.receipts.<txn_id>.<volume>.<file_id_high>.<file_id_low>` after control-file cleanup;",
+      "text": "Journal v6 binds undo, publication and quarantine identities before either POSIX move, retains historical v4 and v5 decoding, and records identity-bound receipts discoverable as `<save>/journal.receipts.<txn_id>.<volume>.<file_id_high>.<file_id_low>` after control-file cleanup;"
     },
     {
       "id": "indexed.persistence.012",
@@ -4551,8 +4551,8 @@
     {
       "id": "indexed.persistence.016",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Initial creation completes admitted snapshot files through the v5 journal before clearing registry identities, while remaining artifact rollback may follow journal retirement because no previous commit exists and the registry retains failed-cleanup evidence.",
-      "text": "Initial creation completes admitted snapshot files through the v5 journal before clearing registry identities, while remaining artifact rollback may follow journal retirement because no previous commit exists and the registry retains failed-cleanup evidence."
+      "quote": "Initial creation completes admitted snapshot files through the v6 journal before clearing registry identities, while remaining artifact rollback may follow journal retirement because no previous commit exists and the registry retains failed-cleanup evidence.",
+      "text": "Initial creation completes admitted snapshot files through the v6 journal before clearing registry identities, while remaining artifact rollback may follow journal retirement because no previous commit exists and the registry retains failed-cleanup evidence."
     },
     {
       "id": "indexed.persistence.017",
@@ -5265,14 +5265,14 @@
     {
       "id": "indexed.persistence.022",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Receipt phases record namespace completion, a later successful same-volume NTFS file flush, and separate receipt retirement while POSIX repeats directory fsync, with immutable per-path generations starting at zero and advancing only after retirement or explicit reset.",
-      "text": "Receipt phases record namespace completion, a later successful same-volume NTFS file flush, and separate receipt retirement while POSIX repeats directory fsync, with immutable per-path generations starting at zero and advancing only after retirement or explicit reset."
+      "quote": "Receipt phases record namespace completion, a later successful same-volume NTFS file flush qualified by equal known stable identities for artifact and journal, and separate receipt retirement while POSIX repeats directory fsync, with immutable per-path generations starting at zero and advancing only after retirement or explicit reset.",
+      "text": "Receipt phases record namespace completion, a later successful same-volume NTFS file flush qualified by equal known stable identities for artifact and journal, and separate receipt retirement while POSIX repeats directory fsync, with immutable per-path generations starting at zero and advancing only after retirement or explicit reset."
     },
     {
       "id": "indexed.persistence.023",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "On ReFS, FAT/exFAT, network and unknown volumes, receipts remain retained and durability remains unqualified.",
-      "text": "On ReFS, FAT/exFAT, network and unknown volumes, receipts remain retained and durability remains unqualified."
+      "quote": "On ReFS, FAT/exFAT, network and unknown volumes, receipts remain retained and durability remains unqualified, including missing artifact or journal identities and serial-only Windows v5 receipts even with recorded flush completion until superseded by a new v6 transaction.",
+      "text": "On ReFS, FAT/exFAT, network and unknown volumes, receipts remain retained and durability remains unqualified, including missing artifact or journal identities and serial-only Windows v5 receipts even with recorded flush completion until superseded by a new v6 transaction."
     },
     {
       "id": "indexed.persistence.024",
@@ -5283,8 +5283,8 @@
     {
       "id": "indexed.persistence.025",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Receipt streams retain the 16 MiB journal limit, reserve completion capacity before forward publication, and bound save-root discovery by the existing member ceiling.",
-      "text": "Receipt streams retain the 16 MiB journal limit, reserve completion capacity before forward publication, and bound save-root discovery by the existing member ceiling."
+      "quote": "Receipt streams write journal v6 with stable_volume as two unsigned 64-bit words encoding exact Windows volume GUID bits from the verified open handle independent of drive-letter remounts and filename aliases, or POSIX {st_dev, 1}, reserve {0, 0} for unavailable identity, retain v5 decoding, preserve immutable receipt identities across phase records, retain the 16 MiB journal limit, reserve completion capacity before forward publication, and bound save-root discovery by the existing member ceiling.",
+      "text": "Receipt streams write journal v6 with stable_volume as two unsigned 64-bit words encoding exact Windows volume GUID bits from the verified open handle independent of drive-letter remounts and filename aliases, or POSIX {st_dev, 1}, reserve {0, 0} for unavailable identity, retain v5 decoding, preserve immutable receipt identities across phase records, retain the 16 MiB journal limit, reserve completion capacity before forward publication, and bound save-root discovery by the existing member ceiling."
     },
     {
       "id": "indexed.persistence.026",
@@ -5295,8 +5295,8 @@
     {
       "id": "indexed.persistence.027",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "World-owned v5 removal, publication retirement and recorded staging cleanup use explicit namespace completion, with empty never-committed save-root, chunks and chunks/region directories excluded because they hold no committed state and non-world removals plus ledger staging cleanup excluded and unqualified on Windows under issue #1324.",
-      "text": "World-owned v5 removal, publication retirement and recorded staging cleanup use explicit namespace completion, with empty never-committed save-root, chunks and chunks/region directories excluded because they hold no committed state and non-world removals plus ledger staging cleanup excluded and unqualified on Windows under issue #1324."
+      "quote": "World-owned v6 removal, publication retirement and recorded staging cleanup use explicit namespace completion, with empty never-committed save-root, chunks and chunks/region directories excluded because they hold no committed state and non-world removals plus ledger staging cleanup excluded and unqualified on Windows under issue #1324.",
+      "text": "World-owned v6 removal, publication retirement and recorded staging cleanup use explicit namespace completion, with empty never-committed save-root, chunks and chunks/region directories excluded because they hold no committed state and non-world removals plus ledger staging cleanup excluded and unqualified on Windows under issue #1324."
     },
     {
       "id": "ar.field-evidence.001",

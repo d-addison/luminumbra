@@ -1374,8 +1374,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
             "receipt.phase = NamespaceReceiptPhase::NamespaceDone;",
             "operations.flush_later_commit()",
             "if (!observation.succeeded)",
-            "!observation.volume_known || !observation.ntfs ||",
-            "observation.volume != receipt.identity.front()",
+            "!QualifiesNamespaceFlush(receipt.stable_volume, observation)",
             "operations.record_flush_observed(receipt.identity, observation)",
             "receipt.phase = NamespaceReceiptPhase::FlushObserved;",
             "operations.retire_receipt(receipt.identity)",
@@ -1392,8 +1391,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         source = read_source("src/luminumbra_common/persistence/RecoveryDurability.h")
         self.assert_namespace_receipt_completion(source)
         for original, replacement in (
-            ("!observation.volume_known || !observation.ntfs ||", "false ||"),
-            ("observation.volume != receipt.identity.front()", "false"),
+            ("!QualifiesNamespaceFlush(receipt.stable_volume, observation)", "false"),
             ("operations.record_flush_observed(receipt.identity, observation)", "true"),
             ("operations.inspect_namespace(receipt.identity)", "NamespaceEntryState::Absent"),
             ("operations.record_prepared(receipt.identity)", "true"),
@@ -1401,14 +1399,45 @@ class SessionUsabilitySourceContract(unittest.TestCase):
             with self.subTest(original=original), self.assertRaises((AssertionError, ValueError)):
                 self.assert_namespace_receipt_completion(source.replace(original, replacement))
 
+    def assert_stable_volume_contract(self, source):
+        qualification = self.function(source, "QualifiesNamespaceFlush", "")
+        for guard in ("journal.succeeded", "journal.volume_known", "journal.ntfs",
+                      "artifact.known()", "journal.stable_volume.known()",
+                      "artifact == journal.stable_volume"):
+            self.assertIn(guard, qualification)
+        self.assertNotIn("journal.volume ==", qualification)
+        native = self.function(source, "VolumeIdentityFromHandle", "")
+        self.assertIn("FILE_NAME_NORMALIZED | VOLUME_NAME_GUID", native)
+        self.assertIn("length == 0 || length >= name.size()", native)
+        self.assertIn("VolumeIdentityFromGuidPath", native)
+
+    def test_stable_volume_contract_refuses_serial_only_or_unknown_identity(self):
+        source = read_source("src/luminumbra_common/persistence/RecoveryDurability.h")
+        self.assert_stable_volume_contract(source)
+        for guard in ("artifact.known()", "journal.stable_volume.known()",
+                      "artifact == journal.stable_volume"):
+            with self.subTest(guard=guard), self.assertRaises(AssertionError):
+                self.assert_stable_volume_contract(source.replace(guard, "true"))
+
+    def test_receipt_volume_preparation_precedes_durable_resets(self):
+        source = read_source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        prepare = self.function(source, "PrepareReceipts", "")
+        self.assertLess(prepare.index("ObserveReceiptVolume(save_dir, candidate)"),
+                        prepare.index("RecordReceipts("))
+        parse = self.function(source, "ParseJournalRecord", "")
+        self.assertIn('"luminumbra.journal.v5"', parse)
+        self.assertIn('"stable_volume", receipt.completion.stable_volume.words', parse)
+        self.assertIn('"luminumbra.journal.v6"',
+                      read_source("src/luminumbra_common/persistence/SaveTransaction.h"))
+
     def test_journal_flush_observation_uses_same_handle_and_clears_failures(self):
         source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
         append = self.function(source, "append_journal_record", "WorldSaveService::")
         self.assertLess(append.index("*observation = {};"), append.index("if (record.empty()"))
         native = append.index("::GetVolumeInformationByHandleW(file,")
         self.assertLess(append.index('write_bytes("\\n", 1) && flush()'), native)
-        self.assertIn("FILE_NAME_NORMALIZED | VOLUME_NAME_GUID", append)
-        self.assertRegex(append, r"if \(local_volume &&\s*::GetVolumeInformationByHandleW\(file,")
+        self.assertIn("detail::VolumeIdentityFromHandle(file)", append)
+        self.assertRegex(append, r"if \(completed_flush.stable_volume.known\(\) &&\s*::GetVolumeInformationByHandleW\(file,")
         self.assertIn("serial == actual.front()", append)
         self.assertIn('std::wstring_view(filesystem_name.data()) == L"NTFS"', append)
         self.assertLess(native, append.index("const bool closed = close();"))
@@ -1418,7 +1447,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
     def assert_transaction_receipt_integration(self, source):
         parse = self.function(source, "ParseJournalRecord", "")
         self.assertIn('schema->get<std::string>() != "luminumbra.journal.v4"', parse)
-        self.assertIn('parsed.modern = schema->get<std::string>() == kJournalSchema;', parse)
+        self.assertIn('parsed.modern = schema->get<std::string>() != "luminumbra.journal.v4";', parse)
         self.assertIn('root.size() != expected_fields', parse)
         self.assertIn('phase->get<std::uint64_t>() > 3', parse)
         stream = self.function(source, "ApplyJournalRecords", "")
@@ -1427,15 +1456,15 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn('record.modern != out.modern', stream)
         self.assertIn('journal receipt transition invalid', stream)
         completion = self.function(source, "CompleteReceipts", "")
-        self.assertIn('latest_flush.volume != receipt.completion.identity.front()', completion)
-        self.assertIn('!latest_flush.volume_known || !latest_flush.ntfs', completion)
+        self.assertIn('!detail::QualifiesNamespaceFlush(receipt.completion.stable_volume, latest_flush)', completion)
+        self.assertIn('if (!receipt.completion.stable_volume.known())', completion)
         self.assertIn('FlushReceiptCarrier(RecoveryControl(save_dir, document), control)', completion)
         self.assertIn('NearestExistingDirectory((save_dir / receipt.path).parent_path())', completion)
         self.assertLess(completion.index('WorldSaveService::remove_owned_entry('),
                         completion.index('namespace_done, 1, control, errors, &latest_flush'))
         self.assertLess(completion.index('namespace_done, 1, control, errors, &latest_flush'),
-                        completion.index('latest_flush.volume != receipt.completion.identity.front()'))
-        self.assertLess(completion.index('latest_flush.volume != receipt.completion.identity.front()'),
+                        completion.index('!detail::QualifiesNamespaceFlush(receipt.completion.stable_volume, latest_flush)'))
+        self.assertLess(completion.index('!detail::QualifiesNamespaceFlush(receipt.completion.stable_volume, latest_flush)'),
                         completion.index('flush_observed, 2, control, errors'))
         self.assertLess(completion.index('flush_observed, 2, control, errors'),
                         completion.index('retired, 3, control, errors'))
@@ -1449,7 +1478,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertLess(flush.index('::FlushFileBuffers(file)'),
                         flush.index('::GetVolumeInformationByHandleW(file,'))
         self.assertIn('serial == actual.front()', flush)
-        self.assertIn('FILE_NAME_NORMALIZED | VOLUME_NAME_GUID', flush)
+        self.assertIn('detail::VolumeIdentityFromHandle(file)', flush)
         self.assertIn('if (!::CloseHandle(file))', flush)
         finish = self.function(source, "FinishJournal", "")
         self.assertLess(finish.index('PrepareReceipts('), finish.index('WorldSaveService::publish_restoration('))
@@ -1721,7 +1750,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                       '"crash-receipt-before-publication"',
                       'root.size() != expected_fields',
                       'phase->get<std::uint64_t>() > 3',
-                      'latest_flush.volume != receipt.completion.identity.front()',
+                      '!detail::QualifiesNamespaceFlush(receipt.completion.stable_volume, latest_flush)',
                       'RecoverReceiptCarriers(save_dir, errors)',
                       'const auto identity = missing ? entry->rollback_retired_identity : current;'):
             with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):

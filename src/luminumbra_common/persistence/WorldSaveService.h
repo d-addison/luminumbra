@@ -40,7 +40,8 @@ class CreatedWorldArtifacts;
 struct BoundPublicationStage;
 namespace detail {
 struct NamespaceFlushObservation;
-}
+struct StableVolumeIdentity;
+} // namespace detail
 
 // Counters describing one incremental save pass over the streaming state.
 struct WorldSaveDirtyReport {
@@ -712,20 +713,24 @@ public:
                                       const std::string* expected_bytes = nullptr);
     // Recovery operations require the recorded object, including at the destructive operation.
     // A file with more than max_links names is reported as neither identified nor missing.
+    // Optional stable volume metadata comes from that same inspected handle; zero is unknown.
     static bool artifact_identity(const std::filesystem::path& path,
                                   ArtifactIdentity& identity,
                                   bool& missing,
                                   bool directory = false,
-                                  unsigned max_links = std::numeric_limits<unsigned>::max());
+                                  unsigned max_links = std::numeric_limits<unsigned>::max(),
+                                  detail::StableVolumeIdentity* stable_volume = nullptr);
     // Caller owns publication; this inspection does not reacquire the file's read lock.
     static bool artifact_version(const std::filesystem::path& path,
                                  std::array<std::uint64_t, 8>& version,
                                  bool& missing);
+    // A supplied known stable volume must also match the handle used for removal.
     static bool remove_owned_entry(const std::filesystem::path& path,
                                    const ArtifactIdentity& identity,
                                    std::vector<std::string>* errors,
                                    bool directory = false,
-                                   const BoundPublicationStage* stage = nullptr);
+                                   const BoundPublicationStage* stage = nullptr,
+                                   const detail::StableVolumeIdentity* stable_volume = nullptr);
     static bool prepare_restoration(const std::filesystem::path& staging,
                                     const std::string& bytes,
                                     std::filesystem::path& temp,
