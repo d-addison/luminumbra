@@ -283,6 +283,73 @@ Missing, malformed or duplicate-key selected presets and non-string biome-table
 paths refuse capture before launching the executable or creating evidence.
 Inputs are hashed again before publication; changes refuse a success manifest.
 
+## Regional cadence capture and comparison
+
+The diagnostic capture tool for issue #138 uses the server's fixed
+`--regional-cadence-workload`: eight distant anchored regions and a ninth
+unanchored control, each with a plant, resource participant and water source.
+The current server flag has no anchor-count option. The matrix varies presets,
+seeds and repetitions of this fixed workload; other anchor counts await a
+separately qualified workload. Use a stable executable and isolated runtime
+content tree, with evidence outside both the repository and runtime tree:
+
+```sh
+python3 -I -B tools/perf/capture_regional_cadence.py capture \
+  --root <runtime-directory> --binary <server-executable> \
+  --evidence-dir <new-evidence-directory> \
+  --presets default mountains archipelago --seeds 1337 --repeats 2 --ticks 3600
+python3 -I -B tools/perf/capture_regional_cadence.py compare \
+  <before-evidence-directory> <after-evidence-directory> > <comparison-file>
+```
+
+Each command runs standalone smoke twice internally; each matrix cell repeats
+that smoke independently. Commands include no-audio, simulation telemetry,
+30-tick autosaves and explicit surface/collision radii (both default to one).
+Inherited `LUMINUMBRA_` overrides are removed from the child environment.
+Capture-only admission bounds are 32 matrix cells, 36,000 ticks per run,
+64 MiB per JSON artifact, 512 MiB total artifact input and a 512 MiB executable.
+Each process has a 600-second deadline. These bounds do not change shipping
+simulation limits. Larger workloads require separate qualification.
+
+Only a complete validated matrix publishes `capture.json`, schema
+`luminumbra.regional_cadence_capture.v1`. It binds exact argument arrays, source
+revision and dirty flag, executable SHA-256, the shared resolved-content hash,
+a canonical workload SHA-256, and canonical artifact digests. Source, executable
+and content identities are checked again before publication. Partial artifacts
+and logs remain diagnostic evidence after failure; existing evidence directories
+are refused. Capture directories and input trees are operator-owned and stable
+during capture; the tool does not provide concurrent-writer isolation or prove
+that an executable was built from its recorded source revision.
+
+Qualification checks both complete smoke runs, all shipping simulation gates,
+all telemetry-v2 stages and integer work-item traces, matching simulation truth
+hashes, and the optional `regional_cadence` diagnostic block from each run.
+Every anchored owner has positive plant service, elapsed resource steps and
+interior water service. Missing participants, incomplete observations, frozen
+plant/water service, advancement of the unanchored control, divergent repeated
+integer traces, and water work exceeding the existing 4,096-cell cap refuse
+publication. Diagnostic water maxima include preparation and seam endpoint work;
+per-tick `water_cells` traces are checked separately. Foliage replay cell/page
+visits are last-pass and maximum observations, never summed as cumulative work.
+Per-owner service gaps are simulation ticks; water service counts interior
+windows, while border windows remain global observations. The tool retains
+remaining replay steps and deferred water samples without interpreting them as
+completed work or claiming native correctness.
+
+Comparison revalidates complete matrices, commands, identities and artifact
+digests. Workload, resolved content and effective gates agree across endpoints;
+source revisions and executable digests may differ and remain in the report.
+The `luminumbra.regional_cadence_compare.v1` report separates
+`integer_work_and_service` (raw integer traces, counts, service gaps and truth
+hashes for both endpoints, with equality) from `duration_ms` (per-stage
+p50/p95/p99/maximum distributions). Duration changes and render-only mesh hashes
+do not affect deterministic comparisons. Different integer trajectories across
+revisions are reported; divergence within a repeated workload is refused.
+There are no timing thresholds or new shipping-limit proposals. Representative
+native runs, batching/save continuation correctness and release acceptance are
+still separate evidence requirements. `RegionalCadenceCaptureContract` registers
+synthetic regressions without launching the engine.
+
 ## Synthetic ledger and indexed-save measurements
 
 The optional `LUMINUMBRA_BUILD_TOOLS` target `luminumbra_active_regions_bench`
