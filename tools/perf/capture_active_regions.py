@@ -15,7 +15,6 @@ import copy
 import hashlib
 import os
 from pathlib import Path
-import re
 import stat
 import struct
 import subprocess
@@ -123,13 +122,27 @@ def check_linux_loader(path, *, library_names=None):
                       "cannot isolate Linux dependencies: unsupported ELF program headers")
         headers = [struct.unpack(ph_format, read_at(offset + index * stride, stride))
                    for index in range(count)]
-        loads, dynamics = [], []
+        loads, dynamics, interpreters = [], [], []
         for row in headers:
             start, address, length = (row[2], row[3], row[5]) if wide else (row[1], row[2], row[4])
             if row[0] == 1:  # PT_LOAD maps the dynamic string table's virtual address.
                 loads.append((start, address, length))
             elif row[0] == 2:  # PT_DYNAMIC
                 dynamics.append((start, length))
+            elif row[0] == 3:  # PT_INTERP
+                interpreters.append((start, length))
+        check.require(len(interpreters) <= 1,
+                      "cannot isolate Linux dependencies: unsupported program interpreter")
+        for start, length in interpreters:
+            check.require(0 <= start <= size and 0 < length <= size - start,
+                          "cannot isolate Linux dependencies: invalid ELF interpreter range")
+            # The interpreter must terminate inside its segment and this 4096-byte bound.
+            raw = read_at(start, min(length, 4096))
+            interpreter, terminator, _ = raw.partition(b"\0")
+            check.require(terminator and interpreter in (
+                b"/lib64/ld-linux-x86-64.so.2", b"/lib/ld-linux-aarch64.so.1",
+                b"/lib/ld-linux-armhf.so.3", b"/lib/ld-linux.so.2"),
+                "cannot isolate Linux dependencies: unsupported program interpreter")
         check.require(len(dynamics) <= 1, "cannot isolate Linux dependencies: multiple dynamic tables")
         if not dynamics:
             return  # A static executable has no loader search to redirect.
@@ -164,8 +177,7 @@ def check_linux_loader(path, *, library_names=None):
                     if address <= strings[0] < address + length]
         check.require(len(mappings) == 1 and lengths[0] <= mappings[0][1],
                       "cannot isolate Linux dependencies: unmapped dynamic strings")
-        needed, directories = [], []
-        staged = os.path.normpath(os.fsencode(path.parent))
+        staged = os.fsencode(path.parent)
         for tag, name in references:
             check.require(name < lengths[0], "cannot isolate Linux dependencies: invalid import offset")
             # Each import or RUNPATH must terminate within this 4096-byte buffer.
@@ -173,35 +185,19 @@ def check_linux_loader(path, *, library_names=None):
             dependency, terminator, _ = raw.partition(b"\0")
             if tag == 29:
                 check.require(terminator, "cannot isolate Linux dependencies: unterminated RUNPATH")
-                # Only complete ORIGIN tokens have known, object-local semantics.
-                origin_token = rb"\$(?:ORIGIN(?![A-Za-z0-9_])|\{ORIGIN\})"
-                # glibc also accepts semicolons as search-path separators.
-                for entry in re.split(b"[:;]", dependency):
-                    check.require(b"$" not in re.sub(origin_token, b"", entry),
-                                  "cannot isolate Linux dependencies: unsupported RUNPATH token")
-                    expanded = re.sub(origin_token, lambda match: os.fsencode(path.parent), entry)
-                    check.require(entry and os.path.isabs(expanded),
-                                  "cannot isolate Linux dependencies: empty/relative RUNPATH entry")
-                    directory = os.path.normpath(expanded)
-                    if directory != staged:
-                        directories.append(directory)
+                # RUNPATH splits only on colons; compare literal spellings without
+                # collapsing dot components, which can change symlink traversal.
+                for entry in dependency.split(b":"):
+                    origin = entry in (b"$ORIGIN", b"${ORIGIN}", b"$ORIGIN/", b"${ORIGIN}/")
+                    local = (os.path.isabs(staged) and b"$" not in entry and entry in (staged, staged + b"/")
+                             and not any(part in (b".", b"..") for part in entry.split(b"/")))
+                    check.require(origin or local,
+                                  "cannot isolate Linux dependencies: RUNPATH outside staged directory")
                 continue
             check.require(terminator and dependency and b"/" not in dependency and b"$" not in dependency,
                           "cannot isolate Linux dependencies: path-bearing/invalid import")
             check.require(tag != 14 or dependency in library_names,
                           "cannot isolate Linux dependencies: SONAME missing from staged set")
-            if tag == 1 and dependency not in library_names:
-                needed.append(dependency)
-        # At most 4096 dynamic tags by 2048 entries in the bounded RUNPATH.
-        # Probe names only: never open or follow an unstaged file or symlink.
-        for dependency in needed:
-            for directory in directories:
-                try:
-                    os.lstat(os.path.join(directory, dependency))
-                except (FileNotFoundError, NotADirectoryError):
-                    continue  # No RUNPATH candidate; allow the system default search.
-                check.require(False, "cannot isolate Linux dependencies: RUNPATH resolves unstaged "
-                              + os.fsdecode(dependency))
 
 
 def loader_environment(binary):

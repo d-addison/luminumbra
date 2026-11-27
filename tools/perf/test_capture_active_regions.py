@@ -30,14 +30,15 @@ def encoded(value):
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
-def elf(*, tags=(), dependency=None, runpaths=(), wide=True, endian="<"):
+def elf(*, tags=(), dependency=None, runpaths=(), interpreters=(), dynamic=True, wide=True, endian="<"):
     """Minimal ELF metadata for loader checks; never executed by these tests."""
     header_format = endian + ("HHIQQQIHHHHHH" if wide else "HHIIIIIHHHHHH")
     ph_format = endian + ("IIQQQQQQ" if wide else "IIIIIIII")
     dyn_format = endian + ("qQ" if wide else "iI")
     header_size = 16 + struct.calcsize(header_format)
     ph_size = struct.calcsize(ph_format)
-    start = header_size + 2 * ph_size
+    count = 1 + int(dynamic) + len(interpreters)
+    start = header_size + count * ph_size
     strings = (dependency + b"\0") if dependency is not None else b""
     dynamic_tags = list(tags)
     if dependency is not None:
@@ -47,25 +48,48 @@ def elf(*, tags=(), dependency=None, runpaths=(), wide=True, endian="<"):
         strings += runpath + b"\0"
     if strings:
         dynamic_tags += [(5, 4096 + start), (10, len(strings))]
-    dynamic = b"".join(struct.pack(dyn_format, *tag) for tag in dynamic_tags + [(0, 0)])
-    size = start + len(strings) + len(dynamic)
+    table_bytes = b"".join(struct.pack(dyn_format, *tag) for tag in dynamic_tags + [(0, 0)]) if dynamic else b""
+    size = start + len(strings) + len(table_bytes) + sum(map(len, interpreters))
     ident = b"\x7fELF" + bytes([2 if wide else 1, 1 if endian == "<" else 2, 1]) + bytes(9)
     header = struct.pack(header_format, 2, 62 if wide else 3, 1, 0, header_size,
-                         0, 0, header_size, ph_size, 2, 0, 0, 0)
-    if wide:
-        load = (1, 4, 0, 4096, 0, size, size, 1)
-        table = (2, 4, start + len(strings), 0, 0, len(dynamic), len(dynamic), 1)
-    else:
-        load = (1, 0, 4096, 0, size, size, 4, 1)
-        table = (2, start + len(strings), 0, 0, len(dynamic), len(dynamic), 4, 1)
-    return ident + header + struct.pack(ph_format, *load) + struct.pack(ph_format, *table) + strings + dynamic
+                         0, 0, header_size, ph_size, count, 0, 0, 0)
+    segments = [(1, 0, 4096, size)]
+    if dynamic:
+        segments.append((2, start + len(strings), 0, len(table_bytes)))
+    offset = start + len(strings) + len(table_bytes)
+    for interpreter in interpreters:
+        segments.append((3, offset, 0, len(interpreter)))
+        offset += len(interpreter)
+    headers = []
+    for kind, offset, address, length in segments:
+        row = ((kind, 4, offset, address, 0, length, length, 1) if wide
+               else (kind, offset, address, 0, length, length, 4, 1))
+        headers.append(struct.pack(ph_format, *row))
+    return ident + header + b"".join(headers) + strings + table_bytes + b"".join(interpreters)
 
 
-def elf_directory(path, origin):
-    # Native Windows drive colons are ELF search separators; use ORIGIN there.
-    if os.name == "nt":
-        return b"$ORIGIN/" + os.fsencode(os.path.relpath(path, origin)).replace(b"\\", b"/")
-    return os.fsencode(path)
+def invalid_interpreter_elfs(*, wide=True, endian="<"):
+    approved = b"/lib64/ld-linux-x86-64.so.2\0"
+    cases = {
+        "custom": elf(interpreters=[b"/opt/custom/ld.so\0"], wide=wide, endian=endian),
+        "custom-without-dynamic": elf(interpreters=[b"/opt/custom/ld.so\0"], dynamic=False,
+                                      wide=wide, endian=endian),
+        "duplicate": elf(interpreters=[approved, approved], wide=wide, endian=endian),
+        "unterminated": elf(interpreters=[approved[:-1]], wide=wide, endian=endian),
+        "empty-segment": elf(interpreters=[b""], wide=wide, endian=endian),
+        "empty-path": elf(interpreters=[b"\0"], wide=wide, endian=endian),
+        "beyond-read-bound": elf(interpreters=[b"x" * 4096 + b"\0"], wide=wide, endian=endian),
+    }
+    raw = elf(interpreters=[approved], wide=wide, endian=endian)
+    header_size, ph_size = (64, 56) if wide else (52, 32)
+    # PT_INTERP follows PT_LOAD and PT_DYNAMIC. Mutate its file range fields.
+    for name, field, value in (("outside-file", 8 if wide else 4, len(raw) + 1),
+                                ("segment-past-eof", 32 if wide else 16, len(approved) + 1),
+                                ("nul-outside-segment", 32 if wide else 16, len(approved) - 1)):
+        changed = bytearray(raw)
+        struct.pack_into(endian + ("Q" if wide else "I"), changed, header_size + 2 * ph_size + field, value)
+        cases[name] = bytes(changed)
+    return cases
 
 
 def trace(ticks=2):
@@ -279,27 +303,29 @@ class ActiveRegionCaptureContract(unittest.TestCase):
                     with self.subTest(platform=platform), mock.patch.object(capture.sys, "platform", platform):
                         with self.assertRaisesRegex(ValueError, "cannot isolate staged libraries"):
                             capture.loader_environment(binary)
-                with mock.patch.object(capture.sys, "platform", "linux"):
-                    for delimiter in (":", ";", "$"):
-                        unsafe = binary.parent / ("unsafe" + delimiter) / binary.name
-                        with self.subTest(delimiter=delimiter), \
-                                self.assertRaisesRegex(ValueError, "unsafe staged library directory"):
-                            capture.loader_environment(unsafe)
-                    (binary.parent / "library.so").write_bytes(b"unknown library format")
-                    with self.assertRaisesRegex(ValueError, "unsupported executable/library format"):
-                        capture.loader_environment(binary)
-                    alias = binary.parent / "library.so.1"
-                    shared = elf(dependency=b"library.so.1", tags=[(14, 0)])
-                    (binary.parent / "library.so").write_bytes(shared)
-                    with self.assertRaisesRegex(ValueError, "SONAME missing from staged set"):
-                        capture.loader_environment(binary)
-                    alias.write_bytes(shared)
-                    self.assertEqual(capture.loader_environment(binary), {"LD_LIBRARY_PATH": str(binary.parent)})
-                    alias.unlink()
+                if sys.platform.startswith("linux"):
+                    with mock.patch.object(capture.sys, "platform", "linux"):
+                        for delimiter in (":", ";", "$"):
+                            unsafe = binary.parent / ("unsafe" + delimiter) / binary.name
+                            with self.subTest(delimiter=delimiter), \
+                                    self.assertRaisesRegex(ValueError, "unsafe staged library directory"):
+                                capture.loader_environment(unsafe)
+                        (binary.parent / "library.so").write_bytes(b"unknown library format")
+                        with self.assertRaisesRegex(ValueError, "unsupported executable/library format"):
+                            capture.loader_environment(binary)
+                        alias = binary.parent / "library.so.1"
+                        shared = elf(dependency=b"library.so.1", tags=[(14, 0)])
+                        (binary.parent / "library.so").write_bytes(shared)
+                        with self.assertRaisesRegex(ValueError, "SONAME missing from staged set"):
+                            capture.loader_environment(binary)
+                        alias.write_bytes(shared)
+                        self.assertEqual(capture.loader_environment(binary), {"LD_LIBRARY_PATH": str(binary.parent)})
+                        alias.unlink()
                 (binary.parent / "library.so").unlink()
                 with mock.patch.object(capture.sys, "platform", "darwin"):
                     self.assertEqual(capture.loader_environment(binary), {})
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires native Linux staging paths")
     def test_linux_loader_checks_both_executables_and_libraries_before_publication(self):
         posix = types.SimpleNamespace(**(vars(os) | {"name": "posix"}))
         for selected in ("binary", "dump_binary", "library"):
@@ -320,101 +346,89 @@ class ActiveRegionCaptureContract(unittest.TestCase):
                 self.assertFalse(args.evidence_dir.exists())
                 self.assertFalse(any(argv[0] != "git" for argv, _ in runner.calls))
 
+    def assert_loader_refusal_before_publication(self, args, runner, message, *, snapshot_directory=None):
+        tour = check.parse(args.tour.read_bytes())
+        with mock.patch.object(capture, "resolved_fixture_hash", return_value="b" * 64):
+            tour["identity"] = capture.identities(args.repository, args.root, args.binary,
+                                                  args.dump_binary, "default", runner)
+        for stage in tour["stages"]:
+            stage["identity"] = tour["identity"]
+        args.tour.write_bytes(encoded(tour))
+        with self.assertRaisesRegex(ValueError, message):
+            if snapshot_directory is None:
+                run_capture(args, runner)
+            else:
+                with mock.patch.object(capture, "resolved_fixture_hash", return_value="b" * 64):
+                    capture.capture_snapshot(args, runner, snapshot_directory)
+        self.assertFalse(args.evidence_dir.exists())
+        self.assertFalse(any(argv[0] != "git" for argv, _ in runner.calls))
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires native Linux staging paths")
     def test_linux_runpath_refusals_precede_invocations_and_publication(self):
-        posix = types.SimpleNamespace(**(vars(os) | {"name": "posix"}))
-        cases = ("absolute", "origin", "braced-origin", "search-list", "semicolon-list", "empty", "leading-empty",
-                 "trailing-empty", "middle-empty", "semicolon-empty", "relative", "origin-relative", "lib-token",
-                 "platform-token", "unknown-token", "origin-suffix-token", "duplicate")
+        cases = {
+            "absolute-empty-sdk": [b"/sdk"], "origin-parent": [b"$ORIGIN/../sdk"],
+            "braced-origin-parent": [b"${ORIGIN}/../sdk"], "origin-dot": [b"$ORIGIN/."],
+            "search-list": [b"$ORIGIN:/sdk"], "semicolon-list": [b"/sdk/a;/sdk/b"],
+            "empty": [b""], "leading-empty": [b":$ORIGIN"], "trailing-empty": [b"$ORIGIN:"],
+            "middle-empty": [b"$ORIGIN::$ORIGIN"], "semicolon-empty": [b"$ORIGIN;:$ORIGIN"],
+            "relative": [b"sdk"], "origin-relative": [b"sdk/$ORIGIN"], "lib-token": [b"$LIB"],
+            "platform-token": [b"/${PLATFORM}"], "unknown-token": [b"/$UNKNOWN"],
+            "origin-suffix-token": [b"/$ORIGIN_suffix"], "double-slash": [b"$ORIGIN//"],
+            "duplicate": [b"$ORIGIN", b"${ORIGIN}"], "staged-parent-detour": None,
+        }
         for selected in ("binary", "dump_binary", "library"):
-            for case in cases:
-                with self.subTest(selected=selected, case=case), tempfile.TemporaryDirectory() as temp:
-                    args, runner = fixture(Path(temp))
-                    sdk = Path(temp) / "sdk"
-                    sdk.mkdir()
-                    (sdk / "libnetwork.so").write_bytes(elf())
-                    sdk_entry = elf_directory(sdk, Path(temp) / "server")
-                    runpaths = {
-                        "absolute": [sdk_entry], "origin": [b"$ORIGIN/../sdk"],
-                        "braced-origin": [b"${ORIGIN}/../sdk"],
-                        "search-list": [b"$ORIGIN:" + sdk_entry],
-                        "semicolon-list": [b"$ORIGIN;" + sdk_entry],
-                        "empty": [b""], "leading-empty": [b":$ORIGIN"],
-                        "trailing-empty": [b"$ORIGIN:"], "middle-empty": [b"$ORIGIN::$ORIGIN"],
-                        "semicolon-empty": [b"$ORIGIN;:$ORIGIN"],
-                        "relative": [b"sdk"], "origin-relative": [b"sdk/$ORIGIN"],
-                        "lib-token": [b"$ORIGIN/$LIB"], "platform-token": [b"/${PLATFORM}"],
-                        "unknown-token": [b"/$UNKNOWN"], "origin-suffix-token": [b"/$ORIGIN_suffix"],
-                        "duplicate": [b"$ORIGIN", b"${ORIGIN}"],
-                    }[case]
-                    source = args.binary.parent / "libouter.so" if selected == "library" else getattr(args, selected)
-                    source.write_bytes(elf(dependency=b"libnetwork.so", runpaths=runpaths))
-                    tour = check.parse(args.tour.read_bytes())
-                    with mock.patch.object(capture, "resolved_fixture_hash", return_value="b" * 64):
-                        tour["identity"] = capture.identities(args.repository, args.root, args.binary,
-                                                              args.dump_binary, "default", runner)
-                    for stage in tour["stages"]:
-                        stage["identity"] = tour["identity"]
-                    args.tour.write_bytes(encoded(tour))
-                    snapshot = capture.snapshot_inputs
+            with tempfile.TemporaryDirectory() as temp:
+                args, runner = fixture(Path(temp))
+                source = args.binary.parent / "libouter.so" if selected == "library" else getattr(args, selected)
+                for case, runpaths in cases.items():
+                    with self.subTest(selected=selected, case=case):
+                        runner.calls.clear()
+                        args.evidence_dir = Path(temp) / ("evidence-" + case)
+                        snapshot = None
+                        if case == "staged-parent-detour":
+                            snapshot = Path(temp) / "snapshot"
+                            snapshot.mkdir()
+                            name = b"exporter" if selected == "dump_binary" else b"server"
+                            staged = os.fsencode(snapshot) + b"/" + name
+                            runpaths = [staged + b"/../" + name]
+                        # No dependency candidates are needed for a strict refusal.
+                        dependency = None if case == "absolute-empty-sdk" else b"libnetwork.so"
+                        source.write_bytes(elf(dependency=dependency, runpaths=runpaths))
+                        message = "ambiguous RUNPATH" if case == "duplicate" else "RUNPATH outside staged directory"
+                        self.assert_loader_refusal_before_publication(args, runner, message, snapshot_directory=snapshot)
 
-                    def with_sdk(root, binary, exporter, directory):
-                        result = snapshot(root, binary, exporter, directory)
-                        # Both inspected directories have the same sibling SDK.
-                        staged_sdk = directory / "sdk"
-                        staged_sdk.mkdir()
-                        (staged_sdk / "libnetwork.so").write_bytes(elf())
-                        return result
-
-                    resolves = case in ("absolute", "origin", "braced-origin", "search-list", "semicolon-list")
-                    message = ("RUNPATH resolves unstaged" if resolves
-                               else "cannot isolate Linux dependencies")
-                    with mock.patch.object(capture, "os", posix), \
-                            mock.patch.object(capture.sys, "platform", "linux"), \
-                            mock.patch.object(capture, "snapshot_inputs", with_sdk), \
-                            self.assertRaisesRegex(ValueError, message):
-                        run_capture(args, runner)
-                    self.assertFalse(args.evidence_dir.exists())
-                    self.assertFalse(any(argv[0] != "git" for argv, _ in runner.calls))
-
-    def test_linux_runpath_allows_staged_names_and_system_fallback(self):
+    def test_linux_runpath_allows_only_literal_staged_directory(self):
         with tempfile.TemporaryDirectory() as temp:
-            staged = Path(temp) / "staged"
-            staged.mkdir()
-            binary = staged / "server"
-            sdk = Path(temp) / "sdk"
-            sdk.mkdir()
-            (sdk / "libnetwork.so").write_bytes(elf())
-            not_directory = Path(temp) / "file"
-            not_directory.write_bytes(b"not a directory")
-            for runpath in (b"$ORIGIN", b"${ORIGIN}/../staged", elf_directory(staged, staged),
-                            elf_directory(sdk / "missing", staged), elf_directory(not_directory, staged),
-                            b"$ORIGIN:${ORIGIN}/../staged", b"$ORIGIN;${ORIGIN}/../staged"):
+            binary = Path(temp) / "server"
+            # Absolute POSIX staged paths are tested on Linux; native drive-letter
+            # paths are not ELF directory spellings on Windows.
+            runpaths = [b"$ORIGIN", b"${ORIGIN}", b"$ORIGIN/", b"${ORIGIN}/", b"$ORIGIN:${ORIGIN}/"]
+            if sys.platform.startswith("linux"):
+                runpaths += [os.fsencode(binary.parent), os.fsencode(binary.parent) + b"/"]
+            for runpath in runpaths:
                 for dependency in (None, b"libnetwork.so"):
                     with self.subTest(runpath=runpath, dependency=dependency):
                         binary.write_bytes(elf(dependency=dependency, runpaths=[runpath]))
                         capture.check_linux_loader(binary)
-            # A staged basename wins before any RUNPATH, even if the SDK has it.
-            binary.write_bytes(elf(dependency=b"libnetwork.so", runpaths=[elf_directory(sdk, staged)]))
-            original = os.lstat
-
-            def no_sdk_probe(path, *args, **kwargs):
-                self.assertNotEqual(os.fsencode(path), os.fsencode(sdk / "libnetwork.so"))
-                return original(path, *args, **kwargs)
-
-            with mock.patch.object(capture.os, "lstat", no_sdk_probe):
-                capture.check_linux_loader(binary, library_names={b"server", b"libnetwork.so"})
-            # The terminator at byte 4095 is inside the read bound.
+                        capture.check_linux_loader(binary, library_names={b"server", b"libnetwork.so"})
+            if sys.platform.startswith("linux"):
+                staged = os.fsencode(binary.parent)
+                for runpath in (staged + b"/../" + os.fsencode(binary.parent.name), staged + b"/.",
+                                staged + b"//"):
+                    binary.write_bytes(elf(runpaths=[runpath]))
+                    with self.subTest(runpath=runpath), \
+                            self.assertRaisesRegex(ValueError, "RUNPATH outside staged directory"):
+                        capture.check_linux_loader(binary)
+            # A terminator at byte 4095 is readable, but does not make an external path safe.
             binary.write_bytes(elf(runpaths=[b"/" * 4095]))
-            capture.check_linux_loader(binary, library_names=set())
+            with self.assertRaisesRegex(ValueError, "RUNPATH outside staged directory"):
+                capture.check_linux_loader(binary, library_names=set())
 
     def test_linux_runpath_checks_both_elf_classes_endians_and_tag_orders(self):
         with tempfile.TemporaryDirectory() as temp:
             binary = Path(temp) / "server"
-            sdk = Path(temp) / "sdk"
-            sdk.mkdir()
             dependency = b"libnetwork.so"
-            (sdk / os.fsdecode(dependency)).write_bytes(elf())
-            runpath = elf_directory(sdk, binary.parent)
+            runpath = b"/sdk"
             for wide in (False, True):
                 for endian in ("<", ">"):
                     for runpath_first in (False, True):
@@ -426,7 +440,7 @@ class ActiveRegionCaptureContract(unittest.TestCase):
                             raw[start:start + 2 * stride] = second + first
                         binary.write_bytes(raw)
                         with self.subTest(wide=wide, endian=endian, runpath_first=runpath_first), \
-                                self.assertRaisesRegex(ValueError, "RUNPATH resolves unstaged"):
+                                self.assertRaisesRegex(ValueError, "RUNPATH outside staged directory"):
                             capture.check_linux_loader(binary)
 
     def test_linux_runpath_metadata_reads_are_bounded_and_fail_closed(self):
@@ -463,24 +477,86 @@ class ActiveRegionCaptureContract(unittest.TestCase):
                         self.assertRaises((ValueError, PermissionError)):
                     capture.check_linux_loader(binary)
 
-    def test_linux_runpath_probe_refuses_symlinks_and_propagates_errors(self):
+    def test_linux_runpath_refuses_external_paths_without_probing(self):
         with tempfile.TemporaryDirectory() as temp:
             binary = Path(temp) / "server"
-            sdk = Path(temp) / "sdk"
-            binary.write_bytes(elf(dependency=b"libnetwork.so", runpaths=[elf_directory(sdk, binary.parent)]))
+            binary.write_bytes(elf(dependency=b"libnetwork.so", runpaths=[b"/sdk"]))
             original = os.lstat
-            for failure in (None, PermissionError("denied RUNPATH probe")):
-                def probe(path, *args, **kwargs):
-                    if os.fsencode(path) == os.fsencode(sdk / "libnetwork.so"):
-                        if failure is not None:
-                            raise failure
-                        # Includes dangling symlinks; no Windows symlink privilege needed.
-                        return types.SimpleNamespace(st_mode=0o120777)
-                    return original(path, *args, **kwargs)
 
-                with self.subTest(failure=failure), mock.patch.object(capture.os, "lstat", probe), \
-                        self.assertRaises((ValueError, PermissionError)):
-                    capture.check_linux_loader(binary)
+            def no_external_probe(path, *args, **kwargs):
+                self.assertNotEqual(os.fsencode(path).split(b"/")[1:2], [b"sdk"])
+                return original(path, *args, **kwargs)
+
+            with mock.patch.object(capture.os, "lstat", no_external_probe):
+                for names in ({b"server"}, {b"server", b"libnetwork.so"}):
+                    with self.subTest(names=names), \
+                            self.assertRaisesRegex(ValueError, "RUNPATH outside staged directory"):
+                        capture.check_linux_loader(binary, library_names=names)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires native Linux staging paths")
+    def test_linux_interpreter_refusals_precede_invocations_and_publication(self):
+        for selected in ("binary", "dump_binary", "library"):
+            with tempfile.TemporaryDirectory() as temp:
+                args, runner = fixture(Path(temp))
+                source = args.binary.parent / "libouter.so" if selected == "library" else getattr(args, selected)
+                for case, raw in invalid_interpreter_elfs().items():
+                    with self.subTest(selected=selected, case=case):
+                        runner.calls.clear()
+                        args.evidence_dir = Path(temp) / ("evidence-" + case)
+                        source.write_bytes(raw)
+                        self.assert_loader_refusal_before_publication(args, runner, "cannot isolate Linux dependencies")
+
+    def test_linux_interpreters_and_static_objects_in_both_elf_classes_and_byte_orders(self):
+        approved = (b"/lib64/ld-linux-x86-64.so.2", b"/lib/ld-linux-aarch64.so.1",
+                    b"/lib/ld-linux-armhf.so.3", b"/lib/ld-linux.so.2")
+        with tempfile.TemporaryDirectory() as temp:
+            binary = Path(temp) / "server"
+            for wide in (False, True):
+                for endian in ("<", ">"):
+                    for dynamic in (False, True):
+                        for interpreter in (None, *approved):
+                            with self.subTest(wide=wide, endian=endian, dynamic=dynamic, interpreter=interpreter):
+                                binary.write_bytes(elf(wide=wide, endian=endian, dynamic=dynamic,
+                                                       interpreters=[] if interpreter is None else [interpreter + b"\0"]))
+                                capture.check_linux_loader(binary)
+                    for case, raw in invalid_interpreter_elfs(wide=wide, endian=endian).items():
+                        binary.write_bytes(raw)
+                        message = ("invalid ELF interpreter range" if case in (
+                            "empty-segment", "outside-file", "segment-past-eof") else "unsupported program interpreter")
+                        with self.subTest(wide=wide, endian=endian, case=case), self.assertRaisesRegex(ValueError, message):
+                            capture.check_linux_loader(binary)
+
+    def test_linux_interpreter_reads_are_bounded_and_fail_closed(self):
+        approved = b"/lib64/ld-linux-x86-64.so.2\0"
+        with tempfile.TemporaryDirectory() as temp:
+            binary = Path(temp) / "server"
+            binary.write_bytes(elf(interpreters=[approved + b"x" * 4096]))
+            reader = capture.open_regular
+            for failure in (None, "partial", "unreadable"):
+                @contextlib.contextmanager
+                def interpreter_reader(root, path):
+                    with reader(root, path) as stream:
+                        wrapped = mock.Mock(wraps=stream)
+
+                        def read(count):
+                            self.assertLessEqual(count, 4096)
+                            if stream.tell() == 248:  # ELF64 header, three headers, DT_NULL.
+                                self.assertEqual(count, 4096)
+                                if failure == "unreadable":
+                                    raise PermissionError("unreadable interpreter")
+                                if failure == "partial":
+                                    return stream.read(count)[:-1]
+                            return stream.read(count)
+
+                        wrapped.read.side_effect = read
+                        yield wrapped
+
+                with self.subTest(failure=failure), mock.patch.object(capture, "open_regular", interpreter_reader):
+                    if failure is None:
+                        capture.check_linux_loader(binary)
+                    else:
+                        with self.assertRaises((ValueError, PermissionError)):
+                            capture.check_linux_loader(binary)
 
     def test_linux_loader_metadata_and_import_refusals(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -488,7 +564,7 @@ class ActiveRegionCaptureContract(unittest.TestCase):
             for wide in (False, True):
                 for endian in ("<", ">"):
                     for dependency in (None, b"libnetwork.so"):
-                        for runpath in (b"$ORIGIN", elf_directory(binary.parent / "empty", binary.parent)):
+                        for runpath in (b"$ORIGIN", b"${ORIGIN}/"):
                             binary.write_bytes(elf(wide=wide, endian=endian, dependency=dependency,
                                                    runpaths=[runpath]))
                             capture.check_linux_loader(binary)
