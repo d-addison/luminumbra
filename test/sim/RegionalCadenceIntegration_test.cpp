@@ -1,3 +1,4 @@
+#include "../support/ActiveRegionAcceptanceWorld.h"
 #include "luminumbra_common/ai/CircadianSystem.h"
 #include "luminumbra_common/ai/DecompositionSystem.h"
 #include "luminumbra_common/ai/HerdAlarmSystem.h"
@@ -18,6 +19,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <map>
@@ -184,6 +186,81 @@ TEST(RegionalCadenceIntegration, FrozenOwnersRemainByteIdentical) {
     EXPECT_EQ(registry.get<C::TerritoryComponent>(frozen).established, 1u);
     EXPECT_TRUE(registry.all_of<C::TerritoryBiasComponent>(frozen));
     EXPECT_NE(registry.get<C::CircadianComponent>(frozen).activity, 0.123f);
+}
+
+TEST(RegionalCadenceIntegration, ReopenPreservesNextDueWindow) {
+    using Luminumbra::TestSupport::ActiveRegionAcceptanceWorld;
+    constexpr W::RegionKey owner{40, -40};
+    // Two checkpoints: Reduced just before freeze, and Frozen before thaw.
+    // Each trajectory is twelve ticks, one plant and two tiny chunks.
+    for (const std::uint64_t checkpoint : {4u, 6u}) {
+        SCOPED_TRACE(checkpoint);
+        ActiveRegionAcceptanceWorld fixture(1);
+        W::GameSession uninterrupted, reopened;
+        fixture.Configure(uninterrupted);
+        ActiveRegionAcceptanceWorld::AdoptAuthority(uninterrupted);
+        uninterrupted.PinActiveRegion(owner, true);
+        Luminumbra::TestSupport::ClockTestPlant(uninterrupted.GetRegistry(), {20488, 0, -20472});
+        std::string frozen_plants;
+        bool saw_reduced_skip = false;
+        bool saw_thaw = false;
+        for (std::uint64_t tick = 1; tick <= 12; ++tick) {
+            SCOPED_TRACE(tick);
+            for (auto* session : {&uninterrupted, &reopened}) {
+                if (session == &reopened && tick <= checkpoint)
+                    continue;
+                // Script scheduler pressure independently of measured consumer work.
+                auto& ledger = const_cast<W::ActiveRegionLedger&>(session->GetActiveRegionLedger());
+                ledger.clear_completed_work();
+                session->RecordActiveRegionWork({owner, tick <= 7 ? 11u : 10u, 0, 0, 0});
+                ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
+                ASSERT_FALSE(session->GetRegionSchedulerFault());
+            }
+            const auto& ledger = uninterrupted.GetActiveRegionLedger();
+            const auto& record = ledger.records().at(owner);
+            const auto expected = tick < 3 || tick >= 11  ? W::RegionState::Active
+                                  : tick < 5 || tick >= 9 ? W::RegionState::Reduced
+                                                          : W::RegionState::Frozen;
+            ASSERT_EQ(record.state, expected);
+            const auto& due = uninterrupted.GetRegionSchedule().due;
+            if (expected == W::RegionState::Reduced &&
+                std::find(due.begin(), due.end(), owner) == due.end())
+                saw_reduced_skip = true;
+            if (tick == 5)
+                frozen_plants = Plants(uninterrupted.GetRegistry());
+            if (tick >= 5 && tick <= 8) {
+                EXPECT_EQ(Plants(uninterrupted.GetRegistry()), frozen_plants);
+            }
+            if (tick == 9)
+                saw_thaw = true;
+            if (tick == checkpoint) {
+                ASSERT_TRUE(uninterrupted.SaveWorldState()) << uninterrupted.GetWorldOpenError();
+                fixture.Configure(reopened);
+                ASSERT_TRUE(reopened.LoadWorldStateFrom(uninterrupted.GetWorldSaveDir()))
+                    << reopened.GetWorldOpenError();
+                EXPECT_EQ(reopened.GetActiveRegionLedger().encode(), ledger.encode());
+                EXPECT_EQ(reopened.GetWorldClock().canonical_bytes(),
+                          uninterrupted.GetWorldClock().canonical_bytes());
+            }
+            if (tick >= checkpoint) {
+                EXPECT_EQ(reopened.GetActiveRegionLedger().canonical_bytes(),
+                          ledger.canonical_bytes());
+                EXPECT_EQ(Plants(reopened.GetRegistry()), Plants(uninterrupted.GetRegistry()));
+                EXPECT_EQ(reopened.GetFieldPages().serialize(),
+                          uninterrupted.GetFieldPages().serialize());
+            }
+            if (tick > checkpoint) {
+                EXPECT_EQ(reopened.GetRegionSchedule().due, due);
+                EXPECT_EQ(reopened.GetRegionSchedule().prior_ticks,
+                          uninterrupted.GetRegionSchedule().prior_ticks);
+                EXPECT_EQ(reopened.GetRegionSchedule().digest,
+                          uninterrupted.GetRegionSchedule().digest);
+            }
+        }
+        EXPECT_TRUE(saw_reduced_skip);
+        EXPECT_TRUE(saw_thaw);
+        EXPECT_NE(Plants(uninterrupted.GetRegistry()), frozen_plants);
+    }
 }
 
 TEST(RegionalCadenceIntegration, BatchedFramesAbortAndResumePublishOnce) {
