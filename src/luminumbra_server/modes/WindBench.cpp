@@ -1,3 +1,4 @@
+#include "JsonArtifact.h"
 #include "ModeHelpers.h"
 #include "Modes.h"
 
@@ -103,13 +104,10 @@ int RunWindBench(const ServerCliOptions& options) {
             fs::create_directories(artifact_path.parent_path(), ec);
         }
         std::ofstream out(artifact_path);
-        if (out.is_open()) {
-            out << artifact.dump(2) << "\n";
-            LUMINUMBRA_CORE_INFO("Wind-bench artifact written: {}", options.artifact_path);
-        } else {
-            LUMINUMBRA_CORE_ERROR("Failed to write wind-bench artifact: {}", options.artifact_path);
+        if (!Luminumbra::Server::WriteJsonArtifact(out, artifact, options.artifact_path)) {
             return 1;
         }
+        LUMINUMBRA_CORE_INFO("Wind-bench artifact written: {}", options.artifact_path);
     }
 
     if (!passed) {
