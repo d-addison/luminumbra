@@ -606,7 +606,7 @@ class RegionAuthorityWiring(unittest.TestCase):
             self.assertIn("EXPECT_EQ(saved.bytes(), bytes);", body)
             self.assertIn("ASSERT_TRUE(saved.save_dirty(loaded, errors));", body)
         for name in ("UnownedCanonicalAndDormantOffLayerPartialStatesRefuse",
-                     "ConflictingDormantOwnersRefuseWithoutChangingSavedBytes"):
+                     "ConflictingDormantOwnersSelectSurfaceOrFirstRecord"):
             case = function(native, f"TEST(RegionalWaterMigration, {name})")
             self.assertIn("saved.service.load_world(", case)
             self.assertIn("EXPECT_EQ(saved.bytes(), bytes);", case)
