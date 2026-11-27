@@ -553,12 +553,13 @@ def _log_pipe_reader(descriptor):
 
 
 @contextmanager
-def bounded_log(log, receipt):
+def bounded_log(log, receipt, *, exclusive=False):
+    """Retain bounded process output, optionally refusing an existing log."""
     stopped = threading.Event()
     reader, writer = os.pipe()
     with os.fdopen(reader, 'rb', buffering=0) as source, os.fdopen(writer, 'wb', buffering=0) as destination:
         read_block = _log_pipe_reader(source.fileno())
-        with log.open('wb') as output:
+        with log.open('xb' if exclusive else 'wb') as output:
             receipt.update(log_truncated=False, log_limit_bytes=MAX_LOG_BYTES, log_bytes_retained=0)
 
             def drain():

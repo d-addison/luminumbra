@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import capture_regional_cadence as capture
+import render_runner_process as process
 
 
 HASH = "0123456789abcdef"
@@ -117,6 +119,19 @@ class RegionalCadenceCaptureContract(unittest.TestCase):
             evidence_dir=self.base / "evidence", presets=list(capture.PRESETS), seeds=["1337"],
             repeats=2, ticks=2, radius=1, collision_radius=1)
         self.runner = FakeRunner()
+        # Artifact-validation cases need no pipe worker. Log-specific cases below
+        # restore the real drainer, including coverage with a real Python child.
+        @contextlib.contextmanager
+        def artifact_log(path, status, *, exclusive=False):
+            status.update(log_truncated=False, log_limit_bytes=process.MAX_LOG_BYTES, log_bytes_retained=0)
+            with path.open("xb" if exclusive else "wb") as log:
+                try:
+                    yield log
+                finally:
+                    status["log_bytes_retained"] = log.tell()
+        self.log_stub = mock.patch.object(process, "bounded_log", artifact_log)
+        self.log_stub.start()
+        self.addCleanup(self.log_stub.stop)
 
     def collect(self):
         return capture.capture(self.args, self.runner)
@@ -158,6 +173,160 @@ class RegionalCadenceCaptureContract(unittest.TestCase):
             self.assertFalse(any(key.upper().startswith("LUMINUMBRA_") for key in kwargs["env"]))
         self.assertTrue(all(row["same"] for row in capture.compare(
             self.args.evidence_dir, self.args.evidence_dir)["integer_work_and_service"]))
+
+    def test_capture_and_comparison_publish_only_safe_paths(self):
+        manifest = self.collect()
+        self.assertEqual(manifest["schema"], "luminumbra.regional_cadence_capture.v2")
+        encoded = (self.args.evidence_dir / "capture.json").read_text(encoding="utf-8")
+        self.assertEqual(json.loads(encoded), manifest)
+        self.assertNotIn(self.base.as_posix(), encoded)
+        self.assertEqual(manifest["binary"], "binary-sha256-" + capture.file_digest(self.binary))
+        self.assertEqual(manifest["runtime_root"],
+                         "runtime-sha256-" + capture.resolved_fixture_hash(self.root))
+        self.assertEqual(manifest["capture_root"], ".")
+        for row in manifest["cells"]:
+            self.assertEqual(row["command"], capture.command(
+                manifest["binary"], manifest["runtime_root"], row["artifact"],
+                manifest["workload"], row["preset"], row["seed"]))
+        relocated = self.base / "relocated"
+        shutil.move(self.args.evidence_dir, relocated)
+        report = capture.compare(relocated, relocated)
+        self.assertEqual(report["schema"], "luminumbra.regional_cadence_compare.v2")
+        self.assertNotIn(self.base.as_posix(), capture.canonical(report))
+        self.assertEqual(report["before"], manifest)
+        self.assertEqual(report["after"], manifest)
+
+    def test_legacy_comparison_redacts_bindings_commands_and_unknown_metadata(self):
+        manifest = self.collect()
+        portable = self.base / "portable"
+        shutil.copytree(self.args.evidence_dir, portable)
+        legacy = copy.deepcopy(manifest)
+        legacy["schema"] = "luminumbra.regional_cadence_capture.v1"
+        legacy.update(binary=self.binary.as_posix(), runtime_root=self.root.as_posix(),
+                      capture_root=self.args.evidence_dir.as_posix(), unknown=self.base.as_posix())
+        legacy["identity"]["unknown"] = self.base.as_posix()
+        for row in legacy["cells"]:
+            row["unknown"] = self.base.as_posix()
+            row["command"] = capture.command(legacy["binary"], legacy["runtime_root"],
+                self.args.evidence_dir / row["artifact"], legacy["workload"], row["preset"], row["seed"])
+        write(self.args.evidence_dir / "capture.json", legacy)
+        for before, after in ((self.args.evidence_dir, self.args.evidence_dir),
+                              (self.args.evidence_dir, portable), (portable, self.args.evidence_dir)):
+            with self.subTest(before=before.name, after=after.name):
+                report = capture.compare(before, after)
+                self.assertEqual(report["before"], manifest)
+                self.assertEqual(report["after"], manifest)
+                self.assertNotIn(self.base.as_posix(), capture.canonical(report))
+
+    def test_capture_bounds_logs_and_records_truncation_on_all_outcomes(self):
+        self.log_stub.stop()
+        self.assertEqual(process.MAX_LOG_BYTES, 16 * 1024**2)
+        prefix = b"synthetic smoke complete\r\n"
+        limit = len(prefix)
+        self.args.presets = ["default"]
+        for failure in (None, "failed", "timeout", "spawn"):
+            for count in (0, limit - 1, limit, limit + 1, 200000):
+                self.args.evidence_dir = self.base / f"bounded-{failure}-{count}"
+                runner = FakeRunner()
+                def noisy(argv, **kwargs):
+                    if argv[0] != "git":
+                        kwargs["stdout"].write((prefix + b"x" * count)[:count])
+                        if failure == "timeout":
+                            raise subprocess.TimeoutExpired(argv, 600)
+                        if failure == "spawn":
+                            raise OSError("spawn failed")
+                        if failure == "failed":
+                            return subprocess.CompletedProcess(argv, 2)
+                        # FakeRunner's own message must not alter this test's byte count.
+                        kwargs = dict(kwargs, stdout=io.BytesIO())
+                    return runner(argv, **kwargs)
+                with self.subTest(failure=failure, count=count), \
+                        mock.patch.object(process, "MAX_LOG_BYTES", limit):
+                    if failure or count > limit:
+                        with self.assertRaises((ValueError, OSError, subprocess.SubprocessError)):
+                            capture.capture(self.args, noisy)
+                        self.assertFalse((self.args.evidence_dir / "capture.json").exists())
+                    else:
+                        capture.capture(self.args, noisy)
+                    status = capture.read_json(self.args.evidence_dir / "cell-0.log.json")
+                    self.assertEqual((self.args.evidence_dir / "cell-0.log").read_bytes(),
+                                     (prefix + b"x" * count)[:min(count, limit)])
+                    self.assertEqual(status, {"log_truncated": count > limit,
+                        "log_limit_bytes": limit, "log_bytes_retained": min(count, limit),
+                        "log_complete": count <= limit})
+
+    def test_log_io_failures_refuse_publication_and_record_incomplete_log(self):
+        self.log_stub.stop()
+        for operation in ("write", "flush"):
+            self.args.evidence_dir = self.base / operation
+            sink = io.BytesIO()
+            original_open = Path.open
+            def open_output(path, *args, **kwargs):
+                if path.suffix == ".log":
+                    return contextlib.nullcontext(sink)
+                return original_open(path, *args, **kwargs)
+            with self.subTest(operation=operation), \
+                    mock.patch.object(Path, "open", open_output), \
+                    mock.patch.object(sink, operation, side_effect=OSError("log failed")):
+                with self.assertRaisesRegex(ValueError, "incomplete smoke log"):
+                    self.collect()
+            self.assertFalse((self.args.evidence_dir / "capture.json").exists())
+            self.assertFalse(capture.read_json(self.args.evidence_dir / "cell-0.log.json")["log_complete"])
+
+    def test_log_setup_failure_records_unknown_status_without_launch(self):
+        self.log_stub.stop()
+        with mock.patch.object(process, "bounded_log", side_effect=OSError("pipe failed")):
+            with self.assertRaisesRegex(OSError, "pipe failed"):
+                self.collect()
+        self.assertEqual(self.runner.calls, [])
+        self.assertFalse((self.args.evidence_dir / "capture.json").exists())
+        self.assertEqual(capture.read_json(self.args.evidence_dir / "cell-0.log.json"), {
+            "log_truncated": None, "log_limit_bytes": None, "log_bytes_retained": None,
+            "log_complete": False})
+        self.args.evidence_dir = self.base / "occupied-log"
+        occupied = self.args.evidence_dir / "cell-1.log"
+        self.runner.hook = lambda data, number: occupied.write_bytes(b"retained")
+        with self.assertRaises(FileExistsError):
+            self.collect()
+        self.assertEqual(len(self.runner.calls), 1)
+        self.assertEqual(occupied.read_bytes(), b"retained")
+        self.assertFalse((self.args.evidence_dir / "capture.json").exists())
+        self.assertEqual(capture.read_json(self.args.evidence_dir / "cell-1.log.json"), {
+            "log_truncated": None, "log_limit_bytes": None, "log_bytes_retained": None,
+            "log_complete": False})
+
+    def test_log_status_write_failure_refuses_publication(self):
+        self.log_stub.stop()
+        with mock.patch.object(capture, "write_new", side_effect=OSError("status failed")):
+            with self.assertRaisesRegex(OSError, "status failed"):
+                self.collect()
+        self.assertEqual(len(self.runner.calls), 1)
+        self.assertFalse((self.args.evidence_dir / "capture.json").exists())
+
+    def test_real_python_stdout_and_stderr_use_bounded_pipe(self):
+        self.log_stub.stop()
+        self.args.presets = ["default"]
+        for count in (0, 128, 100000):
+            self.args.evidence_dir = self.base / f"python-output-{count}"
+            def invoke(argv, **kwargs):
+                result = self.runner(argv, **dict(kwargs, stdout=io.BytesIO()))
+                if argv[0] == "git":
+                    return result
+                return subprocess.run([sys.executable, "-I", "-B", "-c",
+                    "import sys; count = int(sys.argv[1]); "
+                    "sys.stdout.buffer.write(b'x' * count); sys.stdout.buffer.flush(); "
+                    "sys.stderr.buffer.write(b'y' * count)", str(count)], **kwargs)
+            with self.subTest(count=count), mock.patch.object(process, "MAX_LOG_BYTES", 256):
+                if count > 128:
+                    with self.assertRaisesRegex(ValueError, "incomplete smoke log"):
+                        capture.capture(self.args, invoke)
+                else:
+                    capture.capture(self.args, invoke)
+            self.assertEqual((self.args.evidence_dir / "cell-0.log").read_bytes(),
+                             (b"x" * count + b"y" * count)[:256])
+            self.assertEqual(capture.read_json(self.args.evidence_dir / "cell-0.log.json"), {
+                "log_truncated": count > 128, "log_limit_bytes": 256,
+                "log_bytes_retained": min(2 * count, 256), "log_complete": count <= 128})
 
     def test_refuses_vacuous_remote_work(self):
         for index in range(8):
@@ -388,12 +557,13 @@ class RegionalCadenceCaptureContract(unittest.TestCase):
         with mock.patch.object(capture, "MAX_BINARY", 1), self.assertRaisesRegex(ValueError, "bound"):
             capture.file_digest(self.binary)
 
-    def test_archive_paths_require_absolute_bindings_on_every_host(self):
+    def test_archive_paths_require_safe_labels_or_legacy_absolute_bindings(self):
         self.collect()
         path = self.args.evidence_dir / "capture.json"
         original = capture.read_json(path)
         for key in ("binary", "runtime_root", "capture_root"):
-            for value in ("", "relative", "C:relative", "../escape", "\\root", "bad\0name"):
+            for value in ("", "relative", "C:relative", "../escape", "\\root", "bad\0name",
+                          "binary-sha256-" + "0" * 64, None, [], {}):
                 manifest = copy.deepcopy(original)
                 manifest[key] = value
                 write(path, manifest)
@@ -406,7 +576,19 @@ class RegionalCadenceCaptureContract(unittest.TestCase):
             row["command"] = capture.command(manifest["binary"], manifest["runtime_root"],
                 Path(manifest["capture_root"]) / row["artifact"], manifest["workload"], row["preset"], row["seed"])
         write(path, manifest)
+        with self.assertRaisesRegex(ValueError, "capture paths"):
+            capture.load_capture(self.args.evidence_dir)
+        manifest["schema"] = "luminumbra.regional_cadence_capture.v1"
+        write(path, manifest)
         self.assertEqual(len(capture.load_capture(self.args.evidence_dir)["cells"]), 6)
+        report = capture.compare(self.args.evidence_dir, self.args.evidence_dir)
+        self.assertEqual(report["before"], original)
+        self.assertEqual(report["after"], original)
+        manifest = copy.deepcopy(original)
+        manifest["schema"] = "luminumbra.regional_cadence_capture.v1"
+        write(path, manifest)
+        with self.assertRaisesRegex(ValueError, "capture paths"):
+            capture.load_capture(self.args.evidence_dir)
 
     def test_complete_traces_gates_durations_and_unknown_metadata(self):
         for mutation in ("runs", "ticks", "gate", "stage", "trace", "total", "duration",
@@ -490,6 +672,10 @@ class RegionalCadenceCaptureContract(unittest.TestCase):
         path = self.args.evidence_dir / "capture.json"
         manifest = capture.read_json(path)
         manifest["identity"]["content_sha256"] = "0" * 64
+        manifest.update(capture.path_labels(manifest["identity"]))
+        for row in manifest["cells"]:
+            row["command"] = capture.command(manifest["binary"], manifest["runtime_root"], row["artifact"],
+                                             manifest["workload"], row["preset"], row["seed"])
         write(path, manifest)
         with self.assertRaisesRegex(ValueError, "content"):
             capture.compare(before, self.args.evidence_dir)
@@ -513,6 +699,10 @@ class RegionalCadenceCaptureContract(unittest.TestCase):
         path = self.args.evidence_dir / "capture.json"
         manifest = capture.read_json(path)
         manifest["identity"].update(revision="b" * 40, binary_sha256="c" * 64)
+        manifest.update(capture.path_labels(manifest["identity"]))
+        for row in manifest["cells"]:
+            row["command"] = capture.command(manifest["binary"], manifest["runtime_root"], row["artifact"],
+                                             manifest["workload"], row["preset"], row["seed"])
         write(path, manifest)
         report = capture.compare(before, self.args.evidence_dir)
         self.assertTrue(all(row["same"] for row in report["integer_work_and_service"]))
@@ -524,7 +714,10 @@ class RegionalCadenceCaptureContract(unittest.TestCase):
             if failure == "rename":
                 patcher = mock.patch.object(Path, "rename", side_effect=OSError("rename failed"))
             else:
+                original_write = capture.write_new
                 def broken_write(path, value):
+                    if path.name != "capture.pending":
+                        return original_write(path, value)
                     path.write_bytes(b'{"schema":')
                     raise OSError("write or flush failed")
                 patcher = mock.patch.object(capture, "write_new", side_effect=broken_write)
