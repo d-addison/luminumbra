@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <mutex>
+#include <span>
 #include <string_view>
 
 namespace {
@@ -153,7 +154,10 @@ protected:
         std::filesystem::remove_all(root, error);
     }
     void Admit() {
-        ASSERT_TRUE(controller.Request(keys));
+        Admit(keys);
+    }
+    void Admit(std::span<const FarTileKey> wanted) {
+        ASSERT_TRUE(controller.Request(wanted));
         for (unsigned pump = 0; pump < 2048; ++pump) {
             const auto phase = controller.Pump(++frame);
             ASSERT_NE(phase, Controller::Phase::Refused)
@@ -547,8 +551,10 @@ TEST_F(FarWorldSessionController, DiagnosticsReceiptsCoverCompletionRefusalAndCa
                               "preparation_frames=",
                               "elapsed_ticks=",
                               "refusal=None ",
-                              "source_error=0 capture_error=0"})
+                              "outcome=Complete",
+                              "source_error=0 capture_error=0"}) {
         EXPECT_NE(sink->line.find(field), std::string::npos) << field;
+    }
     controller.Pump(++frame);
     EXPECT_EQ(sink->receipts, 1u);
     limits.transaction_samples.water = 1;
@@ -558,6 +564,7 @@ TEST_F(FarWorldSessionController, DiagnosticsReceiptsCoverCompletionRefusalAndCa
     ASSERT_EQ(controller.Pump(++frame), Controller::Phase::Refused);
     EXPECT_EQ(sink->receipts, 2u);
     EXPECT_NE(sink->line.find("refusal=AdmissionFailed"), std::string::npos);
+    EXPECT_NE(sink->line.find("outcome=Refused"), std::string::npos);
     EXPECT_NE(sink->line.find("water_samples=1 "), std::string::npos);
     controller.Pump(++frame);
     EXPECT_EQ(sink->receipts, 2u);
@@ -566,7 +573,11 @@ TEST_F(FarWorldSessionController, DiagnosticsReceiptsCoverCompletionRefusalAndCa
     ASSERT_EQ(controller.Pump(++frame), Controller::Phase::Planning);
     controller.Cancel();
     EXPECT_EQ(sink->receipts, 3u);
-    EXPECT_NE(sink->line.find("refusal=ImmutableAuthorityUnavailable"), std::string::npos);
+    EXPECT_NE(sink->line.find("refusal=None "), std::string::npos);
+    EXPECT_NE(sink->line.find("outcome=Cancelled"), std::string::npos);
+    EXPECT_NE(sink->line.find("source_error=0 capture_error=0"), std::string::npos);
+    controller.Cancel();
+    EXPECT_EQ(sink->receipts, 3u);
     // A new transaction that refuses before creating its sampler must not
     // report the previous transaction's samples.
     limits.transaction_samples.water = 2'000'000;
@@ -702,6 +713,32 @@ TEST_F(FarWorldSessionController, PublicationDuringIncrementalSourceQueuesSucces
     ASSERT_NE(producer->capture(), nullptr);
     ASSERT_EQ(producer->capture()->published.size(), 1u);
     EXPECT_EQ(producer->capture()->published[0].depth[0], 0);
+}
+
+TEST_F(FarWorldSessionController, UnsortedDuplicateKeysCompleteAdmissionAndRetainHistory) {
+    const std::array<FarTileKey, 3> unsorted{{{5, 1, 0}, {5, 0, 0}, {5, 1, 0}}};
+    const std::array<FarTileKey, 2> canonical{{{5, 0, 0}, {5, 1, 0}}};
+    ASSERT_NO_FATAL_FAILURE(Admit(unsorted));
+    EXPECT_EQ(producer->capture_progress().reads, canonical.size());
+    for (const auto& key : canonical) {
+        EXPECT_TRUE(controller.Retains(key));
+    }
+    ASSERT_NO_FATAL_FAILURE(FinishBuild());
+    ASSERT_NE(renderer.SessionDiagnostic(), nullptr);
+    ASSERT_EQ(renderer.SessionDiagnostic()->tile_count, canonical.size());
+    for (std::size_t index = 0; index < canonical.size(); ++index) {
+        EXPECT_EQ(renderer.SessionDiagnostic()->tiles[index].key, canonical[index]);
+        EXPECT_TRUE(controller.Retains(canonical[index]));
+    }
+    EXPECT_EQ(controller.RetireIdleHistory(), 0u);
+    // A successor keeps both serving keys until its build completes, then drops
+    // only the absent key. The duplicate must never occupy another history slot.
+    ASSERT_NO_FATAL_FAILURE(Admit(keys));
+    EXPECT_TRUE(controller.Retains(canonical[1]));
+    ASSERT_NO_FATAL_FAILURE(FinishBuild());
+    EXPECT_EQ(controller.RetireIdleHistory(), 1u);
+    EXPECT_TRUE(controller.Retains(canonical[0]));
+    EXPECT_FALSE(controller.Retains(canonical[1]));
 }
 
 TEST_F(FarWorldSessionController, SingleFrameCaptureDeadlineCompletesInOneSourcePump) {

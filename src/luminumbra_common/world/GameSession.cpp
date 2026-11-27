@@ -5754,10 +5754,10 @@ bool GameSession::PumpFarWorldAuthorityCapture(bool prepare_only) {
             });
         } catch (const std::exception& failure) {
             LUMINUMBRA_CORE_ERROR("Source refresh refused: {}", failure.what());
-            return true;
+            return false;
         }
         if (!refreshed) {
-            return true;
+            return false;
         }
         m_farWorldSourceNeedsRefresh = false;
     }
