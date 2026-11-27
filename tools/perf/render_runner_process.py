@@ -604,8 +604,11 @@ def bounded_log(log, receipt, *, exclusive=False):
                                 receipt['log_truncated'] = True
                                 break
                     output.flush()
-                except OSError as error:
-                    receipt['evidence_errors'].append(f'log drain: {error}')
+                except Exception as error:  # noqa: BLE001 - any drainer failure leaves the log incomplete.
+                    # A thread exception is otherwise only printed, so record every
+                    # failure (for example a write to a closed file) for the caller.
+                    detail = error if isinstance(error, OSError) else f'{type(error).__name__}: {error}'
+                    receipt['evidence_errors'].append(f'log drain: {detail}')
                     receipt['log_truncated'] = True
                     # Unblock any producer if the pipe itself becomes unreadable.
                     source.close()
