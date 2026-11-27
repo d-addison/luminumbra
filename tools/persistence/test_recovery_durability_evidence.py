@@ -265,6 +265,61 @@ class RecoveryDurabilityEvidenceContract(unittest.TestCase):
         self.run["exit_code"] = True
         self.assertIn("executed test", self.first()["reason"])
 
+    def test_unknown_junit_encoding_leaves_lane_unevaluated_and_prints_json(self):
+        self.manifest = copy.deepcopy(self.complete)
+        self.lane = self.manifest["lanes"][0]
+        ref = self.lane["junit"]
+        data = b'<?xml version="1.0" encoding="unknown-evidence-encoding"?><testsuite/>'
+        self.write(ref["path"], data)
+        ref["sha256"] = hashlib.sha256(data).hexdigest()
+        result = self.evaluate()
+        self.assertEqual(result["status"], "incomplete")
+        for row in result["checks"]:
+            self.assertEqual(row["status"],
+                             "unevaluated" if row["lane"] == self.lane["lane"] else "complete")
+        output = io.StringIO()
+        args = [str(self.root), "--expected-candidate", CANDIDATE]
+        for name, sha in BUILDS.items():
+            args.extend(["--build", f"{name}={sha}"])
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(evidence.main(args), 1)
+        self.assertEqual(json.loads(output.getvalue())["status"], "incomplete")
+
+    def test_missing_junit_status_is_run_but_explicit_unevaluated_status_refuses(self):
+        ref = self.lane["junit"]
+        original = self.documents[ref["path"]]
+        for status in (None, "run", "passed", "disabled", "notrun", "skipped", "unknown", ""):
+            with self.subTest(status=status):
+                attribute = b"" if status is None else f' status="{status}"'.encode()
+                data = original.replace(b' status="run"', attribute)
+                self.write(ref["path"], data)
+                ref["sha256"] = hashlib.sha256(data).hexdigest()
+                self.assertEqual(self.first()["status"],
+                                 "complete" if status in (None, "run", "passed") else "unevaluated")
+
+    def test_junit_suite_counts_cover_nested_and_missing_results(self):
+        case = b'<testcase name="one" status="run"/>'
+        for report in (
+                b'<testsuite tests="1">' + case + b'</testsuite>',
+                b'<testsuites tests="1"><testsuite tests="1">' + case + b'</testsuite></testsuites>',
+                b'<testsuites><testsuite tests="0"/><testsuite>' + case + b'</testsuite></testsuites>'):
+            self.assertEqual(evidence.passed_tests(report), {"one"})
+        ref = self.lane["junit"]
+        original = self.documents[ref["path"]]
+        # Keep every referenced matrix testcase present while falsifying totals.
+        for report in (
+                original.replace(b'<testsuite>', b'<testsuite tests="19">'),
+                b'<testsuites tests="19">' + original + b'</testsuites>',
+                b'<testsuites tests="18">' + original.replace(
+                    b'<testsuite>', b'<testsuite tests="19">') + b'</testsuites>',
+                b'<testsuite tests="1"/>',
+                *(original.replace(b'<testsuite>', f'<testsuite tests="{value}">'.encode())
+                  for value in ("0", "-1", "unknown", "", "1.0", "100000"))):
+            with self.subTest(report=report[:70]):
+                self.write(ref["path"], report)
+                ref["sha256"] = hashlib.sha256(report).hexdigest()
+                self.assertIn("suite count", self.first()["reason"])
+
     def test_discovery_refuses_unknown_versions_duplicates_and_missing_commands(self):
         for change in (lambda doc: doc.update(version={"major": True, "minor": 0}),
                        lambda doc: doc.update(kind="unknown"),
@@ -345,6 +400,33 @@ class RecoveryDurabilityEvidenceContract(unittest.TestCase):
         row = next(item for item in rows if item["case"] == run["case"] and item["mechanism"] == run["mechanism"])
         self.assertEqual(row["status"], "unevaluated")
         self.assertIn("committed members", row["reason"])
+
+    def test_cleanup_interruption_preserves_every_committed_member(self):
+        for source in self.complete["lanes"][0]["runs"]:
+            if not source["case"].startswith("cleanup_"):
+                continue
+            run = copy.deepcopy(source)
+            self.lane["runs"] = [run]
+            committed = {"snapshot.index": b"index", "payload.bin": b"payload",
+                         "unrelated.bin": b"preserved"}
+            self.mutate(run["interrupted"], lambda doc: doc.update(
+                tree=receipt({"recovery/journal": b"owned evidence"})))
+            row = next(item for item in self.evaluate()["checks"]
+                       if item["case"] == run["case"] and item["mechanism"] == run["mechanism"])
+            self.assertIn("interrupted cleanup changed committed members", row["reason"])
+            for name in committed:
+                for replacement in (None, b"changed"):
+                    with self.subTest(case=run["case"], mechanism=run["mechanism"],
+                                      member=name, replacement=replacement):
+                        interrupted = {**committed, "recovery/journal": b"owned evidence"}
+                        if replacement is None:
+                            del interrupted[name]
+                        else:
+                            interrupted[name] = replacement
+                        self.mutate(run["interrupted"], lambda doc: doc.update(tree=receipt(interrupted)))
+                        row = next(item for item in self.evaluate()["checks"]
+                                   if item["case"] == run["case"] and item["mechanism"] == run["mechanism"])
+                        self.assertIn("interrupted cleanup changed committed members", row["reason"])
 
     def test_vm_reset_requires_external_observation_and_storage_scope(self):
         self.lane["runs"] = [copy.deepcopy(self.complete["lanes"][0]["runs"][2])]

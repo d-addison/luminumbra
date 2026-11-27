@@ -202,6 +202,14 @@ def passed_tests(data):
     root = ET.fromstring(data, parser=ET.XMLParser(target=JUnitTreeBuilder()))
     require(root.tag in ("testsuite", "testsuites"), "raw JUnit required")
     nodes = list(root.iter())
+    # Sum each subtree once, including nested suites, within the XML node budget.
+    counts = {}
+    for node in reversed(nodes):
+        counts[node] = (1 if node.tag == "testcase" else 0) + sum(counts[child] for child in node)
+        if node.tag in ("testsuite", "testsuites") and node.get("tests") is not None:
+            declared = node.get("tests")
+            require(re.fullmatch(r"[0-9]{1,5}", declared) is not None
+                    and int(declared) == counts[node], "inconsistent JUnit suite count")
     for node in nodes:
         require(node.tag not in ("failure", "error", "skipped"), "failed or skipped JUnit evidence")
         if node.tag in ("testsuite", "testsuites"):
@@ -214,7 +222,7 @@ def passed_tests(data):
         name = text(case.get("name"))
         require(name not in names, "duplicate JUnit testcase")
         names.add(name)
-        require(case.get("status") in ("run", "passed") and
+        require(case.get("status") in (None, "run", "passed") and
                 case.get("result") in (None, "completed"), "unevaluated JUnit testcase")
     return names
 
@@ -274,6 +282,8 @@ def validate_trace(document, case, mechanism, before, interrupted, after, expect
                 "cleanup changed committed members")
         require(set(before) - set(after) == set(retained) and not (set(after) - set(before))
                 and all(before[name] == after[name] for name in after), "cleanup inventory mismatch")
+        require(all(interrupted.get(name) == entry for name, entry in after.items()),
+                "interrupted cleanup changed committed members")
 
 
 def validate_interruption(artifacts, run, identity):
@@ -351,7 +361,7 @@ def validate_lane(artifacts, lane, candidate, expected_build):
     return results
 
 
-EVIDENCE_ERRORS = (ValueError, KeyError, TypeError, OSError, RecursionError, ET.ParseError)
+EVIDENCE_ERRORS = (ValueError, LookupError, TypeError, OSError, RecursionError, ET.ParseError)
 
 
 def evaluate(root, expected_candidate, expected_builds, source_roots=()):
