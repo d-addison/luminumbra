@@ -5301,8 +5301,8 @@
     {
       "id": "ar.field-evidence.001",
       "source": "docs/active-regions.md#moving-anchor-field-diagnostics",
-      "quote": "`regional_field_evidence --diagnostic-pressure` emits a seed-1337 axial 20,000 m packet with scheduler work limit 10, hold 2 and reduced shift 1, recording four ticks at each 128 m stop through the production session activation path.",
-      "text": "`regional_field_evidence --diagnostic-pressure` emits a seed-1337 axial 20,000 m packet with scheduler work limit 10, hold 2 and reduced shift 1, recording four ticks at each 128 m stop through the production session activation path."
+      "quote": "`regional_field_evidence --diagnostic-pressure` emits a seed-1337 axial 20,000 m packet with scheduler work limit 10, hold 2 and reduced shift 1, recording four ticks at each 128 m stop through the production session activation path using the local walking anchor and no replicated roster with ambient page updates supplying completed work and pressure.",
+      "text": "`regional_field_evidence --diagnostic-pressure` emits a seed-1337 axial 20,000 m packet with scheduler work limit 10, hold 2 and reduced shift 1, recording four ticks at each 128 m stop through the production session activation path using the local walking anchor and no replicated roster with ambient page updates supplying completed work and pressure."
     },
     {
       "id": "ar.field-evidence.002",

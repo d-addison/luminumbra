@@ -373,7 +373,9 @@ portable hash oracle. Missing or changed fixture bytes still fail the tests.
 
 `regional_field_evidence --diagnostic-pressure` emits a seed-1337 axial 20,000 m
 packet with scheduler work limit 10, hold 2 and reduced shift 1, recording four
-ticks at each 128 m stop through the production session activation path.
+ticks at each 128 m stop through the production session activation path using the
+local walking anchor and no replicated roster with ambient page updates supplying
+completed work and pressure.
 `regional_field_evidence --shipped-settings` retains the shipped scheduler limits
 for separate simulation-only tick and save/load timing observations with field
 capture outside the tick timer and unrelated water, rain, event and energy work

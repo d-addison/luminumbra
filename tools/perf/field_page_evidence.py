@@ -51,6 +51,18 @@ def rows(value, limit):
     return value
 
 
+def boundary_work(owner_key, owners, tick):
+    # Both profiles use reduced shift 1. Shared edges run on even ticks,
+    # independently of a Reduced owner's interior phase. Inspect four neighbours
+    # in the already validated, at-most-256-owner roster; frozen cells never participate.
+    if owners[owner_key]["state"] != 1 or tick % 2:
+        return False
+    x, z = owner_key
+    return any(neighbour in owners and owners[neighbour]["state"] != 2 and
+               owners[neighbour]["cells"] > 0
+               for neighbour in ((x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)))
+
+
 def validate(packet, *, full_route=False, measurement=False):
     keys(packet, "schema profile scheduler seed distance_m stride_m frames reopen")
     require(packet["schema"] == "luminumbra.field_page_evidence.v1", "invalid schema")
@@ -114,11 +126,14 @@ def validate(packet, *, full_route=False, measurement=False):
                 freezes += prior["state"] != 2
                 stable += prior["state"] == 2
             if owner["completed_work"]:
-                require(owner_key in due and owner["cells"] > 0, "work outside due authority")
+                require(owner["cells"] > 0, "work outside initialized authority")
                 completed += owner["completed_work"]
             owners[owner_key] = owner
         require(list(owners) == sorted(owners) and previous.keys() <= owners.keys() and
                 set(due) <= owners.keys(), "invalid owner roster")
+        for owner_key, owner in owners.items():
+            if owner["completed_work"] and owner_key not in due:
+                require(boundary_work(owner_key, owners, tick), "work outside scheduled authority")
         mask_keys = []
         cells = 0
         require(type(frame["masks"]) is list and len(frame["masks"]) <= 1024, "invalid mask count")

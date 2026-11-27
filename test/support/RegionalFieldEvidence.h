@@ -39,7 +39,8 @@ public:
             !source.LoadWorldStateFrom(root_.path() / "unmarked-snapshot"))
             throw std::runtime_error("cannot create field evidence world");
         source.GetWorldSystem()->SetWaterHydrology(false, 0, 0);
-        source.SetReplicatedSimulationAnchors({});
+        // Leave the replicated roster absent: an explicit empty roster suppresses
+        // the local walking anchor, so no ambient owners or completed work are admitted.
         if (!source.GetFieldPages().empty())
             throw std::runtime_error("field evidence requires empty initial authority");
         nlohmann::json frames = nlohmann::json::array();
@@ -73,7 +74,7 @@ public:
         if (loaded.GetSimulationTickCount() != source.GetSimulationTickCount())
             throw std::runtime_error("reopen advanced field evidence clock");
         // Reapply only public host inputs; load itself does no catch-up work.
-        loaded.SetReplicatedSimulationAnchors({});
+        // Reopen also leaves the replicated roster absent, matching the source.
         loaded.SetLocalPlayerSimulationPosition(Vec3(256 + static_cast<float>(distance), 0, 256),
                                                 true);
         for (unsigned continuation = 0; continuation < 2; ++continuation) {

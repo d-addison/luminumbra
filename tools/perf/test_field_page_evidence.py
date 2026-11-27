@@ -45,6 +45,36 @@ def packet():
 
 
 class FieldPageEvidenceContract(unittest.TestCase):
+    def test_reduced_boundary_work_between_interior_due_ticks(self):
+        value = packet()
+        frame = value["frames"][5]
+        frame["owners"][0].update(state=1, last_ticked=5)
+        frame["due"].remove([0, 0])
+        frame["activation_visits"] -= 1
+        self.assertGreater(evidence.validate(value)["completed_work"], 0)
+        # Active off-schedule work and odd-tick Reduced work remain refusals.
+        for tick, state in ((6, 0), (7, 1)):
+            invalid = packet()
+            selected = invalid["frames"][tick - 1]
+            selected["owners"][0].update(state=state, last_ticked=tick - 1)
+            selected["due"].remove([0, 0])
+            selected["activation_visits"] -= 1
+            with self.subTest(tick=tick), self.assertRaisesRegex(ValueError, "scheduled authority"):
+                evidence.validate(invalid)
+
+    def test_boundary_work_requires_participating_neighbour(self):
+        owner = {"state": 1, "cells": 1}
+        for adjacent in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            for state in (0, 1, 2):
+                for cells in (0, 1, 484):
+                    owners = {(0, 0): owner, adjacent: {"state": state, "cells": cells}}
+                    with self.subTest(adjacent=adjacent, state=state, cells=cells):
+                        self.assertEqual(evidence.boundary_work((0, 0), owners, 6),
+                                         state != 2 and cells > 0)
+        for owners in ({(0, 0): owner},
+                       {(0, 0): owner, (2, 0): {"state": 0, "cells": 1}}):
+            self.assertFalse(evidence.boundary_work((0, 0), owners, 6))
+
     def test_valid_pressure_and_separate_measurements(self):
         original = packet()
         self.assertEqual(evidence.validate(original)["freezes"], 1)
