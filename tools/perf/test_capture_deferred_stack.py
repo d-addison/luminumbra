@@ -18,6 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import capture_deferred_stack as capture
 from test_sim_budget_gate import write_capture
 from test_fixture_hash import directory_link, remove_directory_link
+# Run the device-free log contracts in this CI-registered suite too.
+from test_render_runner import RenderRunnerLogTests
 
 
 class DeferredStackEvidenceTests(unittest.TestCase):
@@ -160,6 +162,50 @@ class DeferredStackEvidenceTests(unittest.TestCase):
                 self.assertEqual(receipt['log_truncated'], count > 256)
                 self.assertEqual(bool(receipt['evidence_errors']), count > 256)
 
+    def test_truncated_multibyte_logs_are_hashed_without_phase_parsing(self):
+        self.phase = 'Shutdown stage: world_save_started\n' + '\u20ac' * 100
+        limit = len('Shutdown stage: world_save_started\n'.encode()) + 1
+        with mock.patch.object(capture.runner, 'MAX_LOG_BYTES', limit):
+            self.collect()
+        report = capture.report(self.evidence)
+        for row in report['runs']:
+            for process in row['processes']:
+                path = Path(process['log_path'])
+                self.assertEqual(path.read_bytes(), self.phase.encode()[:limit])
+                self.assertEqual(process['log'], capture.payload_record(path, path.read_bytes()))
+                self.assertTrue(process['log_truncated'])
+                self.assertEqual(process['phase'], 'unknown')
+                self.assertIsNone(process['last_shutdown_stage'])
+                self.assertIsNone(process['placement'])
+        self.assertFalse(report['passed'])
+
+    def test_truncated_logs_still_validate_files_and_byte_caps(self):
+        self.collect()
+        receipt_path = self.evidence / '0/render-first.process.json'
+        receipt = capture.read_json(receipt_path)
+        receipt['log_truncated'] = True
+        receipt_path.write_bytes(capture.encode(receipt))
+        log = self.evidence / '0/render-first.log'
+        def process():
+            return next(entry for entry in capture.report(self.evidence)['runs'][0]['processes']
+                        if entry['log_path'] == str(log))
+        for payload in (b'', b'\xff', b'Shutdown stage: world_save_started\n' + b'x' * 70000):
+            with self.subTest(payload_bytes=len(payload)):
+                log.write_bytes(payload)
+                entry = process()
+                self.assertEqual(entry['log'], capture.payload_record(log, payload))
+                self.assertEqual(entry['phase'], 'unknown')
+        log.unlink()
+        self.assertTrue(process()['log_missing'])
+        log.mkdir()
+        with self.assertRaises(capture.receipts.InputError):
+            capture.report(self.evidence)
+        log.rmdir()
+        with log.open('wb') as output:
+            output.truncate(capture.receipts.MAX_FILE_BYTES + 1)
+        with self.assertRaises(capture.receipts.InputError):
+            capture.report(self.evidence)
+
     def test_log_drain_handles_open_writers_and_reports_io_failures(self):
         path = self.root / 'drain.log'
         receipt = {'evidence_errors': []}
@@ -177,6 +223,7 @@ class DeferredStackEvidenceTests(unittest.TestCase):
             with capture.runner.bounded_log(path, receipt):
                 pass
         self.assertIn('log pipe exceeded shutdown drain cap', receipt['evidence_errors'])
+        self.assertTrue(receipt['log_truncated'])
         self.assertLessEqual(path.stat().st_size, 256)
         for operation in ('write', 'flush'):
             receipt = {'evidence_errors': []}
@@ -186,11 +233,13 @@ class DeferredStackEvidenceTests(unittest.TestCase):
                 with capture.runner.bounded_log(path, receipt) as output:
                     output.write(b'queued output')
             self.assertTrue(any('full' in error for error in receipt['evidence_errors']))
+            self.assertTrue(receipt['log_truncated'])
         receipt = {'evidence_errors': []}
         with mock.patch.object(capture.runner.os, 'read', side_effect=OSError('pipe read failed')):
             with capture.runner.bounded_log(path, receipt):
                 pass
         self.assertTrue(any('pipe read failed' in error for error in receipt['evidence_errors']))
+        self.assertTrue(receipt['log_truncated'])
 
     def test_windows_log_pipe_peeks_before_reading_and_handles_closure(self):
         kernel = SimpleNamespace(PeekNamedPipe=mock.Mock())

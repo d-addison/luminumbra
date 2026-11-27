@@ -205,13 +205,18 @@ def relative_file(root, name):
     return root / name
 
 
-def log_report(path, root):
+def log_report(path, root, *, log_truncated=False):
     try:
         with receipts.open_regular_file(path, root) as source:
             payload = receipts.bounded_bytes(path, source=source)
     except FileNotFoundError:
         return dict(log_path=str(path), log_missing=True, last_shutdown_stage=None,
                     placement=None, log=None, phase='unknown')
+    if log_truncated:
+        # A byte-capped prefix may end inside a character or a phase record.
+        # Validate and hash the raw bytes without interpreting them as text.
+        return dict(log_path=str(path), log_missing=False, last_shutdown_stage=None,
+                    placement=None, log=payload_record(path, payload), phase='unknown')
     stage, phase = None, 'unknown'
     for line in receipts.read_log(path, source=io.BytesIO(payload)):
         match = receipts.STAGE_LINE.search(line)
@@ -250,10 +255,8 @@ def process_report(path, root, bound, role, deadline, case):
                  elapsed_seconds=receipt['elapsed_seconds'], evidence_errors=receipt['evidence_errors'])
     entry['label'] = path.name[:-len('.process.json')].rsplit('-', 1)[-1]
     # Classify breadcrumbs for every outcome; absence is unknown, never proof of boot.
-    location = log_report(path.with_name(path.name[:-len('.process.json')] + '.log'), root)
-    if receipt.get('log_truncated', False):
-        # A retained prefix cannot establish the process's later active phase.
-        location.update(phase='unknown', last_shutdown_stage=None, placement=None)
+    location = log_report(path.with_name(path.name[:-len('.process.json')] + '.log'), root,
+                          log_truncated=receipt.get('log_truncated', False))
     entry.update(location, log_truncated=receipt.get('log_truncated', False),
                  command=receipt['command'],
                  receipt=payload_record(path, payload), measurement_ms=None,
