@@ -20,11 +20,15 @@ import sim_budget_io as budget_io
 
 
 REPORT_SCHEMA = "luminumbra.sim_budget_report.v1"
+# Diagnostic admission bounds, independent of simulation settings: at most
+# seven 64 MiB files per endpoint, three presets, thirty stages, 10,000 ticks.
+MAX_FILE_BYTES = 64 * 1024 * 1024
+MAX_TICKS = 10_000
 DURATION_KEYS = ("p50", "p95", "p99", "maximum")
 
 
 def read_artifact(directory: Path, reference: Any) -> dict[str, Any]:
-    data = budget_io.read_json(directory.joinpath(*reference_parts(reference)), root=directory)
+    data = budget_io.read_json(directory.joinpath(*reference_parts(reference)), root=directory, limit=MAX_FILE_BYTES)
     if not isinstance(data, dict):
         raise ValueError("artifact is not a JSON object")
     return data
@@ -62,7 +66,7 @@ def load_report_capture(directory: Path) -> tuple[dict[str, Any], dict[str, Any]
     so the report and integer summary use the same validated object. Work is
     bounded by three presets, thirty stages and each artifact's finite tick trace.
     """
-    manifest = budget_io.read_json(directory / "capture.json", root=directory)
+    manifest = budget_io.read_json(directory / "capture.json", root=directory, limit=MAX_FILE_BYTES)
     if not isinstance(manifest, dict) or manifest.get("schema") != budget_io.CAPTURE_SCHEMA:
         raise ValueError("capture.json has a missing or unsupported schema")
     if any(key not in manifest for key in (*budget_io.MANIFEST_KEYS, "preset_hash")):
@@ -70,6 +74,8 @@ def load_report_capture(directory: Path) -> tuple[dict[str, Any], dict[str, Any]
     budget_io.validate_manifest(manifest)
     budget_io.validate_workload_integer(manifest["seed"], "seed")
     ticks = budget_io.validate_workload_integer(manifest["ticks"], "ticks")
+    if ticks > MAX_TICKS:
+        raise ValueError(f"ticks exceeds report admission cap of {MAX_TICKS}")
     runs = manifest.get("runs")
     if (not isinstance(runs, list) or len(runs) != len(capture.PRESETS)
             or any(not isinstance(run, dict) or not isinstance(run.get("preset"), str)

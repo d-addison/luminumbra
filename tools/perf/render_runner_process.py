@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 import render_crash_capture as crash_capture
@@ -513,6 +514,104 @@ def run_process(command, *, cwd, environment, log, artifact, retained, receipt_p
                             finalize_receipt=finalize_receipt)
 
 
+# Retain at most 16 MiB per process, draining excess in 64 KiB blocks so stdout
+# cannot exhaust disk or memory. Shutdown drains at most 1 MiB of queued pipe data.
+MAX_LOG_BYTES = 16 * 1024 * 1024
+LOG_BLOCK_BYTES = 64 * 1024
+MAX_LOG_DRAIN_BYTES = 1024 * 1024
+
+
+def _log_pipe_reader(descriptor):
+    if os.name != 'nt':
+        os.set_blocking(descriptor, False)
+        return lambda: os.read(descriptor, LOG_BLOCK_BYTES)
+    # Peek before reading: Windows Python 3.10/3.11 cannot make a pipe
+    # nonblocking through os.set_blocking. Never wait on an inherited writer.
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    peek = kernel.PeekNamedPipe
+    peek.argtypes = (wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+                     wintypes.LPVOID, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID)
+    peek.restype = wintypes.BOOL
+    handle = msvcrt.get_osfhandle(descriptor)
+
+    def read_block():
+        available = wintypes.DWORD()
+        if not peek(handle, None, 0, None, ctypes.byref(available), None):
+            error = ctypes.get_last_error()
+            if error == 109:  # ERROR_BROKEN_PIPE: every writer has closed.
+                return b''
+            raise ctypes.WinError(error)
+        if not available.value:
+            raise BlockingIOError(errno.EAGAIN, 'log pipe has no queued bytes')
+        return os.read(descriptor, min(available.value, LOG_BLOCK_BYTES))
+
+    return read_block
+
+
+@contextmanager
+def bounded_log(log, receipt):
+    stopped = threading.Event()
+    reader, writer = os.pipe()
+    with os.fdopen(reader, 'rb', buffering=0) as source, os.fdopen(writer, 'wb', buffering=0) as destination:
+        read_block = _log_pipe_reader(source.fileno())
+        with log.open('wb') as output:
+            receipt.update(log_truncated=False, log_limit_bytes=MAX_LOG_BYTES, log_bytes_retained=0)
+
+            def drain():
+                shutdown_bytes = 0
+                write_failed = False
+                try:
+                    while True:
+                        finishing = stopped.is_set()
+                        try:
+                            block = read_block()
+                        except BlockingIOError:
+                            if finishing:
+                                break
+                            stopped.wait(0.01)
+                            continue
+                        if not block:
+                            break
+                        remaining = MAX_LOG_BYTES - receipt['log_bytes_retained']
+                        retained = block[:remaining]
+                        if len(block) > remaining:
+                            receipt['log_truncated'] = True
+                        if retained and not write_failed:
+                            try:
+                                output.write(retained)
+                                receipt['log_bytes_retained'] += len(retained)
+                            except OSError as error:
+                                receipt['evidence_errors'].append(f'log write: {error}')
+                                write_failed = True
+                        if finishing:
+                            shutdown_bytes += len(block)
+                            if shutdown_bytes >= MAX_LOG_DRAIN_BYTES:
+                                receipt['evidence_errors'].append('log pipe exceeded shutdown drain cap')
+                                break
+                    output.flush()
+                except OSError as error:
+                    receipt['evidence_errors'].append(f'log drain: {error}')
+                    # Unblock any producer if the pipe itself becomes unreadable.
+                    source.close()
+
+            worker = threading.Thread(target=drain)
+            worker.start()
+            try:
+                yield destination
+            finally:
+                try:
+                    destination.close()
+                finally:
+                    stopped.set()
+                    worker.join()
+                if receipt['log_truncated']:
+                    receipt['evidence_errors'].append('log exceeded byte cap; retained prefix only')
+
+
 def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_path,
                  timeout_seconds, finalize_receipt=None):
     # Retire only this case's exact outputs, including a repeated invocation in
@@ -526,7 +625,7 @@ def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_
                    outcome='spawn_error', return_code=None, capture_status='missing',
                    capture_path=None, capture_sha256=None, evidence_errors=[])
     try:
-        with verified_binary(receipt), log.open('wb') as output:
+        with verified_binary(receipt), bounded_log(log, receipt) as output:
             started = time.perf_counter()
             try:
                 result = crash_capture.run(command, receipt=receipt,

@@ -112,6 +112,8 @@ def validate(packet, *, full_route=False, measurement=False):
                     uint(owner["completed_work"]), "invalid owner")
             digest(owner["digest"])
             prior = previous.get(owner_key)
+            expected_tick = tick if owner_key in due else (prior["last_ticked"] if prior else 0)
+            require(owner["last_ticked"] == expected_tick, "invalid last_ticked scheduling stamp")
             if owner["state"] == 1 and (prior is None or prior["state"] != 1):
                 reduced_since[owner_key] = tick
             require(prior is None or owner["cells"] >= prior["cells"], "lost initialized owner cells")
