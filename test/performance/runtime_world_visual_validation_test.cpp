@@ -1170,6 +1170,9 @@ TEST(ClientBootPreparation, RadiusZeroSettlesStreamingAndWaterAtTickZero) {
     client.SetRootPath(root.root_string());
     ASSERT_TRUE(client.CreateWorld("Client", "424242", "default"));
     ASSERT_TRUE(client.LoadWorldState());
+    ASSERT_EQ(client.GetLastLoadedChunkCount(), 0u);
+    ASSERT_TRUE(client.GetWorldSystem()->durable_chunk_inventory().empty());
+    ASSERT_FALSE(client.RestoredWorldSnapshot());
     client.GetWorldSystem()->debug_set_streaming_radius_cap(1);
     ASSERT_TRUE(client.PrepareInitialSimulation(0, 0));
     auto* world_system = client.GetWorldSystem();
