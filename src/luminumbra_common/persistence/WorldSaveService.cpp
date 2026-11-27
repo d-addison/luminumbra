@@ -9288,6 +9288,16 @@ WorldSaveService::AuthorityWindowReader::read(const AuthorityWindow& window,
     AuthorityWindowResult result(m_memory);
     try {
         AuthorityReadBudget budget{limits, m_memory};
+        // Fixed-size receipt survives every refusal, including stack unwinding.
+        // Declare after budget so its charged counters remain alive at teardown.
+        struct Receipt {
+            const AuthorityReadBudget& budget;
+            AuthorityWindowResult& result;
+            ~Receipt() {
+                result.compressed_bytes = budget.compressed;
+                result.decoded_bytes = budget.decoded;
+            }
+        } receipt{budget, result};
         if (!m_impl || !budget.valid())
             throw std::runtime_error("unadmitted source or missing finite authority limits");
         budget.charge_paths(m_impl->root);
@@ -9376,8 +9386,6 @@ WorldSaveService::AuthorityWindowReader::read(const AuthorityWindow& window,
         });
         result.membership = result.chunks.empty() ? AuthorityMembership::ProvenAbsent
                                                   : AuthorityMembership::Present;
-        result.compressed_bytes = budget.compressed;
-        result.decoded_bytes = budget.decoded;
         budget.committed_storage = true;
     } catch (const std::exception& failure) {
         result.membership = AuthorityMembership::Unavailable;
