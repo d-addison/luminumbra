@@ -15,6 +15,7 @@ import copy
 import hashlib
 import os
 from pathlib import Path
+import re
 import stat
 import struct
 import subprocess
@@ -149,7 +150,9 @@ def check_linux_loader(path, *, library_names=None):
             tags.append((tag, value))
         else:
             check.require(False, "cannot isolate Linux dependencies: unterminated dynamic table")
-        references = [(tag, value) for tag, value in tags if tag in (1, 14)]  # NEEDED, SONAME
+        runpaths = [value for tag, value in tags if tag == 29]  # DT_RUNPATH
+        check.require(len(runpaths) <= 1, "cannot isolate Linux dependencies: ambiguous RUNPATH")
+        references = [(tag, value) for tag, value in tags if tag in (1, 14, 29)]  # NEEDED, SONAME, RUNPATH
         if not references:
             return
         strings = [value for tag, value in tags if tag == 5]  # DT_STRTAB
@@ -161,15 +164,44 @@ def check_linux_loader(path, *, library_names=None):
                     if address <= strings[0] < address + length]
         check.require(len(mappings) == 1 and lengths[0] <= mappings[0][1],
                       "cannot isolate Linux dependencies: unmapped dynamic strings")
+        needed, directories = [], []
+        staged = os.path.normpath(os.fsencode(path.parent))
         for tag, name in references:
             check.require(name < lengths[0], "cannot isolate Linux dependencies: invalid import offset")
-            # A dependency basename must terminate within this 4096-byte buffer.
+            # Each import or RUNPATH must terminate within this 4096-byte buffer.
             raw = read_at(mappings[0][0] + name, min(4096, lengths[0] - name))
             dependency, terminator, _ = raw.partition(b"\0")
+            if tag == 29:
+                check.require(terminator, "cannot isolate Linux dependencies: unterminated RUNPATH")
+                # Only complete ORIGIN tokens have known, object-local semantics.
+                origin_token = rb"\$(?:ORIGIN(?![A-Za-z0-9_])|\{ORIGIN\})"
+                # glibc also accepts semicolons as search-path separators.
+                for entry in re.split(b"[:;]", dependency):
+                    check.require(b"$" not in re.sub(origin_token, b"", entry),
+                                  "cannot isolate Linux dependencies: unsupported RUNPATH token")
+                    expanded = re.sub(origin_token, lambda match: os.fsencode(path.parent), entry)
+                    check.require(entry and os.path.isabs(expanded),
+                                  "cannot isolate Linux dependencies: empty/relative RUNPATH entry")
+                    directory = os.path.normpath(expanded)
+                    if directory != staged:
+                        directories.append(directory)
+                continue
             check.require(terminator and dependency and b"/" not in dependency and b"$" not in dependency,
                           "cannot isolate Linux dependencies: path-bearing/invalid import")
             check.require(tag != 14 or dependency in library_names,
                           "cannot isolate Linux dependencies: SONAME missing from staged set")
+            if tag == 1 and dependency not in library_names:
+                needed.append(dependency)
+        # At most 4096 dynamic tags by 2048 entries in the bounded RUNPATH.
+        # Probe names only: never open or follow an unstaged file or symlink.
+        for dependency in needed:
+            for directory in directories:
+                try:
+                    os.lstat(os.path.join(directory, dependency))
+                except (FileNotFoundError, NotADirectoryError):
+                    continue  # No RUNPATH candidate; allow the system default search.
+                check.require(False, "cannot isolate Linux dependencies: RUNPATH resolves unstaged "
+                              + os.fsdecode(dependency))
 
 
 def loader_environment(binary):

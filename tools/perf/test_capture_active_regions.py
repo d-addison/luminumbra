@@ -30,7 +30,7 @@ def encoded(value):
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
-def elf(*, tags=(), dependency=None, wide=True, endian="<"):
+def elf(*, tags=(), dependency=None, runpaths=(), wide=True, endian="<"):
     """Minimal ELF metadata for loader checks; never executed by these tests."""
     header_format = endian + ("HHIQQQIHHHHHH" if wide else "HHIIIIIHHHHHH")
     ph_format = endian + ("IIQQQQQQ" if wide else "IIIIIIII")
@@ -41,7 +41,12 @@ def elf(*, tags=(), dependency=None, wide=True, endian="<"):
     strings = (dependency + b"\0") if dependency is not None else b""
     dynamic_tags = list(tags)
     if dependency is not None:
-        dynamic_tags += [(1, 0), (5, 4096 + start), (10, len(strings))]
+        dynamic_tags.append((1, 0))
+    for runpath in runpaths:
+        dynamic_tags.append((29, len(strings)))
+        strings += runpath + b"\0"
+    if strings:
+        dynamic_tags += [(5, 4096 + start), (10, len(strings))]
     dynamic = b"".join(struct.pack(dyn_format, *tag) for tag in dynamic_tags + [(0, 0)])
     size = start + len(strings) + len(dynamic)
     ident = b"\x7fELF" + bytes([2 if wide else 1, 1 if endian == "<" else 2, 1]) + bytes(9)
@@ -54,6 +59,13 @@ def elf(*, tags=(), dependency=None, wide=True, endian="<"):
         load = (1, 0, 4096, 0, size, size, 4, 1)
         table = (2, start + len(strings), 0, 0, len(dynamic), len(dynamic), 4, 1)
     return ident + header + struct.pack(ph_format, *load) + struct.pack(ph_format, *table) + strings + dynamic
+
+
+def elf_directory(path, origin):
+    # Native Windows drive colons are ELF search separators; use ORIGIN there.
+    if os.name == "nt":
+        return b"$ORIGIN/" + os.fsencode(os.path.relpath(path, origin)).replace(b"\\", b"/")
+    return os.fsencode(path)
 
 
 def trace(ticks=2):
@@ -308,15 +320,178 @@ class ActiveRegionCaptureContract(unittest.TestCase):
                 self.assertFalse(args.evidence_dir.exists())
                 self.assertFalse(any(argv[0] != "git" for argv, _ in runner.calls))
 
+    def test_linux_runpath_refusals_precede_invocations_and_publication(self):
+        posix = types.SimpleNamespace(**(vars(os) | {"name": "posix"}))
+        cases = ("absolute", "origin", "braced-origin", "search-list", "semicolon-list", "empty", "leading-empty",
+                 "trailing-empty", "middle-empty", "semicolon-empty", "relative", "origin-relative", "lib-token",
+                 "platform-token", "unknown-token", "origin-suffix-token", "duplicate")
+        for selected in ("binary", "dump_binary", "library"):
+            for case in cases:
+                with self.subTest(selected=selected, case=case), tempfile.TemporaryDirectory() as temp:
+                    args, runner = fixture(Path(temp))
+                    sdk = Path(temp) / "sdk"
+                    sdk.mkdir()
+                    (sdk / "libnetwork.so").write_bytes(elf())
+                    sdk_entry = elf_directory(sdk, Path(temp) / "server")
+                    runpaths = {
+                        "absolute": [sdk_entry], "origin": [b"$ORIGIN/../sdk"],
+                        "braced-origin": [b"${ORIGIN}/../sdk"],
+                        "search-list": [b"$ORIGIN:" + sdk_entry],
+                        "semicolon-list": [b"$ORIGIN;" + sdk_entry],
+                        "empty": [b""], "leading-empty": [b":$ORIGIN"],
+                        "trailing-empty": [b"$ORIGIN:"], "middle-empty": [b"$ORIGIN::$ORIGIN"],
+                        "semicolon-empty": [b"$ORIGIN;:$ORIGIN"],
+                        "relative": [b"sdk"], "origin-relative": [b"sdk/$ORIGIN"],
+                        "lib-token": [b"$ORIGIN/$LIB"], "platform-token": [b"/${PLATFORM}"],
+                        "unknown-token": [b"/$UNKNOWN"], "origin-suffix-token": [b"/$ORIGIN_suffix"],
+                        "duplicate": [b"$ORIGIN", b"${ORIGIN}"],
+                    }[case]
+                    source = args.binary.parent / "libouter.so" if selected == "library" else getattr(args, selected)
+                    source.write_bytes(elf(dependency=b"libnetwork.so", runpaths=runpaths))
+                    tour = check.parse(args.tour.read_bytes())
+                    with mock.patch.object(capture, "resolved_fixture_hash", return_value="b" * 64):
+                        tour["identity"] = capture.identities(args.repository, args.root, args.binary,
+                                                              args.dump_binary, "default", runner)
+                    for stage in tour["stages"]:
+                        stage["identity"] = tour["identity"]
+                    args.tour.write_bytes(encoded(tour))
+                    snapshot = capture.snapshot_inputs
+
+                    def with_sdk(root, binary, exporter, directory):
+                        result = snapshot(root, binary, exporter, directory)
+                        # Both inspected directories have the same sibling SDK.
+                        staged_sdk = directory / "sdk"
+                        staged_sdk.mkdir()
+                        (staged_sdk / "libnetwork.so").write_bytes(elf())
+                        return result
+
+                    resolves = case in ("absolute", "origin", "braced-origin", "search-list", "semicolon-list")
+                    message = ("RUNPATH resolves unstaged" if resolves
+                               else "cannot isolate Linux dependencies")
+                    with mock.patch.object(capture, "os", posix), \
+                            mock.patch.object(capture.sys, "platform", "linux"), \
+                            mock.patch.object(capture, "snapshot_inputs", with_sdk), \
+                            self.assertRaisesRegex(ValueError, message):
+                        run_capture(args, runner)
+                    self.assertFalse(args.evidence_dir.exists())
+                    self.assertFalse(any(argv[0] != "git" for argv, _ in runner.calls))
+
+    def test_linux_runpath_allows_staged_names_and_system_fallback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            staged = Path(temp) / "staged"
+            staged.mkdir()
+            binary = staged / "server"
+            sdk = Path(temp) / "sdk"
+            sdk.mkdir()
+            (sdk / "libnetwork.so").write_bytes(elf())
+            not_directory = Path(temp) / "file"
+            not_directory.write_bytes(b"not a directory")
+            for runpath in (b"$ORIGIN", b"${ORIGIN}/../staged", elf_directory(staged, staged),
+                            elf_directory(sdk / "missing", staged), elf_directory(not_directory, staged),
+                            b"$ORIGIN:${ORIGIN}/../staged", b"$ORIGIN;${ORIGIN}/../staged"):
+                for dependency in (None, b"libnetwork.so"):
+                    with self.subTest(runpath=runpath, dependency=dependency):
+                        binary.write_bytes(elf(dependency=dependency, runpaths=[runpath]))
+                        capture.check_linux_loader(binary)
+            # A staged basename wins before any RUNPATH, even if the SDK has it.
+            binary.write_bytes(elf(dependency=b"libnetwork.so", runpaths=[elf_directory(sdk, staged)]))
+            original = os.lstat
+
+            def no_sdk_probe(path, *args, **kwargs):
+                self.assertNotEqual(os.fsencode(path), os.fsencode(sdk / "libnetwork.so"))
+                return original(path, *args, **kwargs)
+
+            with mock.patch.object(capture.os, "lstat", no_sdk_probe):
+                capture.check_linux_loader(binary, library_names={b"server", b"libnetwork.so"})
+            # The terminator at byte 4095 is inside the read bound.
+            binary.write_bytes(elf(runpaths=[b"/" * 4095]))
+            capture.check_linux_loader(binary, library_names=set())
+
+    def test_linux_runpath_checks_both_elf_classes_endians_and_tag_orders(self):
+        with tempfile.TemporaryDirectory() as temp:
+            binary = Path(temp) / "server"
+            sdk = Path(temp) / "sdk"
+            sdk.mkdir()
+            dependency = b"libnetwork.so"
+            (sdk / os.fsdecode(dependency)).write_bytes(elf())
+            runpath = elf_directory(sdk, binary.parent)
+            for wide in (False, True):
+                for endian in ("<", ">"):
+                    for runpath_first in (False, True):
+                        raw = bytearray(elf(wide=wide, endian=endian, dependency=dependency, runpaths=[runpath]))
+                        if runpath_first:
+                            header_size, ph_size, stride = (64, 56, 16) if wide else (52, 32, 8)
+                            start = header_size + 2 * ph_size + len(dependency) + len(runpath) + 2
+                            first, second = raw[start:start + stride], raw[start + stride:start + 2 * stride]
+                            raw[start:start + 2 * stride] = second + first
+                        binary.write_bytes(raw)
+                        with self.subTest(wide=wide, endian=endian, runpath_first=runpath_first), \
+                                self.assertRaisesRegex(ValueError, "RUNPATH resolves unstaged"):
+                            capture.check_linux_loader(binary)
+
+    def test_linux_runpath_metadata_reads_are_bounded_and_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            binary = Path(temp) / "server"
+            for raw in (elf(tags=[(29, 0)]), elf(tags=[(29, 4096)], dependency=b"lib.so"),
+                        elf(runpaths=[b"$ORIGIN"], tags=[(5, 0)]),
+                        elf(runpaths=[b"/" + b"x" * 4095]),
+                        elf(runpaths=[b"relative"]), elf(runpaths=[b"$LIB"]),
+                        elf(runpaths=[b"$ORIGIN", b"$ORIGIN"])):
+                binary.write_bytes(raw)
+                with self.subTest(raw=raw[-40:]), self.assertRaisesRegex(ValueError, "cannot isolate Linux"):
+                    capture.check_linux_loader(binary)
+            binary.write_bytes(elf(runpaths=[b"$ORIGIN"]))
+            reader = capture.open_regular
+            for failure in ("partial", "unreadable"):
+                @contextlib.contextmanager
+                def failing_string(root, path):
+                    with reader(root, path) as stream:
+                        wrapped = mock.Mock(wraps=stream)
+
+                        def read(count):
+                            self.assertLessEqual(count, 4096)
+                            if stream.tell() == 176:  # ELF64 header and two program headers.
+                                if failure == "unreadable":
+                                    raise PermissionError("unreadable RUNPATH")
+                                return stream.read(count)[:-1]
+                            return stream.read(count)
+
+                        wrapped.read.side_effect = read
+                        yield wrapped
+
+                with self.subTest(failure=failure), mock.patch.object(capture, "open_regular", failing_string), \
+                        self.assertRaises((ValueError, PermissionError)):
+                    capture.check_linux_loader(binary)
+
+    def test_linux_runpath_probe_refuses_symlinks_and_propagates_errors(self):
+        with tempfile.TemporaryDirectory() as temp:
+            binary = Path(temp) / "server"
+            sdk = Path(temp) / "sdk"
+            binary.write_bytes(elf(dependency=b"libnetwork.so", runpaths=[elf_directory(sdk, binary.parent)]))
+            original = os.lstat
+            for failure in (None, PermissionError("denied RUNPATH probe")):
+                def probe(path, *args, **kwargs):
+                    if os.fsencode(path) == os.fsencode(sdk / "libnetwork.so"):
+                        if failure is not None:
+                            raise failure
+                        # Includes dangling symlinks; no Windows symlink privilege needed.
+                        return types.SimpleNamespace(st_mode=0o120777)
+                    return original(path, *args, **kwargs)
+
+                with self.subTest(failure=failure), mock.patch.object(capture.os, "lstat", probe), \
+                        self.assertRaises((ValueError, PermissionError)):
+                    capture.check_linux_loader(binary)
+
     def test_linux_loader_metadata_and_import_refusals(self):
         with tempfile.TemporaryDirectory() as temp:
             binary = Path(temp) / "server"
             for wide in (False, True):
                 for endian in ("<", ">"):
                     for dependency in (None, b"libnetwork.so"):
-                        binary.write_bytes(elf(wide=wide, endian=endian, dependency=dependency,
-                                               tags=[(29, 0)]))  # RUNPATH follows LD_LIBRARY_PATH.
-                        capture.check_linux_loader(binary)
+                        for runpath in (b"$ORIGIN", elf_directory(binary.parent / "empty", binary.parent)):
+                            binary.write_bytes(elf(wide=wide, endian=endian, dependency=dependency,
+                                                   runpaths=[runpath]))
+                            capture.check_linux_loader(binary)
             for tag in (15, 0x6FFFFEFB, 0x6FFFFEFC, 0x7FFFFFFD, 0x7FFFFFFF):
                 binary.write_bytes(elf(tags=[(tag, 0)]))
                 with self.subTest(tag=tag), self.assertRaisesRegex(ValueError, "RPATH/audit/filter"):
