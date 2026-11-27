@@ -3930,9 +3930,90 @@ void InstallUnqualifiedReceipts(const fs::path& save,
 void CheckRetainedSaveCycles(const fs::path& save, const fs::path& carrier) {
     const auto evidence = Get(carrier);
     const auto retained = Tree(CarrierJournal(carrier));
-    for (unsigned cycle = 0; cycle < 3; ++cycle) {
+    for (unsigned cycle = 0; cycle < 5; ++cycle) {
         const auto value = "next " + std::to_string(cycle);
         ASSERT_TRUE(CommitOnce(save, 3u + cycle, {{"world_info.json", value}}));
+        EXPECT_FALSE(fs::exists(journal_directory(save)));
+        EXPECT_EQ(recover_pending_journal(save, nullptr), RecoveryOutcome::NothingToDo);
+        EXPECT_EQ(Get(save / "world_info.json"), value);
+        EXPECT_EQ(Get(carrier), evidence);
+        EXPECT_EQ(Tree(CarrierJournal(carrier)), retained);
+        EXPECT_TRUE(journal_pending(save));
+    }
+}
+
+void BindCompletedCarrierDirectory(const fs::path& save,
+                                   const fs::path& carrier,
+                                   bool matching_identity) {
+    WorldSaveService::ArtifactIdentity directory{};
+    bool missing = false;
+    ASSERT_TRUE(
+        WorldSaveService::artifact_identity(journal_directory(save), directory, missing, true));
+    ASSERT_FALSE(missing);
+    if (!matching_identity) {
+        directory[1] = directory[1] == 1u ? 2u : 1u;
+    }
+    auto records = CarrierRecords(carrier);
+    const auto previous = records.front().at("journal_identity");
+    for (auto& record : records) {
+        record["journal_identity"] = directory;
+        if (!record.contains("receipts"))
+            continue;
+        for (auto& receipt : record["receipts"]) {
+            if (receipt.at("identity") == previous) {
+                receipt["identity"] = directory;
+            }
+        }
+    }
+    // Explicitly model both outcomes of directory ID recycling. The retained
+    // control object remains allocated, so its ID cannot recycle with the directory.
+    Put(carrier, EncodeJournalRecords(records));
+}
+
+void ConflictCarrierVolumes(const fs::path& save, const fs::path& carrier) {
+    auto records = CarrierRecords(carrier);
+    auto volume = StableVolumeWords(save);
+    volume[1] ^= 1u;
+    for (auto& record : records) {
+        if (!record.contains("receipts"))
+            continue;
+        for (auto& receipt : record["receipts"])
+            receipt["stable_volume"] = volume;
+    }
+    Put(carrier, EncodeJournalRecords(records));
+}
+
+void CheckCompletedRetainedSaveCycles(const fs::path& save,
+                                      const fs::path& carrier,
+                                      bool matching_identity,
+                                      bool staged_control) {
+    const auto retained = Tree(CarrierJournal(carrier));
+    auto evidence = Get(carrier);
+    for (unsigned cycle = 0; cycle < 5; ++cycle) {
+        SaveTransaction transaction(save, 3u + cycle, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        const auto value = "next " + std::to_string(cycle);
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save, "world_info.json", value));
+        EXPECT_EQ(Get(carrier), evidence);
+        if (cycle == 0) {
+            BindCompletedCarrierDirectory(save, carrier, matching_identity);
+            evidence = Get(carrier);
+        }
+        if (staged_control) {
+            // Interrupt after publication, before recovery. Exercise the other
+            // control name without moving a file that the live writer still needs.
+            ReceiptInterruption() = "commit-point";
+            {
+                const HookGuard hook(&InterruptSelectedReceiptStep);
+                ASSERT_TRUE(transaction.commit(nullptr));
+            }
+            fs::rename(journal_directory(save) / "txn.json",
+                       journal_directory(save) / "undo/cleanup.txn.json");
+            EXPECT_EQ(recover_pending_journal(save, nullptr), RecoveryOutcome::DiscardedStale);
+        } else {
+            ASSERT_TRUE(transaction.commit(nullptr));
+        }
         EXPECT_FALSE(fs::exists(journal_directory(save)));
         EXPECT_EQ(recover_pending_journal(save, nullptr), RecoveryOutcome::NothingToDo);
         EXPECT_EQ(Get(save / "world_info.json"), value);
@@ -4054,7 +4135,7 @@ TEST(SaveTransaction, CompletedSerialOnlyCarrierDoesNotBlockLaterCleanupOrReopen
     }
     Put(carrier, EncodeJournalRecords(records));
 #if defined(_WIN32)
-    CheckRetainedSaveCycles(save.path(), carrier);
+    CheckCompletedRetainedSaveCycles(save.path(), carrier, true, false);
 #else
     // POSIX still retires serial-only evidence. The Windows-only coexistence
     // predicate is also pinned by the portable source contract regression.
@@ -4110,22 +4191,123 @@ TEST(SaveTransaction, IncompleteUnqualifiedCarrierWithoutContainersLoadsButRefus
 }
 
 TEST(SaveTransaction, CompletedVolumeConflictCarrierDoesNotBlockLaterCleanupOrReopen) {
+    for (const bool matching_identity : {false, true}) {
+        for (const bool staged_control : {false, true}) {
+            SCOPED_TRACE(matching_identity);
+            SCOPED_TRACE(staged_control);
+            TempSave save;
+            fs::path carrier;
+            InterruptCleanup(save.path(), carrier, true);
+            ASSERT_FALSE(carrier.empty());
+            ASSERT_FALSE(fs::exists(journal_directory(save.path())));
+            ConflictCarrierVolumes(save.path(), carrier);
+            CheckCompletedRetainedSaveCycles(
+                save.path(), carrier, matching_identity, staged_control);
+        }
+    }
+}
+
+TEST(SaveTransaction, CompletedRetainedCarrierRefusesInvalidEvidenceBeforeReusedNames) {
     TempSave save;
     fs::path carrier;
     InterruptCleanup(save.path(), carrier, true);
     ASSERT_FALSE(carrier.empty());
-    ASSERT_FALSE(fs::exists(journal_directory(save.path())));
-    auto records = CarrierRecords(carrier);
-    auto volume = StableVolumeWords(save.path());
-    volume[1] ^= 1u;
-    for (auto& record : records) {
-        if (record.contains("receipts")) {
-            for (auto& receipt : record["receipts"])
-                receipt["stable_volume"] = volume;
+    ConflictCarrierVolumes(save.path(), carrier);
+    SaveTransaction transaction(save.path(), 3, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "next"));
+    BindCompletedCarrierDirectory(save.path(), carrier, true);
+    const auto valid = Get(carrier);
+    const auto original = CarrierRecords(carrier);
+    for (const std::string_view mutation : {"partial",
+                                            "unknown metadata",
+                                            "empty receipts",
+                                            "missing journal",
+                                            "missing undo",
+                                            "prepared journal",
+                                            "prepared undo",
+                                            "reset journal",
+                                            "reset undo",
+                                            "extra link",
+                                            "unreadable"}) {
+        SCOPED_TRACE(mutation);
+        auto records = original;
+        const auto other = save.path() / "other-control";
+        const auto directory = mutation.ends_with("undo") ? "journal/undo" : "journal";
+        if (mutation == "partial") {
+            Put(carrier, valid.substr(0, valid.find('\n')));
+        } else if (mutation == "extra link") {
+            fs::create_hard_link(carrier, other);
+        } else if (mutation == "unreadable") {
+            fs::rename(carrier, other);
+            ASSERT_TRUE(fs::create_directory(carrier));
+        } else {
+            if (mutation == "unknown metadata") {
+                records.back()["unknown"] = true;
+            } else if (mutation.starts_with("prepared") || mutation.starts_with("reset")) {
+                if (mutation.starts_with("prepared")) {
+                    // Leave only this directory's original Prepared phase.
+                    for (auto& record : records) {
+                        if (record.contains("receipts") && record.at("phase") != 0u) {
+                            std::erase_if(record["receipts"].get_ref<nlohmann::json::array_t&>(),
+                                          [directory](const auto& receipt) {
+                                              return receipt.at("path") == directory;
+                                          });
+                        }
+                    }
+                } else {
+                    auto reset = records.back();
+                    reset["record"] = "receipt-reset";
+                    reset["phase"] = 0u;
+                    reset["receipts"] = nlohmann::json::array();
+                    for (const auto& record : original) {
+                        if (!record.contains("receipts"))
+                            continue;
+                        for (const auto& receipt : record.at("receipts")) {
+                            if (receipt.at("path") == directory) {
+                                reset["receipts"].push_back(receipt);
+                                break;
+                            }
+                        }
+                        if (!reset["receipts"].empty())
+                            break;
+                    }
+                    records.push_back(std::move(reset));
+                }
+            } else {
+                for (auto& record : records) {
+                    if (!record.contains("receipts"))
+                        continue;
+                    std::erase_if(record["receipts"].get_ref<nlohmann::json::array_t&>(),
+                                  [mutation](const auto& receipt) {
+                                      return mutation == "empty receipts" ||
+                                             receipt.at("path") == (mutation == "missing journal"
+                                                                        ? "journal"
+                                                                        : "journal/undo");
+                                  });
+                }
+            }
+            std::erase_if(records, [](const auto& record) {
+                return record.contains("receipts") && record.at("receipts").empty();
+            });
+            Put(carrier, EncodeJournalRecords(records));
         }
+        const auto evidence = Tree(save.path());
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        EXPECT_EQ(Tree(save.path()), evidence);
+        if (mutation == "extra link") {
+            ASSERT_TRUE(fs::remove(other));
+        } else if (mutation == "unreadable") {
+            ASSERT_TRUE(fs::remove(carrier));
+            fs::rename(other, carrier);
+        }
+        Put(carrier, valid);
     }
-    Put(carrier, EncodeJournalRecords(records));
-    CheckRetainedSaveCycles(save.path(), carrier);
+    ASSERT_TRUE(transaction.commit(nullptr));
+    EXPECT_FALSE(fs::exists(journal_directory(save.path())));
+    EXPECT_EQ(Get(carrier), valid);
+    EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::NothingToDo);
 }
 
 TEST(SaveTransaction, KnownVolumeConflictRetainsReceiptWithoutReusingOwnership) {

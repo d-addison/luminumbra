@@ -2618,37 +2618,45 @@ bool RecoverReceiptCarriers(const fs::path& save_dir,
         if (!WorldSaveService::artifact_identity(
                 journal_directory(save_dir), journal_identity, missing, true))
             return false;
-        if (!missing && journal_identity != document.journal_identity) {
-            // An unqualified completed cleanup may coexist with a later transaction.
-            // Refuse every removal through the old names and retain its evidence.
-            // Prepared receipts cannot reach this state: cleanup was incomplete.
-            const bool unqualified = std::any_of(
-                document.receipts.begin(),
-                document.receipts.end(),
-                [&current_volume](const auto& item) {
+        const bool unqualified = std::any_of(
+            document.receipts.begin(),
+            document.receipts.end(),
+            [&current_volume](const auto& item) {
 #if defined(_WIN32)
-                    if (!item.second.completion.stable_volume.known() || !current_volume.known())
-                        return true;
+                if (!item.second.completion.stable_volume.known() || !current_volume.known())
+                    return true;
 #endif
-                    return (!item.second.retired && !item.second.reset) ||
-                           (item.second.completion.stable_volume.known() &&
-                            current_volume.known() &&
-                            item.second.completion.stable_volume != current_volume);
-                });
-            if (!unqualified ||
-                std::any_of(document.receipts.begin(),
-                            document.receipts.end(),
-                            [](const auto& item) {
-                                return !item.second.reset &&
-                                       item.second.completion.phase ==
-                                           detail::NamespaceReceiptPhase::Prepared;
-                            }) ||
-                !HasReceipt(document, "journal") || !HasReceipt(document, "journal/undo")) {
-                AddError(errors, "snapshot receipt directory ownership changed");
+                return (!item.second.retired && !item.second.reset) ||
+                       (item.second.completion.stable_volume.known() && current_volume.known() &&
+                        item.second.completion.stable_volume != current_volume);
+            });
+        // Completed directory namespaces no longer confer ownership of their old
+        // names. Native directory IDs can recycle while the carrier is retained;
+        // comparing those IDs must not admit a later transaction's control files
+        // as aliases, even when both transactions also reused the transaction ID.
+        const bool detached =
+            HasReceipt(document, "journal") && HasReceipt(document, "journal/undo") &&
+            !ReceiptFor(document, "journal").reset && !ReceiptFor(document, "journal/undo").reset &&
+            std::none_of(document.receipts.begin(), document.receipts.end(), [](const auto& item) {
+                return !item.second.reset &&
+                       item.second.completion.phase == detail::NamespaceReceiptPhase::Prepared;
+            });
+        if (!missing && unqualified && detached) {
+            // Only the carrier name remains owned. Refuse unexpected hard links
+            // without looking up control files in the writable journal namespace.
+            ArtifactIdentity actual{};
+            bool carrier_missing = false;
+            if (!WorldSaveService::artifact_identity(carrier, actual, carrier_missing, false, 1) ||
+                carrier_missing || actual != identity) {
+                AddError(errors, "snapshot receipt carrier ownership changed");
                 return false;
             }
-            AddError(errors, "namespace receipts retained; later journal owns reused names");
+            AddError(errors, "namespace receipts retained; completed journal names released");
             continue;
+        }
+        if (!missing && journal_identity != document.journal_identity) {
+            AddError(errors, "snapshot receipt directory ownership changed");
+            return false;
         }
         if (!FinishJournal(save_dir, document, identity, errors))
             return false;

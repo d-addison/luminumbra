@@ -1521,6 +1521,36 @@ class SessionUsabilitySourceContract(unittest.TestCase):
             with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):
                 self.assert_retained_journal_isolation(source.replace(token, 'removed'))
 
+    def assert_completed_carrier_names_released(self, source):
+        recovery = self.function(source, "RecoverReceiptCarriers", "")
+        retain = recovery.index('if (!missing && unqualified && detached)')
+        compare = recovery.index('if (!missing && journal_identity != document.journal_identity)')
+        self.assertLess(retain, compare)
+        detached = recovery[recovery.index('const bool detached ='):retain]
+        for guard in ('HasReceipt(document, "journal")', 'HasReceipt(document, "journal/undo")',
+                      '!ReceiptFor(document, "journal").reset',
+                      '!ReceiptFor(document, "journal/undo").reset', 'std::none_of(',
+                      '!item.second.reset', 'detail::NamespaceReceiptPhase::Prepared'):
+            self.assertIn(guard, detached)
+        retained = recovery[retain:compare]
+        self.assertIn('WorldSaveService::artifact_identity(carrier, actual, carrier_missing, false, 1)',
+                      retained)
+        self.assertIn('carrier_missing || actual != identity', retained)
+        self.assertIn('continue;', retained)
+        self.assertNotIn('ControlAliasLinks(', retained)
+        self.assertNotIn('FinishJournal(', retained)
+
+    def test_completed_carrier_releases_names_before_directory_identity_comparison(self):
+        source = read_source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        self.assert_completed_carrier_names_released(source)
+        for token in ('if (!missing && unqualified && detached)',
+                      '!ReceiptFor(document, "journal").reset',
+                      '!ReceiptFor(document, "journal/undo").reset',
+                      'WorldSaveService::artifact_identity(carrier, actual, carrier_missing, false, 1)',
+                      'carrier_missing || actual != identity'):
+            with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):
+                self.assert_completed_carrier_names_released(source.replace(token, 'removed'))
+
     def assert_consumed_receipt_volume_sources(self, source):
         observe = self.function(source, "ObserveReceiptVolume", "")
         for guard in ('actual != receipt.completion.identity',
