@@ -4406,6 +4406,141 @@ TEST(RegionalWaterExecution, PublishesPlannedMassRegistersRevisionsAndOnlyPartic
     EXPECT_EQ(water.regional_work(), published_work);
 }
 
+TEST(RegionalWaterCadence, ReopenPreservesCursorDebtAndSealedMass) {
+    namespace P = Luminumbra::Persistence;
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    WaterSystem uninterrupted(nullptr, &shield), reopened(nullptr, &shield);
+    for (auto* water : {&uninterrupted, &reopened}) {
+        water->SetSimResolution(8);
+        water->SetRegionalScheduling(true);
+    }
+    auto ledger = PlanningLedger({{0, 0}, {1, 0}, {2, 0}});
+    ledger.acknowledge_world_clock(WorldClock(1));
+    auto& frozen =
+        const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records()).at({1, 0});
+    frozen.state = RegionState::Frozen;
+    frozen.wake_pending = false;
+    frozen.cadence_shift = 1;
+    frozen.cadence_phase = ActiveRegionLedger::phase({1, 0}, 1);
+    frozen.frozen_at = 1;
+    frozen.frozen_digest = 123;
+    ledger.set_water_cursor({0, 0}, 1);
+    ledger.set_water_cursor({1, 0}, 9);
+    ASSERT_TRUE(ledger.set_water_debts(
+        {{{0, 0}, 2 * world::water_share::kQ32 + 19}, {{1, 0}, 37}, {{2, 0}, 23}}));
+    const std::vector chunks{TransactionChunk(0),
+                             TransactionChunk(31, 2000),
+                             TransactionChunk(32, 3000),
+                             TransactionChunk(64, 4000)};
+    WorldStreamingState live;
+    for (const auto& chunk : chunks) {
+        chunk->set_state(ChunkState::Idle);
+        chunk->set_water_authority();
+        live.insert_chunk(chunk);
+    }
+    // Nonuniform depth and carried momentum exercise strict integer water decode.
+    chunks[1]->water_depth_mm[0] += 77;
+    chunks[1]->water_edge_flux[0] = 7;
+    const auto sealed_bytes = TransactionBytes(*chunks[2]);
+    const auto total_mass =
+        Mass(*chunks[0]) + Mass(*chunks[1]) + Mass(*chunks[2]) + Mass(*chunks[3]);
+    entt::registry registry;
+    // Tick 1 is already completed. Nine new opportunities, four 8x8 grids,
+    // one funded window per opportunity.
+    for (std::uint64_t tick = 2; tick <= 4; ++tick) {
+        const auto schedule = ledger.schedule(WorldClock(tick));
+        EXPECT_EQ(schedule.due, (std::vector<RegionKey>{{0, 0}, {2, 0}}));
+        std::vector<world::RegionWork> completed;
+        uninterrupted.UpdateRegional(
+            registry, chunks, ledger, schedule, completed, kPlanningCapacity);
+        EXPECT_GT(uninterrupted.regional_work().total_cells, 0u);
+        EXPECT_LE(uninterrupted.regional_work().total_cells, kPlanningCapacity);
+    }
+    const TestSupport::ScopedTempFile directory{"water-cadence-continuation-", ".world"};
+    const auto& save = directory.Path();
+    P::WorldSaveService service;
+    std::vector<std::string> errors;
+    {
+        P::WorldSaveService::SaveFactsScope facts(save);
+        P::SaveTransaction transaction(save, 4, {}, &P::WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(&errors));
+        ASSERT_TRUE(service.save_world(live, save, &errors));
+        nlohmann::json metadata = {{"container_version", P::WorldSaveService::kContainerVersion}};
+        WorldClock(4).write_metadata(metadata);
+        ASSERT_TRUE(P::WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), ledger, save, &errors));
+        ASSERT_TRUE(P::WorldSaveService::finalize_indexed_envelope(save, &errors));
+        ASSERT_TRUE(transaction.commit(&errors));
+    }
+    // Joined writers publish last_save on disk; the owner acknowledges only after commit.
+    ledger.mark_saved(WorldClock(4));
+    const auto ledger_bytes = ledger.encode();
+    ASSERT_GE(ledger_bytes.size(), 6u);
+    EXPECT_EQ(ledger_bytes.substr(0, 4), "ARL1");
+    EXPECT_EQ(static_cast<unsigned char>(ledger_bytes[4]), 3u);
+    EXPECT_EQ(static_cast<unsigned char>(ledger_bytes[5]), 0u);
+    EXPECT_EQ(P::WorldSaveService::kContainerVersion, 2u);
+    EXPECT_EQ(P::WorldSaveService::kIndexedMetadataVersion, 3u);
+    WorldStreamingState restored;
+    ActiveRegionLedger restored_ledger;
+    ASSERT_TRUE(service.load_world(restored, save, errors, {}, nullptr, nullptr, nullptr, true))
+        << ::testing::PrintToString(errors);
+    ASSERT_TRUE(P::WorldSaveService::load_active_regions(restored_ledger, save, &errors));
+    EXPECT_EQ(restored_ledger.encode(), ledger_bytes);
+    for (const auto& [key, record] : ledger.records()) {
+        EXPECT_EQ(record.last_save, 4u);
+        EXPECT_EQ(restored_ledger.records().at(key).last_save, record.last_save);
+    }
+    const auto loaded_chunks = restored.snapshot_chunks();
+    ASSERT_EQ(loaded_chunks.size(), chunks.size());
+    const auto persistent_water = [](const Chunk& chunk) {
+        return std::make_tuple(chunk.water_depth_mm,
+                               chunk.water_bed_mm,
+                               chunk.water_edge_flux,
+                               chunk.water_level_data,
+                               chunk.water_flow_data,
+                               chunk.water_sim_terrain_height,
+                               chunk.is_water_sleeping.load(),
+                               chunk.ticks_below_threshold,
+                               chunk.max_water_delta_last_tick);
+    };
+    const auto expect_same = [&] {
+        EXPECT_EQ(restored_ledger.encode(), ledger.encode());
+        std::int64_t mass = 0;
+        for (const auto& chunk : chunks) {
+            const auto loaded = restored.find_chunk(chunk->get_id());
+            ASSERT_NE(loaded, nullptr);
+            EXPECT_EQ(persistent_water(*loaded), persistent_water(*chunk));
+            mass += Mass(*loaded);
+        }
+        EXPECT_EQ(mass, total_mass);
+        EXPECT_EQ(TransactionBytes(*chunks[2]), sealed_bytes);
+        EXPECT_EQ(ledger.records().at({1, 0}).water_cursor, 9u);
+        EXPECT_EQ(ledger.water_debts().at({1, 0}), 37u);
+    };
+    ASSERT_NO_FATAL_FAILURE(expect_same());
+    for (std::uint64_t tick = 5; tick <= 10; ++tick) {
+        SCOPED_TRACE(tick);
+        const auto schedule = ledger.schedule(WorldClock(tick));
+        const auto loaded_schedule = restored_ledger.schedule(WorldClock(tick));
+        EXPECT_EQ(loaded_schedule.due, schedule.due);
+        EXPECT_EQ(loaded_schedule.digest, schedule.digest);
+        std::vector<world::RegionWork> completed, loaded_completed;
+        uninterrupted.UpdateRegional(
+            registry, chunks, ledger, schedule, completed, kPlanningCapacity);
+        reopened.UpdateRegional(registry,
+                                loaded_chunks,
+                                restored_ledger,
+                                loaded_schedule,
+                                loaded_completed,
+                                kPlanningCapacity);
+        EXPECT_EQ(reopened.regional_work(), uninterrupted.regional_work());
+        EXPECT_EQ(CompletionBytes(loaded_completed), CompletionBytes(completed));
+        EXPECT_LE(uninterrupted.regional_work().total_cells, kPlanningCapacity);
+        ASSERT_NO_FATAL_FAILURE(expect_same());
+    }
+}
+
 TEST(RegionalWaterExecution, LateOverflowPreservesPublishedSleepCompletionAndTelemetry) {
     SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
     WaterSystem water(nullptr, &shield);

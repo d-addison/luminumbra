@@ -795,6 +795,69 @@ TEST_F(ReplayModeAdmission, InvalidRecordingSchedulePreservesOutputAndDoesNotCre
     EXPECT_FALSE(fs::exists(root / "worlds/saves"));
 }
 
+TEST_F(ReplayModeAdmission, RegionalCadenceRejectsIncompatibleAuthority) {
+    options.ticks = 0;
+    ASSERT_EQ(RunRecord(options), 0);
+    const auto recorded = replay::ReadReplay(options.record_path);
+    ASSERT_TRUE(recorded.has_value());
+    if (!recorded)
+        return;
+    ASSERT_TRUE(recorded->header.authority_boot.has_value());
+    if (!recorded->header.authority_boot)
+        return;
+    EXPECT_EQ(replay::kLrec1BootVersion, 5u);
+    EXPECT_EQ(recorded->header.version, replay::kLrec1BootVersion);
+    EXPECT_EQ(recorded->header.authority_boot->authority_rules_revision, 9u);
+    EXPECT_TRUE(ReplayRunnerConfigFrom(options, recorded->header).has_value());
+    ASSERT_EQ(RunReplay(options), 0) << logs.str();
+    // Both historical enabled identities are readable, but cannot select the
+    // current authority. A mismatched descriptor alone must also refuse.
+    for (unsigned mutation = 0; mutation < 4; ++mutation) {
+        SCOPED_TRACE(mutation);
+        auto changed = *recorded;
+        if (!changed.header.authority_boot) {
+            FAIL() << "Missing authority descriptor";
+            return;
+        }
+        auto& boot = *changed.header.authority_boot;
+        if (mutation < 2) {
+            changed.header.system_config_identity =
+                mutation == 0 ? "45664f7615d96904" : "bf48b15682a969bd";
+            boot.system_config_identity = changed.header.system_config_identity;
+            boot.authority_rules_revision = mutation == 0 ? 8u : 9u;
+        } else if (mutation == 2) {
+            boot.authority_rules_revision = 8;
+        } else {
+            boot.system_config_identity = "bf48b15682a969bd";
+        }
+        EXPECT_FALSE(ReplayRunnerConfigFrom(options, changed.header).has_value());
+        if (mutation == 3) {
+            // Header/descriptor disagreement is rejected by the frozen codec too.
+            const auto before = ReadReplayModeFile(options.replay_path);
+            replay::ReplayWriter writer;
+            EXPECT_FALSE(writer.Open(options.replay_path, changed.header));
+            EXPECT_EQ(ReadReplayModeFile(options.replay_path), before);
+            continue;
+        }
+        Rewrite(changed);
+        ASSERT_FALSE(testing::Test::HasFatalFailure());
+        {
+            std::ofstream output(options.artifact_path);
+            output << "retained";
+            ASSERT_TRUE(output.good());
+        }
+        logs.str("");
+        logs.clear();
+        EXPECT_EQ(RunReplay(options), 1);
+        EXPECT_EQ(ReadReplayModeFile(options.artifact_path), "retained");
+        EXPECT_TRUE(fs::is_empty(root / "worlds/saves"));
+        EXPECT_EQ(logs.str().find("Water resolution wired:"), std::string::npos) << logs.str();
+    }
+    Rewrite(*recorded);
+    ASSERT_FALSE(testing::Test::HasFatalFailure());
+    EXPECT_EQ(RunReplay(options), 0) << logs.str();
+}
+
 TEST_F(ReplayModeAdmission, CompleteBootDescriptorRefusesConflictsBeforeWorldOrOutput) {
     options.ticks = 0;
     ASSERT_EQ(RunRecord(options), 0);
