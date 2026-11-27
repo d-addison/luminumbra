@@ -1463,7 +1463,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         inventory = self.function(source, "JournalInventory", "")
         self.assertIn('ControlAliasLinks(save_dir, document)', inventory)
         notifications = self.function(source, "report_snapshot_step", "void ")
-        self.assertIn('.starts_with("journal.receipts.")', notifications)
+        self.assertIn('IsReceiptCarrierName(', notifications)
         for event in ('before-publication', 'after-publication',
                       'publication-quarantined', 'retirement-quarantined'):
             self.assertIn('"crash-receipt-' + event + '"', notifications)
@@ -1531,11 +1531,11 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn('&document.version', writer)
         reader = self.function(source, 'read_live_journal', 'SaveTransaction::')
         self.assertIn('state.valid && version == state.document.version', reader)
-        self.assertIn('bytes == *state.document.cached_bytes', reader)
-        self.assertLess(reader.index('input.read('),
-                        reader.index('bytes == *state.document.cached_bytes'))
-        self.assertLess(reader.index('bytes == *state.document.cached_bytes'),
-                        reader.index('ParseJournal('))
+        fast_path = reader.index('if (state.valid && version == state.document.version')
+        self.assertIn('state.document.cached_bytes)', reader[fast_path:reader.index('input.read(')])
+        self.assertLess(reader.index('input.version(version)'), fast_path)
+        self.assertLess(reader.index('return true;', fast_path), reader.index('input.read('))
+        self.assertLess(reader.index('after != version'), reader.index('ParseJournal('))
         self.assertIn('state.document.cached_bytes = std::move(bytes)', reader)
         self.assertIn('after != version', reader)
         completion = self.function(source, 'complete_owned_removal', 'SaveTransaction::')
@@ -1571,7 +1571,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         source = read_source('src/luminumbra_common/persistence/SaveTransaction.cpp')
         self.assert_live_journal_work_is_incremental(source)
         for token in ('state.valid && version == state.document.version',
-                      'bytes == *state.document.cached_bytes',
+                      'state.document.cached_bytes)',
                       'ApplyJournalRecords(record, document, error)',
                       '&document.version', 'after != version',
                       'member_document.entries.push_back(document.entries[recorded->second])'):

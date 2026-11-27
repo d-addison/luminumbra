@@ -938,6 +938,29 @@ fs::path ReceiptCarrier(const fs::path& save_dir, const JournalDocument& documen
     return save_dir / name;
 }
 
+bool IsReceiptCarrierName(std::string_view name) {
+    constexpr std::string_view prefix = "journal.receipts.";
+    if (!name.starts_with(prefix))
+        return false;
+    name.remove_prefix(prefix.size());
+    // Exactly four canonical uint64 decimals; each has at most 20 digits.
+    if (name.size() > 4u * 20u + 3u)
+        return false;
+    for (unsigned component = 0; component < 4; ++component) {
+        const auto delimiter = name.find('.');
+        const auto digits = name.substr(0, delimiter);
+        std::uint64_t value = 0;
+        const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), value);
+        if (digits.empty() || (digits.size() > 1 && digits.front() == '0') ||
+            parsed.ec != std::errc{} || parsed.ptr != digits.data() + digits.size() ||
+            (component == 3) != (delimiter == std::string_view::npos))
+            return false;
+        if (component != 3)
+            name.remove_prefix(delimiter + 1);
+    }
+    return true;
+}
+
 fs::path RecoveryControl(const fs::path& save_dir, const JournalDocument& document) {
     return document.external_control ? ReceiptCarrier(save_dir, document)
                                      : journal_directory(save_dir) / "txn.json";
@@ -1926,16 +1949,11 @@ bool JournalInventory(const fs::path& save_dir,
 bool CompleteCreatedFiles(const fs::path& save_dir,
                           JournalDocument& document,
                           ArtifactIdentity& control,
-                          std::vector<CreatedWorldArtifacts::OwnedFile>& files,
+                          const std::vector<CreatedWorldArtifacts::OwnedFile>& files,
                           std::vector<std::string>* errors) {
     std::map<fs::path, ArtifactIdentity> inventory;
     if (!JournalInventory(save_dir, document, control, inventory, errors))
         return false;
-    std::erase_if(files, [&](const auto& file) {
-        const auto name = Filesystem::GenericUtf8PathString(file.path.lexically_relative(save_dir));
-        return name != kSnapshotIndexRelativePath && !member_path_allowed(name) &&
-               !inventory.contains(file.path);
-    });
     // Admission of the whole registry subset precedes the first namespace change.
     for (const auto& file : files) {
         const auto name = Filesystem::GenericUtf8PathString(file.path.lexically_relative(save_dir));
@@ -2176,7 +2194,20 @@ bool FinishJournal(const fs::path& save_dir,
                 return false;
             continue;
         }
-        file_removals.push_back(ReceiptRemovalFor(save_dir, document, found->second, &slot));
+    }
+    // Receipts also cover rolled-back create destinations and recorded absences,
+    // which are deliberately outside the temporary-file inventory. Replay each
+    // latest binding; older generations retain evidence but no longer own a name.
+    for (auto receipt = document.receipts.begin(); receipt != document.receipts.end();) {
+        const auto next = document.receipts.upper_bound(
+            {receipt->first.first, std::numeric_limits<std::uint64_t>::max()});
+        auto& latest = std::prev(next)->second;
+        if (!latest.directory) {
+            const auto slot =
+                CleanupStage(save_dir, document.undo_directory_identity, save_dir / latest.path);
+            file_removals.push_back(ReceiptRemovalFor(save_dir, document, latest, &slot));
+        }
+        receipt = next;
     }
     const auto file_outcome = CompleteReceipts(save_dir, document, file_removals, control, errors);
     if (file_outcome == detail::NamespaceRetirementOutcome::Failed)
@@ -2223,12 +2254,11 @@ bool RecoverReceiptCarriers(const fs::path& save_dir, std::vector<std::string>* 
     if (iterator_error)
         return false;
     std::size_t inspected = 0;
-    constexpr std::string_view prefix = "journal.receipts.";
     for (const fs::directory_iterator end; iterator != end; iterator.increment(iterator_error)) {
         if (iterator_error || inspected++ == kMaxSnapshotMembers)
             return false;
         const auto name = Filesystem::GenericUtf8PathString(iterator->path().filename());
-        if (name.starts_with(prefix))
+        if (IsReceiptCarrierName(name))
             carriers.push_back(iterator->path());
     }
     if (iterator_error)
@@ -2591,8 +2621,7 @@ bool journal_pending(const fs::path& save_dir) {
     std::size_t inspected = 0;
     for (const fs::directory_iterator end; iterator != end; iterator.increment(ec)) {
         if (ec || inspected++ == kMaxSnapshotMembers ||
-            Filesystem::GenericUtf8PathString(iterator->path().filename())
-                .starts_with("journal.receipts."))
+            IsReceiptCarrierName(Filesystem::GenericUtf8PathString(iterator->path().filename())))
             return true;
     }
     return bool(ec);
@@ -2784,7 +2813,7 @@ void report_snapshot_step(const char* step, const fs::path& path) {
         const std::string_view event(step);
         if ((event == "before-replace" || event == "after-replace" ||
              event == "publication-quarantined" || event == "retirement-quarantined") &&
-            Filesystem::GenericUtf8PathString(path.filename()).starts_with("journal.receipts.")) {
+            IsReceiptCarrierName(Filesystem::GenericUtf8PathString(path.filename()))) {
             if (event == "before-replace")
                 step = "crash-receipt-before-publication";
             else if (event == "after-replace")
@@ -3403,6 +3432,10 @@ bool SaveTransaction::read_live_journal(std::vector<std::string>* errors) {
             AddError(errors, "cannot inspect live snapshot journal");
             return false;
         }
+        // The identity, size and high-resolution write/change times came from
+        // this same open file. Unknown or changed versions require full replay.
+        if (state.valid && version == state.document.version && state.document.cached_bytes)
+            return true;
         std::string bytes, error;
         if (!input.read(bytes, kMaxSnapshotIndexBytes)) {
             state.valid = false;
@@ -3415,9 +3448,6 @@ bool SaveTransaction::read_live_journal(std::vector<std::string>* errors) {
             AddError(errors, "live snapshot journal changed while reading");
             return false;
         }
-        if (state.valid && version == state.document.version && state.document.cached_bytes &&
-            bytes == *state.document.cached_bytes)
-            return true;
         state.valid = false;
         if (!ParseJournal(bytes, state.document, error) || !state.document.modern ||
             state.document.cleanup || state.document.txn_id != m_txn_id ||
@@ -3903,6 +3933,12 @@ void SaveTransaction::abort(std::vector<std::string>* errors) {
             m_artifacts->complete_files(
                 journal_directory(m_save_dir),
                 [&](const auto& path) { return creation_inventory.contains(path); },
+                [&](const auto& path) {
+                    const auto name =
+                        Filesystem::GenericUtf8PathString(path.lexically_relative(m_save_dir));
+                    return creation_inventory.contains(path) ||
+                           name == kSnapshotIndexRelativePath || member_path_allowed(name);
+                },
                 [&](auto& files) {
                     return CompleteCreatedFiles(
                         m_save_dir, document, m_control_identity, files, errors);
