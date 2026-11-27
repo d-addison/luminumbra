@@ -97,6 +97,30 @@ The explicitly disabled path retains the legacy consumers and water policy.
 The parameterised 3,600-tick budget parity coverage retains its existing
 three passes per region mode; it is not duplicated in sanitizer shards.
 
+The continuation boundary is covered by the following registered regressions;
+native execution of this coverage remains pending:
+
+| Regression | Boundary pinned |
+| --- | --- |
+| `RegionalCadenceIntegration.ReopenPreservesNextDueWindow` | Production-profile save/reopen in Reduced and Frozen states; subsequent due sets, prior ticks, schedule digests, plant snapshots and field pages match uninterrupted execution through thaw |
+| `GameSessionHeadlessWorldTest.RegionalCadencePendingReplayRefusesSaveThenReopens` | A 64-tick cadence with a plant and sparse soil page refuses saves and replacement loads while history is pending, preserves existing disk members, then matches continuation after bounded replay publication and reopen |
+| `RegionalWaterCadence.ReopenPreservesCursorDebtAndSealedMass` | Four 8-by-8 grids retain integer depth, bed, momentum, mirrors, sleep state, Q32 debt and cursors through indexed save/load and subsequent funded work; the frozen neighbour stays sealed and total mass is conserved |
+| `ReplayModeAdmission.RegionalCadenceRejectsIncompatibleAuthority` | Current production recordings remain readable and admissible in the existing boot envelope; historical enabled identities and mismatched authority descriptors refuse before world boot or artifact replacement |
+
+These cases pin existing LMR payload version 2, indexed metadata version 3,
+ARL1 version 3 when debt is present, and LREC boot version 5. They do not extend
+those codecs. Pending replay is an explicit refusal boundary: its staged registry,
+history and publication state are not a durable queue. A request to save that
+in-progress work would require a separate durable-state design and compatibility
+review. Successful reopen comparisons cover completed publications with the same
+sampled inputs and subsequent commands; they do not establish equivalence for
+unsaved runtime-only participants or historical environmental replay.
+
+The existing disabled-region exact-save fixtures and disabled-water byte checks
+remain unchanged. Fixture regeneration is not part of this coverage. Broader
+native correctness and representative-world telemetry remain separate evidence
+requirements for issue #138.
+
 The added diffusion regression compares measured and unmeasured solver evolution
 against an independent integer-indexed reference with exact floating-point bit
 comparisons. Telemetry sums repeated stage visits within one host tick while
