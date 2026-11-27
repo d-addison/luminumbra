@@ -107,7 +107,8 @@ struct FarWorldSessionController::Impl {
     bool receipt_pending = false;
     void Record(const FarWorldRefreshWork& work,
                 FarWorldRefusal refusal,
-                const Producer::FrozenResult& failure) {
+                const Producer::FrozenResult& failure,
+                bool cancelled = false) {
         if (!receipt_pending)
             return;
         receipt_pending = false;
@@ -116,6 +117,12 @@ struct FarWorldSessionController::Impl {
         const auto& clock = limits.capture.clock;
         const auto end = clock.now(clock.context);
         elapsed_ticks = end >= start_ticks ? end - start_ticks : 0;
+        const char* outcome = "Refused";
+        if (cancelled) {
+            outcome = "Cancelled";
+        } else if (refusal == FarWorldRefusal::None) {
+            outcome = "Complete";
+        }
         // Shipping construction is restricted to the diagnostics host opt-in;
         // explicit qualification harnesses use the same terminal receipts.
         LUMINUMBRA_CORE_INFO(
@@ -123,7 +130,7 @@ struct FarWorldSessionController::Impl {
             "compressed_bytes={} decoded_bytes={} source_ops={} planning_ops={} "
             "admission_ops={} height_samples={} density_samples={} water_samples={} "
             "source_frames={} preparation_frames={} elapsed_ticks={} refusal={} "
-            "source_error={} capture_error={}",
+            "source_error={} capture_error={} outcome={}",
             measured_source.reads,
             measured_source.columns,
             measured_source.members,
@@ -140,7 +147,8 @@ struct FarWorldSessionController::Impl {
             elapsed_ticks,
             FarWorldRefusalName(refusal),
             static_cast<int>(failure.source),
-            static_cast<int>(failure.capture));
+            static_cast<int>(failure.capture),
+            outcome);
     }
 };
 FarWorldSessionController::FarWorldSessionController(FarWorldRenderer& renderer)
@@ -574,9 +582,7 @@ bool FarWorldSessionController::Retains(const FarTileKey& key) const {
 void FarWorldSessionController::Cancel() {
     CheckOwner();
     if (impl_) {
-        impl_->Record(work_,
-                      FarWorldRefusal::ImmutableAuthorityUnavailable,
-                      {Producer::Error::AuthorityUnavailable});
+        impl_->Record(work_, FarWorldRefusal::None, {}, true);
         impl_->plan.Cancel();
         if (impl_->producer)
             impl_->producer->cancel_capture();
