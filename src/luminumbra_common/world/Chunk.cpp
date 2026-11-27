@@ -67,9 +67,9 @@ bool Chunk::has_complete_water_state() const {
 bool Chunk::same_water_state(const Chunk& rhs) const {
     const auto& lhs = *this;
     // Legacy containers have no per-layer water revision or precedence. Only
-    // equal evolution-relevant state can represent duplicate copies of a column.
-    // Persisted mirrors gate queries/sources and resizing, so ambiguous mirrors
-    // also refuse migration. Render counters and source masks are accelerators.
+    // equal evolution-relevant state represents duplicate copies of a column.
+    // Persisted mirrors gate queries/sources and resizing, so they participate
+    // in equality. Render counters and source masks are accelerators.
     return lhs.water_depth_mm == rhs.water_depth_mm && lhs.water_bed_mm == rhs.water_bed_mm &&
            lhs.water_edge_flux == rhs.water_edge_flux &&
            lhs.water_level_data == rhs.water_level_data &&
