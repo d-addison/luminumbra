@@ -266,6 +266,36 @@ class RenderRunnerLogTests(unittest.TestCase):
                     process_runner.report_timeout(receipt, log)
                 self.assertIsNone(receipt['last_observed_phase'])
 
+    def test_unexpected_drainer_failures_reach_the_receipt(self):
+        # Non-OSError failures, such as a write to a closed file, used to end the
+        # drainer silently and leave the log marked complete.
+        failures = (ValueError('write to closed file'), RuntimeError('synthetic reader failure'))
+        for failure in failures:
+            for stage in ('read', 'write'):
+                with self.subTest(failure=type(failure).__name__, stage=stage):
+                    receipt = dict(timeout_seconds=180, evidence_errors=[])
+                    sink = io.BytesIO()
+                    output = mock.Mock(wraps=sink)
+                    if stage == 'write':
+                        output.write.side_effect = failure
+                    log = mock.Mock()
+                    log.open.return_value = contextlib.nullcontext(output)
+                    blocks = iter((b'EnsureSurfaceReadyNear/generation-drain\n', b''))
+
+                    def read_block():
+                        if stage == 'read':
+                            raise failure
+                        return next(blocks)
+
+                    with mock.patch.object(process_runner, '_log_pipe_reader', return_value=read_block):
+                        with mock.patch.object(process_runner.threading, 'excepthook') as excepthook:
+                            with process_runner.bounded_log(log, receipt):
+                                pass
+                    excepthook.assert_not_called()
+                    self.assertTrue(receipt['log_truncated'])
+                    self.assertIn(f'log drain: {type(failure).__name__}: {failure}',
+                                  receipt['evidence_errors'])
+
 
 class RenderRunnerTests(unittest.TestCase):
     def setUp(self):
