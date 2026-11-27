@@ -561,7 +561,9 @@ def bounded_log(log, receipt, *, exclusive=False):
     reader, writer = os.pipe()
     with os.fdopen(reader, 'rb', buffering=0) as source, os.fdopen(writer, 'wb', buffering=0) as destination:
         read_block = _log_pipe_reader(source.fileno())
-        with log.open('xb' if exclusive else 'wb') as output:
+        log_context = log.open('xb' if exclusive else 'wb')
+        output = log_context.__enter__()
+        try:
             receipt.update(log_truncated=False, log_limit_bytes=MAX_LOG_BYTES, log_bytes_retained=0)
 
             def drain():
@@ -618,6 +620,15 @@ def bounded_log(log, receipt, *, exclusive=False):
                 finally:
                     stopped.set()
                     worker.join()
+        finally:
+            # Closing flushes buffered bytes again, so an earlier flush failure can
+            # recur here. Record it as incomplete retention; never let it replace
+            # the process exception (such as TimeoutExpired) that is propagating.
+            try:
+                log_context.__exit__(None, None, None)
+            except OSError as error:
+                receipt['evidence_errors'].append(f'log close: {error}')
+                receipt['log_truncated'] = True
 
 
 def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_path,

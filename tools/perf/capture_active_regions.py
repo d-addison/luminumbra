@@ -22,12 +22,35 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_active_regions as check
-from fixture_hash import fixture_entries
+from fixture_hash import FixtureBudget, fixture_entries
 from fixture_paths import open_regular
 from resolved_fixture import resolved_fixture_hash
 
 
 commands = check.commands
+
+
+def staged_libraries(binary, budget=None):
+    """Bound all sibling entries, including ignored names, before collecting."""
+    budget = FixtureBudget() if budget is None else budget
+    libraries = []
+    with os.scandir(binary.parent) as scanner:
+        for entry in scanner:
+            budget.take(1)
+            name = entry.name.lower()
+            if name.endswith((".dll", ".so", ".dylib")) or ".so." in name:
+                libraries.append(Path(entry.path))
+    return sorted(libraries, key=lambda path: path.name)
+
+
+def library_identity(binary):
+    libraries = {}
+    remaining = check.MAX_TOTAL
+    for path in staged_libraries(binary):
+        item = check.digest_file(path, limit=remaining)
+        remaining -= item["size"]
+        libraries[path.name] = item
+    return hashlib.sha256(check.canonical(libraries).encode("utf-8")).hexdigest()
 
 
 def source_revision(repository, runner):
@@ -45,6 +68,8 @@ def identities(repository, root, binary, dump_binary, preset, runner):
     return {"revision": source_revision(repository, runner),
             "binary_sha256": check.digest_file(binary)["sha256"],
             "dump_binary_sha256": check.digest_file(dump_binary)["sha256"],
+            "binary_libraries_sha256": library_identity(binary),
+            "dump_binary_libraries_sha256": library_identity(dump_binary),
             "content_sha256": resolved_fixture_hash(root),
             "systems_sha256": check.digest_file(root / "data/common/systems.json")["sha256"],
             "preset_sha256": check.digest_file(root / "worlds/atlas/presets" / (preset + ".json"))["sha256"]}
@@ -78,10 +103,13 @@ def snapshot_inputs(root, binary, dump_binary, directory):
     """Freeze runtime inputs and executables without hard links or path rereads."""
     runtime = directory / "runtime"
     runtime.mkdir()
-    # fixture_entries caps the complete runtime scan at 4096 entries/depth 64.
-    # All copied bytes, including both binaries, share the 2 GiB admission cap;
+    # All runtime and executable-directory scans share 4096 entries/depth 64.
+    # All copied bytes, including binaries and libraries, share the 2 GiB cap;
     # each copy uses at most 1 MiB of memory and a verified regular-file handle.
-    entries = list(fixture_entries(root))
+    budget = FixtureBudget()
+    data = root / "data"
+    entries = list(fixture_entries(root, budget=budget, separate_roots=(data,)))
+    entries.extend(fixture_entries(data, budget=budget, depth_offset=1))
     copies = [(root, path, runtime / path.relative_to(root), False)
               for path, _, status in entries if stat.S_ISREG(status.st_mode)]
     for path, _, status in entries:
@@ -92,6 +120,8 @@ def snapshot_inputs(root, binary, dump_binary, directory):
         target = directory / name / source.name
         target.parent.mkdir()
         copies.append((source.parent, source, target, True))
+        for library in staged_libraries(source, budget):
+            copies.append((source.parent, library, target.parent / library.name, False))
         selected.append(target)
     remaining = check.MAX_TOTAL
     for source_root, source, target, executable in copies:
@@ -128,8 +158,8 @@ def capture_snapshot(args, runner, directory):
     identity = identities(repository, root, binary, dump_binary, args.preset, runner)
     tour_path = args.tour.absolute()
     tour = check.parse(check.read(tour_path.parent, tour_path.name))
-    check.require(isinstance(tour, dict) and tour.get("identity") == identity,
-                  "tour identity mismatch")
+    check.require(isinstance(tour, dict) and tour.get("schema") == "luminumbra.active_region_tour.v2"
+                  and tour.get("identity") == identity, "tour identity/schema mismatch")
     check.location(tour.get("save_root"))
     outside(evidence, (Path(tour["save_root"]), tour_path.parent))
     stages = tour.get("stages")
@@ -140,6 +170,7 @@ def capture_snapshot(args, runner, directory):
         refs.append(stage.get("log"))
         if stage.get("name") in check.TOUR_STAGES[2:]:
             refs.append(stage.get("receipt"))
+            refs.append(stage.get("saved_member"))
     # Read a bounded, complete source bundle before creating the destination.
     check.require(len(set(refs)) == len(refs), "duplicate tour artifact reference")
     inputs = {}
@@ -155,7 +186,7 @@ def capture_snapshot(args, runner, directory):
     systems = check.read(root, "data/common/systems.json")
     preset = check.read(root, "worlds/atlas/presets/" + args.preset + ".json")
     evidence.mkdir(parents=True)  # Exclusive: existing, partial evidence is never reused.
-    manifest = {"schema": "luminumbra.active_region_capture.v1", "identity": identity,
+    manifest = {"schema": "luminumbra.active_region_capture.v2", "identity": identity,
                 "configuration": config, "systems": "systems.json", "preset": "preset.json",
                 "binary": binary.as_posix(), "dump_binary": dump_binary.as_posix(),
                 "runtime_root": root.as_posix(), "capture_root": evidence.as_posix(),
@@ -214,6 +245,7 @@ def capture_snapshot(args, runner, directory):
         stage["log"] = "tour/" + stage["log"]
         if "receipt" in stage:
             stage["receipt"] = "tour/" + stage["receipt"]
+            stage["saved_member"] = "tour/" + stage["saved_member"]
     tour["verified_dump"] = "verified-ledger.json"
     tour["exporter"] = invoke([dump_binary.as_posix(), (evidence / tour["ledger"]).as_posix()],
                               "exporter.log", stdout_name=tour["verified_dump"])

@@ -3724,19 +3724,30 @@ void MigrateLegacyWaterColumns(WorldStreamingState& state,
         }
         auto coords = source->get_coords();
         coords.y = 0;
-        const auto [column, inserted] = columns.emplace(Chunk::calculate_id(coords), source);
-        if (!inserted && !EqualLegacyWater(*column->second, *source)) {
-            throw WorldPersistenceRefusal(
-                "Saved-input admission refused: conflicting legacy water records.");
-        }
+        // Sources arrive in packed-id order. Without surface water, retain the
+        // first record verbatim; never average, resample or combine fluxes.
+        columns.emplace(Chunk::calculate_id(coords), source);
     }
     // Admission retained every existing destination, including cold Y=0 terrain.
     // A missing staged destination is proven absent from the validated inventory.
     std::map<ChunkID, std::shared_ptr<Chunk>> destinations;
-    for (const auto& [id, source] : columns) {
+    for (auto& [id, source] : columns) {
         auto destination = state.find_chunk(id);
         if (!destination) {
             destination = std::make_shared<Chunk>(Chunk::decode_id(id));
+        }
+        if (HasPersistedWater(*destination)) {
+            if (!HasValidWaterColumnState(*destination)) {
+                throw WorldPersistenceRefusal(
+                    "Saved-input admission refused: incomplete legacy water destination.");
+            }
+            // Enabled frame-water sources resolved to Y=0. On conflict its saved
+            // grid is the column authority, including dormant/Off state. Equal
+            // records keep the old first representative (including signed zeros),
+            // so every previously admitted migration remains byte-identical.
+            if (!EqualLegacyWater(*destination, *source)) {
+                source = destination;
+            }
         }
         // Charge destination terrain plus a second grid before copying. The
         // extra source charge conservatively includes its terrain and mirrors.
@@ -3748,11 +3759,6 @@ void MigrateLegacyWaterColumns(WorldStreamingState& state,
                 "Saved-input admission refused: legacy water migration storage cap.");
         }
         migration_bytes += destination_bytes + copy_bytes;
-        if (HasPersistedWater(*destination) &&
-            (!HasValidWaterColumnState(*destination) || !EqualLegacyWater(*destination, *source))) {
-            throw WorldPersistenceRefusal(
-                "Saved-input admission refused: conflicting legacy water destination.");
-        }
         destinations.emplace(id, destination);
     }
     // Only private load staging changes below. A subsequent allocation/read
@@ -10073,7 +10079,7 @@ bool WorldSaveService::load_world_impl(WorldStreamingState& state,
         // must discard the staged chunks just like cancellation during a read.
         if (stop.stop_requested())
             return reject("Saved-world validation cancelled.");
-        // Stable packed-id order also makes the selected equal duplicate independent
+        // Stable packed-id order also makes the selected fallback independent
         // of container order. Admission covers every source before any publication.
         if (!legacy_water.empty()) {
             std::sort(
