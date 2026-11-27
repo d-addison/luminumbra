@@ -12,8 +12,9 @@ This only classifies. It never changes a limit or a verdict. Exit 0 on success, 
 invalid input (paths, JSON/schema/field types, decoding, links or limits).
 Limits: 16 MiB per file, 1,000 receipts, 100,000 discovery entries/log lines,
 65,536 characters per log line. Over-limit input exits 2 without a summary.
-Retained diagnostic strings are limited to 300 characters. Logs are streamed and
-strictly decoded as UTF-8 or BOM-marked UTF-16. Receipts/logs must be regular files
+Retained diagnostic strings are limited to 300 characters. Complete logs are
+streamed and strictly decoded as UTF-8 or BOM-marked UTF-16; truncated logs are
+validated as bytes without assigning a shutdown stage. Receipts/logs must be regular files
 within the supplied evidence directory (or an explicit receipt's parent).
 """
 import argparse
@@ -252,6 +253,8 @@ def load_receipt(path, source):
     for name in ('log_tail', 'last_observed_phase'):
         if name in data:
             require(name, lambda v: v is None or isinstance(v, str))
+    if 'log_truncated' in data:
+        require('log_truncated', lambda v: type(v) is bool)
     return data
 
 
@@ -310,16 +313,20 @@ def last_shutdown_stage(log_path, source):
     return stage
 
 
-def timed_out_fields(receipt_path, log_suffix, root):
+def timed_out_fields(receipt_path, log_suffix, root, *, log_truncated=False):
     validate_log_suffix(log_suffix)
     log_path = receipt_path.with_name(receipt_path.name[:-len(RECEIPT_SUFFIX)] + log_suffix)
     try:
         with open_regular_file(log_path, root) as source:
-            stage = last_shutdown_stage(log_path, source)
+            if log_truncated:
+                bounded_bytes(log_path, source=source)
+                stage = None
+            else:
+                stage = last_shutdown_stage(log_path, source)
     except FileNotFoundError:
         return dict(log_path=str(log_path), log_missing=True, last_shutdown_stage=None,
                     placement=None)
-    placement = NO_BREADCRUMBS if stage is None else 'in_' + stage
+    placement = None if log_truncated else NO_BREADCRUMBS if stage is None else 'in_' + stage
     return dict(log_path=str(log_path), log_missing=False, last_shutdown_stage=stage,
                 placement=placement)
 
@@ -329,13 +336,16 @@ def summarize(receipt_path, receipt, log_suffix, root):
                  binary_path=receipt['binary_path'][:MAX_EXCERPT_CHARS],
                  timeout_seconds=receipt['timeout_seconds'],
                  elapsed_seconds=receipt['elapsed_seconds'])
+    if receipt.get('log_truncated', False):
+        entry['log_truncated'] = True
     if receipt['outcome'] == 'returned':
         entry.update(return_code=receipt['return_code'],
                      capture_status=receipt['capture_status'])
     elif receipt['outcome'] == 'spawn_error':
         entry.update(exception_type=receipt['exception_type'][:MAX_EXCERPT_CHARS])
     else:
-        entry.update(timed_out_fields(receipt_path, log_suffix, root))
+        entry.update(timed_out_fields(receipt_path, log_suffix, root,
+                                     log_truncated=receipt.get('log_truncated', False)))
     return entry
 
 

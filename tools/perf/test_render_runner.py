@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Client-process regression tests for the opt-in render measurement runner."""
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -12,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 # Resolve sibling modules for direct execution with isolated Python.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -98,7 +101,7 @@ def _report_timeout(receipt, log):
         complete_lines = complete_lines[1:]
     complete_lines = [line for line in complete_lines if line.endswith('\n')]
     phases = [line for line in complete_lines
-              if SURFACE_READY_PHASE.search(line)]
+              if not receipt.get('log_truncated', False) and SURFACE_READY_PHASE.search(line)]
     last_phase = phases[-1].strip() if phases else None
     receipt.update(log_tail=tail, last_observed_phase=last_phase)
     # Diagnostics are best effort: a closed or failing stderr must not replace
@@ -106,7 +109,9 @@ def _report_timeout(receipt, log):
     try:
         print(f"render runner: timed out after {receipt['timeout_seconds']} s", file=sys.stderr)
         print(tail, file=sys.stderr)
-        print('last EnsureSurfaceReadyNear phase: ' + (last_phase or '(none observed)'),
+        phase_text = ('(unknown; log retention incomplete)' if receipt.get('log_truncated', False)
+                      else last_phase or '(none observed)')
+        print('last EnsureSurfaceReadyNear phase: ' + phase_text,
               file=sys.stderr)
     except (OSError, ValueError):
         pass
@@ -160,6 +165,71 @@ def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_
 def _require_evidence(errors):
     if errors:
         raise RuntimeError('Render runner evidence could not be retained: ' + '; '.join(errors))
+
+
+class RenderRunnerLogTests(unittest.TestCase):
+    """Device-free contracts also collected by the deferred-stack CI suite."""
+
+    def test_timeout_incomplete_retention_suppresses_prefix_phase(self):
+        payload = b'EnsureSurfaceReadyNear/generation-drain\r\n'
+        for report in (_report_timeout, process_runner.report_timeout):
+            for truncated in (False, True):
+                with self.subTest(report=report.__module__, truncated=truncated):
+                    receipt = dict(timeout_seconds=180, evidence_errors=[], log_truncated=truncated)
+                    log = mock.Mock()
+                    log.open.return_value = io.BytesIO(payload)
+                    diagnostic = io.StringIO()
+                    with contextlib.redirect_stderr(diagnostic):
+                        report(receipt, log)
+                    self.assertEqual(receipt['log_tail'], payload.decode())
+                    self.assertEqual(receipt['last_observed_phase'],
+                                     None if truncated else payload.decode().strip())
+                    if truncated:
+                        self.assertIn('unknown; log retention incomplete', diagnostic.getvalue())
+
+    def test_retention_failures_mark_logs_incomplete(self):
+        prefix = b'EnsureSurfaceReadyNear/generation-drain\n'
+        for failure in ('write', 'short_write', 'flush', 'read'):
+            with self.subTest(failure=failure):
+                receipt = dict(timeout_seconds=180, evidence_errors=[])
+                sink = io.BytesIO()
+                blocks = iter((prefix, b'later output', b'discarded output', b''))
+                writes = []
+
+                def write(block):
+                    writes.append(block)
+                    if len(writes) == 2:
+                        if failure == 'write':
+                            raise OSError('synthetic write failure')
+                        if failure == 'short_write':
+                            return sink.write(block[:1])
+                    return sink.write(block)
+
+                def read_block():
+                    block = next(blocks)
+                    if failure == 'read' and block == b'later output':
+                        raise OSError('synthetic read failure')
+                    return block
+
+                output = mock.Mock(wraps=sink)
+                output.write.side_effect = write
+                if failure == 'flush':
+                    output.flush.side_effect = OSError('synthetic flush failure')
+                log = mock.Mock()
+                log.open.return_value = contextlib.nullcontext(output)
+                with mock.patch.object(process_runner, '_log_pipe_reader', return_value=read_block):
+                    with process_runner.bounded_log(log, receipt):
+                        pass
+                self.assertTrue(receipt['log_truncated'])
+                self.assertTrue(receipt['evidence_errors'])
+                self.assertEqual(receipt['log_bytes_retained'], len(sink.getvalue()))
+                self.assertFalse(any('byte cap' in error for error in receipt['evidence_errors']))
+                if failure in ('write', 'short_write'):
+                    self.assertEqual(writes, [prefix, b'later output'])
+                log.open.return_value = io.BytesIO(sink.getvalue())
+                with contextlib.redirect_stderr(io.StringIO()):
+                    process_runner.report_timeout(receipt, log)
+                self.assertIsNone(receipt['last_observed_phase'])
 
 
 class RenderRunnerTests(unittest.TestCase):
