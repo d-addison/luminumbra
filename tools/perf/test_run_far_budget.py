@@ -4,6 +4,7 @@ import contextlib
 import copy
 import io
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -16,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import far_budget as budget
 import render_runner_process as process
 import run_far_budget as runner
+import qualification_matrix as matrix_lib
 from test_far_budget import synthetic_capture
 
 
@@ -39,6 +41,121 @@ def write_evidence(root, cell, data):
 
 
 class FarBudgetRunnerTests(unittest.TestCase):
+    def test_observation_admission_boundaries_and_overflow(self):
+        frames = matrix_lib.benchmark_observation_frames
+        for arguments, expected in (((18000, 8008), 36000), ((400, 18000), 28392),
+                                    ((400, 1800, 0, 1), 15792),
+                                    ((2200, 1800, 0, 1), 17592),
+                                    ((400, 18000, 408, 2), 36000), ((18000, 5000), 32992), ((0, 1), 9993)):
+            self.assertEqual(frames(*arguments), expected)
+        for arguments in ((18000, 18000), (18000, 8009), (400, 18000, 409, 2),
+                          (400, 18000, 0, 3), (18000, 5000, 0, 1), (1, 1, 2**64, 0), (1, 1, 0, 2**64),
+                          (18001, 1), (1, 0), (1, 18001), (-1, 1), (1, 1, -1),
+                          (1, 1, 0, -1), (True, 1), (1, 1.0), (1, '1'), (1, None)):
+            with self.subTest(arguments=arguments), self.assertRaises(ValueError):
+                frames(*arguments)
+
+    def test_native_observation_budget_source_parity(self):
+        root = budget.ROOT / 'src/luminumbra_client'
+        workload = (root / 'app/RenderWorkload.h').read_text()
+        presentation = (root / 'world/WorldPresentation.h').read_text()
+        measurement = (root / 'app/RenderMeasurement.h').read_text()
+        constants = ((workload, 'kMaxReloadSettlingPasses', matrix_lib.MAX_RELOAD_SETTLING_PASSES),
+                     (workload, 'kMaxBenchmarkUploadWaitFrames', matrix_lib.MAX_BENCHMARK_UPLOAD_WAIT_FRAMES),
+                     (presentation, 'kWorldPresentationFrameDeadline', matrix_lib.WORLD_PRESENTATION_FRAME_DEADLINE),
+                     (measurement, 'kMaxFrames', matrix_lib.MAX_BENCHMARK_FRAMES))
+        for source, name, value in constants:
+            self.assertRegex(source, rf'\b{name} = {value};')
+        self.assertIn('kMaxBudgetObservations = 2 * kMaxFrames;', workload)
+        self.assertEqual(matrix_lib.MAX_BUDGET_OBSERVATIONS,
+                         2 * matrix_lib.MAX_BENCHMARK_FRAMES)
+        compact = re.sub(r'\s+', ' ', workload)
+        for fragment in ('reload_frames = kWorldPresentationFrameDeadline + kMaxReloadSettlingPasses;',
+                         'total = kWorldPresentationFrameDeadline + 2 * kMaxBenchmarkUploadWaitFrames;',
+                         'for (const auto frames : {warmup, measured, runtime_boot})',
+                         'frames > kMaxBudgetObservations - total', 'total += frames;',
+                         'reloads > (kMaxBudgetObservations - total) / reload_frames',
+                         'return total + reloads * reload_frames;'):
+            self.assertIn(fragment, compact)
+        recorder = (root / 'app/FarBudgetMeasurement.h').read_text()
+        self.assertIn('kMaxObservations = kMaxBudgetObservations;', recorder)
+
+    def test_far_runner_admission_precedes_directories_and_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / 'absent'
+            matrix = budget.load_matrix()
+            expanded = budget.cells(matrix)
+            matrix.update(warmup_frames=18000, measured_frames=18000)
+            cell = next(item for item in expanded if item['workload'] == 'settled')
+            world = copy.deepcopy(matrix['worlds'][0])
+            world['pose'] = dict(x=1.0, y=2.0, z=3.0, yaw=4.0, pitch=5.0)
+            with self.assertRaisesRegex(ValueError, '36000'):
+                runner.command(cell, world, matrix, 'client', 'capture', None)
+            with self.assertRaisesRegex(ValueError, '36000'):
+                runner.launch_cell(out, matrix, cell, world, client=Path('client'),
+                                   runtime_root=Path('runtime'), build_manifest=None, timeout=1)
+            self.assertFalse(out.exists())
+            with mock.patch.object(budget, 'load_matrix', return_value=matrix), \
+                    mock.patch.object(budget, 'cells', return_value=expanded), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(runner.main(['--out-dir', str(out)]), 2)
+            self.assertFalse(out.exists())
+            matrix.update(measured_frames=8008)
+            # Fixed view fits exactly, but v1 traversal still reserves 18000.
+            self.assertEqual(runner.admit_cell(cell, matrix), 36000)
+            self.assertIn('8008', runner.command(cell, world, matrix, 'client', 'capture', None))
+            with mock.patch.object(budget, 'load_matrix', return_value=matrix), \
+                    mock.patch.object(budget, 'cells', return_value=expanded), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(runner.main(['--out-dir', str(out)]), 2)
+            self.assertFalse(out.exists())
+
+    def test_qualification_admission_precedes_moves_settings_and_directories(self):
+        qualification = runner.qualification
+        matrix = matrix_lib.load_matrix(budget.ROOT / 'tools/perf/qualification/matrix.json')
+        matrix.update(warmup_frames=18000, fixed_view_measured_frames=18000)
+        cell = next(cell for cell in matrix_lib.cells(matrix) if cell['kind'] == 'fixed_view')
+        cell.update(pose=dict(x=1.0, y=2.0, z=3.0, yaw=4.0, pitch=5.0),
+                    pose_source=None, pose_provenance='native-confirmed:fixture')
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / 'out'
+            with self.assertRaisesRegex(ValueError, '36000'):
+                matrix_lib.build_command(cell, client='client', artifact='capture', root=budget.ROOT)
+            with self.assertRaisesRegex(ValueError, '36000'):
+                qualification.run_cell(cell, matrix, client='client', out_dir=out, root=budget.ROOT,
+                    python=sys.executable, checker='checker', timeout_seconds=1, environment={},
+                    checker_canonical=False, matrix_canonical=False, build_manifest=None,
+                    runtime_root=budget.ROOT)
+            self.assertFalse(out.exists())
+            admitted = dict(cell, measured_frames=8008)
+            command = matrix_lib.build_command(admitted, client='client', artifact='capture',
+                                               root=budget.ROOT)
+            self.assertEqual(command[command.index('--render-benchmark-frames') + 1], '8008')
+            out.mkdir()
+            marker = out / qualification.QUALIFICATION_NAME
+            marker.write_bytes(b'previous evidence')
+            cells = out / 'cells'
+            cells.mkdir()
+            capture = cells / (cell['id'] + '.json')
+            capture.write_bytes(b'previous capture')
+            with self.assertRaisesRegex(ValueError, '36000'):
+                qualification.run_cells(matrix, client=sys.executable, out_dir=out,
+                                        root=budget.ROOT, runtime_root=budget.ROOT)
+            self.assertEqual(marker.read_bytes(), b'previous evidence')
+            self.assertEqual(capture.read_bytes(), b'previous capture')
+            self.assertEqual(sorted(path.relative_to(out).as_posix() for path in out.rglob('*')),
+                             ['cells', 'cells/' + capture.name, marker.name])
+            with mock.patch.object(matrix_lib, 'load_matrix', return_value=matrix), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(qualification.main(['--client', sys.executable, '--out-dir', str(out), '--dry-run']), 2)
+            self.assertEqual(marker.read_bytes(), b'previous evidence')
+            self.assertEqual(capture.read_bytes(), b'previous capture')
+            absent = Path(directory) / 'absent'
+            with mock.patch.object(matrix_lib, 'load_matrix', return_value=matrix), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(qualification.main(['--client', sys.executable, '--out-dir', str(absent)]), 2)
+            self.assertFalse(absent.exists())
+
     def test_owned_capture_complete_and_missing_receipt_incomplete(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

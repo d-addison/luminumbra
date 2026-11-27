@@ -757,6 +757,32 @@ class FrameAttributionWiring(unittest.TestCase):
                          r"if \(collect_attribution\) \{ // Diagnostic[^\n]*? "
                          r"Attribution::ScatterSignature components\{\};")
 
+    def test_budget_admission_precedes_recording_and_bounds_failure_without_evidence(self):
+        main = compact(self.main)
+        admission = main.index('Measurement::benchmark_observation_frames(')
+        self.assertLess(admission, main.index('std::unique_ptr<Measurement::FarBudgetMeasurement>'))
+        self.assertLess(admission, main.index('start_world_load'))
+        self.assertLess(admission, main.index('RuntimeBootMetricsRecorder runtime_boot_recorder('))
+        self.assertIn('action.name == "reload" || action.name == "enter_world"', main)
+        self.assertIn('static_cast<std::size_t>(std::max(1, runtime_boot_frames))', main)
+        self.assertIn('Render benchmark admission refused: {}', main)
+        wait = block(self.main, 'const auto wait_for_uploads =')
+        bounded = block(wait, 'if (frame_budget &&')
+        for fragment in ('exit_code = 2;', 'glfwSetWindowShouldClose(window, GLFW_TRUE);',
+                         'return false;', 'LUMINUMBRA_CORE_ERROR'):
+            self.assertIn(fragment, bounded)
+        self.assertNotIn('WriteCapture', bounded)
+        self.assertNotIn('write_capture', bounded)
+        self.assertIn('!frame_budget->observe(!waiting) || wait.failed()', wait)
+        self.assertIn('"benchmark_warmup", g_app.capture.render_benchmark_path, '
+                      '&warmup_upload_budget)', main)
+        self.assertIn('"benchmark_capture", g_app.capture.render_benchmark_path, '
+                      '&capture_upload_budget)', main)
+        reload_failure = block(self.main, 'if (reload_settling_pending)')
+        self.assertIn('exit_code = 2;', reload_failure)
+        self.assertIn('break;', reload_failure)
+        self.assertNotIn('WriteCapture', reload_failure)
+
     def test_reload_drains_all_gates_before_resuming_script(self):
         load = block(self.main, 'const auto settle_workload_reload =')
         for fragment in ('const Measurement::ReloadWaterPause water_pause(*world);',

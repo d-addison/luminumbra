@@ -773,6 +773,7 @@ def run_gl_debug_pass(cell, command, *, client, build_manifest, systems_config,
 
 def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_seconds,
              environment, checker_canonical, matrix_canonical, build_manifest, runtime_root):
+    matrix_lib.admit_cell(cell)
     state, reason = matrix_lib.readiness(cell, root)
     cells_dir = out_dir / 'cells'
     cell_id = cell['id']
@@ -950,6 +951,9 @@ def run_cells(matrix, *, client, out_dir, root=planner.ROOT, python=sys.executab
     # A replacement checker may run, but its results never count toward qualification.
     checker_canonical = (runner.resolve_path(checker)
                         == runner.resolve_path(Path(root) / matrix_lib.VALIDATOR))
+    selected_cells = planner.select(matrix_lib.cells(matrix), only)
+    for cell in selected_cells:
+        matrix_lib.admit_cell(cell)
     reset_settings(out_dir)
     environment = isolated_environment(out_dir, environment)
     return [run_cell(cell, matrix, client=client, out_dir=out_dir, root=root, python=python,
@@ -957,7 +961,7 @@ def run_cells(matrix, *, client, out_dir, root=planner.ROOT, python=sys.executab
                      environment=environment, checker_canonical=checker_canonical,
                      matrix_canonical=matrix_canonical, build_manifest=build_manifest,
                      runtime_root=runtime_root)
-            for cell in planner.select(matrix_lib.cells(matrix), only)]
+            for cell in selected_cells]
 
 
 def display_entries(matrix, declared_refresh):
@@ -1178,7 +1182,8 @@ def main(argv=None):
         build_manifest = load_build_manifest(args.build_manifest)
         host_record = load_host_record(args.host_record)
         declared = parse_declarations(args.declare_refresh, matrix)
-        planner.select(matrix_lib.cells(matrix), args.only)
+        for cell in planner.select(matrix_lib.cells(matrix), args.only):
+            matrix_lib.admit_cell(cell)
     except (matrix_lib.MatrixError, UsageError) as error:
         print(f'run_qualification: {error}', file=sys.stderr)
         return 2
@@ -1220,6 +1225,8 @@ def main(argv=None):
 def run_locked(matrix, args, out_dir, client, checker, declared, provenance, build_manifest,
                host_record=None):
     """Execute and atomically publish while main owns the directory lock."""
+    for cell in planner.select(matrix_lib.cells(matrix), args.only):
+        matrix_lib.admit_cell(cell)
     path = out_dir / QUALIFICATION_NAME
     try:
         previous_host = read_host_bytes(out_dir / 'host.json', missing_ok=True)

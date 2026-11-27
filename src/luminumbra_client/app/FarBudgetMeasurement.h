@@ -1,6 +1,6 @@
 #pragma once
 
-#include "RenderMeasurement.h"
+#include "RenderWorkload.h"
 #include "luminumbra_client/rendering/FarWorldDiagnostics.h"
 #include <span>
 
@@ -43,9 +43,9 @@ struct FarBudgetFrame {
 
 class FarBudgetMeasurement {
 public:
-    // At most two existing maximum measurement windows, including cold/wait
-    // renders. Exhaustion refuses evidence; no observation is overwritten.
-    static constexpr std::size_t kMaxObservations = 2 * kMaxFrames;
+    // Admission reserves all phases within this fixed storage bound.
+    // Exhaustion refuses evidence; no observation is overwritten.
+    static constexpr std::size_t kMaxObservations = kMaxBudgetObservations;
     explicit FarBudgetMeasurement(std::size_t capacity)
         : frames_(checked_capacity(capacity)) {}
 

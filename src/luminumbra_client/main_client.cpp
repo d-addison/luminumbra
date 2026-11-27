@@ -1587,8 +1587,6 @@ int main(int argc, char* argv[]) {
         root_dir / "build/debug/test-artifacts/performance";
     const std::filesystem::path runtime_boot_output = GetCommandLineOption(
         argc, argv, "--runtime-boot-output", default_runtime_boot_output.string());
-    RuntimeBootMetricsRecorder runtime_boot_recorder(
-        runtime_boot_metrics_enabled, runtime_boot_frames, runtime_boot_output);
 
     // --render-benchmark <path>: average per-pass GPU timers over N settled in-world
     // frames -> JSON (render-optimization budget-gate capture). Pair with
@@ -1800,6 +1798,29 @@ int main(int argc, char* argv[]) {
             "Schema v3 requires 1..18000 measured frames and 1..18000 warmup frames");
         return 2;
     }
+    if (!g_app.capture.render_benchmark_path.empty()) {
+        try {
+            const auto reloads = traversal ? std::count_if(traversal->actions.begin(),
+                                                           traversal->actions.end(),
+                                                           [](const auto& action) {
+                                                               return action.name == "reload" ||
+                                                                      action.name == "enter_world";
+                                                           })
+                                           : 0;
+            Measurement::benchmark_observation_frames(
+                static_cast<std::size_t>(std::max(0, g_app.capture.render_benchmark_warmup)),
+                static_cast<std::size_t>(g_app.capture.render_benchmark_frames),
+                runtime_boot_metrics_enabled
+                    ? static_cast<std::size_t>(std::max(1, runtime_boot_frames))
+                    : 0,
+                static_cast<std::size_t>(reloads));
+        } catch (const std::invalid_argument& error) {
+            LUMINUMBRA_CORE_ERROR("Render benchmark admission refused: {}", error.what());
+            return 2;
+        }
+    }
+    RuntimeBootMetricsRecorder runtime_boot_recorder(
+        runtime_boot_metrics_enabled, runtime_boot_frames, runtime_boot_output);
     const std::string terrain_coverage_dir =
         GetCommandLineOption(argc, argv, "--render-benchmark-aovs", "");
     const bool terrain_coverage_bypass_camera_region_guard =
@@ -4790,6 +4811,7 @@ int main(int argc, char* argv[]) {
     using Luminumbra::Rendering::UploadSettlingWait;
     UploadSettlingWait scene_upload_wait, survey_upload_wait, scan_upload_wait;
     UploadSettlingWait warmup_upload_wait, capture_upload_wait;
+    Measurement::BenchmarkUploadWaitBudget warmup_upload_budget, capture_upload_budget;
     bool upload_warmup_complete = false;
     bool frame_scan_complete = false;
     bool survey_complete = false;
@@ -4838,13 +4860,21 @@ int main(int argc, char* argv[]) {
     };
     const auto wait_for_uploads = [&](UploadSettlingWait& wait,
                                       const char* phase,
-                                      const std::filesystem::path& report) {
+                                      const std::filesystem::path& report,
+                                      Measurement::BenchmarkUploadWaitBudget* frame_budget =
+                                          nullptr) {
         const auto& work = renderPipeline.get_last_mesh_upload_stats();
         const auto pending = work.terrain_uploads_deferred + work.water_uploads_deferred +
                              work.asset_uploads_deferred;
         const bool waiting = wait.waiting(pending,
                                           work.terrain_budget.adopted + work.water_budget.adopted +
                                               work.asset_budget.adopted);
+        if (frame_budget && (!frame_budget->observe(!waiting) || wait.failed())) {
+            LUMINUMBRA_CORE_ERROR("Benchmark upload wait refused during {}", phase);
+            exit_code = 2;
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+            return false;
+        }
         if (wait.failed()) {
             const nlohmann::json failure{{"status", "failed"},
                                          {"capture_complete", false},
@@ -6020,7 +6050,8 @@ int main(int argc, char* argv[]) {
                                        streaming.cumulative_scheduled_meshing,
                                        foliage ? foliage->build_generation() : 0})) {
                     if (watchdog.failed()) {
-                        LUMINUMBRA_CORE_ERROR("Reload streaming made no progress");
+                        LUMINUMBRA_CORE_ERROR(
+                            "Reload streaming exceeded its settling budget or made no progress");
                         return false;
                     }
                     break;
@@ -7784,7 +7815,8 @@ int main(int argc, char* argv[]) {
                 if (rb_warm + 1 < g_app.capture.render_benchmark_warmup ||
                     wait_for_uploads(warmup_upload_wait,
                                      "benchmark_warmup",
-                                     g_app.capture.render_benchmark_path)) {
+                                     g_app.capture.render_benchmark_path,
+                                     &warmup_upload_budget)) {
                     if (rb_warm < g_app.capture.render_benchmark_warmup)
                         ++rb_warm;
                     if (benchmark_v4) {
@@ -7908,7 +7940,8 @@ int main(int argc, char* argv[]) {
 
             } else if (wait_for_uploads(capture_upload_wait,
                                         "benchmark_capture",
-                                        g_app.capture.render_benchmark_path)) {
+                                        g_app.capture.render_benchmark_path,
+                                        &capture_upload_budget)) {
                 const double n = static_cast<double>(std::max(1, rb_count));
                 const double np = static_cast<double>(std::max(1, rb_nv_count));
                 const double gpu_sum = rb_total / n;

@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import far_budget as budget
 import render_runner_process as process
 import run_qualification as qualification
+import qualification_matrix as matrix_lib
 
 
 def outside_tree(path):
@@ -93,7 +94,14 @@ def inspect_cell(root, matrix, cell, world, reasons, traversal=None):
     return result
 
 
+def admit_cell(cell, matrix):
+    return matrix_lib.benchmark_observation_frames(
+        matrix['warmup_frames'], matrix_lib.MAX_BENCHMARK_FRAMES
+        if cell['workload'] == 'traversal' else matrix['measured_frames'])
+
+
 def command(cell, world, matrix, client, capture, script):
+    admit_cell(cell, matrix)
     argv = [str(client), '--no-audio', '--no-menu-backdrop', '--render-benchmark', str(capture),
             '--render-benchmark-schema', 'v3', '--capture-size', cell['display'],
             '--perf-profile', cell['profile'], '--render-benchmark-warmup', str(matrix['warmup_frames']),
@@ -119,6 +127,7 @@ def snapshot_script(work, world, source_root=budget.ROOT):
 
 
 def launch_cell(out, matrix, cell, world, *, client, runtime_root, build_manifest, timeout):
+    admit_cell(cell, matrix)
     selected = paths(out, cell)
     work = out / 'work' / cell['id']
     work.mkdir(parents=True)
@@ -185,6 +194,8 @@ def main(argv=None):
             raise ValueError('timeout must be positive and finite')
         matrix = budget.load_matrix(args.matrix)
         expanded = budget.cells(matrix)
+        for cell in expanded:
+            admit_cell(cell, matrix)
         worlds = {world['id']: world for world in matrix['worlds']}
         pending = {cell['id']: budget.dependencies(worlds[cell['world']], cell) for cell in expanded}
         out = outside_tree(args.out_dir)

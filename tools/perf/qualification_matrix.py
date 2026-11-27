@@ -40,6 +40,40 @@ class MatrixError(ValueError):
     """Raised for any malformed matrix, unknown cell, or cell that cannot run."""
 
 
+# Mirrored from RenderWorkload.h and WorldPresentation.h; parity is tested.
+MAX_BUDGET_OBSERVATIONS = 36000
+MAX_BENCHMARK_FRAMES = 18000
+WORLD_PRESENTATION_FRAME_DEADLINE = 1800
+MAX_RELOAD_SETTLING_PASSES = 1800
+MAX_BENCHMARK_UPLOAD_WAIT_FRAMES = 4096
+
+
+def benchmark_observation_frames(warmup, measured, runtime_boot=0, reloads=0):
+    """Refuse before any output mutation; integers are checked before arithmetic."""
+    if any(type(value) is not int or value < 0
+           for value in (warmup, measured, runtime_boot, reloads)):
+        raise MatrixError('benchmark frame budgets require nonnegative integers')
+    if warmup > MAX_BENCHMARK_FRAMES or not 1 <= measured <= MAX_BENCHMARK_FRAMES:
+        raise MatrixError('benchmark windows exceed frame bounds')
+    reload_frames = WORLD_PRESENTATION_FRAME_DEADLINE + MAX_RELOAD_SETTLING_PASSES
+    total = WORLD_PRESENTATION_FRAME_DEADLINE + 2 * MAX_BENCHMARK_UPLOAD_WAIT_FRAMES
+    for frames in (warmup, measured, runtime_boot):
+        if frames > MAX_BUDGET_OBSERVATIONS - total:
+            raise MatrixError('benchmark exceeds 36000 budget observations')
+        total += frames
+    if reloads > (MAX_BUDGET_OBSERVATIONS - total) // reload_frames:
+        raise MatrixError('benchmark reloads exceed 36000 budget observations')
+    return total + reloads * reload_frames
+
+
+def admit_cell(cell):
+    # These builders emit schema v3, whose v1 traversal reserves all 18000
+    # measured frames and cannot reload. Scripted v2 workloads require v4.
+    return benchmark_observation_frames(cell['warmup_frames'],
+                                        cell['measured_frames']
+                                        if cell['kind'] == 'fixed_view' else MAX_BENCHMARK_FRAMES)
+
+
 def _reject_constant(name):
     raise MatrixError(f'matrix: non-standard JSON constant {name}')
 
@@ -376,6 +410,7 @@ def _require_ready(cell, root):
 
 def build_command(cell, *, client, artifact, root):
     """Return the exact render-benchmark client argv for a ready cell."""
+    admit_cell(cell)
     _require_ready(cell, root)
     command = [str(client), '--no-audio', '--no-menu-backdrop', '--render-benchmark',
                str(artifact), '--render-benchmark-schema', 'v3',
