@@ -7389,7 +7389,8 @@ void SHIELD_WorldSystem::update_collision_slab(const IVec3& coords,
     candidate.revision = ++column.revision;
     constexpr std::size_t kSide = CHUNK_SIZE_X + 1;
     constexpr std::size_t kVertical = CHUNK_SIZE_Y + 1;
-    const bool has_sdf = source && !source->sdf_data.empty();
+    // Generated replacements still retire the slab, but never validate or project SDF.
+    const bool has_sdf = source && source->has_terrain_authority() && !source->sdf_data.empty();
     if (has_sdf && !column.samples)
         column.samples = std::make_unique<CollisionColumnSamples>();
     const bool partial = changed.size() == kCollisionSamples && slab.prepared && slab.valid;
