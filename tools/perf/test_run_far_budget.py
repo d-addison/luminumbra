@@ -117,9 +117,29 @@ class FarBudgetRunnerTests(unittest.TestCase):
             broken = copy.deepcopy(results)
             broken[0]['state'] = state
             index = runner.build_index(matrix, broken)
-            self.assertEqual(index['state'], 'incomplete')
+            self.assertEqual(index['state'], 'fail' if state == 'fail' else 'incomplete')
             self.assertIsNone(index['candidate_caps']['separately_measured_reserve_bytes'])
             self.assertTrue(all(tier['resident_bytes'] is None for tier in index['candidate_caps']['tiers']))
+
+    def test_measured_floor_failure_remains_fail_with_missing_or_invalid_cells(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data, matrix, cell, world, script = synthetic_capture(root)
+            for sample in data['frame_samples']:
+                sample['frame_wall_ms'] = budget.render_budget.FLOOR_MS + 1
+            values = [row['frame_wall_ms'] for row in data['frame_samples']]
+            data['distribution']['frame_wall_ms'] = dict(budget.distribution(values, 'ms'), unavailable_count=0)
+            data['avg']['frame_wall_ms'] = sum(values) / len(values)
+            write_evidence(root, cell, data)
+            failed = runner.inspect_cell(root, matrix, cell, world, [], script)
+            self.assertEqual(failed['state'], 'fail', failed)
+            matrix = budget.load_matrix()
+            for state in ('complete', 'incomplete', 'invalid', 'unknown'):
+                results = [dict(item, state=state) for item in budget.cells(matrix)]
+                position = next(i for i, item in enumerate(results) if item['id'] == cell['id'])
+                results[position] = failed
+                with self.subTest(other_cells=state):
+                    self.assertEqual(runner.build_index(matrix, results)['state'], 'fail')
 
     def test_isolated_cli_reports_all_missing_cells_outside_tree(self):
         with tempfile.TemporaryDirectory() as directory:

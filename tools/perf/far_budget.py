@@ -166,6 +166,10 @@ def qualify_receipt(section, root, approval, revision):
         data = decode(snapshots['capture'])
         if not isinstance(data, dict):
             raise ValueError('far budget capture must be an object')
+        expected_overrides = {'cli:--systems-config': receipt['systems_config']['path']}
+        if data.get('debug_overrides') != {'active': expected_overrides,
+                                          'declared': expected_overrides}:
+            raise ValueError('unapproved far budget capture overrides')
         # Snapshot the verified traversal bytes for the path-based validator.
         # A single private, closed file of at most 64 KiB is live at a time;
         # Windows never reads an open NamedTemporaryFile or removes open files.
