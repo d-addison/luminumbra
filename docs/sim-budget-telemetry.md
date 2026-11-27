@@ -308,11 +308,18 @@ that smoke independently. Commands include no-audio, simulation telemetry,
 Inherited `LUMINUMBRA_` overrides are removed from the child environment.
 Capture-only admission bounds are 32 matrix cells, 36,000 ticks per run,
 64 MiB per JSON artifact, 512 MiB total artifact input and a 512 MiB executable.
-Each process has a 600-second deadline. These bounds do not change shipping
-simulation limits. Larger workloads require separate qualification.
+Each process has a 600-second deadline and retains at most 16 MiB of combined
+stdout/stderr. Truncation or log I/O failure refuses publication; a per-cell
+`cell-N.log.json` records retained bytes, the limit, truncation and log completeness,
+including after process failure or timeout. Unmeasured status fields are null if
+log setup fails. These bounds do not change shipping simulation limits. Larger workloads
+require separate qualification.
 
 Only a complete validated matrix publishes `capture.json`, schema
-`luminumbra.regional_cadence_capture.v1`. It binds exact argument arrays, source
+`luminumbra.regional_cadence_capture.v2`. It binds argument arrays with executable
+and runtime paths replaced by role labels plus their SHA-256 digests, and artifact
+paths relative to the evidence directory. The capture root is recorded as `.`.
+Comparison also redacts these paths in legacy archives. Other bindings are source
 revision and dirty flag, executable SHA-256, the shared resolved-content hash,
 a canonical workload SHA-256, and canonical artifact digests. Source, executable
 and content identities are checked again before publication. Partial artifacts
@@ -339,7 +346,7 @@ completed work or claiming native correctness.
 Comparison revalidates complete matrices, commands, identities and artifact
 digests. Workload, resolved content and effective gates agree across endpoints;
 source revisions and executable digests may differ and remain in the report.
-The `luminumbra.regional_cadence_compare.v1` report separates
+The `luminumbra.regional_cadence_compare.v2` report separates
 `integer_work_and_service` (raw integer traces, counts, service gaps and truth
 hashes for both endpoints, with equality) from `duration_ms` (per-stage
 p50/p95/p99/maximum distributions). Duration changes and render-only mesh hashes
