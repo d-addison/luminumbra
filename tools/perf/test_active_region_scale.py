@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Fast report/capture contract, with synthetic samples and no engine launch."""
+"""Report/capture contracts, including an optional real benchmark integration."""
 
 from __future__ import annotations
 
+import argparse
 import copy
 import json
 from pathlib import Path
@@ -42,6 +43,17 @@ def runs():
 
 
 class ActiveRegionScaleReportContract(unittest.TestCase):
+    def test_benchmark_capture_is_registered(self):
+        root = Path(__file__).resolve().parents[2]
+        cmake = (root / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn('if(TARGET luminumbra_active_regions_bench)', cmake)
+        self.assertIn('add_test(NAME ActiveRegionScaleProducerContract', cmake)
+        self.assertIn('"${CMAKE_SOURCE_DIR}/tools/perf/test_active_region_scale.py"\n'
+                      '            --binary "$<TARGET_FILE:luminumbra_active_regions_bench>")', cmake)
+        tools = (root / "tools/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn('if(LUMINUMBRA_BUILD_TOOLS OR BUILD_TESTING)\n'
+                      '    add_executable(luminumbra_active_regions_bench active_regions_bench.cpp)', tools)
+
     def report(self, rows):
         return scale.build_report(rows, [8, 32], 4, 2)
 
@@ -212,5 +224,27 @@ class ActiveRegionScaleReportContract(unittest.TestCase):
                     scale.file_digest(invalid)
 
 
+def benchmark_capture(binary):
+    """Cross the real producer boundary and retain every fixed phase through capture."""
+    root = Path(__file__).resolve().parents[2]
+    with tempfile.TemporaryDirectory() as temporary:
+        evidence = Path(temporary) / "evidence"
+        report = scale.capture(binary.resolve(), root, evidence, [1, 8], 1, 2)
+        case = unittest.TestCase()
+        case.assertEqual(json.loads((evidence / "report.json").read_text(encoding="utf-8")), report)
+        case.assertEqual(len(report["summaries"]), 2 * (len(scale.SCHEDULER) + len(scale.SAVES)))
+        for records in (1, 8):
+            for repeat in range(2):
+                run = json.loads((evidence / f"sample-{records}-{repeat}.json").read_text(encoding="utf-8"))
+                scale.validate_sample(run["sample"], records, 1)
+                case.assertEqual(run["identity"], report["identity"])
+                case.assertTrue((evidence / f"fixture-{records}-{repeat}").is_dir())
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if "--binary" in sys.argv[1:]:
+        parser = argparse.ArgumentParser(description=benchmark_capture.__doc__)
+        parser.add_argument("--binary", type=Path, required=True)
+        benchmark_capture(parser.parse_args().binary)
+    else:
+        unittest.main()

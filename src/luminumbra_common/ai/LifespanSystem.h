@@ -39,6 +39,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -97,6 +98,19 @@ inline LifespanStats RunLifespanOnTick(entt::registry& reg,
         return entt::to_integral(a) < entt::to_integral(b);
     });
 
+    const auto elapsed_ticks = [&](entt::entity entity) {
+        return admission && reg.all_of<Comp::CreatureComponent>(entity)
+                   ? admission->ElapsedTicks(entity)
+                   : gate.ElapsedTicks(entity);
+    };
+    if constexpr (Elapsed) {
+        // Validate the entire admitted roster before aging even its first mortal.
+        for (auto entity : ents) {
+            if (elapsed_ticks(entity) > 65536u)
+                throw std::invalid_argument("Invalid lifespan elapsed window");
+        }
+    }
+
     for (auto e : ents) {
         auto& mortal = view.get<Comp::MortalComponent>(e);
 
@@ -108,8 +122,7 @@ inline LifespanStats RunLifespanOnTick(entt::registry& reg,
 
         std::uint32_t steps = 1;
         if constexpr (Elapsed) {
-            steps = admission && reg.all_of<Comp::CreatureComponent>(e) ? admission->ElapsedTicks(e)
-                                                                        : gate.ElapsedTicks(e);
+            steps = elapsed_ticks(e);
             if (steps == 0)
                 continue;
             // Closed-form integer path: stop at the FIRST fatal step, including

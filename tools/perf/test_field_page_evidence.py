@@ -45,6 +45,46 @@ def packet():
 
 
 class FieldPageEvidenceContract(unittest.TestCase):
+    def test_due_owners_stamp_current_tick_and_others_preserve_history(self):
+        for frame_index, owner_index in ((0, 0), (4, 1), (6, 0), (7, 0)):
+            for stamp in (0, frame_index):
+                value = packet()
+                value['frames'][frame_index]['owners'][owner_index]['last_ticked'] = stamp
+                with self.subTest(frame=frame_index, stamp=stamp), self.assertRaisesRegex(
+                        ValueError, 'last_ticked'):
+                    evidence.validate(value)
+        # An initialized Reduced owner may do boundary work without being due.
+        value = packet()
+        frame = value['frames'][5]
+        frame['owners'][0].update(state=1, last_ticked=5)
+        frame['due'].remove([0, 0])
+        frame['activation_visits'] -= 1
+        self.assertGreater(evidence.validate(value)['completed_work'], 0)
+        for stamp in (0, 4, 6):
+            changed = copy.deepcopy(value)
+            changed['frames'][5]['owners'][0]['last_ticked'] = stamp
+            with self.subTest(stamp=stamp), self.assertRaisesRegex(ValueError, 'last_ticked'):
+                evidence.validate(changed)
+        # Frozen entry and repeated frozen observations retain the prior stamp.
+        for frame_index in (8, 9):
+            changed = packet()
+            changed['frames'][frame_index]['owners'][0]['last_ticked'] = 7
+            with self.subTest(frame=frame_index), self.assertRaisesRegex(ValueError, 'last_ticked'):
+                evidence.validate(changed)
+
+    def test_uninitialized_nondue_owners_keep_zero_stamp_until_activation(self):
+        value = packet()
+        for frame in value['frames'][:2]:
+            frame.update(due=[], activation_visits=0, masks=[])
+            frame['owners'][0].update(cells=0, activated=False, completed_work=0, last_ticked=0)
+        value['frames'][2]['owners'][0]['activated'] = True
+        self.assertEqual(evidence.validate(value)['activations'], 2)
+        for frame_index in (0, 1):
+            changed = copy.deepcopy(value)
+            changed['frames'][frame_index]['owners'][0]['last_ticked'] = 1
+            with self.subTest(frame=frame_index), self.assertRaisesRegex(ValueError, 'last_ticked'):
+                evidence.validate(changed)
+
     def test_freeze_requires_consecutive_over_limit_work(self):
         for work in (0, 2, 10):
             value = packet()

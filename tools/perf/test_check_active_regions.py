@@ -19,12 +19,21 @@ from test_capture_active_regions import encoded, fixture, run_capture, trace
 
 
 class ActiveRegionEvidenceContract(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        temporary = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(temporary.cleanup)
+        cls.args, runner = fixture(Path(temporary.name))
+        cls.expected = run_capture(cls.args, runner)
+        cls.clean_evidence = {path.relative_to(cls.args.evidence_dir): path.read_bytes()
+                              for path in cls.args.evidence_dir.rglob("*") if path.is_file()}
+
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.args, runner = fixture(Path(self.temporary.name))
-        self.expected = run_capture(self.args, runner)
+        # Reuse one synthetic capture; each refusal still reads fresh copies of
+        # every artifact at the original, command-bound evidence location.
         self.root = self.args.evidence_dir
+        for name, raw in self.clean_evidence.items():
+            (self.root / name).write_bytes(raw)
         self.original = check.parse((self.root / "capture.json").read_bytes())
         self.manifest = copy.deepcopy(self.original)
 
@@ -53,16 +62,24 @@ class ActiveRegionEvidenceContract(unittest.TestCase):
         # false per-tick replay match. Final authority equality still qualifies.
         self.assertEqual(self.expected["availability_timing"], "observational")
 
-    def test_save_members_may_evolve_while_verified_edit_stays_identical(self):
-        tour = self.artifact("tour.json")
-        for index, stage in enumerate(tour["stages"][2:]):
-            saved = self.artifact(stage["receipt"])
-            saved["files"][0]["sha256"] = hashlib.sha256(str(index).encode()).hexdigest()
-            stage["saved_member_sha256"] = saved["files"][0]["sha256"]
-            lines = "".join(f"{row['path']}\0{row['size']}\0{row['sha256']}\n" for row in saved["files"])
-            saved["tree_digest"] = hashlib.sha256(lines.encode()).hexdigest()
-            self.update(stage["receipt"], saved)
-        self.update("tour.json", tour)
+    def test_saved_member_and_receipt_must_match_edited_payload_at_every_stage(self):
+        original = (self.root / "tour.json").read_bytes()
+        for index in range(2, len(check.TOUR_STAGES)):
+            tour = check.parse(original)
+            stage = tour["stages"][index]
+            raw = (self.root / stage["receipt"]).read_bytes()
+            with self.subTest(stage=stage["name"]):
+                saved = check.parse(raw)
+                saved["files"][0]["sha256"] = hashlib.sha256(b"lost edit").hexdigest()
+                stage["saved_member_sha256"] = saved["files"][0]["sha256"]
+                lines = "".join(f"{row['path']}\0{row['size']}\0{row['sha256']}\n" for row in saved["files"])
+                saved["tree_digest"] = hashlib.sha256(lines.encode()).hexdigest()
+                self.update(stage["receipt"], saved)
+                self.update("tour.json", tour)
+                with self.assertRaisesRegex(ValueError, "edited payload missing"):
+                    self.validate()
+                self.update(stage["receipt"], raw)
+        self.update("tour.json", original)
         self.assertTrue(self.validate()["passed"])
 
     def test_reconciled_header_tick_remains_valid(self):
@@ -186,6 +203,28 @@ class ActiveRegionEvidenceContract(unittest.TestCase):
         self.update("w2/moving.json", moving)
         with self.assertRaises(ValueError):
             self.validate()
+
+    def test_disabled_systems_config_cannot_be_overridden_by_effective_flags(self):
+        original = (self.root / "systems.json").read_bytes()
+        original_tour = (self.root / "tour.json").read_bytes()
+        for gate in ("active_regions", "plant_growth", "future_gate"):
+            for enabled in (False, None, 0, 1, "true"):
+                with self.subTest(gate=gate, enabled=enabled):
+                    self.manifest = copy.deepcopy(self.original)
+                    systems = check.parse(original)
+                    systems["sim"][gate]["enabled"] = enabled
+                    self.update("systems.json", systems)
+                    digest = self.manifest["files"]["systems.json"]["sha256"]
+                    self.manifest["identity"]["systems_sha256"] = digest
+                    for cell in self.manifest["cells"]:
+                        cell["identity"]["systems_sha256"] = digest
+                    tour = check.parse(original_tour)
+                    tour["identity"]["systems_sha256"] = digest
+                    for stage in tour["stages"]:
+                        stage["identity"]["systems_sha256"] = digest
+                    self.update("tour.json", tour)
+                    with self.assertRaisesRegex(ValueError, "shipping simulation gate"):
+                        self.validate()
 
     def test_malformed_evidence_and_unsupported_metadata(self):
         variants = [None, [], {}, dict(self.original, schema="future"),

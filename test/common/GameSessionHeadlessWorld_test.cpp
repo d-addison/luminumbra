@@ -1681,6 +1681,9 @@ protected:
         session.SetJobSystem(&jobs);
         session.SetActiveRegionsEnabled(GetParam());
     }
+    Luminumbra::IoExecutor& PersistenceWorkers() {
+        return jobs.io_executor();
+    }
     void CreateSnapshotSession(GameSession& session) {
         SCOPED_TRACE("create snapshot session");
         Configure(session);
@@ -15067,6 +15070,7 @@ TEST(GameSessionHeadlessWorldTest, FailedOpenPreservesFarCaptureBinding) {
     session.GetSimulationEventBus().subscribe([&](const auto&) {
         refused_inside_tick = true;
         EXPECT_FALSE(session.AcquireFarWorldCaptureBinding().current());
+        EXPECT_FALSE(session.PumpFarWorldAuthorityCapture(true));
     });
     session.GetSimulationEventBus().publish(1, "capture-binding", "");
     EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
@@ -15280,7 +15284,9 @@ TEST_P(SavedWorldPresetTest, SourceCaptureRetriesRefusedRefreshAfterRollback) {
             canonical, session.GetSimulationTickCount(), {}, &P::WorldSaveService::member_digest);
         ASSERT_TRUE(transaction.begin(nullptr));
         ASSERT_TRUE(session.SaveWorld());
-        session.PumpFarWorldAuthorityCapture();
+        EXPECT_FALSE(session.PumpFarWorldAuthorityCapture(true));
+        EXPECT_FALSE(producer->capture_status().paused);
+        EXPECT_FALSE(session.PumpFarWorldAuthorityCapture());
         EXPECT_EQ(producer->capture(), accepted);
         transaction.abort(nullptr);
     }
@@ -15289,16 +15295,25 @@ TEST_P(SavedWorldPresetTest, SourceCaptureRetriesRefusedRefreshAfterRollback) {
     const auto committed_bytes = ReadClockTestFile(metadata);
     ASSERT_FALSE(committed_bytes.empty());
     ASSERT_TRUE(P::WorldSaveService::write_file_durably(metadata, "{"));
-    session.PumpFarWorldAuthorityCapture();
+    EXPECT_FALSE(session.PumpFarWorldAuthorityCapture(true));
     EXPECT_EQ(producer->capture(), accepted);
     EXPECT_FALSE(producer->capture_status().latest_ready);
     EXPECT_FALSE(producer->capture_status().active);
     EXPECT_FALSE(producer->request_capture(windows));
     EXPECT_FALSE(producer->capture_read_error().empty());
-    session.PumpFarWorldAuthorityCapture();
+    EXPECT_FALSE(session.PumpFarWorldAuthorityCapture());
     EXPECT_EQ(producer->capture(), accepted);
     EXPECT_FALSE(producer->capture_status().latest_ready);
     ASSERT_TRUE(P::WorldSaveService::write_file_durably(metadata, committed_bytes));
+    // Refusal to dispatch refresh must also leave preparation unready and the
+    // refresh pending. Restoring the executor below must retry the same source.
+    PersistenceWorkers().shutdown();
+    for (const bool prepare_only : {false, true}) {
+        EXPECT_FALSE(session.PumpFarWorldAuthorityCapture(prepare_only));
+        EXPECT_EQ(producer->capture(), accepted);
+        EXPECT_FALSE(producer->capture_status().active);
+    }
+    PersistenceWorkers().startup();
     session.FenceFarWorldAuthorityReads(true);
     session.PumpFarWorldAuthorityCapture();
     EXPECT_EQ(producer->capture(), accepted);
@@ -15311,6 +15326,121 @@ TEST_P(SavedWorldPresetTest, SourceCaptureRetriesRefusedRefreshAfterRollback) {
     session.PumpFarWorldAuthorityCapture();
     ASSERT_TRUE(producer->capture_status().latest_ready);
     EXPECT_EQ(producer->capture()->committed.generation, generation);
+}
+
+TEST_P(SavedWorldPresetTest, SourceCapturePrepareOnlyRefreshesWithoutPumping) {
+    GameSession session;
+    EXPECT_FALSE(session.PumpFarWorldAuthorityCapture(true));
+    Configure(session);
+    ASSERT_TRUE(session.CreateWorld("Source preparation", "1337", "default"));
+    std::string error;
+    ASSERT_TRUE(session.EnableFarWorldAuthorityProducer(CaptureBindingConfig(), error)) << error;
+    auto* producer = session.GetFarWorldAuthorityProducer();
+    ASSERT_NE(producer, nullptr);
+    const std::array<P::WorldSaveService::AuthorityWindow, 1> windows{{{0, 0, 0, 0}}};
+    ASSERT_TRUE(producer->request_capture(windows));
+    for (unsigned attempt = 0; attempt < 8; ++attempt) {
+        EXPECT_TRUE(session.PumpFarWorldAuthorityCapture(true));
+    }
+    EXPECT_TRUE(producer->capture_status().queued);
+    EXPECT_FALSE(producer->capture_status().active);
+    EXPECT_EQ(producer->capture_progress().reads, 0u);
+    ASSERT_TRUE(session.PumpFarWorldAuthorityCapture());
+    ASSERT_TRUE(producer->capture_status().active);
+    for (unsigned attempt = 0; attempt < 8; ++attempt) {
+        EXPECT_TRUE(session.PumpFarWorldAuthorityCapture(true));
+    }
+    EXPECT_EQ(producer->capture_progress().reads, 0u);
+    EXPECT_TRUE(producer->capture_status().active);
+    session.FenceFarWorldAuthorityReads(true);
+    EXPECT_FALSE(session.PumpFarWorldAuthorityCapture(true));
+    EXPECT_TRUE(producer->capture_status().paused);
+    EXPECT_TRUE(producer->capture_status().active);
+    EXPECT_EQ(producer->capture_status().error,
+              Luminumbra::World::FarWorldAuthorityProducer::Error::None);
+    session.FenceFarWorldAuthorityReads(false);
+    ASSERT_TRUE(session.PumpFarWorldAuthorityCapture());
+    ASSERT_TRUE(producer->capture_status().latest_ready);
+    const auto* accepted = producer->capture();
+    ASSERT_NE(accepted, nullptr);
+    const auto reads = producer->capture_progress().reads;
+    ASSERT_TRUE(session.SaveWorld());
+    EXPECT_FALSE(producer->capture_status().latest_ready);
+    session.FenceFarWorldAuthorityReads(true);
+    EXPECT_FALSE(session.PumpFarWorldAuthorityCapture(true));
+    EXPECT_TRUE(producer->capture_status().paused);
+    session.FenceFarWorldAuthorityReads(false);
+    {
+        P::SaveTransaction transaction(session.GetWorldSaveDir(),
+                                       session.GetSimulationTickCount(),
+                                       {},
+                                       &P::WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        EXPECT_FALSE(session.PumpFarWorldAuthorityCapture(true));
+        EXPECT_FALSE(producer->capture_status().paused);
+        EXPECT_EQ(producer->capture(), accepted);
+        EXPECT_EQ(producer->capture_progress().reads, reads);
+        transaction.abort(nullptr);
+    }
+    const auto metadata = session.GetWorldSaveDir() / "world_info.json";
+    const auto committed_bytes = ReadClockTestFile(metadata);
+    ASSERT_FALSE(committed_bytes.empty());
+    ASSERT_TRUE(P::WorldSaveService::write_file_durably(metadata, "{"));
+    EXPECT_FALSE(session.PumpFarWorldAuthorityCapture(true));
+    EXPECT_EQ(producer->capture(), accepted);
+    ASSERT_TRUE(P::WorldSaveService::write_file_durably(metadata, committed_bytes));
+    // Success clears the refresh obligation, without consuming its queued capture.
+    EXPECT_TRUE(session.PumpFarWorldAuthorityCapture(true));
+    EXPECT_FALSE(producer->capture_status().active);
+    EXPECT_TRUE(producer->capture_status().queued);
+    EXPECT_EQ(producer->capture(), accepted);
+    EXPECT_EQ(producer->capture_progress().reads, reads);
+    ASSERT_TRUE(producer->request_capture(windows));
+    PersistenceWorkers().shutdown();
+    EXPECT_TRUE(session.PumpFarWorldAuthorityCapture(true));
+    PersistenceWorkers().startup();
+    ASSERT_TRUE(session.PumpFarWorldAuthorityCapture());
+    ASSERT_TRUE(session.PumpFarWorldAuthorityCapture());
+    EXPECT_TRUE(producer->capture_status().latest_ready);
+}
+
+TEST_P(SavedWorldPresetTest, SourceCapturePrepareOnlyFencesActiveSaveWithoutAging) {
+    GameSession session;
+    Configure(session);
+    ASSERT_TRUE(session.CreateWorld("Active source preparation", "1337", "default"));
+    std::string error;
+    ASSERT_TRUE(session.EnableFarWorldAuthorityProducer(CaptureBindingConfig(), error)) << error;
+    auto* producer = session.GetFarWorldAuthorityProducer();
+    ASSERT_NE(producer, nullptr);
+    const std::array<P::WorldSaveService::AuthorityWindow, 1> windows{{{0, 0, 0, 0}}};
+    ASSERT_TRUE(producer->request_capture(windows));
+    ASSERT_TRUE(session.PumpFarWorldAuthorityCapture());
+    ASSERT_TRUE(producer->capture_status().active);
+    {
+        P::SaveTransaction transaction(session.GetWorldSaveDir(),
+                                       session.GetSimulationTickCount(),
+                                       {},
+                                       &P::WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(session.SaveWorld());
+        // More preparations than the four-frame capture deadline prove that
+        // an enclosing save neither reads nor ages the active capture.
+        for (unsigned attempt = 0; attempt < 8; ++attempt) {
+            EXPECT_FALSE(session.PumpFarWorldAuthorityCapture(true));
+            EXPECT_TRUE(producer->capture_status().active);
+            EXPECT_FALSE(producer->capture_status().paused);
+            EXPECT_EQ(producer->capture_status().error,
+                      Luminumbra::World::FarWorldAuthorityProducer::Error::None);
+            EXPECT_EQ(producer->capture_progress().reads, 0u);
+        }
+        transaction.abort(nullptr);
+    }
+    EXPECT_TRUE(session.PumpFarWorldAuthorityCapture(true));
+    EXPECT_FALSE(producer->capture_status().active);
+    EXPECT_TRUE(producer->capture_status().queued);
+    ASSERT_TRUE(session.PumpFarWorldAuthorityCapture());
+    ASSERT_TRUE(session.PumpFarWorldAuthorityCapture());
+    EXPECT_TRUE(producer->capture_status().latest_ready);
 }
 
 namespace {

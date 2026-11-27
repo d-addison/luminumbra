@@ -792,7 +792,9 @@ void DrawGpuProfilerContents(Luminumbra::Rendering::RenderPipeline& renderPipeli
                 fw.indices,
                 fw.selection.submit ? "None" : "SubmissionOverride",
                 static_cast<int>(fw.water_capability));
-    if (fw.captured && fw.advanced && fw.selection.effective == FarWorldMode::Ladder) {
+    if (!fw.captured) {
+        ImGui::TextUnformatted("Frame streaming work unavailable (snapshot unavailable).");
+    } else if (fw.advanced && fw.selection.effective == FarWorldMode::Ladder) {
         ImGui::Text("upload attempts %zu debit %llu success %llu horizon refusal %d",
                     fw.upload.upload_attempts,
                     static_cast<unsigned long long>(fw.upload.upload_bytes),
@@ -807,7 +809,13 @@ void DrawGpuProfilerContents(Luminumbra::Rendering::RenderPipeline& renderPipeli
     for (std::size_t ti = 0; ti < budget_display.size(); ++ti) {
         const auto& tier_display = budget_display[ti];
         if (!tier_display.diagnostic) {
-            ImGui::Text("V%zu residency, pool sample and streaming work unavailable", ti + 1);
+            if (!fw.captured) {
+                ImGui::Text("V%zu residency, pool sample and streaming work unavailable "
+                            "(snapshot unavailable).",
+                            ti + 1);
+            } else {
+                ImGui::Text("V%zu residency, pool sample and streaming work unavailable", ti + 1);
+            }
             continue;
         }
         const auto& t = *tier_display.diagnostic;

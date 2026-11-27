@@ -6,8 +6,8 @@ file receipts. tour.json is an operator's edited-tour attestation: ordered
 edited/departed/saved/revisited/reopened stages, each with the same identity,
 worker count, successful command and verified edited-payload digest. The last
 three stages include standard save_receipt.v1 snapshots and saved_member_sha256
-for the containing file. The edit-specific payload digest is independent of
-other evolving simulation state in that file. Its ledger and the
+for the containing file, which must also match the edited payload digest.
+Its ledger and the
 production-codec export are retained and compared with a fresh exporter result.
 Availability samples are observations; only final moving authority must agree.
 """
@@ -265,7 +265,8 @@ def validate_tour(tour, evidence, identity, effective, config):
         if expected in TOUR_STAGES[2:]:
             final_files = save_receipt(evidence.json(stage.get("receipt")))
             require(isinstance(payload["path"], str) and payload["path"] in final_files
-                    and final_files[payload["path"]]["sha256"] == stage.get("saved_member_sha256"),
+                    and final_files[payload["path"]]["sha256"] == stage.get("saved_member_sha256")
+                    == payload["sha256"],
                     "edited payload missing from saved/revisited/reopened receipt")
     ledger = evidence.raw(tour.get("ledger"))
     require(final_files is not None and "chunks/region/active-regions.arl" in final_files,
@@ -313,7 +314,9 @@ def validate(root, manifest):
     require(isinstance(systems, dict) and isinstance(systems.get("sim"), dict), "invalid systems document")
     gates = {name for name, value in systems["sim"].items()
              if isinstance(value, dict) and "enabled" in value}
-    require("active_regions" in gates and all(effective.get(name) is True for name in gates)
+    require("active_regions" in gates
+            and all(systems["sim"][name]["enabled"] is True
+                    and effective.get(name) is True for name in gates)
             and all(effective.get(name) is True for name in ("finite_hydrology", "weather_rain")),
             "shipping simulation gate missing or disabled")
     cells = manifest.get("cells")

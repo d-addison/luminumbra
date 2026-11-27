@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Fast fixed-budget evidence contracts; all process execution is mocked."""
+"""Fast fixed-budget evidence contracts over synthetic processes and captures."""
 import contextlib
+import ctypes
 import copy
 import io
 import json
@@ -9,12 +10,14 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import capture_deferred_stack as capture
 from test_sim_budget_gate import write_capture
+from test_fixture_hash import directory_link, remove_directory_link
 
 
 class DeferredStackEvidenceTests(unittest.TestCase):
@@ -94,6 +97,146 @@ class DeferredStackEvidenceTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(capture.render_tests.RenderRunnerTests, method, render_process))
             stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
             return capture.capture(self.source, self.assets, self.binaries, self.build, self.evidence)
+
+    def test_selected_directory_aliases_preserve_artifact_checks(self):
+        alias = self.root / 'alias'
+        directory_link(alias, self.root)
+        self.addCleanup(remove_directory_link, alias)
+        self.evidence = alias / 'evidence'
+        manifest = self.collect()
+        self.assertTrue(manifest['complete'])
+        path, _profile = self.profile()
+        expected = capture.report(self.root / 'evidence', path)
+        self.assertEqual(capture.report(self.evidence, alias / path.name), expected)
+        self.assertEqual(capture.report(str(self.evidence), str(alias / path.name)), expected)
+        # Canonicalizing a selected root must not admit escaping artifacts.
+        foreign = self.root / 'foreign'
+        foreign.mkdir()
+        (foreign / 'render-first.process.json').write_bytes(
+            (self.root / 'evidence/0/render-first.process.json').read_bytes())
+        linked = self.root / 'evidence/linked'
+        directory_link(linked, foreign)
+        self.addCleanup(remove_directory_link, linked)
+        with self.assertRaisesRegex(capture.receipts.InputError, 'escapes'):
+            capture.read_json(linked / 'render-first.process.json', self.root / 'evidence')
+        self.assertFalse((self.source / 'evidence').exists())
+        with self.assertRaisesRegex(ValueError, 'outside'):
+            capture.capture(self.source, self.assets, self.binaries, self.build, alias / 'source/evidence')
+
+    def test_capture_bounds_logs_and_records_truncation_on_all_outcomes(self):
+        limit = 256
+        prefix = b'EnsureSurfaceReadyNear/generation-drain\n'
+        self.phase = (prefix + b'noise\n' * 20000).decode('ascii')
+        for failure in (None, 'timeout', 'spawn'):
+            with self.subTest(failure=failure), mock.patch.object(capture.runner, 'MAX_LOG_BYTES', limit, create=True):
+                self.failure = failure
+                self.evidence = self.root / ('bounded-' + str(failure))
+                self.collect()
+                report = capture.report(self.evidence)
+                self.assertFalse(report['passed'])
+                for row in report['runs']:
+                    for process in row['processes']:
+                        receipt = capture.read_json(Path(process['receipt']['path']))
+                        self.assertEqual(Path(process['log_path']).read_bytes(), self.phase.encode()[:limit])
+                        self.assertTrue(receipt['log_truncated'])
+                        self.assertEqual(receipt['log_bytes_retained'], limit)
+                        self.assertEqual(receipt['log_limit_bytes'], limit)
+                        self.assertTrue(any('byte cap' in error for error in receipt['evidence_errors']))
+                        self.assertTrue(process['log_truncated'])
+                        self.assertEqual(process['phase'], 'unknown')
+
+    def test_bounded_log_pipe_handles_real_python_output_and_empty_output(self):
+        for count in (0, 255, 256, 257, 200000):
+            log = self.root / 'pipe.log'
+            receipt = {'evidence_errors': []}
+            with self.subTest(count=count), mock.patch.object(capture.runner, 'MAX_LOG_BYTES', 256):
+                with capture.runner.bounded_log(log, receipt) as output:
+                    result = subprocess.run(
+                        [sys.executable, '-I', '-B', '-c',
+                         'import sys; sys.stdout.buffer.write(b"x" * int(sys.argv[1]))', str(count)],
+                        stdout=output, stderr=subprocess.STDOUT, timeout=5, check=False)
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(log.read_bytes(), b'x' * min(count, 256))
+                self.assertEqual(receipt['log_truncated'], count > 256)
+                self.assertEqual(bool(receipt['evidence_errors']), count > 256)
+
+    def test_log_drain_handles_open_writers_and_reports_io_failures(self):
+        path = self.root / 'drain.log'
+        receipt = {'evidence_errors': []}
+        # A descendant retaining stdout must not keep capture shutdown waiting.
+        with capture.runner.bounded_log(path, receipt) as output:
+            inherited = os.dup(output.fileno())
+        os.close(inherited)
+        self.assertEqual(path.read_bytes(), b'')
+        self.assertFalse(receipt['evidence_errors'])
+        # A continuously writing descendant cannot extend shutdown indefinitely.
+        receipt = {'evidence_errors': []}
+        with mock.patch.object(capture.runner.os, 'read', return_value=b'x' * 64), \
+                mock.patch.object(capture.runner, 'MAX_LOG_DRAIN_BYTES', 128), \
+                mock.patch.object(capture.runner, 'MAX_LOG_BYTES', 256):
+            with capture.runner.bounded_log(path, receipt):
+                pass
+        self.assertIn('log pipe exceeded shutdown drain cap', receipt['evidence_errors'])
+        self.assertLessEqual(path.stat().st_size, 256)
+        for operation in ('write', 'flush'):
+            receipt = {'evidence_errors': []}
+            sink = io.BytesIO()
+            with mock.patch.object(path.__class__, 'open', return_value=contextlib.nullcontext(sink)), \
+                    mock.patch.object(sink, operation, side_effect=OSError('full')):
+                with capture.runner.bounded_log(path, receipt) as output:
+                    output.write(b'queued output')
+            self.assertTrue(any('full' in error for error in receipt['evidence_errors']))
+        receipt = {'evidence_errors': []}
+        with mock.patch.object(capture.runner.os, 'read', side_effect=OSError('pipe read failed')):
+            with capture.runner.bounded_log(path, receipt):
+                pass
+        self.assertTrue(any('pipe read failed' in error for error in receipt['evidence_errors']))
+
+    def test_windows_log_pipe_peeks_before_reading_and_handles_closure(self):
+        kernel = SimpleNamespace(PeekNamedPipe=mock.Mock())
+        runtime = SimpleNamespace(get_osfhandle=mock.Mock(return_value=123))
+        with mock.patch.object(capture.runner.os, 'name', 'nt'), \
+                mock.patch.dict(sys.modules, msvcrt=runtime), \
+                mock.patch.object(ctypes, 'WinDLL', return_value=kernel, create=True), \
+                mock.patch.object(ctypes, 'get_last_error', return_value=109, create=True) as error, \
+                mock.patch.object(ctypes, 'WinError', side_effect=lambda code: OSError(code, 'peek failed'),
+                                  create=True), \
+                mock.patch.object(capture.runner.os, 'read', return_value=b'data') as read:
+            read_block = capture.runner._log_pipe_reader(42)
+            runtime.get_osfhandle.assert_called_once_with(42)
+            kernel.PeekNamedPipe.return_value = False
+            self.assertEqual(read_block(), b'')
+            read.assert_not_called()
+            error.return_value = 5
+            with self.assertRaisesRegex(OSError, 'peek failed'):
+                read_block()
+            kernel.PeekNamedPipe.return_value = True
+            with self.assertRaises(BlockingIOError):
+                read_block()
+            read.assert_not_called()
+            for available in (4, capture.runner.LOG_BLOCK_BYTES + 1):
+                def ready(_handle, _buffer, _size, _read, count, _left):
+                    count._obj.value = available
+                    return True
+                kernel.PeekNamedPipe.side_effect = ready
+                self.assertEqual(read_block(), b'data')
+                read.assert_called_with(42, min(available, capture.runner.LOG_BLOCK_BYTES))
+
+    def test_completed_readiness_requires_a_later_phase_breadcrumb(self):
+        starting = 'EnsureSurfaceReadyNear/generation-drain\r\n'
+        ready = 'EnsureSurfaceReadyNear: surface ready (took 10ms)\r\n'
+        cases = ((starting, 'boot'), (ready, 'unknown'),
+                 (starting + ready + 'simulation tick\n', 'unknown'),
+                 (starting + ready + 'Shutdown stage: world_save_started\n', 'save'),
+                 (starting + ready + 'Shutdown stage: world_readers_drained\n', 'streaming_wait'),
+                 ('Shutdown stage: world_save_started\n' + ready, 'unknown'),
+                 (ready + starting, 'boot'), ('unrelated EnsureSurfaceReadyNear text\n', 'unknown'),
+                 ('', 'unknown'))
+        path = self.root / 'phase.log'
+        for text, phase in cases:
+            with self.subTest(text=text):
+                path.write_bytes(text.encode())
+                self.assertEqual(capture.log_report(path, self.root)['phase'], phase)
 
     def test_process_map_matches_the_render_regressions(self):
         # The mocked runs replay RENDER_PROCESSES, so check the map against the
@@ -281,6 +424,10 @@ class DeferredStackEvidenceTests(unittest.TestCase):
         result = capture.report(self.evidence, populated_capture=path)
         self.assertEqual(len(result['populated']), 3)
         self.assertIn('sim_budget', result['populated'][0])
+        alias = self.root / 'populated-alias'
+        directory_link(alias, directory)
+        self.addCleanup(remove_directory_link, alias)
+        self.assertEqual(capture.report(self.evidence, populated_capture=str(alias / path.name)), result)
         manifest = capture.read_json(path)
         for field, value in (('schema', 'luminumbra.sim_budget_capture.future'),
                              ('revision', 'b' * 40), ('binary_sha256', '0' * 64),

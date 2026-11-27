@@ -39,7 +39,9 @@ def receipt_evidence(root):
     results = []
     for cell in budget.cells(matrix):
         world = next(world for world in matrix['worlds'] if world['id'] == cell['world'])
-        selected, receipt = write_evidence(root, cell, {'workload': {'script': text}})
+        overrides = {'cli:--systems-config': str(root / 'runtime/data/common/systems.json')}
+        selected, receipt = write_evidence(root, cell, {'workload': {'script': text},
+            'debug_overrides': {'active': overrides, 'declared': overrides}})
         work = root / 'work' / cell['id']
         receipt.update(client_path=str(root / 'client'), runtime_root=str(root / 'runtime'),
                        save_root=str(work / 'storage'))
@@ -266,6 +268,39 @@ class FarBudgetReceiptTests(unittest.TestCase):
                 pass
             self.write_index()
             with self.subTest(mutation=mutations.index(mutate)), self.assertRaises((ValueError, KeyError)):
+                self.qualify()
+
+    def test_rehashed_override_maps_require_exact_systems_declaration(self):
+        import run_far_budget as runner
+        cell = budget.cells(self.matrix)[0]
+        actual = self.index['cells'][0]
+        selected = runner.paths(self.root, cell)
+        original = budget.decode(selected['capture'].read_bytes())
+        expected = original['debug_overrides']['active']
+        variants = [None, [], {}, {'active': expected}, {'declared': expected},
+                    {'active': {}, 'declared': {}},
+                    {'active': expected, 'declared': expected, 'unknown': {}},
+                    {'active': None, 'declared': None}]
+        for override in ({**expected, 'LUMIN_TREE_IMPOSTORS': '0'},
+                         {'cli:--systems-config': 'other.json'}):
+            variants.extend([{'active': override, 'declared': override},
+                             {'active': override, 'declared': expected},
+                             {'active': expected, 'declared': override}])
+        for overrides in variants:
+            data = dict(original, debug_overrides=overrides)
+            payload = budget.canonical(data)
+            selected['capture'].write_bytes(payload)
+            selected['retained'].write_bytes(payload)
+            receipt = budget.decode(selected['receipt'].read_bytes())
+            receipt['capture_sha256'] = budget.digest(payload)
+            selected['receipt'].write_bytes(budget.canonical(receipt))
+            snapshots = {key: selected[key].read_bytes() for key in ('capture', 'retained', 'receipt')}
+            actual['capture_sha256'] = budget.digest(payload)
+            actual['process'] = runner.custody(self.root, cell, snapshots)
+            for key, snapshot in snapshots.items():
+                actual['sources'][key]['sha256'] = budget.digest(snapshot)
+            self.write_index()
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(ValueError, 'capture overrides'):
                 self.qualify()
 
     def test_source_paths_missing_files_wrong_types_and_changed_summaries_refuse(self):

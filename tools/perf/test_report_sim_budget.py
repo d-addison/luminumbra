@@ -84,6 +84,59 @@ class SimBudgetReportTests(unittest.TestCase):
         self.assertTrue(error.startswith("Report refused: "), error)
         return error
 
+    def test_report_bounds_manifest_and_both_artifact_paths(self):
+        manifest = self.read(self.after / 'capture.json')
+        paths = [self.after / 'capture.json'] + [self.after / entry['artifact']
+                for entry in (manifest['runs'][0], manifest['runs'][0]['telemetry_off'])]
+        largest = max(path.stat().st_size for path in self.root.rglob('*.json'))
+        with mock.patch.object(report, 'MAX_FILE_BYTES', largest, create=True):
+            self.assertEqual(self.invoke()[0], 0)
+            for path in paths:
+                original = path.read_bytes()
+                path.write_bytes(original + b' ' * (largest + 1 - len(original)))
+                with self.subTest(path=path.name):
+                    self.assertIn('oversized', self.assert_refused())
+                path.write_bytes(original)
+
+    def test_report_bounds_ticks_before_validating_any_artifact(self):
+        path = self.after / 'capture.json'
+        original = self.read(path)
+        # The normal two-tick fixture sits exactly on the injected admission cap.
+        with mock.patch.object(report, 'MAX_TICKS', 2, create=True):
+            self.assertEqual(self.invoke()[0], 0)
+        # A fully valid three-tick pair must be refused by a two-tick cap.
+        # Keep commands, smoke metadata and every sampled trace consistent so
+        # the old implementation accepts the pair rather than refusing elsewhere.
+        for directory in (self.before, self.after):
+            manifest_path = directory / 'capture.json'
+            manifest = self.read(manifest_path)
+            manifest['ticks'] = 3
+            for run in manifest['runs']:
+                for entry in (run, run['telemetry_off']):
+                    command = entry['command']
+                    command[command.index('--ticks') + 1] = '3'
+                    artifact_path = directory / entry['artifact']
+                    data = self.read(artifact_path)
+                    data['ticks_requested'] = 3
+                    for replay in data['runs']:
+                        replay['ticks_executed'] = 3
+                    for stage in data.get('sim_budget', {}).get('stages', []):
+                        if stage['samples']:
+                            stage.update(samples=3, work_total=6)
+                            stage['work_trace'].append({'tick': 3, 'work': 3})
+                    self.write(artifact_path, data)
+            self.write(manifest_path, manifest)
+        self.assertEqual(self.invoke()[0], 0)
+        with mock.patch.object(report, 'MAX_TICKS', 2, create=True):
+            self.assertIn('admission cap', self.assert_refused())
+        for ticks in (10_001, '10001', 2**64 - 1):
+            self.write(path, {**original, 'ticks': ticks})
+            with self.subTest(ticks=ticks), mock.patch.object(report, 'read_artifact') as read:
+                with self.assertRaisesRegex(ValueError, 'ticks.*cap'):
+                    report.load_report_capture(self.after)
+                read.assert_not_called()
+        self.write(path, original)
+
     def test_report_covers_three_presets_and_every_stage(self):
         # Keep a byte-for-byte snapshot of every raw capture and manifest.
         paths = sorted(self.root.rglob("*.json"))

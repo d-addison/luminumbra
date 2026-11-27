@@ -5,7 +5,10 @@ import os
 from pathlib import Path
 import re
 import runpy
+import subprocess
+import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -31,7 +34,45 @@ def read_source(path):
     return without_comments((ROOT / path).read_text(encoding="utf-8"))
 
 
+def tracked_sources():
+    paths = subprocess.check_output(
+        ["git", "-C", str(ROOT), "ls-files", "-z", "--", "src", "test", "tools"])
+    generated = {"__pycache__", "CMakeFiles", "build", ".cache"}
+    extensions = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx",
+                  ".inc", ".inl", ".ipp", ".py", ".cmake", ".sh", ".ps1"}
+    for name in sorted(paths.split(b"\0")):
+        if not name:
+            continue
+        path = Path(os.fsdecode(name))
+        if not generated.intersection(path.parts) and (
+                path.suffix in extensions or path.name == "CMakeLists.txt"):
+            yield path
+
+
 class NamedFnvBasisContract(unittest.TestCase):
+    def test_basis_scan_ignores_generated_and_untracked_files(self):
+        basis = b"146959810" b"3934665603"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for folder in ("src", "test", "tools/__pycache__", "tools/build"):
+                (root / folder).mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "init", "--quiet", "--template=", str(root)], check=True,
+                           capture_output=True)
+            source = root / "src/owned.cpp"
+            source.write_bytes(b"// allowed source\n")
+            for name in ("tools/__pycache__/guard.pyc", "tools/__pycache__/generated.py",
+                         "tools/build/generated.cpp", "tools/capture.bin"):
+                (root / name).write_bytes(basis)
+            subprocess.run(["git", "-C", str(root), "add", "--force", "src", "tools"],
+                           check=True, capture_output=True)
+            (root / "tools/untracked.py").write_bytes(basis)
+            with mock.patch.dict(globals(), ROOT=root):
+                self.assertEqual(list(tracked_sources()), [Path("src/owned.cpp")])
+                self.test_named_digest_sites_do_not_reintroduce_the_truncated_literal()
+                source.write_bytes(basis)
+                with self.assertRaises(AssertionError):
+                    self.test_named_digest_sites_do_not_reintroduce_the_truncated_literal()
+
     def test_named_digest_sites_do_not_reintroduce_the_truncated_literal(self):
         # Split the spelling so this guard does not itself introduce a forbidden hit.
         basis = b"146959810" b"3934665603"
@@ -44,17 +85,12 @@ class NamedFnvBasisContract(unittest.TestCase):
             ("tools/perf/validate_foliage_evidence.py",
              b"FNV1A64_HISTORICAL_BASIS = " + basis),
         }
-        for directory in ("src", "test", "tools"):
-            for folder, directories, filenames in os.walk(ROOT / directory, onerror=self.fail):
-                directories.sort()
-                for filename in sorted(filenames):
-                    path = Path(folder) / filename
-                    relative = path.relative_to(ROOT).as_posix()
-                    for number, line in enumerate(path.read_bytes().splitlines(), 1):
-                        if literal.search(line):
-                            with self.subTest(path=relative, line=number):
-                                self.assertIn((relative, line.strip()), allowed,
-                                              f"{relative}:{number}: use the named historical basis")
+        for path in tracked_sources():
+            relative = path.as_posix()
+            for number, line in enumerate((ROOT / path).read_bytes().splitlines(), 1):
+                if literal.search(line):
+                    self.assertIn((relative, line.strip()), allowed,
+                                  f"{relative}:{number}: use the named historical basis")
 
 
 class ReplaySourceContract(unittest.TestCase):

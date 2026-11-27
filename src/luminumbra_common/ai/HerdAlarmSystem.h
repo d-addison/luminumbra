@@ -32,7 +32,10 @@
 // canonical NetworkStateHash baseline stays byte-identical.
 
 #include <algorithm>
+#include <bit>
+#include <cmath>
 #include <cstdint>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -42,6 +45,7 @@
 #include "../components/CoreComponents.h"
 #include "../components/CreatureComponents.h"
 #include "../core/DeterministicMath.h"
+#include "../simulation/DeterministicUniformGrid.h"
 #include "CreatureTickAdmission.h"
 
 namespace luminumbra::ai {
@@ -83,6 +87,17 @@ struct HerdAlarmStats {
         return 1.0f;
     return v;
 }
+
+namespace herd_alarm_detail {
+
+// Transient registry scratch, neither saved nor hashed. Retain index capacities
+// across regional calls once the admitted roster fits.
+struct SpatialScratch {
+    ::luminumbra::simulation::DeterministicUniformGrid grid;
+    std::vector<::luminumbra::simulation::DeterministicUniformGrid::Point> points;
+};
+
+} // namespace herd_alarm_detail
 
 // RunHerdAlarmOnTick: maintain the propagating alarm field. id-ordered, two-phase snapshot.
 // `dt` scales the decay/propagation rate so the field is frame-rate independent (the sim
@@ -184,11 +199,44 @@ inline HerdAlarmStats RunHerdAlarmOnTick(entt::registry& reg,
     decay_loss = AlarmClamp01(decay_loss);
     const float keep = 1.0f - decay_loss;
 
-    // At most 65,536 substeps and N*N pair probes per step (the existing all-pairs
-    // propagation contract). Reuse the N snapshots; no allocation or world scan per step.
+    // Due-time geometry is fixed for the replay. The integer broad phase preserves
+    // identity order and exact pair math; unsupported coordinates use the original scan.
+    // Storage is O(admitted participants), never O(pairs), and queries allocate nothing.
+    herd_alarm_detail::SpatialScratch local_scratch;
+    auto* scratch = &local_scratch;
+    if (use_elapsed) {
+        scratch = reg.ctx().find<herd_alarm_detail::SpatialScratch>();
+        if (scratch == nullptr)
+            scratch = &reg.ctx().emplace<herd_alarm_detail::SpatialScratch>();
+    }
+    auto& grid = scratch->grid;
+    auto& points = scratch->points;
+    points.clear();
+    bool indexed = use_elapsed;
+    if (indexed) {
+        points.reserve(snap.size()); // At most one point per admitted participant.
+        for (const auto& self : snap) {
+            constexpr float coordinate_limit = 536870912.0f;
+            if (!std::isfinite(self.x) || !std::isfinite(self.z) ||
+                std::abs(self.x) > coordinate_limit || std::abs(self.z) > coordinate_limit) {
+                indexed = false;
+                break;
+            }
+            points.push_back({static_cast<std::int64_t>(std::floor(self.x)),
+                              static_cast<std::int64_t>(std::floor(self.z))});
+        }
+        if (indexed)
+            grid.Build(points, 12);
+    }
+
+    // At most 65,536 substeps, each visiting only the admitted roster and spatial
+    // candidates (at worst N*N). Bit-identical fixed points skip to the next join.
     const float invR = kAlarmRadius > 0.0f ? (1.0f / kAlarmRadius) : 0.0f;
     for (std::uint32_t remaining = steps; remaining != 0; --remaining) {
+        std::uint32_t next_join = 0;
         for (auto& self : snap) {
+            if (self.ticks < remaining)
+                next_join = std::max(next_join, self.ticks);
             self.src_strength =
                 self.ticks < remaining || self.dead
                     ? 0.0f
@@ -209,7 +257,17 @@ inline HerdAlarmStats RunHerdAlarmOnTick(entt::registry& reg,
                 next = 1.0f;
             }
             float best_in = 0.0f;
-            for (std::size_t j = 0; j < snap.size(); ++j) {
+            std::span<const std::size_t> candidates;
+            if (indexed) {
+                // One metre covers projection and float rounding at the radius.
+                static_assert(kAlarmRadius == 12.0f, "Update alarm query extents with radius");
+                const auto center = points[i];
+                candidates =
+                    grid.Query({center.x - 13, center.z - 13}, {center.x + 13, center.z + 13});
+            }
+            const auto count = indexed ? candidates.size() : snap.size();
+            for (std::size_t candidate = 0; candidate < count; ++candidate) {
+                const auto j = indexed ? candidates[candidate] : candidate;
                 if (j == i)
                     continue;
                 const Snap& other = snap[j];
@@ -232,10 +290,20 @@ inline HerdAlarmStats RunHerdAlarmOnTick(entt::registry& reg,
         }
         // Publish only into the scratch snapshot until every listener has read the same
         // pre-step field. No partial registry writes, even for invalid elapsed input.
+        bool unchanged = true;
         for (auto& self : snap) {
             if (self.ticks >= remaining) {
+                unchanged = unchanged && std::bit_cast<std::uint32_t>(self.level) ==
+                                             std::bit_cast<std::uint32_t>(self.next);
                 self.level = self.next;
             }
+        }
+        if (use_elapsed && unchanged) {
+            // No state, source strength or raised flag can change until another
+            // suffix window joins. Compare bits so signed zero is preserved too.
+            if (next_join == 0)
+                break;
+            remaining = next_join + 1u;
         }
     }
     for (const auto& self : snap) {

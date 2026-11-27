@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -119,7 +120,8 @@ def fixture(base):
     (root / "worlds/atlas/presets").mkdir(parents=True)
     systems = {"sim": {key: {"enabled": True} for key in ("active_regions", "plant_growth", "future_gate")}}
     (root / "data/common/systems.json").write_bytes(encoded(systems))
-    (root / "worlds/atlas/presets/default.json").write_bytes(b"{}\n")
+    for preset in ("default", "mountains", "archipelago"):
+        (root / "worlds/atlas/presets" / (preset + ".json")).write_bytes(b"{}\n")
     binary, dump_binary = base / "server", base / "exporter"
     binary.write_bytes(b"synthetic server")
     dump_binary.write_bytes(b"synthetic exporter")
@@ -166,6 +168,100 @@ def run_capture(args, runner):
 
 
 class ActiveRegionCaptureContract(unittest.TestCase):
+    def test_replaced_and_restored_sources_never_change_executed_snapshots(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args, runner = fixture(Path(temp))
+            # Include a referenced data file outside data/common in the identity.
+            dependency = args.root / "data/biomes.json"
+            dependency.write_bytes(b"{}\n")
+            preset = args.root / "worlds/atlas/presets/default.json"
+            preset.write_bytes(encoded({"generation_params": {"biomes": {"table": "biomes.json"}}}))
+            tour = check.parse(args.tour.read_bytes())
+            identity = capture.identities(args.repository, args.root, args.binary, args.dump_binary,
+                                          "default", runner)
+            tour["identity"] = identity
+            for stage in tour["stages"]:
+                stage["identity"] = identity
+            args.tour.write_bytes(encoded(tour))
+            sources = [args.binary, args.dump_binary, dependency, preset,
+                       args.root / "data/common/systems.json"]
+            originals = {path: path.read_bytes() for path in sources}
+            snapshots = set()
+
+            def replace_sources(argv, kwargs):
+                for path in sources:
+                    path.write_bytes(b"concurrent replacement")
+                try:
+                    executable = Path(argv[0])
+                    source = args.dump_binary if len(argv) == 2 else args.binary
+                    self.assertNotEqual(executable, source)
+                    self.assertEqual(executable.read_bytes(), originals[source])
+                    snapshots.add(executable.parent.parent)
+                    if len(argv) != 2:
+                        runtime = Path(argv[argv.index("--root") + 1])
+                        self.assertNotEqual(runtime, args.root)
+                        for path in sources[2:]:
+                            self.assertEqual((runtime / path.relative_to(args.root)).read_bytes(), originals[path])
+                finally:
+                    for path, raw in originals.items():
+                        path.write_bytes(raw)
+
+            runner.hook = replace_sources
+            # This race regression uses real resolved content hashes throughout.
+            self.assertTrue(capture.capture(args, runner)["passed"])
+            self.assertEqual(len(snapshots), 1)
+            self.assertTrue(all(not path.exists() for path in snapshots))
+
+    def test_snapshot_refuses_partial_unreadable_oversized_and_changed_inputs(self):
+        for failure in ("partial", "growing", "unreadable", "oversized", "changed", "short", "flush", "entries"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
+                args, runner = fixture(Path(temp))
+                if failure == "unreadable":
+                    patch = mock.patch.object(capture, "open_regular", side_effect=PermissionError("denied"))
+                elif failure in ("partial", "growing", "oversized", "short", "flush"):
+                    if failure in ("partial", "growing"):
+                        reader = capture.open_regular
+                        @contextlib.contextmanager
+                        def changed_stream(root, path):
+                            with reader(root, path) as stream:
+                                wrapped = mock.Mock(wraps=stream)
+                                wrapped.read.return_value = b"" if failure == "partial" else b"x" * 1024
+                                yield wrapped
+                        patch = mock.patch.object(capture, "open_regular", side_effect=changed_stream)
+                    elif failure == "oversized":
+                        patch = mock.patch.object(check, "MAX_TOTAL", 1)
+                    else:
+                        output = mock.MagicMock()
+                        output.__enter__.return_value = output
+                        output.write.side_effect = lambda block: len(block) - (failure == "short")
+                        if failure == "flush":
+                            output.flush.side_effect = OSError("flush refused")
+                        patch = mock.patch.object(Path, "open", return_value=output)
+                elif failure == "entries":
+                    patch = mock.patch.object(capture, "fixture_entries", side_effect=ValueError("entry budget"))
+                else:
+                    original = capture.snapshot_inputs
+                    def change_snapshot(*arguments):
+                        runtime, binary, exporter = original(*arguments)
+                        binary.chmod(0o700)
+                        binary.write_bytes(b"changed copy")
+                        return runtime, binary, exporter
+                    patch = mock.patch.object(capture, "snapshot_inputs", side_effect=change_snapshot)
+                with patch:
+                    if failure in ("short", "flush", "partial", "growing", "oversized", "unreadable", "entries"):
+                        target = Path(temp) / "snapshot"
+                        target.mkdir()
+                        # Exercise the copy itself so writer mocks do not intercept
+                        # source identity reads or cross a subprocess boundary.
+                        with mock.patch.object(check, "MAX_TOTAL", 4096 if failure == "growing" else check.MAX_TOTAL):
+                            with self.assertRaises((OSError, ValueError)):
+                                capture.snapshot_inputs(args.root, args.binary, args.dump_binary, target)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "snapshot identity mismatch"):
+                            run_capture(args, runner)
+                self.assertFalse((args.evidence_dir / "capture.json").exists())
+                self.assertFalse(any(argv[0] != "git" for argv, _ in runner.calls))
+
     def test_commands_cover_enabled_record_replay_and_moving_flags(self):
         config = {"preset": "mountains", "seed": "seed with spaces", "ticks": 31}
         commands = capture.commands("C:/Program Files/server.exe", "D:/runtime", "D:/evidence/w2", config)
