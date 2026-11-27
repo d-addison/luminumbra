@@ -1521,6 +1521,139 @@ class UploadBudgetWiring(unittest.TestCase):
         python_tests = ci_paths.split("PYTHON_TESTS = (", 1)[1].split(")", 1)[0]
         self.assertIn('"test/rendering/test_upload_budget_wiring.py"', python_tests)
 
+    def test_normal_play_attaches_and_pumps_session_authority(self):
+        enabled = "renderPipeline.enable_far_ladder_diagnostics(jobSystem, far_session_host);"
+        self.assertEqual(self.main.count(enabled), 1)
+        opt_in = body(self.main, 'if (HasCommandLineFlag(argc, argv, "--far-ladder-diagnostics") &&')
+        self.assertIn(enabled, opt_in)
+        self.assertIn("EnableFarWorldAuthorityProducer(config, error)", opt_in)
+        self.assertLess(opt_in.index("EnableFarWorldAuthorityProducer(config, error)"),
+                        opt_in.index("AcquireFarWorldCaptureBinding()"))
+        self.assertIn("session->IsSimulationTickBoundary()", opt_in)
+        self.assertIn("session->GetWorldSystem() == &world", opt_in)
+        self.assertIn("/*prepare_only=*/true", opt_in)
+        prepare = body(self.pipeline, "void RenderPipeline::prepare_far_session_diagnostics(")
+        for suppression in ("!m_far_session_diagnostics", "m_far_world_preview",
+                            "m_offscreen_target_active", "m_far_world_paired",
+                            "!m_far_world_submission", "state.paused"):
+            self.assertIn(suppression, prepare)
+        self.assertLess(prepare.index("get_streaming_telemetry_stats().quiescent()"),
+                        prepare.index("controller->Configure("))
+        self.assertLess(prepare.index("state.host.ready("), prepare.index("controller->Configure("))
+        self.assertLess(prepare.index("state.host.attach("), prepare.index("controller->Attach("))
+        self.assertIn("controller->Attach(producer, world)", prepare)
+        self.assertIn("FarWorldDiagnosticsSessionLimits(", prepare)
+        self.assertIn("state.host.prepare(state.host.context)", prepare)
+        self.assertIn("state.controller->Request(state.wanted)", prepare)
+        self.assertIn("state.controller->Pump(m_far_world_frame + 1)", prepare)
+        frame = body(self.pipeline, "void RenderPipeline::render_frame(")
+        self.assertLess(frame.index("prepare_far_session_diagnostics(world_system, camera)"),
+                        frame.index("select_frame_far_world("))
+        self.assertLess(frame.index("select_frame_far_world("), frame.index("prepare_frame("))
+        self.assertIn("purpose == FarWorldPurpose::World", frame)
+        replay = body(self.pipeline, "bool RenderPipeline::render_far_world_off_pair(")
+        for forbidden in ("prepare_far_session_diagnostics", "PumpFarWorldAuthorityCapture",
+                          "->Pump(", "BindFixture("):
+            self.assertNotIn(forbidden, replay)
+        self.assertNotIn("BindFixture(", self.pipeline)
+        self.assertNotIn("BindFixture(", self.main)
+
+    def test_diagnostics_host_refuses_incomplete_callbacks_before_allocation(self):
+        enable = body(self.pipeline, "void RenderPipeline::enable_far_ladder_diagnostics(")
+        self.assertRegex(compact(enable),
+                         r"if \(!m_far_session_diagnostics && host.context && host.ready && "
+                         r"host.attach && host.prepare && host.fence\) "
+                         r"m_far_session_diagnostics = std::make_unique<FarSessionDiagnostics>\(jobs, host\);")
+        self.assertNotIn('world/GameSession.h', self.pipeline)
+
+    def test_default_path_has_no_session_authority_attachment(self):
+        constructor = body(self.pipeline, "RenderPipeline::RenderPipeline()")
+        self.assertNotIn("enable_far_ladder_diagnostics", constructor)
+        self.assertNotIn("FarSessionDiagnostics", constructor)
+        self.assertNotIn("FarWorldSessionController", constructor)
+        frame = body(self.pipeline, "void RenderPipeline::render_frame(")
+        self.assertRegex(frame, r"if \(m_far_session_diagnostics && purpose == FarWorldPurpose::World\)\s*"
+                         r"prepare_far_session_diagnostics\(world_system, camera\);")
+        header = read(RENDERING / "RenderPipeline.h")
+        self.assertIn("std::unique_ptr<FarSessionDiagnostics> m_far_session_diagnostics;", header)
+        # Evaluate every combination: diagnostics is explicitly OFF without the
+        # flag, including systems.json's existing requested-Ladder default.
+        guard = re.search(r'if \((HasCommandLineFlag\(argc, argv, "--far-ladder-diagnostics"\) &&\s*'
+                          r'g_systemConfig.enabled\(luminumbra::core::SysKey::RenderFarWorldLadder\))\)',
+                          self.main).group(1)
+        predicate = guard.replace('HasCommandLineFlag(argc, argv, "--far-ladder-diagnostics")',
+                                  'diagnostics').replace(
+            'g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder)', 'ladder')
+        predicate = compact(predicate).replace('&&', 'and')
+        for diagnostics in (False, True):
+            for ladder in (False, True):
+                self.assertEqual(eval(predicate, {"__builtins__": {}},
+                                      dict(diagnostics=diagnostics, ladder=ladder)),
+                                 diagnostics and ladder)
+
+    def test_diagnostics_refresh_receipts_are_terminal_and_bounded(self):
+        controller = read(RENDERING / "FarWorldSessionController.cpp")
+        record = body(controller, "void Record(")
+        self.assertIn("if (!receipt_pending)", record)
+        self.assertIn("receipt_pending = false;", record)
+        for field in ("reads", "columns", "members", "compressed_bytes", "decoded_bytes",
+                      "source_ops", "planning_ops", "admission_ops", "height_samples",
+                      "density_samples", "water_samples", "source_frames",
+                      "preparation_frames", "elapsed_ticks", "refusal", "source_error",
+                      "capture_error"):
+            self.assertIn(field + "={}", record)
+        refused = body(controller, "void FarWorldSessionController::Refuse(")
+        self.assertLess(refused.index("impl_->Record("), refused.index("impl_->plan.Cancel()"))
+        cancel = body(controller, "void FarWorldSessionController::Cancel(")
+        self.assertLess(cancel.index("impl_->Record("), cancel.index("impl_->plan.Cancel()"))
+        pump = body(controller, "FarWorldSessionController::Phase FarWorldSessionController::Pump(")
+        self.assertRegex(pump, r"if \(phase_ == Phase::Complete\)\s*state.Record\(")
+        session = read(ROOT / "src/luminumbra_common/world/GameSession.cpp")
+        boundary = body(session, "bool GameSession::PumpFarWorldAuthorityCapture(")
+        self.assertLess(boundary.index("if (prepare_only)"),
+                        boundary.index("if (m_farWorldAuthorityProducer->capture_status().active)"))
+        self.assertIn("if (!prepare_only)", boundary)
+        self.assertIn("return false;", body(boundary, "if (Persistence::SaveTransaction::active_for("))
+        prepare = body(self.pipeline, "void RenderPipeline::prepare_far_session_diagnostics(")
+        self.assertRegex(prepare, r"if \(!state.host.prepare\(state.host.context\)\)\s*return;")
+
+    def test_far_binding_preserves_world_entry_commit_order(self):
+        source = (ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8")
+        pipeline = (ROOT / "src/luminumbra_client/rendering/RenderPipeline.cpp").read_text(
+            encoding="utf-8")
+        for marker, opening in (("auto start_world_creation =", "gameSession->CreateWorld("),
+                                ("auto start_world_load =", "gameSession->LoadWorldFrom(")):
+            entry = body(source, marker)
+            self.assertLess(entry.index("wait_for_world_entry_readers();"), entry.index(opening))
+            self.assertLess(entry.index(opening), entry.index("finish_world_replacement();"))
+        stages = body(source, "auto run_entry_stage =")
+        self.assertLess(stages.index("case WorldEntryStage::DrainReaders:"),
+                        stages.index("gameSession->AdoptPreparedWorld("))
+        self.assertLess(stages.index("gameSession->AdoptPreparedWorld("),
+                        stages.index("finish_world_replacement();"))
+        finish = body(source, "auto finish_world_replacement =")
+        self.assertLess(finish.index("renderPipeline.resume_far_world_readers();"),
+                        finish.index("if (gameSession->WorldRevision() != entry_world_revision)"))
+        self.assertIn("prepare_world_entry();", finish)
+        refused = body(source, "auto refuse_world_entry =")
+        self.assertIn("renderPipeline.resume_far_world_readers();", refused)
+        wait = body(pipeline, "void RenderPipeline::wait_for_world_readers()")
+        self.assertIn("host.fence(host.context, true)", wait)
+        self.assertIn("paused = true", wait)
+        self.assertNotIn("controller.reset()", wait)
+        resume = body(pipeline, "void RenderPipeline::resume_far_world_readers()")
+        self.assertIn("host.fence(host.context, false)", resume)
+        self.assertIn("paused = false", resume)
+        swap = body(pipeline, "void RenderPipeline::prepare_world_swap()")
+        self.assertLess(swap.index("controller.reset()"), swap.index("m_far_world->PrepareWorldSwap()"))
+        shutdown = body(pipeline, "void RenderPipeline::cleanup_gpu_resources()")
+        self.assertLess(shutdown.index("m_far_session_diagnostics.reset()"),
+                        shutdown.index("m_far_world->Shutdown()"))
+        preview = (ROOT / "src/luminumbra_client/world/WorldgenPreview.cpp").read_text(
+            encoding="utf-8")
+        self.assertNotIn("enable_far_ladder_diagnostics", preview)
+        self.assertNotIn("BindFixture(", preview)
+
     def test_save_fence_preserves_current_world_until_quit_save_succeeds(self):
         quit_action = body(self.main, '} else if (act == "quit")')
         save = quit_action.index("if (!gameSession->SaveWorld())")
