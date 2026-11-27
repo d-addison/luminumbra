@@ -3243,7 +3243,8 @@ void RecordProtectedAbsence(const fs::path& save, unsigned last_phase, unsigned 
                                                   {"generation", 0u},
                                                   {"identity", receipt.at("journal_identity")},
                                                   {"directory", false},
-                                                  {"absent_only", true}}});
+                                                  {"absent_only", true},
+                                                  {"stable_volume", StableVolumeWords(save)}}});
     for (unsigned generation = 0; generation < generations; ++generation) {
         receipt["receipts"][0]["generation"] = generation;
         const auto final_phase = generation + 1 == generations ? last_phase : 3u;
