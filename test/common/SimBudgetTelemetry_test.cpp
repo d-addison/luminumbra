@@ -237,6 +237,9 @@ TEST(SimBudgetTelemetry, RegionalDiagnosticsObserveReducedFrozenAndWaterPublicat
     chunk->water_bed_mm.assign(64, 1000);
     chunk->water_edge_flux.assign(128, 0);
     chunk->water_level_data.assign(64, 2.0f);
+    chunk->water_flow_data.assign(64, Vec2(0.0f));
+    chunk->water_sim_terrain_height.assign(64, 1.0f);
+    ASSERT_TRUE(chunk->has_complete_water_state());
     const std::array residents{chunk};
     auto diagnostic = RegionalCadenceDiagnostics::Start<Components::PlantGrowthComponent,
                                                         Components::MortalComponent>(
