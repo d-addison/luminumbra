@@ -573,7 +573,9 @@ TEST_P(RegionalCadenceRunner, WorkloadReportsEachWaterTickAndEmitsFinalPublicati
         run.ticks = runner.RunFixedTicks(1);
         ASSERT_NO_FATAL_FAILURE(
             ExpectCurrentRegionalWater(run.ticks, *water, sources_before, tick));
-        completed_cells += run.ticks.regional_cadence->water_completed_cells;
+        if (run.ticks.regional_cadence) {
+            completed_cells += run.ticks.regional_cadence->water_completed_cells;
+        }
     }
     EXPECT_GT(completed_cells, 0u);
     run.ok = true;
