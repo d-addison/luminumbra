@@ -759,7 +759,7 @@ SHIELD_WorldSystem::~SHIELD_WorldSystem() {
     }
 }
 
-void SHIELD_WorldSystem::release_session_services() {
+void SHIELD_WorldSystem::release_session_services(SessionServicesKey) {
     quiesce_streaming_jobs_for_save();
     m_job_system = nullptr;
     m_water_system = nullptr;
@@ -7371,8 +7371,19 @@ bool SHIELD_WorldSystem::capture_resident_chunk_ids(std::vector<ChunkID>& ids,
 void SHIELD_WorldSystem::update_collision_slab(const IVec3& coords,
                                                const std::shared_ptr<Chunk>& source,
                                                std::span<const bool> changed) const {
-    auto& column =
-        m_collision_columns[World::ActivationResidencyIndex::column_key(coords.x, coords.z)];
+    const auto key = World::ActivationResidencyIndex::column_key(coords.x, coords.z);
+    if (source && !source->has_terrain_authority()) {
+        // Generated SDF cannot affect collision. Only revisit a prior authority
+        // slab to retire its aggregate or clear its retryable invalid state.
+        const auto existing = m_collision_columns.find(key);
+        if (existing == m_collision_columns.end())
+            return;
+        const auto previous = existing->second.slabs.find(coords.y);
+        if (previous == existing->second.slabs.end() ||
+            (!previous->second.active && previous->second.valid))
+            return;
+    }
+    auto& column = m_collision_columns[key];
     auto& slab = column.slabs[coords.y];
     auto candidate = slab;
     candidate.revision = ++column.revision;
@@ -7403,7 +7414,9 @@ void SHIELD_WorldSystem::update_collision_slab(const IVec3& coords,
                     : 0;
         }
     }
-    const bool prepared = has_sdf && candidate.valid;
+    // Only authority can seed partial edits. A generated retirement may be
+    // followed by further generated replacements whose projection is skipped.
+    const bool prepared = candidate.active && candidate.valid;
     if (source && !source->has_terrain_authority())
         candidate.valid = true;
     // Malformed authority blocks publication; keep the last aggregate intact
@@ -7493,10 +7506,13 @@ void SHIELD_WorldSystem::invalidate_collision_samples(const IVec3& coords,
         !m_durable_chunks.contains(Chunk::calculate_id(coords))) {
         update_collision_slab(coords, source, changed);
         const auto key = World::ActivationResidencyIndex::column_key(coords.x, coords.z);
-        auto& column = m_collision_columns.at(key);
-        column.pending.erase(coords.y);
-        if (column.slabs.empty() && column.pending.empty())
-            m_collision_columns.erase(key);
+        const auto existing = m_collision_columns.find(key);
+        if (existing != m_collision_columns.end()) {
+            auto& column = existing->second;
+            column.pending.erase(coords.y);
+            if (column.slabs.empty() && column.pending.empty())
+                m_collision_columns.erase(existing);
+        }
     } else {
         m_collision_columns[World::ActivationResidencyIndex::column_key(coords.x, coords.z)]
             .pending.insert(coords.y);

@@ -30,10 +30,12 @@
 #include <glm/glm.hpp>
 
 #include <array>
+#include <bit>
 #include <cmath>
 #include <limits>
 #include <memory>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -45,6 +47,20 @@ using Luminumbra::MaterialType;
 using Luminumbra::Systems::PhysicsSystem;
 using Luminumbra::Systems::SHIELD_WorldSystem;
 using Luminumbra::Systems::TerrainGenParams;
+
+static_assert(!std::is_default_constructible_v<SHIELD_WorldSystem::SessionServicesKey>);
+static_assert(!std::is_aggregate_v<SHIELD_WorldSystem::SessionServicesKey>);
+static_assert(!std::is_invocable_v<decltype(&SHIELD_WorldSystem::release_session_services),
+                                   SHIELD_WorldSystem&>);
+
+// First authority validates the entire lattice, then projects every horizontal
+// sample through at most two endpoints per vertical cell: 4,913 to 14,161 reads.
+constexpr Luminumbra::u64 kFullCollisionValidationSamples = (Luminumbra::CHUNK_SIZE_X + 1u) *
+                                                            (Luminumbra::CHUNK_SIZE_Z + 1u) *
+                                                            (Luminumbra::CHUNK_SIZE_Y + 1u);
+constexpr Luminumbra::u64 kFullCollisionProjectionSampleBound =
+    (Luminumbra::CHUNK_SIZE_X + 1u) * (Luminumbra::CHUNK_SIZE_Z + 1u) *
+    (Luminumbra::CHUNK_SIZE_Y + 1u + 2u * Luminumbra::CHUNK_SIZE_Y);
 
 // Builds a chunk with a FLAT heightmap floor at world height `floor_y` (same
 // fixture as jolt_tunneling_test): the HeightFieldShape resolution is
@@ -759,7 +775,7 @@ TEST_P(TerrainEditCollision, DigLowersColumnAcrossVerticalChunkBoundary) {
     EXPECT_LT(hit.hit_point.y, -3);
 }
 
-TEST_P(TerrainEditCollision, ColdProjectionAfterEditIsBoundedByBrushFootprint) {
+TEST_P(TerrainEditCollision, ColdProjectionBoundsFirstAuthorityAndSubsequentBrushWork) {
     // Pre-admit the remesh band so the diagnostic isolates editing, rather than
     // first-time procedural generation. The upper slabs are outside that band.
     ASSERT_TRUE(world->EnsureSurfaceReadyNear({8, 8, 8}, &physics, 2, 2));
@@ -793,9 +809,11 @@ TEST_P(TerrainEditCollision, ColdProjectionAfterEditIsBoundedByBrushFootprint) {
     ASSERT_GT(world->EditTerrainVoxel({8, 8, 8}, 2, false, nullptr), 0);
     ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
     EXPECT_EQ(heights[8 * 17 + 8], 341.5f);
-    // A radius-2 brush touches at most 5x5 horizontal samples. Each validates
-    // 17 inputs and projects at most 32 density endpoints, independent of height.
-    EXPECT_LE(world->simulation_collision_sdf_samples() - work, 5u * 5u * 49u);
+    // Generated terrain has no staged projection. Its first edit projects one
+    // full slab; the twenty admitted authoritative slabs are not revisited.
+    EXPECT_GE(world->simulation_collision_sdf_samples() - work, kFullCollisionValidationSamples);
+    EXPECT_LE(world->simulation_collision_sdf_samples() - work,
+              kFullCollisionProjectionSampleBound);
 
     make_cold();
     work = world->simulation_collision_sdf_samples();
@@ -803,10 +821,12 @@ TEST_P(TerrainEditCollision, ColdProjectionAfterEditIsBoundedByBrushFootprint) {
     ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
     EXPECT_EQ(heights[8 * 17 + 8], 325.5f); // Removed top sample reveals slab 20.
     EXPECT_EQ(heights[0], 341.5f);          // Outside the footprint keeps its roof.
+    // An already authoritative radius-3 edit still touches at most 7x7 columns,
+    // each validating 17 inputs and projecting at most 32 density endpoints.
     EXPECT_LE(world->simulation_collision_sdf_samples() - work, 7u * 7u * 49u);
 }
 
-TEST(SurfaceQuery, WaterAdmissionStagesProjectionBeforeFirstEdit) {
+TEST(SurfaceQuery, WaterAdmissionDefersCollisionProjectionUntilFirstAuthorityEdit) {
     auto params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_amplitude = 0;
     params.peaks_amplitude = 0;
@@ -824,17 +844,141 @@ TEST(SurfaceQuery, WaterAdmissionStagesProjectionBeforeFirstEdit) {
     const auto admitted = world->resolve_water_column(coords);
     ASSERT_NE(admitted, nullptr);
     ASSERT_TRUE(world->unpark_chunk(admitted->get_id()));
-    // Meshing an already populated water admission must reuse its staged SDF
-    // projection, just like streaming generation and direct adoption.
+    // Neither water admission nor meshing should stage generated SDF projection.
+    EXPECT_EQ(world->simulation_collision_projection_bytes(), 0u);
+    EXPECT_EQ(world->simulation_collision_sdf_samples(), 0u);
     ASSERT_TRUE(world->EnsureSurfaceReadyNear({72, 8, 8}, &physics, 2, 2));
+    EXPECT_EQ(world->simulation_collision_projection_bytes(), 0u);
+    EXPECT_EQ(world->simulation_collision_sdf_samples(), 0u);
     const auto work = world->simulation_collision_sdf_samples();
     ASSERT_GT(world->EditTerrainVoxel({72, 8, 8}, 2, false, nullptr), 0);
     std::array<float, 17 * 17> heights{};
     ASSERT_TRUE(world->sample_simulation_collision(coords.x, coords.z, heights));
     EXPECT_LT(heights[8 * 17 + 8], 8);
     EXPECT_EQ(heights[0], 8);
-    EXPECT_LE(world->simulation_collision_sdf_samples() - work, 5u * 5u * 49u);
+    EXPECT_GE(world->simulation_collision_sdf_samples() - work, kFullCollisionValidationSamples);
+    EXPECT_LE(world->simulation_collision_sdf_samples() - work,
+              kFullCollisionProjectionSampleBound);
     world->SetWaterSystem(nullptr);
+}
+
+TEST_P(TerrainEditCollision, GeneratedRetirementDefersLaterAuthorityProjection) {
+    ASSERT_TRUE(world->EnsureSurfaceReadyNear({8, 8, 8}, &physics, 2, 2));
+    floor->mark_sdf_loaded_or_edited();
+    world->notify_far_lod_authority_changed(floor->get_coords());
+    floor->mark_sdf_generated_current_params();
+    world->notify_far_lod_authority_changed(floor->get_coords());
+    // A second generated publication changes a surface outside the next brush.
+    // Retirement must not leave a prepared projection that masks this change.
+    floor->sdf_data[1 + 12 * 17 + 17 * 17] = -1;
+    floor->mark_sdf_generated_current_params();
+    world->notify_far_lod_authority_changed(floor->get_coords());
+    const auto work = world->simulation_collision_sdf_samples();
+    ASSERT_GT(world->EditTerrainVoxel({8, 8, 8}, 2, false, nullptr), 0);
+    std::array<float, 17 * 17> expected{};
+    expected.fill(8);
+    ASSERT_TRUE(Luminumbra::World::OverlayTerrainCollision(*floor, expected));
+    std::array<float, 17 * 17> actual{};
+    ASSERT_TRUE(world->sample_simulation_collision(0, 0, actual));
+    EXPECT_GT(actual[17 + 1], 12);
+    EXPECT_EQ(actual, expected);
+    EXPECT_GE(world->simulation_collision_sdf_samples() - work, kFullCollisionValidationSamples);
+    EXPECT_LE(world->simulation_collision_sdf_samples() - work,
+              kFullCollisionProjectionSampleBound);
+}
+
+TEST(SurfaceQuery, GeneratedChunksRetainNoCollisionProjectionSamples) {
+    for (const bool existing_column : {false, true}) {
+        auto world = MakeWorldSystem();
+        if (existing_column) {
+            auto upper = MakeFlatFloorChunk({0, 1, 0}, 8);
+            upper->sdf_data.assign(17 * 17 * 17, 1);
+            upper->mark_sdf_loaded_or_edited();
+            ASSERT_TRUE(world->adopt_streamed_chunk(upper));
+        }
+        auto generated = MakeFlatFloorChunk({0, 0, 0}, 8);
+        world->GenerateChunkData(*generated);
+        ASSERT_FALSE(generated->has_terrain_authority());
+        const auto bytes = world->simulation_collision_projection_bytes();
+        const auto work = world->simulation_collision_sdf_samples();
+        ASSERT_TRUE(world->adopt_streamed_chunk(generated));
+        std::array<float, 17 * 17> expected{};
+        ASSERT_TRUE(world->sample_simulation_collision(0, 0, expected));
+        // Empty, partial, nonfinite and complete generated inputs all remain
+        // irrelevant to collision, including water-only authority and repeats.
+        for (const int input : {0, 1, 2, 3, 4}) {
+            SCOPED_TRACE(input);
+            generated->sdf_data.assign(input == 0 ? 0 : input == 1 ? 1 : 17 * 17 * 17, 1);
+            if (input == 2) {
+                generated->sdf_data[0] = std::numeric_limits<float>::quiet_NaN();
+            } else if (input == 3) {
+                generated->sdf_data[0] = std::numeric_limits<float>::infinity();
+            } else if (input == 4) {
+                generated->set_water_authority();
+            }
+            world->notify_far_lod_authority_changed(generated->get_coords());
+            std::array<float, 17 * 17> actual{};
+            ASSERT_TRUE(world->sample_simulation_collision(0, 0, actual));
+            const auto actual_bits = std::bit_cast<std::array<Luminumbra::u32, 17 * 17>>(actual);
+            const auto expected_bits =
+                std::bit_cast<std::array<Luminumbra::u32, 17 * 17>>(expected);
+            EXPECT_EQ(actual_bits, expected_bits);
+            EXPECT_EQ(world->simulation_collision_projection_bytes(), bytes);
+            EXPECT_EQ(world->simulation_collision_sdf_samples(), work);
+        }
+    }
+}
+
+TEST(SurfaceQuery, GeneratedReplacementRetiresAuthoritativeAndInvalidSlabProjections) {
+    for (const bool invalid_authority : {false, true}) {
+        for (const int input : {0, 1, 2, 3}) {
+            SCOPED_TRACE(invalid_authority);
+            SCOPED_TRACE(input);
+            auto world = MakeWorldSystem();
+            auto lower = MakeFlatFloorChunk({0, 0, 0}, 8);
+            lower->sdf_data.assign(17 * 17 * 17, 1);
+            lower->sdf_data[8 + 5 * 17 + 8 * 17 * 17] = -1;
+            lower->mark_sdf_loaded_or_edited();
+            ASSERT_TRUE(world->adopt_streamed_chunk(lower));
+            auto upper = MakeFlatFloorChunk({0, 1, 0}, 8);
+            upper->sdf_data.assign(invalid_authority ? 1 : 17 * 17 * 17, 1);
+            if (!invalid_authority) {
+                upper->sdf_data[8 + 5 * 17 + 8 * 17 * 17] = -1;
+            }
+            upper->mark_sdf_loaded_or_edited();
+            ASSERT_TRUE(world->adopt_streamed_chunk(upper));
+            std::array<float, 17 * 17> baseline{};
+            baseline.fill(8);
+            auto expected = baseline;
+            ASSERT_TRUE(Luminumbra::World::OverlayTerrainCollision(*lower, expected));
+            auto heights = baseline;
+            EXPECT_EQ(world->sample_simulation_collision(0, 0, heights, baseline),
+                      !invalid_authority);
+            if (!invalid_authority) {
+                EXPECT_EQ(heights[8 * 17 + 8], 21.5f);
+            }
+            upper->sdf_data.assign(input == 0 ? 0 : input == 1 ? 1 : 17 * 17 * 17, 1);
+            if (input == 2) {
+                upper->sdf_data[0] = std::numeric_limits<float>::quiet_NaN();
+            }
+            upper->mark_sdf_generated_current_params();
+            const auto work = world->simulation_collision_sdf_samples();
+            world->notify_far_lod_authority_changed(upper->get_coords());
+            ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights, baseline));
+            EXPECT_EQ(heights, expected);
+            if (input == 3) {
+                // A complete generated replacement must still retire the old
+                // slab. This all-air fixture reaches the exact geometric bound.
+                EXPECT_EQ(world->simulation_collision_sdf_samples() - work,
+                          kFullCollisionProjectionSampleBound);
+            }
+            const auto retired_work = world->simulation_collision_sdf_samples();
+            world->notify_far_lod_authority_changed(upper->get_coords());
+            ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights, baseline));
+            EXPECT_EQ(heights, expected);
+            EXPECT_EQ(world->simulation_collision_sdf_samples(), retired_work);
+        }
+    }
 }
 
 TEST(SurfaceQuery, ColumnAggregateMatchesDescendingProjectionAcrossSlabRuns) {

@@ -2051,7 +2051,7 @@ GameSession::~GameSession() {
     if (m_physicsSystem)
         m_physicsSystem->set_world_system(nullptr);
     if (m_worldSystem)
-        m_worldSystem->release_session_services();
+        m_worldSystem->release_session_services(Systems::SHIELD_WorldSystem::SessionServicesKey{});
     m_worldSystem.reset();
 }
 
@@ -2069,7 +2069,7 @@ void GameSession::ResetWorldSystems() {
     if (m_physicsSystem)
         m_physicsSystem->set_world_system(nullptr);
     if (m_worldSystem)
-        m_worldSystem->release_session_services();
+        m_worldSystem->release_session_services(Systems::SHIELD_WorldSystem::SessionServicesKey{});
     ++m_worldRevision;
     m_worldSystem.reset();
     m_physicsSystem.reset();
