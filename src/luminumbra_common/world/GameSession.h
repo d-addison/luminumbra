@@ -352,7 +352,8 @@ public:
     std::size_t GetLastLoadedChunkCount() const {
         return m_lastLoadedChunkCount;
     }
-    // Snapshot admission is independent of initial resident-chunk retention.
+    // Nonempty admitted snapshot state, including durable records outside initial
+    // resident retention. Empty initial snapshots leave fresh-world boot enabled.
     bool RestoredWorldSnapshot() const {
         return m_restoredWorldSnapshot;
     }
