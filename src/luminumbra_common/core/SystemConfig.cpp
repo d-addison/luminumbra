@@ -709,9 +709,7 @@ SimulationIdentityValues::SimulationIdentityValues() {
 }
 
 std::uint32_t SimulationIdentityValues::EffectiveAuthorityRulesRevision() const {
-    return enabled[static_cast<std::size_t>(SysKey::SimActiveRegions)]
-               ? kRegionalActivationAuthorityRulesRevision
-               : kPreActivationAuthorityRulesRevision;
+    return kAuthorityRulesRevision;
 }
 
 std::string SimulationIdentityValues::ComputeIdentity() const {
@@ -792,7 +790,7 @@ std::string SimulationIdentityValues::ComputeIdentityForRevision(std::uint32_t r
         integer(daylight_numerator, 32);
         integer(daylight_denominator, 32);
         integer(lunar_cycle_days, 32);
-        if (revision == kRegionalActivationAuthorityRulesRevision &&
+        if (revision >= kRegionalActivationAuthorityRulesRevision &&
             enabled[static_cast<std::size_t>(SysKey::SimActiveRegions)]) {
             // Distinguish enabled recordings made before elapsed consumers and
             // fixed-tick water joined the shared activation revision. Off and

@@ -116,10 +116,9 @@ enum class SysParam : std::uint8_t {
 struct SimulationIdentityValues {
     // Bump whenever compiled authority membership/advancement rules change.
     // Negotiated by every transport and recorded in replay admission identity.
-    static constexpr std::uint32_t kAuthorityRulesRevision = 9;
-    // Shared issue #136/#138 activation revision; applies only with active regions.
-    static constexpr std::uint32_t kRegionalActivationAuthorityRulesRevision =
-        kAuthorityRulesRevision;
+    static constexpr std::uint32_t kAuthorityRulesRevision = 10;
+    // Historical issue #136/#138 activation revision; applies only with active regions.
+    static constexpr std::uint32_t kRegionalActivationAuthorityRulesRevision = 9;
     static constexpr std::uint32_t kPreActivationAuthorityRulesRevision = 8;
     static constexpr std::uint32_t kLegacyAuthorityRulesRevision = 3;
     std::array<bool, static_cast<std::size_t>(SysKey::Count)> enabled{};

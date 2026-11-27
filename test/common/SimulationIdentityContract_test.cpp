@@ -19,84 +19,94 @@
 
 namespace {
 
-TEST(SimulationIdentityContract, AmbientActivationRulesChangeEnabledAdmission) {
+void ExpectPreviousPlantRulesRefused(const std::string& identity, const std::string& previous) {
     namespace net = Luminumbra::Net;
-    using Values = luminumbra::core::SimulationIdentityValues;
-    const Luminumbra::world::GameSession current;
-    const auto identity = current.SystemConfigIdentity();
-    ASSERT_EQ(identity, "c1cfd4e42aa58f8d");
-    EXPECT_EQ(current.EffectiveIdentityValues().EffectiveAuthorityRulesRevision(),
-              Values::kRegionalActivationAuthorityRulesRevision);
-    EXPECT_EQ(Values::kRegionalActivationAuthorityRulesRevision, 9u);
-    // Enabled recordings from both earlier authority profiles must refuse.
-    for (const std::string previous : {"45664f7615d96904", "bf48b15682a969bd"}) {
-        ASSERT_NE(identity, previous);
-        for (const bool previous_local : {false, true}) {
-            net::LockstepConfig config;
-            config.system_config_identity = previous_local ? previous : identity;
-            config.preset_content_hash = "unchanged-preset-content";
-            auto peer_config = config;
-            peer_config.local_client_id = config.peer_client_id;
-            peer_config.peer_client_id = config.local_client_id;
-            peer_config.system_config_identity = previous_local ? identity : previous;
-            const auto local_hello = net::MakeLockstepHello(config);
-            const auto peer_hello = net::MakeLockstepHello(peer_config);
-            EXPECT_TRUE(net::HelloMatches(local_hello, local_hello));
-            EXPECT_FALSE(net::HelloMatches(local_hello, peer_hello));
+    for (const bool previous_local : {false, true}) {
+        net::LockstepConfig config;
+        config.system_config_identity = previous_local ? previous : identity;
+        config.preset_content_hash = "unchanged-preset-content";
+        auto peer_config = config;
+        peer_config.local_client_id = config.peer_client_id;
+        peer_config.peer_client_id = config.local_client_id;
+        peer_config.system_config_identity = previous_local ? identity : previous;
+        const auto local_hello = net::MakeLockstepHello(config);
+        const auto peer_hello = net::MakeLockstepHello(peer_config);
+        EXPECT_TRUE(net::HelloMatches(local_hello, local_hello));
+        EXPECT_FALSE(net::HelloMatches(local_hello, peer_hello));
 
-            auto [local, peer] = net::MakeLoopbackPair();
-            ASSERT_TRUE(peer->SendFrame(net::EncodeHello(peer_hello)));
-            unsigned steps = 0;
-            net::LockstepHooks hooks;
-            hooks.apply_and_step = [](std::uint64_t, const std::vector<std::uint8_t>&, void* user) {
-                ++*static_cast<unsigned*>(user);
-                return true;
-            };
-            hooks.user = &steps;
-            net::LockstepSession lockstep(config, local.get(), hooks);
-            EXPECT_FALSE(lockstep.Handshake());
-            lockstep.PumpTick(1);
-            EXPECT_FALSE(lockstep.Status().handshaken);
-            EXPECT_EQ(lockstep.AgreedTick(), 0u);
-            EXPECT_EQ(steps, 0u);
+        auto [local, peer] = net::MakeLoopbackPair();
+        ASSERT_TRUE(peer->SendFrame(net::EncodeHello(peer_hello)));
+        unsigned steps = 0;
+        net::LockstepHooks hooks;
+        hooks.apply_and_step = [](std::uint64_t, const std::vector<std::uint8_t>&, void* user) {
+            ++*static_cast<unsigned*>(user);
+            return true;
+        };
+        hooks.user = &steps;
+        net::LockstepSession lockstep(config, local.get(), hooks);
+        EXPECT_FALSE(lockstep.Handshake());
+        lockstep.PumpTick(1);
+        EXPECT_FALSE(lockstep.Status().handshaken);
+        EXPECT_EQ(lockstep.AgreedTick(), 0u);
+        EXPECT_EQ(steps, 0u);
 
-            // Both remote-replication roles use the same identity before forwarding.
-            for (const auto role :
-                 {net::ReplicationAdmissionRole::Host, net::ReplicationAdmissionRole::Joiner}) {
-                auto mine = local_hello;
-                auto theirs = peer_hello;
-                mine.client_id = role == net::ReplicationAdmissionRole::Host ? 0u : 1u;
-                theirs.client_id = role == net::ReplicationAdmissionRole::Host ? 1u : 0u;
-                net::ReplicationAdmissionState admission(role, mine, theirs.client_id);
-                admission.Begin(0);
-                if (role == net::ReplicationAdmissionRole::Joiner)
-                    admission.OnHelloSendResult(true, 0);
-                EXPECT_EQ(admission.OnFrame(net::EncodeHello(theirs), net::FrameDelivery::Reliable),
-                          net::ReplicationAdmissionAction::Discard);
-                EXPECT_TRUE(admission.failed());
-                EXPECT_FALSE(admission.admitted());
-                EXPECT_EQ(admission.reason(), "SystemConfig identity mismatch");
-            }
+        // Both remote-replication roles use the same identity before forwarding.
+        for (const auto role :
+             {net::ReplicationAdmissionRole::Host, net::ReplicationAdmissionRole::Joiner}) {
+            auto mine = local_hello;
+            auto theirs = peer_hello;
+            mine.client_id = role == net::ReplicationAdmissionRole::Host ? 0u : 1u;
+            theirs.client_id = role == net::ReplicationAdmissionRole::Host ? 1u : 0u;
+            net::ReplicationAdmissionState admission(role, mine, theirs.client_id);
+            admission.Begin(0);
+            if (role == net::ReplicationAdmissionRole::Joiner)
+                admission.OnHelloSendResult(true, 0);
+            EXPECT_EQ(admission.OnFrame(net::EncodeHello(theirs), net::FrameDelivery::Reliable),
+                      net::ReplicationAdmissionAction::Discard);
+            EXPECT_TRUE(admission.failed());
+            EXPECT_FALSE(admission.admitted());
+            EXPECT_EQ(admission.reason(), "SystemConfig identity mismatch");
         }
     }
-    EXPECT_EQ(current.GetSimulationTickCount(), 0u);
 }
 
-TEST(SimulationIdentityContract, AmbientActivationPreservesApprovedOffIdentity) {
+TEST(SimulationIdentityContract, PlantRulesChangeAdmissionInBothRegionModes) {
+    using Values = luminumbra::core::SimulationIdentityValues;
+    EXPECT_EQ(Values::kAuthorityRulesRevision, 10u);
+    EXPECT_EQ(Values::kRegionalActivationAuthorityRulesRevision, 9u);
+    for (const bool regions : {false, true}) {
+        Luminumbra::world::GameSession current;
+        current.SetActiveRegionsEnabled(regions);
+        const auto identity = current.SystemConfigIdentity();
+        ASSERT_EQ(identity, regions ? "a281d995a5f63702" : "6f0b1285671af053");
+        EXPECT_EQ(current.EffectiveIdentityValues().EffectiveAuthorityRulesRevision(), 10u);
+        for (const std::string previous :
+             {"45664f7615d96904", "bf48b15682a969bd", "c1cfd4e42aa58f8d", "bafe22eabc5fc385"}) {
+            SCOPED_TRACE(::testing::Message() << regions << ',' << previous);
+            ASSERT_NE(identity, previous);
+            ExpectPreviousPlantRulesRefused(identity, previous);
+            ASSERT_FALSE(testing::Test::HasFatalFailure());
+        }
+        EXPECT_EQ(current.GetSimulationTickCount(), 0u);
+    }
+}
+
+TEST(SimulationIdentityContract, PlantRulesChangeOffIdentityAndPreserveHistoricalInspection) {
     using luminumbra::core::SystemConfig;
     Luminumbra::world::GameSession session;
     session.SetActiveRegionsEnabled(false);
-    EXPECT_EQ(session.EffectiveIdentityValues().EffectiveAuthorityRulesRevision(), 8u);
-    EXPECT_EQ(session.SystemConfigIdentity(), "bafe22eabc5fc385");
+    EXPECT_EQ(session.EffectiveIdentityValues().EffectiveAuthorityRulesRevision(), 10u);
+    EXPECT_EQ(session.SystemConfigIdentity(), "6f0b1285671af053");
+    EXPECT_NE(session.SystemConfigIdentity(), "bafe22eabc5fc385");
     EXPECT_EQ(session.LegacyRevision3SystemConfigIdentity(), "0820e02bb23ece12");
     Luminumbra::world::GameSession configured;
     configured.ApplySystemConfig(
         SystemConfig::FromJsonString(R"({"sim":{"active_regions":{"enabled":false}}})"));
     EXPECT_EQ(configured.SystemConfigIdentity(), session.SystemConfigIdentity());
     session.SetActiveRegionsEnabled(true);
-    EXPECT_EQ(session.SystemConfigIdentity(), "c1cfd4e42aa58f8d");
+    EXPECT_EQ(session.SystemConfigIdentity(), "a281d995a5f63702");
     session.SetActiveRegionsEnabled(false);
-    EXPECT_EQ(session.SystemConfigIdentity(), "bafe22eabc5fc385");
+    EXPECT_EQ(session.SystemConfigIdentity(), "6f0b1285671af053");
 }
 
 std::string ReadContract(const char* relative_path) {

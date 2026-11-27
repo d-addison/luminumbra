@@ -243,14 +243,14 @@ TEST(SystemConfig, SimulationIdentityPinsShippingDefaults) {
     // See docs/development/system-config-identity.md for the complete computation.
     EXPECT_EQ(Luminumbra::world::GameSession{}.LegacyRevision3SystemConfigIdentity(),
               "60ab3c242d54ce89");
-    EXPECT_EQ(ConfigIdentity(SystemConfig::Defaults()), "c1cfd4e42aa58f8d");
+    EXPECT_EQ(ConfigIdentity(SystemConfig::Defaults()), "a281d995a5f63702");
     const auto path = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
                       "data/common/systems.json";
     ASSERT_TRUE(std::filesystem::exists(path));
     Luminumbra::world::GameSession legacy;
     legacy.ApplySystemConfig(SystemConfig::LoadFromFile(path));
     EXPECT_EQ(legacy.LegacyRevision3SystemConfigIdentity(), "60ab3c242d54ce89");
-    EXPECT_EQ(ConfigIdentity(SystemConfig::LoadFromFile(path)), "c1cfd4e42aa58f8d");
+    EXPECT_EQ(ConfigIdentity(SystemConfig::LoadFromFile(path)), "a281d995a5f63702");
     EXPECT_EQ(luminumbra::core::SimulationIdentityValues{}.ComputeIdentity(),
               ConfigIdentity(SystemConfig::Defaults()));
     // The previously admitted revision-4 shipping identity must no longer match.
@@ -265,16 +265,18 @@ TEST(SystemConfig, RegionalCadenceAuthorityIdentity) {
     using Values = luminumbra::core::SimulationIdentityValues;
     namespace C = Luminumbra::Components;
     Luminumbra::world::GameSession session;
-    EXPECT_EQ(Values::kAuthorityRulesRevision, 9u);
-    EXPECT_EQ(session.EffectiveIdentityValues().EffectiveAuthorityRulesRevision(), 9u);
-    EXPECT_EQ(session.SystemConfigIdentity(), "c1cfd4e42aa58f8d");
+    EXPECT_EQ(Values::kAuthorityRulesRevision, 10u);
+    EXPECT_EQ(session.EffectiveIdentityValues().EffectiveAuthorityRulesRevision(), 10u);
+    EXPECT_EQ(session.SystemConfigIdentity(), "a281d995a5f63702");
     EXPECT_NE(session.SystemConfigIdentity(), "bf48b15682a969bd");
     EXPECT_TRUE(session.SimulationHostIntegrationEnabled());
     session.SetActiveRegionsEnabled(false);
-    EXPECT_EQ(session.SystemConfigIdentity(), "bafe22eabc5fc385");
+    EXPECT_EQ(session.EffectiveIdentityValues().EffectiveAuthorityRulesRevision(), 10u);
+    EXPECT_NE(session.SystemConfigIdentity(), "bafe22eabc5fc385");
+    EXPECT_EQ(session.SystemConfigIdentity(), "6f0b1285671af053");
     EXPECT_FALSE(session.SimulationHostIntegrationEnabled());
     session.SetActiveRegionsEnabled(true);
-    EXPECT_EQ(session.SystemConfigIdentity(), "c1cfd4e42aa58f8d");
+    EXPECT_EQ(session.SystemConfigIdentity(), "a281d995a5f63702");
 
     // Public production construction must dispatch elapsed consumers, including
     // reduced owners. Twelve ticks and one inert creature keep this bounded.
@@ -313,89 +315,89 @@ TEST(SystemConfig, FrozenHistoricalIdentityVectorsCoverEveryAppliedSetting) {
     };
     constexpr Vector vectors[]{
         {"hydrology_weather",
-         {"b1975c398a0d70f1", "032f02ee2fe362f2", "23be26e2546a0e7a", "6a0bfaf2cf7a7d02"}},
+         {"b1975c398a0d70f1", "c9221e6d3f9a2074", "23be26e2546a0e7a", "8959f6415429d58d"}},
         {"weather_events",
-         {"979cacb197b79b45", "cdb7855ebed53bae", "455e323c2d5080de", "2620cd029b613726"}},
+         {"979cacb197b79b45", "99e7e2fa1eada750", "455e323c2d5080de", "0bce259d8a83f991"}},
         {"aether_state",
-         {"4da37f266978b979", "7d20de2c2f8090fa", "a9f11c36b15d4702", "5a0ebf05869271ea"}},
+         {"4da37f266978b979", "02f2d469a2fd43fc", "a9f11c36b15d4702", "343bf4faa0ad1995"}},
         {"water_high_res",
-         {"f19ddc19ff363221", "de58d484bffeef02", "77bc1aa8d3d992aa", "afc82bc1c9fb5572"}},
+         {"f19ddc19ff363221", "18cefe06a4fefa04", "77bc1aa8d3d992aa", "dd07faaab95c58fd"}},
         {"active_regions",
-         {"0820e02bb23ece12", "bafe22eabc5fc385", "60ab3c242d54ce89", "c1cfd4e42aa58f8d"}},
+         {"0820e02bb23ece12", "6f0b1285671af053", "60ab3c242d54ce89", "a281d995a5f63702"}},
         {"mutation_rate",
-         {"685d3dd6e3bacd77", "aad4dee6edfe8088", "87c6f0914eb60e88", "190eaeae8b736570"}},
+         {"685d3dd6e3bacd77", "88544d5fe33d9fc6", "87c6f0914eb60e88", "30f6a44ed197a927"}},
         {"energy_drain_per_second",
-         {"f308a2a1a5d112a9", "df09994a7e2dba06", "2049da7218c8c4b2", "734857f56a57689e"}},
+         {"f308a2a1a5d112a9", "5d79b82863d87bc8", "2049da7218c8c4b2", "cf29f6266b93c929"}},
         {"energy_rest_recover",
-         {"f316851aa23f4334", "48f2bf194fb1d667", "5c667288b978f003", "4a906f6b716ef45f"}},
+         {"f316851aa23f4334", "01064e22c19452c9", "5c667288b978f003", "a1d5c650aa69b708"}},
         {"energy_sleep_recover",
-         {"07d7dc3b1cb8e286", "1e2ba4ab353bc9b9", "10afe978edc705ad", "e23575574fac7749"}},
+         {"07d7dc3b1cb8e286", "ba9848758fa5a497", "10afe978edc705ad", "d6346967ab875d3e"}},
         {"hunger_growth_per_second",
-         {"789f49bc80b89f48", "ae922161d2acf27f", "fcded29c6381fc37", "7efabb284a3ada77"}},
+         {"789f49bc80b89f48", "18354dbb5bcc0c61", "fcded29c6381fc37", "0615947088bd8c00"}},
         {"hunger_graze_sate",
-         {"e0c54945f81bebd2", "b6f07185a8d714c5", "bfa151bde98c6f49", "4d10aca7f830dbcd"}},
+         {"e0c54945f81bebd2", "fc9db72954d84693", "bfa151bde98c6f49", "25ab26ca10da0a42"}},
         {"stamina_rest_recover",
-         {"1d8582c805590483", "0c8a075fd38d59a8", "7fbbf8d5d02193b4", "b085efd59a0ac5d0"}},
+         {"1d8582c805590483", "31bacf63431db066", "7fbbf8d5d02193b4", "7968dc22dccb1d87"}},
         {"stamina_move_drain",
-         {"32e3f58cad39f794", "f3e5656681cb8d4b", "3670057f1b14c3e3", "4014a47df3f1e4cb"}},
+         {"32e3f58cad39f794", "5151fcd3e274eabd", "3670057f1b14c3e3", "f077b0f3460809e4"}},
         {"herd_weight",
-         {"01da4d6dacc5ce11", "13514536af8c959e", "0cd5ce25eea4171a", "04fd0e16a26cb6f6"}},
+         {"01da4d6dacc5ce11", "3fe037778484eb00", "0cd5ce25eea4171a", "2793f35f857f9561"}},
         {"alignment_weight",
-         {"8548338bfa873dd2", "bf27371fbe2f9745", "64243c03ebf7c149", "31d4f1802a94d84d"}},
+         {"8548338bfa873dd2", "ab5cb872fb3f2713", "64243c03ebf7c149", "0a6f6ba2433e06c2"}},
         {"catch_radius",
-         {"9c9a064a0d815352", "ab32cf4fb2927745", "77592945e93dc0c9", "00095f73284db84d"}},
+         {"9c9a064a0d815352", "976850a2efa20713", "77592945e93dc0c9", "d8a3d99540f6e6c2"}},
         {"catch_satiation",
-         {"ff92cc970fa81e81", "d55a572cf28be416", "f4b51fb6cf0e578a", "4b646325e0d7eace"}},
+         {"ff92cc970fa81e81", "1798698f129b1a98", "f4b51fb6cf0e578a", "9f774aab8e9fb1d9"}},
         {"flock_neighbor_radius",
-         {"66d35a8ed48e9382", "bd4fe97401408035", "57846f6b4646eff9", "a39ddeed6bc9ec5d"}},
+         {"66d35a8ed48e9382", "ca81c69016c4bb43", "57846f6b4646eff9", "f7e9004fd49fbcd2"}},
         {"flock_separation_radius",
-         {"f36052321e998752", "26f35e6704ef09c5", "ce1f752dfa55f4c9", "2269853d0597e0cd"}},
+         {"f36052321e998752", "6ca0a40ab0f03b93", "ce1f752dfa55f4c9", "fb03ff5f1e410f42"}},
         {"flock_cohesion_weight",
-         {"35799529611c3ef7", "f0ff7ebc64340dd0", "6419052d9ac49008", "46251c9095a9f938"}},
+         {"35799529611c3ef7", "24cf2121045ba22e", "6419052d9ac49008", "66949e3f9f1ddd8f"}},
         {"flock_separation_weight",
-         {"fc70e688455b7206", "d7ee8815f1ae2269", "7b895025fac53f2d", "63c2f3878758c099"}},
+         {"fc70e688455b7206", "1032784d5c2b7a87", "7b895025fac53f2d", "6f8a59b2e941918e"}},
         {"graze_radius",
-         {"43327ef3839a8cd2", "0623c357e880e6c5", "220e876b750b1049", "cac0a171aa454dcd"}},
+         {"43327ef3839a8cd2", "4bd108fb94821893", "220e876b750b1049", "a35b1b93c2ee7c42"}},
         {"graze_per_creature",
-         {"fc072684a572ed4b", "d69b434591d2de24", "4821155bbaf8af5c", "528d0b19b99bf2b4"}},
+         {"fc072684a572ed4b", "a51381a1505f21a2", "4821155bbaf8af5c", "6c31b5d4fbe7a2db"}},
         {"regrow_per_tick",
-         {"8829887f8c91cf3d", "feb4a53ec5ca294a", "a26425a9c07e3cd6", "4a597804fba7655a"}},
+         {"8829887f8c91cf3d", "66df2134bba6254c", "a26425a9c07e3cd6", "3ea245a7f497e185"}},
         {"feed_per_graze",
-         {"6a01bedb4fea3e78", "5bad86604fc82437", "4b8920bf3f9be767", "e7c87175fcdbcd8f"}},
+         {"6a01bedb4fea3e78", "73c894b1e7b49b59", "4b8920bf3f9be767", "c758efc6f367e938"}},
         {"rise_rate_per_second",
-         {"d58e9289ead43be3", "c13df4da6fe99330", "d20282977cf96f94", "60f4bd94c607e258"}},
+         {"d58e9289ead43be3", "242d0226d76cf78e", "d20282977cf96f94", "8b0f9fa544a21b2f"}},
         {"drink_rate_per_second",
-         {"23959a73c2d11e52", "0a7ec708630579c5", "fe54bd6f9e8d8bc9", "a5432d676a6950cd"}},
+         {"23959a73c2d11e52", "502c0cac0f06ab93", "fe54bd6f9e8d8bc9", "7ddda78983127f42"}},
         {"seek_threshold",
-         {"a4818c84cd83cc33", "804cb536859ef8e0", "77c086e95acb7d64", "f242a02a479d43a8"}},
+         {"a4818c84cd83cc33", "060d446ebf9c0d7e", "77c086e95acb7d64", "6004210432bcbdff"}},
         {"hunger_threshold",
-         {"187dca69ca9a513b", "b1d34eca2271d540", "0e2a413a6b9f490c", "7029a47faf0849c8"}},
+         {"187dca69ca9a513b", "0f9b6f65f63788de", "0e2a413a6b9f490c", "2be86326a9c46b1f"}},
         {"feed_radius",
-         {"23cb6d3f5fd7e78b", "b44047a0d32e80d8", "3262959885cf209c", "a787a4e9b8f94320"}},
+         {"23cb6d3f5fd7e78b", "2c4b287703f89556", "3262959885cf209c", "df4831823f7c9297"}},
         {"feed_rate_per_tick",
-         {"2634683024d49a3b", "9be54f008be28b2c", "1be0df00c5d9920c", "8b61ec5c22ab125c"}},
+         {"2634683024d49a3b", "5c306eab06c5e4aa", "1be0df00c5d9920c", "b4e9dc8e303412c3"}},
         {"maturity_ticks",
-         {"aa5addef1bd017a3", "c864fdc1379707b4", "8da2c96e50024954", "509ecc96aacda364"}},
+         {"aa5addef1bd017a3", "c731c26e277e1532", "8da2c96e50024954", "d84d5506fdecc04b"}},
         {"cooldown_ticks",
-         {"9855901802c6298b", "d26a4123c59aa654", "a6ecb87128bd629c", "508a431f6fbd4444"}},
+         {"9855901802c6298b", "9fb97c94bef3f5d2", "a6ecb87128bd629c", "b4a6f7b9bdeef6ab"}},
         {"healthy_stamina",
-         {"6f47172c8a7d2fd2", "b764693b75ef1745", "4e231fa47bedb349", "bd813e6771ec584d"}},
+         {"6f47172c8a7d2fd2", "a399ea8eb2fea713", "4e231fa47bedb349", "961bb8898a9586c2"}},
         {"mate_seek_radius",
-         {"f2dc3640d6074196", "496b5e74ff029a29", "ea4ca76611a910fd", "f89383930fdac759"}},
+         {"f2dc3640d6074196", "a879b1fce7df8747", "ea4ca76611a910fd", "a4809c0d6213004e"}},
         {"courtship_radius",
-         {"75bdd1c6e3c940d2", "db0a04e3b2b6efc5", "5499da3ed539c449", "fe5d805f039aa6cd"}},
+         {"75bdd1c6e3c940d2", "20b74a875eb82193", "5499da3ed539c449", "d6f7fa811c43d542"}},
         {"courtship_ticks",
-         {"bdf689fe074c9c27", "3387d541e54e04c8", "1c0427bf58fe8038", "69471a17f2de18b0"}},
+         {"bdf689fe074c9c27", "b517b663ffa34306", "1c0427bf58fe8038", "1d0338ea1341d967"}},
         {"spawn_radius",
-         {"9d31f8449f67230e", "9cbb86517f9436e5", "cfe1b76e5757ddb5", "50a4d78ef0f0942d"}},
+         {"9d31f8449f67230e", "d43e2f52f379b333", "cfe1b76e5757ddb5", "3b8a31bdafa4aa22"}},
         {"deposit",
-         {"7568296522c4fe1b", "18402af342dfe6c8", "2857e1634040ad6c", "ae899d6946e79ab0"}},
+         {"7568296522c4fe1b", "99d00c155d352506", "2857e1634040ad6c", "6245bc3b674b5b67"}},
         {"trail_weight",
-         {"5f470b8621134834", "3493024335219077", "c896f8f4384cf503", "a7e54ee5c8a451cf"}},
+         {"5f470b8621134834", "e37b89a2b31dc199", "c896f8f4384cf503", "0e6a32a9e6421b78"}},
         {"goal_weight",
-         {"39b325ecef65bad3", "651c5dc9dfdc6650", "05629935822ec304", "cffdd62a127cf5b8"}},
+         {"39b325ecef65bad3", "98ec002e8003faae", "05629935822ec304", "f06d57d91bf0da0f"}},
         {"amplitude",
-         {"a01007e699175c93", "391bfd65bc39eea0", "fdcc2987aac02fdc", "dfc55ab00c5981d0"}},
+         {"a01007e699175c93", "7faddc57fd9f033e", "fdcc2987aac02fdc", "a8a846fd4f19d987"}},
     };
     const auto variants = Luminumbra::TestSupport::SimulationConfigVariants();
     ASSERT_EQ(variants.size(), std::size(vectors));
@@ -415,18 +417,18 @@ TEST(SystemConfig, FrozenHistoricalIdentityVectorsCoverEveryAppliedSetting) {
 
 TEST(SystemConfig, FrozenIdentitySessionOptionsCoverBothRegionProfiles) {
     constexpr std::array<const char*, 2> expected[]{
-        {"6940021d07bb62cf", "0e6d469aa61a0168"},
-        {"dc39d8a56618c7ff", "290b2ebe7856097c"},
-        {"0017f78957d1631d", "08f10fee5ed618b6"},
-        {"c66b76418c25cab5", "0d18e3543185b53e"},
-        {"fb71ff0134ef6715", "28cccb08f753f1de"},
-        {"0820df2bb23ecc5f", "0782303788e9e39c"},
-        {"973a17daa4bfe1cc", "69b2709640a1346c"},
-        {"e49a4f3da30a6690", "a6cc612189a95e7c"},
-        {"8426406d0826954e", "8b89407158ceaef6"},
-        {"acd293f874d98fe6", "2adfd55795ad364e"},
-        {"6d5a1d4eaaa43586", "cff36d795646c7ee"},
-        {"60ab39242d54c970", "9251713d7155a29c"},
+        {"6940021d07bb62cf", "03e0df63da920026"},
+        {"dc39d8a56618c7ff", "a339388104d9567a"},
+        {"0017f78957d1631d", "1cfd2a634cadadb8"},
+        {"c66b76418c25cab5", "c6870461f020a0a0"},
+        {"fb71ff0134ef6715", "cb04aa6d238e3e40"},
+        {"0820df2bb23ecc5f", "055b6cadbfca989a"},
+        {"973a17daa4bfe1cc", "0e9792ef2d875153"},
+        {"e49a4f3da30a6690", "701625dc50c0d9e3"},
+        {"8426406d0826954e", "ae2025ba3be18d61"},
+        {"acd293f874d98fe6", "7ef2bcdd4374fd59"},
+        {"6d5a1d4eaaa43586", "13ca32e082c860f9"},
+        {"60ab39242d54c970", "42a53dfc35a92b03"},
     };
     std::size_t index = 0;
     for (const bool regions : {false, true}) {
