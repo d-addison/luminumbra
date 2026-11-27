@@ -167,7 +167,8 @@ def parity_case(name, source, binary, folder):
 
 
 def capture(source, assets, binaries, build_record, evidence):
-    if evidence.resolve().is_relative_to(source):
+    evidence = Path(evidence).resolve()
+    if evidence.is_relative_to(source):
         raise ValueError('evidence directory must be outside the source checkout')
     bound = identity(source, assets, binaries, build_record)
     # Exclusive creation refuses overwriting any earlier successful or failed run.
@@ -211,16 +212,19 @@ def log_report(path, root):
     except FileNotFoundError:
         return dict(log_path=str(path), log_missing=True, last_shutdown_stage=None,
                     placement=None, log=None, phase='unknown')
-    stage = receipts.last_shutdown_stage(path, io.BytesIO(payload))
-    if stage in ('world_save_started', 'world_save_finished'):
-        phase = 'save'
-    elif stage in ('world_readers_drain_started', 'far_lod_drained', 'world_readers_drained'):
-        phase = 'streaming_wait'
-    elif stage is None and any('EnsureSurfaceReadyNear' in line
-                               for line in receipts.read_log(path, source=io.BytesIO(payload))):
-        phase = 'boot'
-    else:
-        phase = 'unknown'
+    stage, phase = None, 'unknown'
+    for line in receipts.read_log(path, source=io.BytesIO(payload)):
+        match = receipts.STAGE_LINE.search(line)
+        if match is not None:
+            stage = match.group(1)
+            if stage in ('world_save_started', 'world_save_finished'):
+                phase = 'save'
+            elif stage in ('world_readers_drain_started', 'far_lod_drained', 'world_readers_drained'):
+                phase = 'streaming_wait'
+            else:
+                phase = 'unknown'
+        elif runner.SURFACE_READY_PHASE.search(line):
+            phase = 'unknown' if 'surface ready' in line else 'boot'
     return dict(log_path=str(path), log_missing=False, last_shutdown_stage=stage,
                 placement=receipts.NO_BREADCRUMBS if stage is None else 'in_' + stage,
                 log=payload_record(path, payload), phase=phase)
@@ -247,7 +251,11 @@ def process_report(path, root, bound, role, deadline, case):
     entry['label'] = path.name[:-len('.process.json')].rsplit('-', 1)[-1]
     # Classify breadcrumbs for every outcome; absence is unknown, never proof of boot.
     location = log_report(path.with_name(path.name[:-len('.process.json')] + '.log'), root)
-    entry.update(location, command=receipt['command'],
+    if receipt.get('log_truncated', False):
+        # A retained prefix cannot establish the process's later active phase.
+        location.update(phase='unknown', last_shutdown_stage=None, placement=None)
+    entry.update(location, log_truncated=receipt.get('log_truncated', False),
+                 command=receipt['command'],
                  receipt=payload_record(path, payload), measurement_ms=None,
                  binary_verified=not unverified_spawn)
     if receipt['capture_status'] == 'retained':
@@ -325,9 +333,15 @@ def populated_report(path, bound):
 
 
 def report(evidence, profile=None, populated_capture=None):
-    evidence = Path(os.path.abspath(evidence))
-    profile = Path(os.path.abspath(profile)) if profile is not None else None
-    populated_capture = Path(os.path.abspath(populated_capture)) if populated_capture is not None else None
+    evidence = Path(evidence).resolve(strict=True)
+    # Canonicalize selected directory roots, keeping each artifact leaf intact
+    # so the regular-file reader still refuses linked artifacts.
+    if profile is not None:
+        profile = Path(profile)
+        profile = profile.parent.resolve(strict=True) / profile.name
+    if populated_capture is not None:
+        populated_capture = Path(populated_capture)
+        populated_capture = populated_capture.parent.resolve(strict=True) / populated_capture.name
     manifest = read_json(evidence / 'capture.json', evidence)
     if manifest.get('schema') != SCHEMA or manifest.get('complete') is not True:
         raise ValueError('incomplete deferred capture')

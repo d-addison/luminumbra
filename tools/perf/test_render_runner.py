@@ -132,7 +132,7 @@ def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_
         executable = process_runner.resolve_executable(command[0], cwd, environment)
         command = [str(executable), *command[1:]]
         receipt.update(command=command, binary_path=command[0])
-        with process_runner.verified_binary(receipt), log.open('wb') as output:
+        with process_runner.verified_binary(receipt), process_runner.bounded_log(log, receipt) as output:
             started = time.perf_counter()
             try:
                 result = crash_capture.run(command, receipt=receipt,
