@@ -3153,6 +3153,339 @@ TEST(SaveTransaction, ReceiptDiscoveryCompletesOnlyRecordedControlAliases) {
 }
 
 namespace {
+// Model Windows' persisted absence receipts through the same on-disk seam as
+// receipt recovery tests, so POSIX exercises the shipping parser and completion.
+void RecordProtectedAbsence(const fs::path& save, unsigned last_phase, unsigned generations) {
+    auto records = JournalRecords(save);
+    std::erase_if(records, [](const auto& record) {
+        return record.at("record") == "receipt" || record.at("record") == "receipt-reset";
+    });
+    auto receipt = records.front();
+    receipt["record"] = "receipt";
+    receipt["receipts"] = nlohmann::json::array({{{"path", "world_info.json"},
+                                                  {"generation", 0u},
+                                                  {"identity", receipt.at("journal_identity")},
+                                                  {"directory", false},
+                                                  {"absent_only", true}}});
+    for (unsigned generation = 0; generation < generations; ++generation) {
+        receipt["receipts"][0]["generation"] = generation;
+        const auto final_phase = generation + 1 == generations ? last_phase : 3u;
+        for (unsigned phase = 0; phase <= final_phase; ++phase) {
+            receipt["phase"] = phase;
+            records.push_back(receipt);
+        }
+    }
+    Put(journal_directory(save) / "txn.json", EncodeJournalRecords(records));
+}
+
+void InterruptSelectedReceiptStep(const char* step, const fs::path&) {
+    if (step == ReceiptInterruption())
+        throw std::runtime_error("snapshot completion interrupted");
+}
+} // namespace
+
+TEST(SaveTransaction, LaterPublicationSupersedesEarlierAbsenceReceipts) {
+    for (unsigned phase = 0; phase <= 3; ++phase) {
+        for (const unsigned generations : {1u, 2u}) {
+            for (const std::string_view interruption :
+                 {"", "commit-point", "crash-receipt-carrier-published"}) {
+                SCOPED_TRACE(phase);
+                SCOPED_TRACE(generations);
+                SCOPED_TRACE(interruption);
+                TempSave save;
+                SaveTransaction transaction(save.path(), 1, {}, &RawDigest);
+                ASSERT_TRUE(transaction.begin(nullptr));
+                ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+                ASSERT_TRUE(WorldSaveService::remove_member(save.path(), "world_info.json"));
+                RecordProtectedAbsence(save.path(), phase, generations);
+                ASSERT_TRUE(WorldSaveService::write_member_bytes(
+                    save.path(), "world_info.json", "published"));
+                {
+                    ReceiptInterruption() = interruption;
+                    const HookGuard hook(&InterruptSelectedReceiptStep);
+                    ASSERT_TRUE(transaction.commit(nullptr));
+                }
+                EXPECT_NE(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+                EXPECT_EQ(Get(save.path() / "world_info.json"), "published");
+                EXPECT_FALSE(journal_pending(save.path()));
+                // Recovery must also release the next writer's begin gate.
+                ASSERT_TRUE(CommitOnce(save.path(), 2, {{"world_info.json", "next"}}));
+                EXPECT_EQ(Get(save.path() / "world_info.json"), "next");
+            }
+        }
+    }
+}
+
+namespace {
+void PrepareAbsencePublicationState(const fs::path& save, std::string_view state) {
+    const auto destination = save / "world_info.json";
+    if (state == "prepared" || state == "partial") {
+        fs::path incoming;
+        WorldSaveService::ArtifactIdentity identity{};
+        ASSERT_TRUE(WorldSaveService::prepare_restoration(
+            destination, "incoming", incoming, identity, nullptr));
+        if (state == "prepared") {
+            ASSERT_TRUE(SaveTransaction::prepare_publication(destination, incoming, nullptr));
+        } else {
+            // The body of an ownership entry cannot supersede a receipt until
+            // its newline is durable. Leave an actual, unpublished incoming tail.
+            auto record = LastEntryRecord(JournalRecords(save));
+            record["entries"][0]["incoming_identity"] = identity;
+            record["entries"][0]["incoming_temporary"] = incoming.filename().string();
+            const auto control = journal_directory(save) / "txn.json";
+            Put(control, Get(control) + record.dump());
+            // This staging name never became owned by the journal.
+            ASSERT_TRUE(fs::remove(incoming));
+        }
+    } else if (state == "unreadable") {
+        const auto evidence = Tree(save);
+        EXPECT_FALSE(SaveTransaction::prepare_publication(destination, save / "missing", nullptr));
+        EXPECT_EQ(Tree(save), evidence);
+    } else if (state != "absent") {
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save, "world_info.json", "first"));
+        if (state == "removed" || state == "replacement") {
+            ASSERT_TRUE(WorldSaveService::remove_member(save, "world_info.json"));
+        }
+        if (state == "replacement") {
+            ASSERT_TRUE(WorldSaveService::write_member_bytes(save, "world_info.json", "second"));
+        }
+    }
+}
+} // namespace
+
+TEST(SaveTransaction, SupersededAbsenceReceiptsRebindDuringRollback) {
+    for (unsigned phase = 0; phase <= 3; ++phase) {
+        for (const std::string_view state : {"absent",
+                                             "partial",
+                                             "unreadable",
+                                             "prepared",
+                                             "published",
+                                             "removed",
+                                             "replacement"}) {
+            SCOPED_TRACE(phase);
+            SCOPED_TRACE(state);
+            TempSave save, retained;
+            const auto destination = save.path() / "world_info.json";
+            // Allocate the foreign inode before removing the owned publication.
+            Put(retained.path() / "foreign", "foreign");
+            SaveTransaction transaction(save.path(), 1, {}, &RawDigest);
+            ASSERT_TRUE(transaction.begin(nullptr));
+            ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+            ASSERT_TRUE(WorldSaveService::remove_member(save.path(), "world_info.json"));
+            RecordProtectedAbsence(save.path(), phase, 2);
+            PrepareAbsencePublicationState(save.path(), state);
+            ASSERT_FALSE(::testing::Test::HasFatalFailure());
+            {
+                ReceiptInterruption() = "crash-before-receipt-retirement";
+                const HookGuard hook(&InterruptSelectedReceiptStep);
+                transaction.abort(nullptr);
+            }
+            ASSERT_FALSE(fs::exists(destination));
+            ASSERT_FALSE(FindReceiptCarrier(save.path()).empty());
+            fs::rename(retained.path() / "foreign", destination);
+            const auto evidence = Tree(save.path());
+            EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+            EXPECT_EQ(Tree(save.path()), evidence);
+            fs::rename(destination, retained.path() / "foreign");
+            EXPECT_NE(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+            EXPECT_FALSE(journal_pending(save.path()));
+        }
+    }
+}
+
+TEST(SaveTransaction, SupersededAbsenceSurvivesRepeatedPublicationAndRemovalBeforeCommit) {
+    TempSave save;
+    SaveTransaction transaction(save.path(), 1, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+    ASSERT_TRUE(WorldSaveService::remove_member(save.path(), "world_info.json"));
+    RecordProtectedAbsence(save.path(), 1, 2);
+    for (const std::string bytes : {"first", "second", "third"}) {
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", bytes));
+        ASSERT_TRUE(WorldSaveService::remove_member(save.path(), "world_info.json"));
+    }
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "last"));
+    ASSERT_TRUE(transaction.commit(nullptr));
+    EXPECT_EQ(Get(save.path() / "world_info.json"), "last");
+    EXPECT_FALSE(journal_pending(save.path()));
+}
+
+TEST(SaveTransaction, SupersededAbsenceRollbackResumesAcrossReceiptPublication) {
+    for (unsigned phase = 0; phase <= 3; ++phase) {
+        for (const std::string_view event :
+             {"crash-record-body-flushed", "crash-record-published"}) {
+            SCOPED_TRACE(phase);
+            SCOPED_TRACE(event);
+            TempSave save;
+            SaveTransaction transaction(save.path(), 1, {}, &RawDigest);
+            ASSERT_TRUE(transaction.begin(nullptr));
+            ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+            ASSERT_TRUE(WorldSaveService::remove_member(save.path(), "world_info.json"));
+            RecordProtectedAbsence(save.path(), phase, 2);
+            ASSERT_TRUE(
+                WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+            {
+                ReceiptInterruption() = event;
+                const HookGuard hook(+[](const char* step, const fs::path& path) {
+                    if (step != ReceiptInterruption())
+                        return;
+                    // At body flush the complete JSON is visible, but its absent
+                    // delimiter must not yet change replay's receipt binding.
+                    const auto records = JournalRecords(path.parent_path().parent_path());
+                    const auto& last = records.back();
+                    if (last.at("record") != "receipt" || last.at("phase") != 1u)
+                        return;
+                    for (const auto& receipt : last.at("receipts")) {
+                        if (receipt.at("path") == "world_info.json") {
+                            ReceiptInterruption() = {};
+                            throw std::runtime_error("absence completion interrupted");
+                        }
+                    }
+                });
+                EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+            }
+            EXPECT_TRUE(ReceiptInterruption().empty());
+            EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::RolledBack);
+            EXPECT_FALSE(fs::exists(save.path() / "world_info.json"));
+            EXPECT_FALSE(journal_pending(save.path()));
+        }
+    }
+}
+
+TEST(SaveTransaction, CreatedWorldRollbackReestablishesSupersededAbsenceReceipts) {
+    for (unsigned phase = 0; phase <= 3; ++phase) {
+        SCOPED_TRACE(phase);
+        TempSave parent;
+        const auto root = parent.path() / "created";
+        CreatedWorldArtifacts artifacts;
+        artifacts.create_root(root);
+        SaveTransaction transaction(root, 0, {}, &RawDigest, &artifacts);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        ASSERT_TRUE(WorldSaveService::remove_member(root, "world_info.json"));
+        RecordProtectedAbsence(root, phase, 2);
+        ASSERT_TRUE(WorldSaveService::write_file_durably(
+            root / "world_info.json", "created", nullptr, &artifacts));
+        std::vector<std::string> errors;
+        transaction.abort(&errors);
+        EXPECT_TRUE(errors.empty());
+        EXPECT_FALSE(journal_pending(root));
+        EXPECT_FALSE(fs::exists(root));
+    }
+}
+
+TEST(SaveTransaction, CleanupReplaysCreateAndAbsentOnlyReceiptsBeforeRetirement) {
+    for (const bool absent_only : {false, true}) {
+        for (const bool directory : {false, true}) {
+            SCOPED_TRACE(absent_only);
+            SCOPED_TRACE(directory);
+            TempSave save;
+            const auto destination = save.path() / "world_info.json";
+            const auto foreign = save.path() / "foreign";
+            if (directory) {
+                ASSERT_TRUE(fs::create_directory(foreign));
+            } else {
+                Put(foreign, "foreign bytes");
+            }
+            SaveTransaction transaction(save.path(), 1, {}, &RawDigest);
+            ASSERT_TRUE(transaction.begin(nullptr));
+            ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+            if (!absent_only) {
+                ASSERT_TRUE(
+                    WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+            }
+            auto record = JournalRecords(save.path()).front();
+            WorldSaveService::ArtifactIdentity identity{}, control{};
+            bool missing = false;
+            ASSERT_TRUE(WorldSaveService::artifact_identity(
+                absent_only ? journal_directory(save.path()) : destination,
+                identity,
+                missing,
+                absent_only));
+            ASSERT_FALSE(missing);
+            record["record"] = "receipt";
+            record["phase"] = 0u;
+            record["receipts"] = nlohmann::json::array({{{"path", "world_info.json"},
+                                                         {"identity", identity},
+                                                         {"directory", false},
+                                                         {"absent_only", absent_only}}});
+            {
+                HookGuard hook(+[](const char* step, const fs::path&) {
+                    if (std::string_view(step) == "crash-before-receipt-retirement")
+                        throw std::runtime_error("cleanup interrupted");
+                });
+                transaction.abort(nullptr);
+            }
+            const auto carrier = FindReceiptCarrier(save.path());
+            ASSERT_FALSE(carrier.empty());
+            ASSERT_FALSE(fs::exists(destination));
+            ASSERT_TRUE(WorldSaveService::artifact_identity(carrier, control, missing));
+            ASSERT_FALSE(missing);
+            // Windows already persists these receipts during rollback. POSIX
+            // must replay the same evidence when it is present on disk.
+            bool recorded = false;
+            std::istringstream stream(Get(carrier));
+            std::string line;
+            while (std::getline(stream, line)) {
+                const auto parsed = nlohmann::json::parse(line);
+                if (parsed.at("record") == "receipt") {
+                    for (const auto& item : parsed.at("receipts"))
+                        recorded = recorded || item.at("path") == "world_info.json";
+                }
+            }
+            if (!recorded) {
+                for (unsigned phase = 0; phase <= 3; ++phase) {
+                    record["phase"] = phase;
+                    ASSERT_TRUE(WorldSaveService::append_journal_record(
+                        carrier, record.dump() + "\n", control, nullptr));
+                }
+            }
+            fs::rename(foreign, destination);
+            const auto evidence = Tree(save.path());
+            EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+            EXPECT_EQ(Tree(save.path()), evidence);
+            EXPECT_TRUE(fs::exists(carrier));
+            fs::rename(destination, foreign);
+            EXPECT_NE(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+            EXPECT_FALSE(journal_pending(save.path()));
+        }
+    }
+}
+
+TEST(SaveTransaction, ReceiptDiscoveryIgnoresNoncanonicalNamesAndRefusesCanonicalCorruption) {
+    TempSave save;
+    for (const std::string_view suffix : {"",
+                                          "notes",
+                                          "1.2.3",
+                                          "1.2.3.4.extra",
+                                          "01.2.3.4",
+                                          "1.02.3.4",
+                                          "1.2.03.4",
+                                          "1.2.3.04",
+                                          "1.2.3.-4",
+                                          "1.2.3.+4",
+                                          "1.2.3.",
+                                          "1..3.4",
+                                          "18446744073709551616.2.3.4",
+                                          "1.2.3.18446744073709551616"}) {
+        Put(save.path() / ("journal.receipts." + std::string(suffix)), "unrelated");
+    }
+    const auto baseline = Tree(save.path());
+    EXPECT_FALSE(journal_pending(save.path()));
+    EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::NothingToDo);
+    EXPECT_EQ(Tree(save.path()), baseline);
+    for (const std::string_view suffix : {"1.2.3.4", "18446744073709551615.0.0.0"}) {
+        const auto carrier = save.path() / ("journal.receipts." + std::string(suffix));
+        Put(carrier, "{partial");
+        const auto evidence = Tree(save.path());
+        EXPECT_TRUE(journal_pending(save.path()));
+        EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::Failed);
+        EXPECT_EQ(Tree(save.path()), evidence);
+        ASSERT_TRUE(fs::remove(carrier));
+    }
+}
+
+namespace {
 struct ReceiptBatchCapture {
     unsigned stop_phase = 4;
     std::size_t event = 0;

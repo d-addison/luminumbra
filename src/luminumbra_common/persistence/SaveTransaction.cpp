@@ -293,6 +293,9 @@ struct RetirementReceipt {
     bool retired = false;
     // Derived from an explicit reset record; no extra encoded field.
     bool reset = false;
+    // A later ownership entry binds this destination to another publication.
+    // Derived from record order, without changing the journal encoding.
+    bool superseded = false;
 };
 
 std::uint64_t PendingReceiptBytes(const RetirementReceipt& receipt) {
@@ -346,6 +349,21 @@ RetirementReceipt& ReceiptFor(JournalDocument& document, const std::string& path
     if (found == document.receipts.end())
         throw std::out_of_range("snapshot receipt missing");
     return found->second;
+}
+
+void SupersedeDestinationReceipt(JournalDocument& document,
+                                 const JournalEntry& previous,
+                                 const JournalEntry& incoming) {
+    if (incoming.incoming_identity == std::array<std::uint64_t, 3>{} ||
+        (incoming.incoming_identity == previous.incoming_identity &&
+         incoming.incoming_temporary == previous.incoming_temporary))
+        return;
+    // The newline publishing incoming ownership is the binding boundary.
+    // If publication then crashes, rollback re-establishes absence after
+    // retiring the owned payload through its private slot.
+    const auto receipt = LatestReceipt(document, incoming.path);
+    if (receipt != document.receipts.end())
+        receipt->second.superseded = true;
 }
 
 bool ReadIdentity(const nlohmann::json& object,
@@ -744,6 +762,7 @@ bool ApplyJournalRecords(std::string_view bytes,
                 error = "journal undo identity changed";
                 return false;
             }
+            SupersedeDestinationReceipt(out, previous, entry);
             entry.installed_from_incoming =
                 entry.installed_identity != decltype(entry.installed_identity){} &&
                 (entry.installed_identity == previous.incoming_identity ||
@@ -938,6 +957,29 @@ fs::path ReceiptCarrier(const fs::path& save_dir, const JournalDocument& documen
     return save_dir / name;
 }
 
+bool IsReceiptCarrierName(std::string_view name) {
+    constexpr std::string_view prefix = "journal.receipts.";
+    if (!name.starts_with(prefix))
+        return false;
+    name.remove_prefix(prefix.size());
+    // Exactly four canonical uint64 decimals; each has at most 20 digits.
+    if (name.size() > 4u * 20u + 3u)
+        return false;
+    for (unsigned component = 0; component < 4; ++component) {
+        const auto delimiter = name.find('.');
+        const auto digits = name.substr(0, delimiter);
+        std::uint64_t value = 0;
+        const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), value);
+        if (digits.empty() || (digits.size() > 1 && digits.front() == '0') ||
+            parsed.ec != std::errc{} || parsed.ptr != digits.data() + digits.size() ||
+            (component == 3) != (delimiter == std::string_view::npos))
+            return false;
+        if (component != 3)
+            name.remove_prefix(delimiter + 1);
+    }
+    return true;
+}
+
 fs::path RecoveryControl(const fs::path& save_dir, const JournalDocument& document) {
     return document.external_control ? ReceiptCarrier(save_dir, document)
                                      : journal_directory(save_dir) / "txn.json";
@@ -1086,6 +1128,7 @@ bool RecordReceipts(const fs::path& save_dir,
                 static_cast<detail::NamespaceReceiptPhase>(std::min(phase, 2u));
             receipts[i]->retired = phase == 3;
             receipts[i]->reset = reset;
+            receipts[i]->superseded = false;
             if (recorded)
                 document.pending_receipt_bytes += PendingReceiptBytes(*receipts[i]);
         }
@@ -1501,6 +1544,39 @@ bool CompleteRemoval(const fs::path& save_dir,
            detail::NamespaceRetirementOutcome::Retired;
 }
 
+// Rollback of a later publication must first retire the owned payload through
+// its private slot, then re-establish the destination's absence. Keep the existing
+// receipt/reset transitions so older readers can replay every emitted record.
+std::optional<bool> CompleteSupersededAbsence(const fs::path& save_dir,
+                                              JournalDocument& document,
+                                              const fs::path& path,
+                                              const ArtifactIdentity& identity,
+                                              ArtifactIdentity& control,
+                                              const BoundPublicationStage& stage,
+                                              std::vector<std::string>* errors) {
+    const auto name = Filesystem::GenericUtf8PathString(path.lexically_relative(save_dir));
+    const auto found = LatestReceipt(document, name);
+    if (found == document.receipts.end() || !found->second.absent_only || !found->second.superseded)
+        return std::nullopt;
+    ArtifactIdentity actual{};
+    bool missing = false;
+    if (!WorldSaveService::artifact_identity(path, actual, missing) ||
+        (!missing && (actual != identity || !WorldSaveService::remove_owned_entry(
+                                                path, identity, errors, false, &stage))))
+        return false;
+    if (identity != ArtifactIdentity{} &&
+        !CompleteRemoval(
+            save_dir, document, stage.directory / stage.name, identity, control, errors))
+        return false;
+    auto& receipt = found->second;
+    const bool reset =
+        receipt.retired || receipt.completion.phase != detail::NamespaceReceiptPhase::Prepared;
+    if (reset && !RecordReceipts(save_dir, document, {&receipt}, 0, control, errors, nullptr, true))
+        return false;
+    return CompleteReceipt(save_dir, document, receipt, control, nullptr, errors) ==
+           detail::NamespaceRetirementOutcome::Retired;
+}
+
 bool ReadUndo(const fs::path& save_dir,
               const JournalDocument& document,
               const JournalEntry& entry,
@@ -1649,8 +1725,13 @@ bool RollbackEntries(const fs::path& save_dir,
         }
         if (entry->action == "create") {
             const auto identity = missing ? entry->rollback_retired_identity : current;
-            if (document.modern && identity == ArtifactIdentity{} &&
-                (kNeedsFileReceipts || HasReceipt(document, entry->path))) {
+            const auto superseded = CompleteSupersededAbsence(
+                save_dir, document, destination, identity, control, retired_stage, errors);
+            if (superseded.has_value()) {
+                if (!*superseded)
+                    return false;
+            } else if (document.modern && identity == ArtifactIdentity{} &&
+                       (kNeedsFileReceipts || HasReceipt(document, entry->path))) {
                 if (!PrepareReceipt(save_dir,
                                     document,
                                     destination,
@@ -1926,16 +2007,11 @@ bool JournalInventory(const fs::path& save_dir,
 bool CompleteCreatedFiles(const fs::path& save_dir,
                           JournalDocument& document,
                           ArtifactIdentity& control,
-                          std::vector<CreatedWorldArtifacts::OwnedFile>& files,
+                          const std::vector<CreatedWorldArtifacts::OwnedFile>& files,
                           std::vector<std::string>* errors) {
     std::map<fs::path, ArtifactIdentity> inventory;
     if (!JournalInventory(save_dir, document, control, inventory, errors))
         return false;
-    std::erase_if(files, [&](const auto& file) {
-        const auto name = Filesystem::GenericUtf8PathString(file.path.lexically_relative(save_dir));
-        return name != kSnapshotIndexRelativePath && !member_path_allowed(name) &&
-               !inventory.contains(file.path);
-    });
     // Admission of the whole registry subset precedes the first namespace change.
     for (const auto& file : files) {
         const auto name = Filesystem::GenericUtf8PathString(file.path.lexically_relative(save_dir));
@@ -2019,6 +2095,13 @@ bool CompleteCreatedFiles(const fs::path& save_dir,
         for (const auto& [path, stage] : removals) {
             const auto file = std::find_if(
                 files.begin(), files.end(), [&](const auto& value) { return value.path == path; });
+            const auto superseded = CompleteSupersededAbsence(
+                save_dir, document, path, file->identity, control, stage, errors);
+            if (superseded.has_value()) {
+                if (!*superseded)
+                    return false;
+                continue;
+            }
             ArtifactIdentity actual{};
             bool missing = false;
             if (!WorldSaveService::artifact_identity(path, actual, missing) ||
@@ -2176,7 +2259,20 @@ bool FinishJournal(const fs::path& save_dir,
                 return false;
             continue;
         }
-        file_removals.push_back(ReceiptRemovalFor(save_dir, document, found->second, &slot));
+    }
+    // Receipts also cover rolled-back create destinations and recorded absences,
+    // which are deliberately outside the temporary-file inventory. Replay each
+    // latest binding; older generations retain evidence but no longer own a name.
+    for (auto receipt = document.receipts.begin(); receipt != document.receipts.end();) {
+        const auto next = document.receipts.upper_bound(
+            {receipt->first.first, std::numeric_limits<std::uint64_t>::max()});
+        auto& latest = std::prev(next)->second;
+        if (!latest.directory && !latest.superseded) {
+            const auto slot =
+                CleanupStage(save_dir, document.undo_directory_identity, save_dir / latest.path);
+            file_removals.push_back(ReceiptRemovalFor(save_dir, document, latest, &slot));
+        }
+        receipt = next;
     }
     const auto file_outcome = CompleteReceipts(save_dir, document, file_removals, control, errors);
     if (file_outcome == detail::NamespaceRetirementOutcome::Failed)
@@ -2197,7 +2293,7 @@ bool FinishJournal(const fs::path& save_dir,
     all_retired =
         all_retired &&
         std::all_of(document.receipts.begin(), document.receipts.end(), [](const auto& item) {
-            return item.second.retired || item.second.reset;
+            return item.second.retired || item.second.reset || item.second.superseded;
         });
     if (!all_retired) {
         AddError(errors, "namespace receipts retained; filesystem durability unqualified");
@@ -2223,12 +2319,11 @@ bool RecoverReceiptCarriers(const fs::path& save_dir, std::vector<std::string>* 
     if (iterator_error)
         return false;
     std::size_t inspected = 0;
-    constexpr std::string_view prefix = "journal.receipts.";
     for (const fs::directory_iterator end; iterator != end; iterator.increment(iterator_error)) {
         if (iterator_error || inspected++ == kMaxSnapshotMembers)
             return false;
         const auto name = Filesystem::GenericUtf8PathString(iterator->path().filename());
-        if (name.starts_with(prefix))
+        if (IsReceiptCarrierName(name))
             carriers.push_back(iterator->path());
     }
     if (iterator_error)
@@ -2591,8 +2686,7 @@ bool journal_pending(const fs::path& save_dir) {
     std::size_t inspected = 0;
     for (const fs::directory_iterator end; iterator != end; iterator.increment(ec)) {
         if (ec || inspected++ == kMaxSnapshotMembers ||
-            Filesystem::GenericUtf8PathString(iterator->path().filename())
-                .starts_with("journal.receipts."))
+            IsReceiptCarrierName(Filesystem::GenericUtf8PathString(iterator->path().filename())))
             return true;
     }
     return bool(ec);
@@ -2784,7 +2878,7 @@ void report_snapshot_step(const char* step, const fs::path& path) {
         const std::string_view event(step);
         if ((event == "before-replace" || event == "after-replace" ||
              event == "publication-quarantined" || event == "retirement-quarantined") &&
-            Filesystem::GenericUtf8PathString(path.filename()).starts_with("journal.receipts.")) {
+            IsReceiptCarrierName(Filesystem::GenericUtf8PathString(path.filename()))) {
             if (event == "before-replace")
                 step = "crash-receipt-before-publication";
             else if (event == "after-replace")
@@ -3403,6 +3497,10 @@ bool SaveTransaction::read_live_journal(std::vector<std::string>* errors) {
             AddError(errors, "cannot inspect live snapshot journal");
             return false;
         }
+        // The identity, size and high-resolution write/change times came from
+        // this same open file. Unknown or changed versions require full replay.
+        if (state.valid && version == state.document.version && state.document.cached_bytes)
+            return true;
         std::string bytes, error;
         if (!input.read(bytes, kMaxSnapshotIndexBytes)) {
             state.valid = false;
@@ -3415,9 +3513,6 @@ bool SaveTransaction::read_live_journal(std::vector<std::string>* errors) {
             AddError(errors, "live snapshot journal changed while reading");
             return false;
         }
-        if (state.valid && version == state.document.version && state.document.cached_bytes &&
-            bytes == *state.document.cached_bytes)
-            return true;
         state.valid = false;
         if (!ParseJournal(bytes, state.document, error) || !state.document.modern ||
             state.document.cleanup || state.document.txn_id != m_txn_id ||
@@ -3903,6 +3998,12 @@ void SaveTransaction::abort(std::vector<std::string>* errors) {
             m_artifacts->complete_files(
                 journal_directory(m_save_dir),
                 [&](const auto& path) { return creation_inventory.contains(path); },
+                [&](const auto& path) {
+                    const auto name =
+                        Filesystem::GenericUtf8PathString(path.lexically_relative(m_save_dir));
+                    return creation_inventory.contains(path) ||
+                           name == kSnapshotIndexRelativePath || member_path_allowed(name);
+                },
                 [&](auto& files) {
                     return CompleteCreatedFiles(
                         m_save_dir, document, m_control_identity, files, errors);

@@ -1061,6 +1061,81 @@ TEST_F(CreatedWorldCleanup, RollbackRetainsHandlesOnRefusalAndClosesThemAfterRem
     EXPECT_FALSE(std::filesystem::exists(save));
 }
 
+TEST_F(CreatedWorldCleanup, CompletionRetainsExcludedHandlesAndPosixFailureHandles) {
+    for (const bool throws : {false, true}) {
+        SCOPED_TRACE(throws);
+        const NativeRace::HandleCapture handles;
+        CreatedWorldArtifacts artifacts;
+        const auto save = Root() / (throws ? "throw-world" : "refuse-world");
+        const auto payload = save / "world_info.json";
+        artifacts.create_root(save);
+        artifacts.write_file(save / "preset.json", "preset");
+        artifacts.write_file(payload, "payload");
+        const auto admitted = [&](const auto& path) {
+            return path == payload;
+        };
+        const auto refuse = [&](const auto& files) -> bool {
+            EXPECT_EQ(files.size(), 1u);
+#if defined(_WIN32)
+            EXPECT_EQ(handles.live(), 2u); // Root and excluded preset remain pinned.
+#else
+            EXPECT_EQ(handles.live(), 3u); // POSIX also pins the admitted payload.
+#endif
+            if (throws)
+                throw std::runtime_error("completion interrupted");
+            return false;
+        };
+        EXPECT_THROW(artifacts.complete_files(save / "journal", admitted, admitted, refuse),
+                     std::runtime_error);
+#if defined(_WIN32)
+        EXPECT_EQ(handles.live(), 2u);
+#else
+        EXPECT_EQ(handles.live(), 3u);
+#endif
+        artifacts.complete_files(save / "journal", admitted, admitted, [&](const auto& files) {
+            EXPECT_EQ(files.size(), 1u);
+            return std::filesystem::remove(payload);
+        });
+        EXPECT_EQ(handles.live(), 2u);
+        // An empty subset never releases the excluded preset's retained handle.
+        artifacts.complete_files(
+            save / "journal",
+            admitted,
+            [](const auto&) { return false; },
+            [&](const auto& files) {
+                EXPECT_TRUE(files.empty());
+                EXPECT_EQ(handles.live(), 2u);
+                return true;
+            });
+        EXPECT_TRUE(artifacts.rollback().empty());
+        EXPECT_EQ(handles.live(), 0u);
+    }
+}
+
+TEST_F(CreatedWorldCleanup, CompletionSelectionCannotAdmitUntrackedSiblings) {
+    const NativeRace::HandleCapture handles;
+    CreatedWorldArtifacts artifacts;
+    const auto save = Root() / "created-world";
+    artifacts.create_root(save);
+    artifacts.write_file(save / "preset.json", "preset");
+    Write(save / "world_info.json", "untracked");
+    bool completed = false;
+    EXPECT_THROW(artifacts.complete_files(
+                     save / "journal",
+                     [](const auto&) { return false; },
+                     [](const auto&) { return true; },
+                     [&](const auto&) {
+                         completed = true;
+                         return true;
+                     }),
+                 std::runtime_error);
+    EXPECT_FALSE(completed);
+    EXPECT_EQ(handles.live(), 2u);
+    EXPECT_EQ(Read(save / "world_info.json"), "untracked");
+    ASSERT_TRUE(std::filesystem::remove(save / "world_info.json"));
+    EXPECT_TRUE(artifacts.rollback().empty());
+}
+
 TEST_F(CreatedWorldCleanup, UnlinkedCreationStaysPinnedAndItsReplacementSurvivesRollback) {
     for (const bool directory : {false, true}) {
         SCOPED_TRACE(directory);
