@@ -27,6 +27,26 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
     def setUp(self):
         self.journal = (PERSISTENCE / "CreatedWorldArtifacts.h").read_text(encoding="utf-8")
 
+    def test_conflicting_legacy_water_uses_validated_surface_before_copy_budget(self):
+        service = (ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp").read_text(
+            encoding="utf-8")
+        migrate = body(service, "void MigrateLegacyWaterColumns(")
+        self.assertNotIn("conflicting legacy water records", migrate)
+        self.assertLess(migrate.index("!HasValidWaterColumnState(*source)"),
+                        migrate.index("columns.emplace("))
+        selection = body(migrate, "if (HasPersistedWater(*destination))")
+        self.assertLess(selection.index("!HasValidWaterColumnState(*destination)"),
+                        selection.index("source = destination;"))
+        self.assertIn("if (!EqualLegacyWater(*destination, *source))", selection)
+        self.assertLess(migrate.index("source = destination;"),
+                        migrate.index("const auto copy_bytes = source->estimated_heap_bytes();"))
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        for name in ("ConflictingLayersKeepSurfaceBytesAcrossFormatsAndRetention",
+                     "EnabledFrameWaterSaveReopensWithProductionRegionalProfile"):
+            case = body(native, f"TEST(RegionalWaterMigration, {name})")
+            self.assertIn("EXPECT_EQ(saved.bytes(), bytes);", case)
+            self.assertIn("owner->same_water_state(*surface)", case)
+
     def test_retention_uses_an_explicit_volume_and_releases_the_named_creation_handle(self):
         retention = body(self.journal, "static ScopedFile duplicate_file(")
         self.assertIn("::OpenFileById(volume.get(),", retention)

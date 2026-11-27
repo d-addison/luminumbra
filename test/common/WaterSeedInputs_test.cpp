@@ -4799,6 +4799,10 @@ TEST(WaterSeedInputs, RefusedLegacyWaterMigrationPreservesLiveWorldAndLegacyOpen
         const auto chunk = original.get_or_create_chunk({0, y, 0});
         legacy.GetWaterSystem()->InitializeGeneratedWater(*chunk, std::vector<float>(64, 100.0f));
         chunk->water_depth_mm[0] = y;
+        if (y == 3) {
+            // Conflicting layers now migrate; a malformed layer still refuses.
+            chunk->water_edge_flux.pop_back();
+        }
     }
     const Persistence::WorldSaveService service;
     std::vector<std::string> errors;
