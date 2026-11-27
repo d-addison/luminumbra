@@ -59,8 +59,10 @@ def fixture(root):
             for mechanism in evidence.MECHANISMS:
                 run_id = f"{case}-{mechanism}"
                 basename = f"{lane_name}-{run_id}"
-                testcase = f"RecoveryQualification.{run_id}"
-                tests.append({"name": testcase, "command": ["recovery-tests", "--case", case, "--mechanism", mechanism]})
+                testcase = f"RecoveryQualification.{case}.{mechanism}"
+                binary = "frontier_gates_test" + (".exe" if lane_name.startswith("windows-") else "")
+                tests.append({"name": testcase, "command": [binary,
+                              f"--gtest_filter=RecoveryQualification_{case}.{mechanism}"]})
                 junit.append(f'<testcase name="{testcase}" status="run"/>')
                 identity = {"candidate": CANDIDATE, "lane": lane_name, "binary_sha256": BUILDS[lane_name],
                             "run_id": run_id, "case": case, "mechanism": mechanism}
@@ -183,7 +185,7 @@ class RecoveryDurabilityEvidenceContract(unittest.TestCase):
         self.assertTrue(all(row["status"] == "unevaluated" for row in result["checks"]
                             if row["mechanism"] == "abrupt_vm_reset"))
 
-    def test_complete_synthetic_matrix_is_deterministic(self):
+    def test_partial_registration_is_deterministic_and_unsupported_cells_stay_pending(self):
         self.manifest = copy.deepcopy(self.complete)
         first = self.evaluate()
         self.assertEqual(encoded(first), encoded(self.evaluate()))
@@ -196,16 +198,105 @@ class RecoveryDurabilityEvidenceContract(unittest.TestCase):
         first["artifacts"].pop("recovery-evidence.json")
         second["artifacts"].pop("recovery-evidence.json")
         self.assertEqual(encoded(first), encoded(second))
-        self.assertEqual(first["status"], "complete")
+        self.assertEqual(first["status"], "incomplete")
+        complete = [row for row in first["checks"] if row["status"] == "complete"]
+        self.assertEqual(len(complete), 3)
+        self.assertTrue(all((row["case"], row["mechanism"]) == ("matching_restore", "injected_fault")
+                            for row in complete))
+        self.assertTrue(all(row["reason"] == "no registered qualification command for cell"
+                            for row in first["checks"] if row["status"] != "complete"))
         self.assertEqual(len(first["checks"]), 54)
         self.assertFalse(first["native_qualified"])
+
+    def test_registered_commands_complete_every_supported_cell(self):
+        self.manifest = copy.deepcopy(self.complete)
+        # A complete verdict is possible only when every required cell has a
+        # native implementation. Exercise that positive path on the supported
+        # submatrix; the full 54-cell matrix above must remain incomplete.
+        with mock.patch.object(evidence, "CASES", ("matching_restore",)), \
+                mock.patch.object(evidence, "MECHANISMS", ("injected_fault",)):
+            for lane in self.manifest["lanes"]:
+                lane["runs"] = lane["runs"][:1]
+            result = self.evaluate()
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(len(result["checks"]), 3)
+        self.assertTrue(all(row["status"] == "complete" for row in result["checks"]))
+
+    def test_one_unrelated_command_for_all_cells_cannot_complete(self):
+        self.manifest = copy.deepcopy(self.complete)
+        for lane in self.manifest["lanes"]:
+            def unrelated(document):
+                for test in document["tests"]:
+                    test["command"] = ["unrelated-tests", "--gtest_filter=Unrelated.Pass"]
+            self.mutate(lane["discovery"], unrelated)
+        result = self.evaluate()
+        self.assertEqual(result["status"], "incomplete")
+        self.assertEqual(len(result["checks"]), 54)
+        self.assertTrue(all(row["status"] == "unevaluated" for row in result["checks"]))
+
+    def test_distinct_unrelated_commands_cannot_complete(self):
+        self.manifest = copy.deepcopy(self.complete)
+        for lane in self.manifest["lanes"]:
+            def unrelated(document):
+                for index, test in enumerate(document["tests"]):
+                    test["command"] = ["unrelated-tests", f"--gtest_filter=Unrelated.Pass{index}"]
+            self.mutate(lane["discovery"], unrelated)
+        self.assertTrue(all(row["status"] == "unevaluated" for row in self.evaluate()["checks"]))
+
+    def test_wrong_case_mechanism_binary_and_extra_arguments_refuse_only_that_cell(self):
+        self.manifest = copy.deepcopy(self.complete)
+        lane = self.manifest["lanes"][0]
+        binary = "frontier_gates_test.exe"
+        correct = "--gtest_filter=RecoveryQualification_matching_restore.injected_fault"
+        commands = ([binary, "--gtest_filter=RecoveryQualification_absent_create.injected_fault"],
+                    [binary, "--gtest_filter=RecoveryQualification_matching_restore.process_termination"],
+                    [binary, "--gtest_filter=RecoveryQualification_matching_restore.abrupt_vm_reset"],
+                    ["unrelated-tests.exe", correct], [binary], [binary, correct, "--gtest_filter=*"],
+                    [binary, "--gtest_filter=RecoveryQualification_*.*"])
+        for command in commands:
+            with self.subTest(command=command):
+                self.mutate(lane["discovery"], lambda doc: doc["tests"][0].update(command=command))
+                result = self.evaluate()
+                self.assertEqual(result["checks"][0]["status"], "unevaluated")
+                self.assertIn("registered qualification command", result["checks"][0]["reason"])
+                self.assertEqual(sum(row["status"] == "complete" for row in result["checks"]), 2)
+
+    def test_testcase_name_must_match_registered_cell(self):
+        self.run["testcase"] = "RecoveryQualification.absent_create.injected_fault"
+        self.assertIn("wrong registered qualification testcase", self.first()["reason"])
+
+    def test_platform_executable_paths_preserve_exact_command(self):
+        self.manifest = copy.deepcopy(self.complete)
+        for lane, prefix in zip(self.manifest["lanes"],
+                                ("C:\\build dir\\", "C:/build dir/", "/build dir/")):
+            self.mutate(lane["discovery"], lambda doc: doc["tests"][0]["command"].__setitem__(
+                0, prefix + doc["tests"][0]["command"][0]))
+        self.assertEqual(sum(row["status"] == "complete" for row in self.evaluate()["checks"]), 3)
+
+    def test_registered_contract_matches_native_selector_and_ctest(self):
+        source = Path(__file__).resolve().parents[2]
+        cmake = (source / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        native = (source / "test/persistence/recovery_durability_test.cpp").read_text(encoding="utf-8")
+        self.assertEqual(evidence.QUALIFICATION_CELLS, {("matching_restore", "injected_fault")})
+        for case, mechanism in evidence.QUALIFICATION_CELLS:
+            self.assertIn(f"add_test(NAME RecoveryQualification.{case}.{mechanism}\n"
+                          f"    COMMAND {evidence.QUALIFICATION_BINARY}\n"
+                          f"        --gtest_filter=RecoveryQualification_{case}.{mechanism})", cmake)
+            self.assertIn(f"TEST(RecoveryQualification_{case}, {mechanism})", native)
 
     def test_native_label_is_only_a_declaration(self):
         self.manifest = copy.deepcopy(self.complete)
         self.assertFalse(self.evaluate()["native_declared"])
         self.manifest["provenance"] = "native"
         result = self.evaluate()
-        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["status"], "incomplete")
+        self.assertFalse(result["native_declared"])
+        self.assertFalse(result["native_qualified"])
+        with mock.patch.object(evidence, "CASES", ("matching_restore",)), \
+                mock.patch.object(evidence, "MECHANISMS", ("injected_fault",)):
+            for lane in self.manifest["lanes"]:
+                lane["runs"] = lane["runs"][:1]
+            result = self.evaluate()
         self.assertTrue(result["native_declared"])
         self.assertFalse(result["native_qualified"])
 
@@ -276,7 +367,9 @@ class RecoveryDurabilityEvidenceContract(unittest.TestCase):
         self.assertEqual(result["status"], "incomplete")
         for row in result["checks"]:
             self.assertEqual(row["status"],
-                             "unevaluated" if row["lane"] == self.lane["lane"] else "complete")
+                             "complete" if row["lane"] != self.lane["lane"]
+                             and (row["case"], row["mechanism"]) == ("matching_restore", "injected_fault")
+                             else "unevaluated")
         output = io.StringIO()
         args = [str(self.root), "--expected-candidate", CANDIDATE]
         for name, sha in BUILDS.items():

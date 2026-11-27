@@ -24,6 +24,10 @@ LANES = ("windows-msvc", "windows-ucrt64", "posix")
 CASES = ("matching_restore", "absent_create", "abort_previous_commit",
          "abort_initial_creation", "cleanup_committed_journal", "cleanup_directory_retirement")
 MECHANISMS = ("injected_fault", "process_termination", "abrupt_vm_reset")
+# Registered in test/CMakeLists.txt. The native fault-injection regression is
+# currently the only selectable case/mechanism; other observers remain pending.
+QUALIFICATION_CELLS = frozenset({("matching_restore", "injected_fault")})
+QUALIFICATION_BINARY = "frontier_gates_test"
 # Diagnostic parsing budgets only; no engine, persistence or operation limits change.
 MAX_ARTIFACT_BYTES = 1024 * 1024
 MAX_TOTAL_BYTES = 64 * MAX_ARTIFACT_BYTES
@@ -169,15 +173,30 @@ def discovery_tests(data):
             "raw CTest JSON discovery required")
     tests = document["tests"]
     require(type(tests) is list and 0 < len(tests) <= MAX_TESTS, "missing or oversized discovery")
-    names = set()
+    commands = {}
     for test in tests:
         name = text(test["name"])
-        require(name not in names, "duplicate discovered test")
-        names.add(name)
+        require(name not in commands, "duplicate discovered test")
         command = test["command"]
         require(type(command) is list and command and all(type(arg) is str for arg in command),
                 "missing discovered test command")
-    return names
+        commands[name] = command
+    return commands
+
+
+def validate_qualification_command(discovered, lane, run):
+    case, mechanism = run["case"], run["mechanism"]
+    require((case, mechanism) in QUALIFICATION_CELLS, "no registered qualification command for cell")
+    name = f"RecoveryQualification.{case}.{mechanism}"
+    require(run["testcase"] == name, "wrong registered qualification testcase")
+    command = discovered.get(name)
+    require(command is not None, "missing registered qualification command")
+    # CTest emits an absolute executable path, with platform-specific separators.
+    # Its build-directory prefix is not portable; the target and all arguments are.
+    binary = QUALIFICATION_BINARY + (".exe" if lane.startswith("windows-") else "")
+    require(command[0].replace("\\", "/").rsplit("/", 1)[-1] == binary
+            and command[1:] == [f"--gtest_filter=RecoveryQualification_{case}.{mechanism}"],
+            "discovered command differs from registered qualification command")
 
 
 class JUnitTreeBuilder(ET.TreeBuilder):
@@ -320,7 +339,7 @@ def validate_lane(artifacts, lane, candidate, expected_build):
             "abrupt-reset qualification requires a VM storage scope")
     discovered = discovery_tests(artifacts.reference(lane["discovery"]))
     passed = passed_tests(artifacts.reference(lane["junit"]))
-    require(passed <= discovered, "JUnit contains undiscovered tests")
+    require(passed <= discovered.keys(), "JUnit contains undiscovered tests")
     runs = lane["runs"]
     require(type(runs) is list and len(runs) <= len(CASES) * len(MECHANISMS), "too many or invalid runs")
     selected = {}
@@ -354,6 +373,7 @@ def validate_lane(artifacts, lane, candidate, expected_build):
                 if mechanism == "abrupt_vm_reset":
                     receipt = parse_json(artifacts.reference(run["interruption"]))
                     require(receipt["virtual_storage_stack"] == environment["storage"], "reset storage scope differs")
+                validate_qualification_command(discovered, lane["lane"], run)
                 result["status"] = "complete"
             except EVIDENCE_ERRORS as error:
                 result["reason"] = str(error)
