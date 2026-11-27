@@ -1,5 +1,6 @@
 #include "FarWorldSessionController.h"
 #include "FarWorldHandoffDiagnostics.h"
+#include "core/Log.h"
 #include "world/FarWorldCapturePlan.h"
 #include <algorithm>
 #include <array>
@@ -97,6 +98,50 @@ struct FarWorldSessionController::Impl {
     bool queued = false;
     std::optional<std::uint64_t> frame;
     std::uint64_t start_frame = 0, epoch = 0, source_operations = 0;
+    // Constant-size terminal measurement receipt. Source progress survives a
+    // refusal/cancellation; sampling counts must be observed before unwinding.
+    Producer::CaptureProgress measured_source;
+    FarFrozenCaptureWork::Counts measured_samples;
+    std::uint64_t start_ticks = 0, elapsed_ticks = 0;
+    std::uint64_t source_frames = 0, preparation_frames = 0;
+    bool receipt_pending = false;
+    void Record(const FarWorldRefreshWork& work,
+                FarWorldRefusal refusal,
+                const Producer::FrozenResult& failure) {
+        if (!receipt_pending)
+            return;
+        receipt_pending = false;
+        if (sampling)
+            measured_samples = sampling->counts();
+        const auto& clock = limits.capture.clock;
+        const auto end = clock.now(clock.context);
+        elapsed_ticks = end >= start_ticks ? end - start_ticks : 0;
+        // Shipping construction is restricted to the diagnostics host opt-in;
+        // explicit qualification harnesses use the same terminal receipts.
+        LUMINUMBRA_CORE_INFO(
+            "Far ladder diagnostics refresh: reads={} columns={} members={} "
+            "compressed_bytes={} decoded_bytes={} source_ops={} planning_ops={} "
+            "admission_ops={} height_samples={} density_samples={} water_samples={} "
+            "source_frames={} preparation_frames={} elapsed_ticks={} refusal={} "
+            "source_error={} capture_error={}",
+            measured_source.reads,
+            measured_source.columns,
+            measured_source.members,
+            work.source_read_bytes,
+            work.source_decode_work,
+            source_operations,
+            work.capture_work,
+            work.admission_work,
+            measured_samples.height,
+            measured_samples.density,
+            measured_samples.water,
+            source_frames,
+            preparation_frames,
+            elapsed_ticks,
+            FarWorldRefusalName(refusal),
+            static_cast<int>(failure.source),
+            static_cast<int>(failure.capture));
+    }
 };
 FarWorldSessionController::FarWorldSessionController(FarWorldRenderer& renderer)
     : renderer_(renderer) {}
@@ -191,6 +236,8 @@ bool FarWorldSessionController::Request(std::span<const FarTileKey> keys) {
 }
 void FarWorldSessionController::Refuse(FarWorldRefusal refusal,
                                        const Producer::FrozenResult& failure) {
+    refusal_ = refusal == FarWorldRefusal::None ? FarWorldRefusal::AdmissionFailed : refusal;
+    impl_->Record(work_, refusal_, failure);
     impl_->plan.Cancel();
     if (impl_->producer)
         impl_->producer->cancel_capture();
@@ -201,18 +248,23 @@ void FarWorldSessionController::Refuse(FarWorldRefusal refusal,
     impl_->sampling.reset();
     failure_ = failure;
     phase_ = Phase::Refused;
-    refusal_ = refusal == FarWorldRefusal::None ? FarWorldRefusal::AdmissionFailed : refusal;
     if (bound)
         renderer_.SetSessionRefresh(refusal_, failure_, work_);
 }
 void FarWorldSessionController::Begin() {
     auto& state = *impl_;
     state.plan.Reset();
+    state.sampling.reset();
     work_ = {};
     state.source_operations = 0;
+    state.measured_source = {};
+    state.measured_samples = {};
+    state.source_frames = state.preparation_frames = 0;
+    state.receipt_pending = true;
     state.start_frame = state.frame.value_or(0);
     const auto& clock = state.limits.capture.clock;
     const auto now = clock.now(clock.context);
+    state.start_ticks = now;
     if (state.limits.refresh_ticks > std::numeric_limits<std::uint64_t>::max() - now) {
         Refuse(FarWorldRefusal::MissingLimits, {Producer::Error::InvalidLimits});
         return;
@@ -220,9 +272,15 @@ void FarWorldSessionController::Begin() {
     state.deadline = {clock.now, clock.context, now + state.limits.refresh_ticks};
     state.sampling.emplace(state.limits.transaction_samples, nullptr, state.deadline);
     if (state.plan.SetWanted({state.successor.data(), state.successor_count}) !=
-            Plan::Error::None ||
-        !state.producer->request_capture(state.plan.source_windows())) {
+        Plan::Error::None) {
         Refuse(FarWorldRefusal::SpanRejected, {Producer::Error::InvalidWindow});
+        return;
+    }
+    if (!state.producer->request_capture(state.plan.source_windows())) {
+        const auto error = state.producer->capture_status().error;
+        const Producer::FrozenResult failure{
+            error != Producer::Error::None ? error : Producer::Error::InvalidWindow};
+        Refuse(FarWorldProducerRefusal(failure), failure);
         return;
     }
     state.queued = false;
@@ -361,7 +419,10 @@ FarWorldSessionController::Phase FarWorldSessionController::Pump(std::uint64_t f
             return phase_;
         }
     }
+    if (phase_ != Phase::Waiting)
+        ++state.preparation_frames;
     if (phase_ == Phase::Source) {
+        ++state.source_frames;
         const auto& clock = state.limits.capture.clock;
         const auto before = clock.now(clock.context);
         const auto copied = state.producer->counters().copied_bytes;
@@ -379,6 +440,7 @@ FarWorldSessionController::Phase FarWorldSessionController::Pump(std::uint64_t f
         const auto after = clock.now(clock.context);
         work_.source_copied_bytes += state.producer->counters().copied_bytes - copied;
         const auto progress = state.producer->capture_progress();
+        state.measured_source = progress;
         work_.source_read_bytes = progress.compressed_bytes;
         work_.source_decode_work = progress.decoded_bytes;
         work_.source_ms += after >= before ? double(after - before) * 1000.0 /
@@ -467,6 +529,8 @@ FarWorldSessionController::Phase FarWorldSessionController::Pump(std::uint64_t f
         Refuse(FarWorldRefusal::AdmissionFailed, {Producer::Error::DeadlineExceeded});
         return phase_;
     }
+    if (phase_ == Phase::Complete)
+        state.Record(work_, FarWorldRefusal::None, {});
     // This constant-size projection includes synchronous read/copy elapsed cost.
     renderer_.SetSessionRefresh(refusal_, failure_, work_);
     return phase_;
@@ -510,6 +574,9 @@ bool FarWorldSessionController::Retains(const FarTileKey& key) const {
 void FarWorldSessionController::Cancel() {
     CheckOwner();
     if (impl_) {
+        impl_->Record(work_,
+                      FarWorldRefusal::ImmutableAuthorityUnavailable,
+                      {Producer::Error::AuthorityUnavailable});
         impl_->plan.Cancel();
         if (impl_->producer)
             impl_->producer->cancel_capture();

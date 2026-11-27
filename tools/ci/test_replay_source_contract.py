@@ -1421,7 +1421,9 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn('parsed.modern = schema->get<std::string>() == kJournalSchema;', parse)
         self.assertIn('root.size() != expected_fields', parse)
         self.assertIn('phase->get<std::uint64_t>() > 3', parse)
-        stream = self.function(source, "ParseJournal", "")
+        stream = self.function(source, "ApplyJournalRecords", "")
+        self.assertIn('ApplyJournalRecords(bytes, out, error, true)',
+                      self.function(source, "ParseJournal", ""))
         self.assertIn('record.modern != out.modern', stream)
         self.assertIn('journal receipt transition invalid', stream)
         completion = self.function(source, "CompleteReceipts", "")
@@ -1476,6 +1478,242 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn('"crash-before-restoration-completion"', rollback)
         self.assertNotIn('if (!missing && !WorldSaveService::remove_owned_entry(', rollback)
 
+    def assert_receipt_generation_contract(self, source):
+        parse = self.function(source, "ParseJournalRecord", "")
+        self.assertIn('generation ? generation->get<std::uint64_t>() : 0', parse)
+        self.assertIn('generation && !generation->is_number_unsigned()', parse)
+        self.assertIn('std::pair{receipt.path, receipt.generation}', parse)
+        stream = self.function(source, "ApplyJournalRecords", "")
+        for token in ('receipt.generation != 0',
+                      'receipt.generation != latest->second.generation + 1',
+                      '!latest->second.retired', 'latest != found',
+                      'out.recorded_slots[slot].insert(identity)'):
+            self.assertIn(token, stream)
+        self.assertGreaterEqual(stream.count('out.recorded_slots[slot].insert(identity)'), 2)
+        self.assertIn('!latest->second.reset', stream)
+        capacity = self.function(source, 'AppendMetadata', '')
+        self.assertLess(capacity.index('ReservePendingReceipts(document, reserve)'),
+                        capacity.index('WorldSaveService::append_journal_record('))
+        self.assertIn('!document.receipts.contains({name, generation})', capacity)
+        reserve = self.function(source, 'ReservePendingReceipts', '')
+        self.assertIn('document.pending_receipt_bytes > kMaxSnapshotIndexBytes - reserve', reserve)
+        self.assertNotIn('for (', reserve)
+        writer = self.function(source, 'write_journal', 'SaveTransaction::')
+        self.assertLess(writer.index('ReservePendingReceipts(document, append_reserve)'),
+                        writer.index('record,\n', writer.index('ReservePendingReceipts(')))
+        encoder = self.function(source, "RecordReceipts", "")
+        self.assertIn('{"generation", receipt.generation}', encoder)
+        inventory = self.function(source, "JournalInventory", "")
+        self.assertIn('history->second.contains(receipt.completion.identity)', inventory)
+
+    def test_receipt_generations_preserve_identity_and_refuse_unordered_reuse(self):
+        source = read_source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        self.assert_receipt_generation_contract(source)
+        for token in ('generation ? generation->get<std::uint64_t>() : 0',
+                      'receipt.generation != latest->second.generation + 1',
+                      '!latest->second.retired', 'latest != found',
+                      'out.recorded_slots[slot].insert(identity)',
+                      'ReservePendingReceipts(document, reserve)',
+                      'ReservePendingReceipts(document, append_reserve)',
+                      '{"generation", receipt.generation}',
+                      'history->second.contains(receipt.completion.identity)'):
+            with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):
+                self.assert_receipt_generation_contract(source.replace(token, 'removed', 1))
+        self.assertIn('TEST(SaveTransaction, ReceiptGenerationsRetainEachRecordedPublicationIdentity)',
+                      read_source("test/persistence/SaveTransaction_test.cpp"))
+
+    def assert_live_journal_work_is_incremental(self, source):
+        writer = self.function(source, 'write_journal', 'SaveTransaction::')
+        self.assertNotIn('ParseJournal(', writer)
+        self.assertNotIn('input.read(', writer)
+        self.assertIn('read_live_journal(errors)', writer)
+        self.assertIn('ApplyJournalRecords(record, document, error)', writer)
+        self.assertIn('&document.version', writer)
+        reader = self.function(source, 'read_live_journal', 'SaveTransaction::')
+        self.assertIn('state.valid && version == state.document.version', reader)
+        self.assertIn('bytes == *state.document.cached_bytes', reader)
+        self.assertLess(reader.index('input.read('),
+                        reader.index('bytes == *state.document.cached_bytes'))
+        self.assertLess(reader.index('bytes == *state.document.cached_bytes'),
+                        reader.index('ParseJournal('))
+        self.assertIn('state.document.cached_bytes = std::move(bytes)', reader)
+        self.assertIn('after != version', reader)
+        completion = self.function(source, 'complete_owned_removal', 'SaveTransaction::')
+        self.assertNotIn('ParseJournal(', completion)
+        self.assertLess(completion.index('if (!publication)'),
+                        completion.index('JournalInventory('))
+        self.assertLess(completion.index('JournalInventory('),
+                        completion.index('const auto& entry ='))
+        self.assertEqual(completion.count('JournalInventory('), 2)
+        self.assertIn('member_document.entries.push_back(document.entries[recorded->second])',
+                      completion)
+        self.assertRegex(completion, r'&state\.inventory_entries,\s*false\)\)')
+        inventory = self.function(source, 'JournalInventory', '')
+        self.assertIn('if (!scan_directories)', inventory)
+        reserve = self.function(source, 'ReservePendingReceipts', '')
+        self.assertNotIn('for (', reserve)
+        self.assertIn('document.pending_receipt_bytes', reserve)
+        stream = self.function(source, 'ApplyJournalRecords', '')
+        self.assertIn('out.pending_receipt_bytes -= PendingReceiptBytes(previous->second)', stream)
+        self.assertIn('out.pending_receipt_bytes += PendingReceiptBytes(receipt)', stream)
+        phases = self.function(source, 'RecordReceipts', '')
+        self.assertIn('document.pending_receipt_bytes -= PendingReceiptBytes(*receipts[i])', phases)
+        self.assertIn('document.pending_receipt_bytes += PendingReceiptBytes(*receipts[i])', phases)
+        prepare = self.function(source, 'PrepareReceipts', '')
+        self.assertIn('document.pending_receipt_bytes += PendingReceiptBytes(*receipt)', prepare)
+        metadata = self.function(source, 'AppendMetadata', '')
+        self.assertIn('document.version == SavedInputFile::Version{} ? nullptr : &document.version',
+                      metadata)
+        self.assertIn('document.cached_bytes->append(bytes)', metadata)
+        self.assertIn('document.cached_bytes->append(record)', writer)
+
+    def test_live_journal_work_is_incremental_and_revalidates_native_versions(self):
+        source = read_source('src/luminumbra_common/persistence/SaveTransaction.cpp')
+        self.assert_live_journal_work_is_incremental(source)
+        for token in ('state.valid && version == state.document.version',
+                      'bytes == *state.document.cached_bytes',
+                      'ApplyJournalRecords(record, document, error)',
+                      '&document.version', 'after != version',
+                      'member_document.entries.push_back(document.entries[recorded->second])'):
+            with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):
+                self.assert_live_journal_work_is_incremental(source.replace(token, 'removed'))
+        service = read_source('src/luminumbra_common/persistence/WorldSaveService.cpp')
+        append = self.function(service, 'append_journal_record', 'WorldSaveService::')
+        self.assertIn('const auto expected_version = version ? *version : SavedInputFile::Version{}',
+                      append)
+        self.assertLess(append.index('current == expected_version'),
+                        append.index('truncate_tail(published)'))
+        self.assertLess(append.index('current == expected_version'),
+                        append.index('write_bytes(record.data()'))
+        for token in ('expected_bytes->size() > kMaxSnapshotIndexBytes',
+                      'expected_version != SavedInputFile::Version{} && !expected_bytes',
+                      'size == expected_bytes->size()',
+                      'std::memcmp(tail.data(), expected_bytes->data() + offset, count) == 0'):
+            self.assertIn(token, append)
+        self.assertLess(append.index('std::memcmp('), append.index('truncate_tail(published)'))
+        self.assertLess(append.index('std::memcmp('), append.index('write_bytes(record.data()'))
+        stream = self.function(source, 'ApplyJournalRecords', '')
+        self.assertIn('out.recorded_slots[slot].insert(entry.incoming_identity)', stream)
+        self.assertLess(append.index('write_bytes("\\n", 1) && flush()'),
+                        append.index('SavedInputFile::native_version(file, appended_version)'))
+        self.assertLess(append.index('SavedInputFile::native_version(file, appended_version)'),
+                        append.index('const bool closed = close()'))
+        self.assertLess(append.index('::ReOpenFile(file,'),
+                        append.index('const bool closed = close()'))
+        self.assertLess(append.index('const bool closed = close()'),
+                        append.index('SavedInputFile::native_version(version_file, appended_version)'))
+        self.assertLess(append.index('::CloseHandle(version_file)'),
+                        append.index('report_snapshot_step("crash-record-published", path)'))
+        tests = read_source('test/persistence/SaveTransaction_test.cpp')
+        for name in ('ForwardJournalWorkScalesWithAppendedRecords',
+                     'LiveJournalReloadRefusesChangedControlWithoutPublishing',
+                     'LiveJournalReloadAcceptsCompletePrefixAndDiscardsUnpublishedTail',
+                     'LiveJournalCacheRechecksControlAndDirectoryIdentities',
+                     'LiveJournalCacheDoesNotAdoptChangesAfterAppendFlush',
+                     'JournalAppendRequiresUnchangedVersionBeforeMutatingPrefix',
+                     'JournalAppendChecksEveryCachedByteBeforeTruncationOrWrite',
+                     'JournalAppendCachedBytesHandleBoundariesAndUnavailableControl',
+                     'ForwardRemovalRefusesForeignMemberSlotsBeforeMutation',
+                     'LiveJournalCacheRefusesMissingProtectedEntry'):
+            self.assertIn('TEST(SaveTransaction, ' + name + ')', tests)
+
+    def assert_world_cleanup_consumers(self, source):
+        removal = self.function(source, "durable_remove", "WorldSaveService::")
+        self.assertLess(removal.index('SaveTransaction::publication_identity('),
+                        removal.index('StagingFile retained('))
+        self.assertIn('SaveTransaction::complete_owned_removal(path, errors)', removal)
+        self.assertIn('if (!completed.has_value() || !*completed)', removal)
+        publication = self.function(source, "PublishProtectedMember", "")
+        self.assertLess(publication.index('const bool recorded_restoration = source_stage || retired_stage;'),
+                        publication.index('SaveTransaction::publication_stages('))
+        self.assertRegex(publication, r'const auto completed = recorded_restoration\s*'
+                         r'\? std::optional<bool>\{\}\s*'
+                         r': SaveTransaction::complete_owned_removal\(destination, errors\);')
+        self.assertLess(publication.index('SaveTransaction::complete_owned_removal(destination, errors)'),
+                        publication.index('source.publish_bound('))
+        staging = self.function(source, "ReclaimAbandonedStaging", "")
+        self.assertIn('if (world_owned)', staging)
+        self.assertIn('SaveTransaction::complete_owned_removal(entry.path(), nullptr, false)', staging)
+        self.assertLess(staging.index('ReclaimClaimedLedgerStaging('),
+                        staging.index('if (world_owned)'))
+        shared = self.function(source, "remove_file_and_staging", "WorldSaveService::")
+        self.assertLess(shared.index('SaveTransaction::publication_identity('),
+                        shared.index('std::filesystem::remove(destination, error)'))
+        self.assertIn('return durable_remove(destination, errors);', shared)
+        reclaim = self.function(source, "reclaim_file_staging", "WorldSaveService::")
+        self.assertIn('SaveTransaction::publication_identity(destination, expected, incoming)', reclaim)
+
+    def test_world_cleanup_consumers_require_recorded_namespace_completion(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        self.assert_world_cleanup_consumers(source)
+        for token in ('SaveTransaction::complete_owned_removal(path, errors)',
+                      'const bool recorded_restoration = source_stage || retired_stage;',
+                      'const auto completed = recorded_restoration',
+                      'SaveTransaction::complete_owned_removal(destination, errors)',
+                      'SaveTransaction::complete_owned_removal(entry.path(), nullptr, false)',
+                      'return durable_remove(destination, errors);'):
+            with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):
+                self.assert_world_cleanup_consumers(source.replace(token, 'removed', 1))
+        self.assertIn('TEST(WorldSaveService, RemovalCompletionFailureRemainsRetryable)',
+                      read_source("test/persistence/world_save_service_test.cpp"))
+
+    def test_recovery_preflights_live_versions_and_always_diagnoses_failure(self):
+        source = read_source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        recovery = self.function(source, "recover_pending_journal", "")
+        self.assertEqual(recovery.count('RecoveryOutcome::Failed'), 1)
+        self.assertIn('if (errors && errors->size() == previous_errors)', recovery)
+        self.assertRegex(recovery, r'AddError\(errors, "snapshot recovery refused[^\n]*\);\s*'
+                         r'return RecoveryOutcome::Failed;')
+        rollback = self.function(source, "RollbackEntries", "")
+        self.assertLess(rollback.index('SaveTransaction::recovery_versions('),
+                        rollback.index('for (auto* entry : order)',
+                                       rollback.index('SaveTransaction::recovery_versions(')))
+        self.assertIn('save_dir / entry->path, control, entry->live_versions, errors)', rollback)
+        preflight = self.function(source, "recovery_versions", "bool SaveTransaction::")
+        self.assertIn('transaction->m_control_identity != control', preflight)
+        self.assertIn('versions = {entry.previous_version, entry.installed_version, entry.incoming_version};', preflight)
+        native = read_source("test/persistence/SaveTransaction_test.cpp")
+        for name in ('RecoveryFailureAlwaysAppendsDiagnostic',
+                     'RecoveryPreflightsLiveVersionsBeforeChangingAnyMember',
+                     'RecoveryVersionsRequireMatchingWriterAndProtectedPath'):
+            self.assertIn('TEST(SaveTransaction, ' + name + ')', native)
+
+    def assert_creation_completion_order(self, source, registry):
+        abort = self.function(source, "abort", "SaveTransaction::")
+        self.assertIn('ParseJournal(bytes, document, error)', abort)
+        self.assertLess(abort.index('m_artifacts->complete_files('),
+                        abort.index('if (FinishJournal(m_save_dir, document,'))
+        complete = self.function(source, "CompleteCreatedFiles", "")
+        self.assertLess(complete.index('JournalInventory('), complete.index('AppendMetadata('))
+        self.assertLess(complete.index('AppendMetadata('),
+                        complete.index('for (const bool index_batch : {true, false})'))
+        self.assertLess(complete.index('PrepareReceipts('),
+                        complete.index('WorldSaveService::remove_owned_entry('))
+        self.assertIn('CompleteReceipts(save_dir, document, completions, control, errors)', complete)
+        registered = self.function(registry, "complete_files", "")
+        self.assertLess(registered.index('if (!complete(files))'),
+                        registered.index('artifact.identity.reset();'))
+        self.assertIn('!tracked(child.path()) && child.path() != control_directory &&', registered)
+        self.assertIn('!admitted(child.path())', registered)
+        self.assertIn('creation_inventory.contains(path)', abort)
+        self.assertNotIn('directory = true', complete)
+
+    def test_creation_registry_completes_files_before_releasing_evidence(self):
+        source = read_source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        registry = read_source("src/luminumbra_common/persistence/CreatedWorldArtifacts.h")
+        self.assert_creation_completion_order(source, registry)
+        for token in ('m_artifacts->complete_files(', 'PrepareReceipts(',
+                      'CompleteReceipts(save_dir, document, completions, control, errors)'):
+            complete = self.function(source, "CompleteCreatedFiles", "")
+            mutated = (source.replace(complete, complete.replace(token, 'removed', 1), 1)
+                       if token in complete else source.replace(token, 'removed', 1))
+            with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):
+                self.assert_creation_completion_order(mutated, registry)
+        with self.assertRaises((AssertionError, ValueError)):
+            self.assert_creation_completion_order(source, registry.replace('if (!complete(files))', 'if (false)', 1))
+        self.assertIn('CreationRollbackCompletesFilesBeforeJournalAndRetriesEveryInterruption',
+                      read_source("test/persistence/SaveTransaction_test.cpp"))
+
     def test_transaction_v5_receipts_survive_control_cleanup_and_complete_absent_retries(self):
         source = read_source("src/luminumbra_common/persistence/SaveTransaction.cpp")
         self.assert_transaction_receipt_integration(source)
@@ -1517,7 +1755,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn("NearestExistingDirectory(destination.parent_path()), errors)", rollback)
         recovery = self.function(source, "recover_pending_journal", "")
         self.assertRegex(recovery, r'if \(!RollbackEntries\(save_dir, document, control, errors\)\)'
-                         r'\s*\{\s*return RecoveryOutcome::Failed;\s*\}')
+                         r'\s*\{\s*return fail\(\);\s*\}')
 
     def test_matching_restoration_completes_before_rollback_progresses(self):
         source = read_source("src/luminumbra_common/persistence/SaveTransaction.cpp")
@@ -1908,6 +2146,42 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertLess(world.index("ReadRegionFile(path, records, &errors, stop)"), skip)
         self.assertLess(world.index("retain_chunks->contains(record.id)"), skip)
         self.assertLess(skip, world.index("AdmitChunkRecord(record,"))
+
+    def assert_publication_reader_borrows_exclusive_ownership(self, source):
+        guard = self.function(source, "FilePublicationReadGuard", "FilePublicationReadGuard::")
+        release = self.function(source, "~FilePublicationReadGuard", "FilePublicationReadGuard::")
+        self.assertIn('const auto& held = HeldPublicationMutexes();', guard)
+        self.assertIn('std::find(held.begin(), held.end(), &m_sync->publication)', guard)
+        self.assertRegex(guard, r'm_sync = nullptr;\s*return;')
+        self.assertLess(guard.index('m_sync = nullptr;'),
+                        guard.index('m_sync->publication.lock_shared();'))
+        self.assertRegex(release, r'if \(m_sync\)\s*\{\s*m_sync->publication\.unlock_shared\(\);\s*\}')
+
+    def test_publication_reader_borrows_its_threads_exclusive_stripe(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        self.assert_publication_reader_borrows_exclusive_ownership(source)
+        for token in ('const auto& held = HeldPublicationMutexes();',
+                      'std::find(held.begin(), held.end(), &m_sync->publication)',
+                      'm_sync = nullptr;', 'if (m_sync)'):
+            with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):
+                self.assert_publication_reader_borrows_exclusive_ownership(
+                    source.replace(token, 'removed', 1))
+        tests = read_source("test/persistence/SaveTransaction_test.cpp")
+        self.assertIn('CollidingJournalStripeAllowsMemberUpdateAndRemoval', tests)
+        self.assertIn('detail::file_publication_stripe_for_testing(journal)', tests)
+        self.assertIn('ManyMembersKeepDescriptorsBoundedThroughPublicationAndRollback', tests)
+
+    def test_absent_world_member_completion_flushes_existing_ancestor(self):
+        source = read_source("src/luminumbra_common/persistence/SaveTransaction.cpp")
+        completion = self.function(source, "complete_owned_removal", "SaveTransaction::")
+        absent = completion.split('if (identity == ArtifactIdentity{}) {', 1)[1]
+        absent = absent.split('#endif', 1)[0]
+        self.assertRegex(absent, r'#else\s*(?://[^\n]*\n\s*)*'
+                         r'return WorldSaveService::durable_flush_directory\(\s*'
+                         r'NearestExistingDirectory\(owned_path.parent_path\(\)\), errors\);')
+        tests = read_source("test/persistence/world_save_service_test.cpp")
+        self.assertIn('FreshPlantSaveCompletesAbsentRegionMembers', tests)
+        self.assertIn('AbsentRegionRemovalRefusesNonDirectoryAncestors', tests)
 
     def test_native_saved_input_holds_publication_until_after_close(self):
         source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")

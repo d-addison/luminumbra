@@ -372,7 +372,8 @@ bool ServerWorldRunner::Boot() {
     // water sub-hash can never round-trip. Pause BEFORE the first streaming call
     // (EnsureSurfaceReadyNear runs the water update too); unpause at the end of Boot.
     const auto* continuation = m_session->RestoredOwnerContinuation();
-    const bool water_loaded_from_save = continuation || m_session->GetLastLoadedChunkCount() > 0;
+    const bool water_loaded_from_save = continuation || m_session->RestoredWorldSnapshot() ||
+                                        m_session->GetLastLoadedChunkCount() > 0;
     if (water_loaded_from_save) {
         world_system->SetWaterBootPaused(true);
     }
