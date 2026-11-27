@@ -930,10 +930,11 @@ TEST(SurfaceQuery, GeneratedChunksRetainNoCollisionProjectionSamples) {
 }
 
 TEST(SurfaceQuery, GeneratedReplacementRetiresAuthoritativeAndInvalidSlabProjections) {
-    for (const bool invalid_authority : {false, true}) {
-        for (const int input : {0, 1, 2, 3}) {
-            SCOPED_TRACE(invalid_authority);
+    for (const int authority_state : {0, 1, 2, 3}) {
+        for (const int input : {0, 1, 2, 3, 4}) {
+            SCOPED_TRACE(authority_state);
             SCOPED_TRACE(input);
+            const bool invalid_authority = authority_state != 0;
             auto world = MakeWorldSystem();
             auto lower = MakeFlatFloorChunk({0, 0, 0}, 8);
             lower->sdf_data.assign(17 * 17 * 17, 1);
@@ -941,12 +942,19 @@ TEST(SurfaceQuery, GeneratedReplacementRetiresAuthoritativeAndInvalidSlabProject
             lower->mark_sdf_loaded_or_edited();
             ASSERT_TRUE(world->adopt_streamed_chunk(lower));
             auto upper = MakeFlatFloorChunk({0, 1, 0}, 8);
-            upper->sdf_data.assign(invalid_authority ? 1 : 17 * 17 * 17, 1);
-            if (!invalid_authority) {
+            upper->sdf_data.assign(authority_state == 1 ? 1 : 17 * 17 * 17, 1);
+            if (authority_state == 2) {
+                upper->sdf_data[0] = std::numeric_limits<float>::quiet_NaN();
+            } else if (authority_state != 1) {
                 upper->sdf_data[8 + 5 * 17 + 8 * 17 * 17] = -1;
             }
             upper->mark_sdf_loaded_or_edited();
             ASSERT_TRUE(world->adopt_streamed_chunk(upper));
+            if (authority_state == 3) {
+                // Invalid replacement keeps the previously active slab until retirement.
+                upper->sdf_data.resize(1);
+                world->notify_far_lod_authority_changed(upper->get_coords());
+            }
             std::array<float, 17 * 17> baseline{};
             baseline.fill(8);
             auto expected = baseline;
@@ -960,18 +968,17 @@ TEST(SurfaceQuery, GeneratedReplacementRetiresAuthoritativeAndInvalidSlabProject
             upper->sdf_data.assign(input == 0 ? 0 : input == 1 ? 1 : 17 * 17 * 17, 1);
             if (input == 2) {
                 upper->sdf_data[0] = std::numeric_limits<float>::quiet_NaN();
+            } else if (input == 4) {
+                upper->sdf_data[0] = std::numeric_limits<float>::infinity();
             }
             upper->mark_sdf_generated_current_params();
             const auto work = world->simulation_collision_sdf_samples();
+            const auto bytes = world->simulation_collision_projection_bytes();
             world->notify_far_lod_authority_changed(upper->get_coords());
             ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights, baseline));
             EXPECT_EQ(heights, expected);
-            if (input == 3) {
-                // A complete generated replacement must still retire the old
-                // slab. This all-air fixture reaches the exact geometric bound.
-                EXPECT_EQ(world->simulation_collision_sdf_samples() - work,
-                          kFullCollisionProjectionSampleBound);
-            }
+            EXPECT_EQ(world->simulation_collision_sdf_samples(), work);
+            EXPECT_EQ(world->simulation_collision_projection_bytes(), bytes);
             const auto retired_work = world->simulation_collision_sdf_samples();
             world->notify_far_lod_authority_changed(upper->get_coords());
             ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights, baseline));
