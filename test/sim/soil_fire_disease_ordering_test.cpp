@@ -205,7 +205,8 @@ DiseaseTrace(const std::array<unsigned, 6>& permutation, bool regional, bool chu
         if (tick == 1) {
             EXPECT_EQ(stats.died, 1);
             EXPECT_EQ(stats.recovered, 1);
-            EXPECT_EQ(stats.new_infections, 1);
+            // The Healthy plant and the partially resistant Recovered plant both become infected.
+            EXPECT_EQ(stats.new_infections, 2);
         }
         trace.push_back(static_cast<std::uint32_t>(stats.infected));
         trace.push_back(static_cast<std::uint32_t>(stats.new_infections));
