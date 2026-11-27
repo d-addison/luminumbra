@@ -85,7 +85,7 @@ void CheckRefusedCropBirth(bool elapsed, bool perennial, bool shared_identity, u
     W::ActiveRegionLedger allocator;
     const auto parent = shared_identity ? F::PlantSeed(registry, {24, 0, 24}, {}, 7, 8, allocator)
                                         : F::PlantSeed(registry, {24, 0, 24}, {}, 7, 8);
-    ASSERT_NE(parent, entt::null);
+    ASSERT_TRUE(parent != entt::null);
     registry.emplace<C::PlantRegionComponent>(parent, C::PlantRegionComponent{1, 0, 0, 8});
     auto& growth = registry.get<C::PlantGrowthComponent>(parent);
     growth.stage = static_cast<std::uint8_t>(C::PlantStage::Fruiting);
