@@ -231,6 +231,41 @@ class RenderRunnerLogTests(unittest.TestCase):
                     process_runner.report_timeout(receipt, log)
                 self.assertIsNone(receipt['last_observed_phase'])
 
+    def test_close_failure_never_replaces_the_process_exception(self):
+        class FailingClose:
+            def __init__(self):
+                self.sink = io.BytesIO()
+
+            def __enter__(self):
+                return self.sink
+
+            def __exit__(self, *exc):
+                raise OSError('synthetic close flush failure')
+
+        pending = (subprocess.TimeoutExpired(['server'], 1), OSError('synthetic spawn failure'), None)
+        for error in pending:
+            with self.subTest(error=type(error).__name__):
+                receipt = dict(timeout_seconds=180, evidence_errors=[])
+                log = mock.Mock()
+                log.open.return_value = FailingClose()
+                blocks = iter((b'EnsureSurfaceReadyNear/generation-drain\n', b''))
+                with mock.patch.object(process_runner, '_log_pipe_reader',
+                                       return_value=lambda: next(blocks)):
+                    try:
+                        with process_runner.bounded_log(log, receipt):
+                            if error is not None:
+                                raise error
+                    except (subprocess.TimeoutExpired, OSError) as raised:
+                        self.assertIs(raised, error)
+                    else:
+                        self.assertIsNone(error)
+                self.assertTrue(receipt['log_truncated'])
+                self.assertIn('log close: synthetic close flush failure', receipt['evidence_errors'])
+                log.open.return_value = io.BytesIO(b'EnsureSurfaceReadyNear/generation-drain\n')
+                with contextlib.redirect_stderr(io.StringIO()):
+                    process_runner.report_timeout(receipt, log)
+                self.assertIsNone(receipt['last_observed_phase'])
+
 
 class RenderRunnerTests(unittest.TestCase):
     def setUp(self):
