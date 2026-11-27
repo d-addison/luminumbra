@@ -13,6 +13,7 @@
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
 #include <set>
+#include <streambuf>
 #include <string>
 #include <unordered_map>
 
@@ -28,11 +29,87 @@
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_server/ServerStreamingBudget.h"
 #include "luminumbra_server/SimBudgetArtifact.h"
+#include "luminumbra_server/modes/JsonArtifact.h"
 #include "luminumbra_server/modes/SmokeArtifact.h"
 
 namespace {
 using luminumbra::simulation::SimBudgetStage;
 using luminumbra::simulation::SimBudgetTelemetry;
+
+TEST(JsonArtifact, SuccessfulWriteClosesAndPreservesPayload) {
+    const Luminumbra::TestSupport::ScopedTempFile file("json_artifact_", ".json");
+    const nlohmann::json artifact{{"passed", true}, {"ticks", 7}};
+    std::ofstream output(file.Path());
+    ASSERT_TRUE(output.is_open());
+    EXPECT_TRUE(Luminumbra::Server::WriteJsonArtifact(output, artifact, file.Path().string()));
+    EXPECT_FALSE(output.is_open());
+    std::ifstream input(file.Path());
+    ASSERT_TRUE(input.is_open());
+    const std::string actual((std::istreambuf_iterator<char>(input)), {});
+    EXPECT_EQ(actual, artifact.dump(2) + "\n");
+}
+
+TEST(JsonArtifact, DirectoryOutputReturnsFailure) {
+    const Luminumbra::TestSupport::ScopedTempFile file("json_artifact_", ".json");
+    const auto directory = file.Path().parent_path();
+    std::ofstream output(directory);
+    ASSERT_FALSE(output.is_open());
+    EXPECT_FALSE(
+        Luminumbra::Server::WriteJsonArtifact(output, {{"passed", true}}, directory.string()));
+    EXPECT_FALSE(output.is_open());
+    EXPECT_TRUE(std::filesystem::is_directory(directory));
+}
+
+class ShortArtifactBuffer final : public std::streambuf {
+    std::streamsize xsputn(const char*, std::streamsize count) override {
+        return count > 0 ? count - 1 : 0;
+    }
+    int_type overflow(int_type) override {
+        return traits_type::eof();
+    }
+};
+
+TEST(JsonArtifact, ShortWriteReturnsFailureAndClosesOutput) {
+    const Luminumbra::TestSupport::ScopedTempFile file("json_artifact_", ".json");
+    ShortArtifactBuffer short_buffer;
+    std::ofstream output(file.Path());
+    ASSERT_TRUE(output.is_open());
+    // Replace the standard ostream buffer through its public API. The file
+    // still owns its original filebuf, so close must release it after the failure.
+    std::ostream& stream = output;
+    auto* original_buffer = stream.rdbuf(&short_buffer);
+    EXPECT_FALSE(
+        Luminumbra::Server::WriteJsonArtifact(output, {{"passed", true}}, file.Path().string()));
+    EXPECT_FALSE(output.is_open());
+    stream.rdbuf(original_buffer);
+}
+
+TEST(SimBudgetTelemetry, SmokeArtifactDirectoryOutputReturnsFailure) {
+    const Luminumbra::TestSupport::ScopedTempFile file("smoke_artifact_", ".json");
+    ServerCliOptions options;
+    Luminumbra::Server::SmokeRunResult first, replay;
+    FixedSmokeInputs(0, options, first, replay);
+    options.artifact_path = file.Path().parent_path().string();
+    EXPECT_NE(Luminumbra::Server::WriteSmokeArtifact(options, first, replay), 0);
+    EXPECT_TRUE(std::filesystem::is_directory(file.Path().parent_path()));
+}
+
+#ifdef __linux__
+TEST(JsonArtifact, FullDeviceReturnsFailureAndClosesOutput) {
+    std::ofstream output("/dev/full");
+    ASSERT_TRUE(output.is_open());
+    EXPECT_FALSE(Luminumbra::Server::WriteJsonArtifact(output, {{"passed", true}}, "/dev/full"));
+    EXPECT_FALSE(output.is_open());
+}
+
+TEST(SimBudgetTelemetry, SmokeArtifactFullDeviceReturnsFailure) {
+    ServerCliOptions options;
+    Luminumbra::Server::SmokeRunResult first, replay;
+    FixedSmokeInputs(0, options, first, replay);
+    options.artifact_path = "/dev/full";
+    EXPECT_NE(Luminumbra::Server::WriteSmokeArtifact(options, first, replay), 0);
+}
+#endif
 
 TEST(SimBudgetTelemetry, DisabledProductionArtifactMatchesDevelBytes) {
     namespace fs = std::filesystem;
