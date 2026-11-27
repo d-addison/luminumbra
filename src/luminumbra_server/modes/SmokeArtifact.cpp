@@ -326,6 +326,11 @@ int WriteSmokeArtifact(const ServerCliOptions& options,
             return 1;
         }
         out << artifact.dump(2) << "\n";
+        out.close();
+        if (!out) {
+            LUMINUMBRA_CORE_ERROR("Failed to finish smoke artifact: {}", options.artifact_path);
+            return 1;
+        }
         LUMINUMBRA_CORE_INFO("Smoke artifact written: {}", options.artifact_path);
     }
 

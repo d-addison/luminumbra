@@ -28,6 +28,18 @@ def function(source, name):
 
 
 class RegionAuthorityWiring(unittest.TestCase):
+    def test_server_regional_diagnostics_follow_completed_water_authority(self):
+        source = (ROOT / "src/luminumbra_server/ServerWorldRunner.cpp").read_text(
+            encoding="utf-8")
+        run = function(source, "ServerTickReport ServerWorldRunner::RunFixedTicks(")
+        observe = run.index("->Observe<")
+        self.assertEqual(run.count("->Observe<"), 1)
+        self.assertLess(run.index("TickSimulation("), observe)
+        self.assertLess(run.rindex("world_system->update("), observe)
+        self.assertLess(run.index("world_system->activate_due("), observe)
+        self.assertLess(run.index("world_system->sync_water_authority();"), observe)
+        self.assertLess(observe, run.index("if (budget.Enabled())", observe))
+
     def test_off_columns_are_excluded_by_shared_admission_before_preparation(self):
         source = (ROOT / "src/luminumbra_common/systems/RegionalWater.cpp").read_text(
             encoding="utf-8")
