@@ -3809,6 +3809,10 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
             // Publish the representative at the counted boundary, not during
             // host preflight or restored boot. A refused preparation and a
             // save/reopen checkpoint must retain the last committed anchor.
+            if (m_pendingLocalSimulationAnchor) {
+                m_activeRegionLedger.set_local_anchor(*m_pendingLocalSimulationAnchor);
+                m_pendingLocalSimulationAnchor.reset();
+            }
             if (SimulationHostIntegrationEnabled() && m_replicatedSimulationAnchors &&
                 !m_replicatedSimulationAnchors->empty() &&
                 ActiveRegionLedger::valid_anchor(m_replicatedSimulationAnchors->front())) {
@@ -4746,6 +4750,7 @@ void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
 }
 void GameSession::ReplaceActiveRegionLedger(ActiveRegionLedger ledger) {
     m_activeRegionLedger = std::move(ledger);
+    m_pendingLocalSimulationAnchor.reset();
     // Retain the effective settings when create/transient/reset clears region state.
     m_regionSchedulerConfig = m_activeRegionLedger.config();
 }
@@ -4783,14 +4788,28 @@ void GameSession::LatchRegionFault(std::uint64_t tick, const std::string& messag
     LUMINUMBRA_CORE_ERROR("Region scheduler fault at tick {}: {}", tick, message);
 }
 void GameSession::SetLocalPlayerSimulationPosition(const Vec3& feet, bool walking) {
-    if (m_activeRegionsEnabled && walking && !m_activeRegionLedger.try_set_local_anchor(feet))
+    if (!m_activeRegionsEnabled || !walking) {
+        return;
+    }
+    if (!ActiveRegionLedger::valid_anchor(feet)) {
         ++m_regionInputRejections.anchors;
+        return;
+    }
+    if (SimulationHostIntegrationEnabled()) {
+        m_pendingLocalSimulationAnchor = feet;
+    } else {
+        m_activeRegionLedger.set_local_anchor(feet);
+    }
 }
 void GameSession::SetReplicatedSimulationAnchors(std::vector<Vec3> anchors) {
     if (m_activeRegionsEnabled)
         m_replicatedSimulationAnchors = std::move(anchors);
 }
 std::span<const Vec3> GameSession::SimulationAnchors() const {
+    if (SimulationHostIntegrationEnabled() && !m_replicatedSimulationAnchors &&
+        m_pendingLocalSimulationAnchor) {
+        return {&*m_pendingLocalSimulationAnchor, 1};
+    }
     return RegionalWaterAnchors(m_replicatedSimulationAnchors, m_activeRegionLedger.local_anchor());
 }
 bool GameSession::SetHostSimulationAnchors(std::span<const Vec3> anchors) {

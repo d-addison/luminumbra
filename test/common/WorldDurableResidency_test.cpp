@@ -1064,7 +1064,8 @@ TEST(WorldDurableResidency, SessionSavesAndReloadsParkedEditedChunk) {
     ASSERT_TRUE(fx.session->SaveWorldState());
     EXPECT_FALSE(edited->is_voxel_data_dirty());
 
-    GameSession reloaded;
+    // Match DurableFixture's explicit frame-water profile on both sides of the save.
+    GameSession reloaded({}, GameSession::AuthorityProfileTestOnly{});
     reloaded.SetJobSystem(&fx.jobs);
     reloaded.SetRootPath(fx.root.root_string());
     reloaded.SetActiveRegionsEnabled(true);

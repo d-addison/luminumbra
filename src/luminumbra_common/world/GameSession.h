@@ -749,6 +749,8 @@ public:
     // ledger must match an explicit override or loading refuses. Without an override,
     // loaded settings become the effective configuration, also retained by world resets.
     void SetRegionSchedulerConfig(RegionSchedulerConfig config);
+    // Enabled host profiles stage walking input for preflight and publish it on a counted tick.
+    // Noclip and invalid inputs preserve the last valid input and committed anchor.
     void SetLocalPlayerSimulationPosition(const Vec3& feet, bool walking);
     void SetReplicatedSimulationAnchors(std::vector<Vec3> anchors);
     // Dormant host wiring shares the ownership profile until negotiated activation.
@@ -942,6 +944,8 @@ private:
     // Reused by the per-tick consumer gate so steady-state ticks allocate nothing.
     std::vector<std::uint64_t> m_consumerGateScratch;
     std::optional<std::vector<Vec3>> m_replicatedSimulationAnchors;
+    // Walking input for collision preflight; only a counted tick publishes it to the ledger.
+    std::optional<Vec3> m_pendingLocalSimulationAnchor;
     std::vector<RegionWork> m_regionWork;          // External inputs for the next schedule call.
     std::vector<RegionWork> m_regionCompletedWork; // Successful consumer work this tick.
     GroundObjectStore m_groundObjects;

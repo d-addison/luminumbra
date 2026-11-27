@@ -143,6 +143,9 @@ TEST(ActiveRegionAcceptance, SessionInputBoundsPreserveValidAuthority) {
     ActiveRegionAcceptanceWorld fixture(1);
     GameSession session;
     fixture.Configure(session);
+    // Packed-world edge inputs are valid anchors but cannot fit a collision ring.
+    // An explicit empty roster lets counted ticks publish them without that fallback.
+    ASSERT_TRUE(session.SetHostSimulationAnchors({}));
     constexpr float limit = 16777216.0f;
     const auto infinity = std::numeric_limits<float>::infinity();
     const auto nan = std::numeric_limits<float>::quiet_NaN();
@@ -158,7 +161,10 @@ TEST(ActiveRegionAcceptance, SessionInputBoundsPreserveValidAuthority) {
         for (const auto& input : accepted) {
             Vec3 position(256, 0, 256);
             position[axis] = input.coordinate;
+            const auto committed_anchor = session.GetActiveRegionLedger().local_anchor();
             session.SetLocalPlayerSimulationPosition(position, true);
+            EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(), committed_anchor);
+            ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
             EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(), std::optional(position));
             session.NotifyGroundObjectEdit(position);
             const RegionKey key =
@@ -172,7 +178,9 @@ TEST(ActiveRegionAcceptance, SessionInputBoundsPreserveValidAuthority) {
         }
     }
     const Vec3 walking(256, 0, 256);
+    const auto committed_anchor = session.GetActiveRegionLedger().local_anchor();
     session.SetLocalPlayerSimulationPosition(walking, true);
+    EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(), committed_anchor);
     const auto before = session.GetActiveRegionLedger().encode();
     const auto authority = SessionWorldHash(session);
     // Noclip cannot replace the walking anchor, even with otherwise valid input.
@@ -192,7 +200,7 @@ TEST(ActiveRegionAcceptance, SessionInputBoundsPreserveValidAuthority) {
         // before mark_edited; each refused call increments exactly once.
         ++rejected_edits;
         EXPECT_EQ(session.GetRegionInputRejections().edits, rejected_edits);
-        EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(), std::optional(walking));
+        EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(), committed_anchor);
         EXPECT_EQ(session.GetActiveRegionLedger().encode(), before);
     };
     for (const int axis : {0, 2}) {
@@ -215,9 +223,16 @@ TEST(ActiveRegionAcceptance, SessionInputBoundsPreserveValidAuthority) {
     // Six finite XZ boundary refusals plus nine non-finite XYZ refusals.
     EXPECT_EQ(session.GetRegionInputRejections().anchors, 15u);
     EXPECT_EQ(session.GetRegionInputRejections().edits, 15u);
-    EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(), std::optional(walking));
+    EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(), committed_anchor);
     EXPECT_EQ(session.GetActiveRegionLedger().encode(), before);
     EXPECT_EQ(SessionWorldHash(session), authority);
+    EXPECT_FALSE(session.GetRegionSchedulerFault().has_value());
+    // Rejected walking and noclip inputs cannot replace the pending valid input.
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(), std::optional(walking));
+    EXPECT_EQ(session.GetRegionInputRejections().anchors, 15u);
+    EXPECT_EQ(session.GetRegionInputRejections().edits, 15u);
+    EXPECT_EQ(session.GetRegionInputRejections().pins, 8u);
     EXPECT_FALSE(session.GetRegionSchedulerFault().has_value());
 }
 

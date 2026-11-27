@@ -5132,17 +5132,29 @@ TEST(GameSessionHeadlessWorldTest, EmptyReplicatedAnchorsNeverUseLocalSpawnFallb
     ASSERT_EQ(server.GetActiveRegionLedger().local_anchor(),
               std::optional<Luminumbra::Vec3>(spawn));
     server.SetReplicatedSimulationAnchors({});
+    const Luminumbra::Vec3 walking(504, 8, 8);
+    server.SetLocalPlayerSimulationPosition(walking, true);
+    ASSERT_TRUE(server.PrepareSimulationCollisions(1));
+    EXPECT_EQ(server.GetPhysicsSystem()->simulation_collision_sample_count(), 0u);
     const auto dt = server.GetSimulationClock().fixed_dt();
     ASSERT_EQ(server.TickSimulation(dt), 1u);
+    EXPECT_EQ(server.GetActiveRegionLedger().local_anchor(),
+              std::optional<Luminumbra::Vec3>(walking));
     EXPECT_TRUE(server.GetActiveRegionLedger().records().empty());
     EXPECT_TRUE(server.GetRegionSchedule().due.empty());
+    // A nonempty roster owns the representative even when walking input is staged too.
+    server.SetLocalPlayerSimulationPosition({1024, 8, 8}, true);
     server.SetReplicatedSimulationAnchors({spawn});
     ASSERT_EQ(server.TickSimulation(dt), 1u);
+    EXPECT_EQ(server.GetActiveRegionLedger().local_anchor(),
+              std::optional<Luminumbra::Vec3>(spawn));
     const auto key = Luminumbra::world::ActiveRegionLedger::region_at(spawn);
     EXPECT_EQ(server.GetActiveRegionLedger().records().at(key).last_proximity, 2u);
     server.SetReplicatedSimulationAnchors({});
     server.RecordActiveRegionWork({key, 1, 0, 0, 0});
     ASSERT_EQ(server.TickSimulation(dt), 1u);
+    EXPECT_EQ(server.GetActiveRegionLedger().local_anchor(),
+              std::optional<Luminumbra::Vec3>(spawn));
     for (const auto& [region, record] : server.GetActiveRegionLedger().records()) {
         (void)region;
         EXPECT_EQ(record.last_proximity, 2u);
@@ -5758,16 +5770,18 @@ TEST(GameSessionHeadlessWorldTest, InvalidHostInputsNeverThrowAndAreCounted) {
     EXPECT_FALSE(session.GetRegionSchedulerFault().has_value());
     EXPECT_EQ(session.GetActiveRegionLedger().records().count({0, 0}), 1u);
     const Luminumbra::Vec3 walking(256, 0, 256);
+    const auto committed_anchor = session.GetActiveRegionLedger().local_anchor();
     session.SetLocalPlayerSimulationPosition(walking, true);
     session.SetLocalPlayerSimulationPosition(Luminumbra::Vec3(nan, 0, 0), true);
-    EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(),
-              std::optional<Luminumbra::Vec3>(walking));
+    EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(), committed_anchor);
     EXPECT_EQ(session.GetRegionInputRejections().anchors, 2u);
 
     // Malformed replicated owners are ignored individually by every consumer,
     // including an entirely invalid or explicitly empty roster.
     session.SetReplicatedSimulationAnchors({Luminumbra::Vec3(nan), Luminumbra::Vec3(inf)});
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(),
+              std::optional<Luminumbra::Vec3>(walking));
     EXPECT_EQ(session.GetRegionSchedule().rejected.anchors, 2u);
     EXPECT_EQ(session.GetPhysicsSystem()->simulation_collision_sample_count(), 0u);
     session.SetReplicatedSimulationAnchors({});
@@ -19873,7 +19887,55 @@ TEST(GameSessionHeadlessWorldTest, HostBoundaryInputsShareAuthoritySequenceWitho
         ExpectPositionBits(local.GetPhysicsSystem()->get_body_position(bodies[2]), settled);
         ExpectHostAuthorityEqual(networked, server);
         ExpectHostAuthorityEqual(local, server);
+        EXPECT_EQ(local.GetActiveRegionLedger().local_anchor(),
+                  std::optional<Luminumbra::Vec3>(anchors.front()));
     }
+}
+
+TEST(GameSessionHeadlessWorldTest, LocalAnchorPreflightPreservesSavedCheckpointUntilCountedTick) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession local, reloaded;
+    for (auto* session : {&local, &reloaded}) {
+        ConfigureHostAuthoritySession(*session, root, jobs);
+    }
+    ASSERT_TRUE(local.CreateWorld("Local checkpoint", "1337", "default"));
+    const auto committed_anchor = local.GetActiveRegionLedger().local_anchor();
+    const auto checkpoint = SessionWorldSubHashes(local);
+    const Luminumbra::Vec3 feet(504, 8, 8);
+    // Repeated walking inputs select the last valid position. Noclip and invalid
+    // inputs cannot replace it or publish it into a save before a counted tick.
+    local.SetLocalPlayerSimulationPosition({520, 8, 8}, true);
+    local.SetLocalPlayerSimulationPosition(feet, true);
+    local.SetLocalPlayerSimulationPosition({2048, 8, 8}, false);
+    for (const float invalid : {std::numeric_limits<float>::infinity(),
+                                std::numeric_limits<float>::quiet_NaN(),
+                                std::numeric_limits<float>::max()}) {
+        local.SetLocalPlayerSimulationPosition({invalid, 8, 8}, true);
+    }
+    EXPECT_EQ(local.GetRegionInputRejections().anchors, 3u);
+    EXPECT_EQ(SessionWorldSubHashes(local), checkpoint);
+    ASSERT_TRUE(local.PrepareSimulationCollisions(1));
+    const auto dt = local.GetSimulationClock().fixed_dt();
+    ASSERT_EQ(local.TickSimulation(dt / 2), 0u);
+    EXPECT_EQ(local.GetActiveRegionLedger().local_anchor(), committed_anchor);
+    ASSERT_TRUE(local.SaveWorldState());
+    ASSERT_TRUE(reloaded.LoadWorld(local.GetMetadata().worldId)) << reloaded.GetWorldOpenError();
+    EXPECT_EQ(reloaded.GetActiveRegionLedger().local_anchor(), committed_anchor);
+    // Adoption clears pending input as well as replicated input; it cannot leak
+    // the preflight position into the first counted tick after reopening.
+    ASSERT_TRUE(local.LoadWorldState());
+    EXPECT_EQ(local.GetActiveRegionLedger().local_anchor(), committed_anchor);
+    ASSERT_EQ(local.TickSimulation(dt), 1u);
+    EXPECT_EQ(local.GetActiveRegionLedger().local_anchor(), committed_anchor);
+    local.SetLocalPlayerSimulationPosition(feet, true);
+    ASSERT_EQ(local.TickSimulation(dt), 1u);
+    EXPECT_EQ(local.GetActiveRegionLedger().local_anchor(), std::optional<Luminumbra::Vec3>(feet));
+    ASSERT_TRUE(local.SaveWorldState());
+    ASSERT_TRUE(reloaded.LoadWorldState());
+    EXPECT_EQ(reloaded.GetActiveRegionLedger().local_anchor(),
+              std::optional<Luminumbra::Vec3>(feet));
 }
 
 TEST(GameSessionHeadlessWorldTest, DefaultSimulationSmokeHasPositiveWetRegionSeamPairs) {
@@ -19971,33 +20033,45 @@ TEST(GameSessionHeadlessWorldTest, HostAnchorAdmissionRefusesInvalidInputsWithou
 }
 
 TEST(GameSessionHeadlessWorldTest, HostCollisionRefusalPreservesTheTickAndRetriesTheSameInputs) {
-    const HeadlessRoot root;
-    JobSystem jobs;
-    jobs.startup(1);
-    GameSession session(kHostAuthorityProfile, GameSession::AuthorityProfileTestOnly{});
-    ConfigureHostAuthoritySession(session, root, jobs);
-    ASSERT_TRUE(session.CreateTransientWorld("Host collision refusal", "1337", "default"));
-    const std::array anchors{Luminumbra::Vec3(504, 8, 8)};
-    ASSERT_TRUE(session.SetHostSimulationAnchors(anchors));
-    auto partial = BoundaryFlowingChunk({31, 0, 0});
-    const auto heights = partial->heightmap_data;
-    partial->heightmap_data.resize(1);
-    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(partial));
-    const auto dt = session.GetSimulationClock().fixed_dt();
-    ASSERT_EQ(session.TickSimulation(dt / 2), 0u);
-    const auto before = SessionWorldSubHashes(session);
-    const auto accumulator = session.GetSimulationClock().accumulator();
-    EXPECT_FALSE(session.PrepareSimulationCollisions(1));
-    EXPECT_EQ(session.TickSimulation(dt / 2), 0u);
-    EXPECT_EQ(session.GetSimulationTickCount(), 0u);
-    EXPECT_EQ(session.GetWorldClock().tick(), 0u);
-    EXPECT_EQ(session.GetSimulationClock().accumulator(), accumulator + dt / 2);
-    EXPECT_EQ(SessionWorldSubHashes(session), before);
-    partial->heightmap_data = heights;
-    ASSERT_TRUE(session.PrepareSimulationCollisions(1));
-    ASSERT_EQ(session.TickSimulation(0), 1u);
-    EXPECT_EQ(session.GetPhysicsSystem()->simulation_collision_sample_count(), 9u);
-    EXPECT_EQ(session.GetSimulationTickCount(), 1u);
+    for (const bool local_input : {false, true}) {
+        SCOPED_TRACE(local_input);
+        const HeadlessRoot root;
+        JobSystem jobs;
+        jobs.startup(1);
+        GameSession session(kHostAuthorityProfile, GameSession::AuthorityProfileTestOnly{});
+        ConfigureHostAuthoritySession(session, root, jobs);
+        ASSERT_TRUE(session.CreateTransientWorld("Host collision refusal", "1337", "default"));
+        const std::array anchors{Luminumbra::Vec3(504, 8, 8)};
+        const auto committed_anchor = session.GetActiveRegionLedger().local_anchor();
+        if (local_input) {
+            session.SetLocalPlayerSimulationPosition(anchors.front(), true);
+        } else {
+            ASSERT_TRUE(session.SetHostSimulationAnchors(anchors));
+        }
+        EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(), committed_anchor);
+        auto partial = BoundaryFlowingChunk({31, 0, 0});
+        const auto heights = partial->heightmap_data;
+        partial->heightmap_data.resize(1);
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(partial));
+        const auto dt = session.GetSimulationClock().fixed_dt();
+        ASSERT_EQ(session.TickSimulation(dt / 2), 0u);
+        const auto before = SessionWorldSubHashes(session);
+        const auto accumulator = session.GetSimulationClock().accumulator();
+        EXPECT_FALSE(session.PrepareSimulationCollisions(1));
+        EXPECT_EQ(session.TickSimulation(dt / 2), 0u);
+        EXPECT_EQ(session.GetSimulationTickCount(), 0u);
+        EXPECT_EQ(session.GetWorldClock().tick(), 0u);
+        EXPECT_EQ(session.GetSimulationClock().accumulator(), accumulator + dt / 2);
+        EXPECT_EQ(SessionWorldSubHashes(session), before);
+        EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(), committed_anchor);
+        partial->heightmap_data = heights;
+        ASSERT_TRUE(session.PrepareSimulationCollisions(1));
+        ASSERT_EQ(session.TickSimulation(0), 1u);
+        EXPECT_EQ(session.GetPhysicsSystem()->simulation_collision_sample_count(), 9u);
+        EXPECT_EQ(session.GetSimulationTickCount(), 1u);
+        EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(),
+                  std::optional<Luminumbra::Vec3>(anchors.front()));
+    }
 }
 
 TEST(GameSessionHeadlessWorldTest, DefaultSimulationSmokeRefusesAnEntirelyDryPreset) {

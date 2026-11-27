@@ -2062,6 +2062,19 @@ class SimulationHostWiring(unittest.TestCase):
         schedule = function(session, "void GameSession::RunRegionScheduler(")
         self.assertIn("m_activeRegionLedger.set_local_anchor(m_replicatedSimulationAnchors->front())",
                       schedule)
+        local = function(session, "void GameSession::SetLocalPlayerSimulationPosition(")
+        self.assertIn("if (!m_activeRegionsEnabled || !walking)", local)
+        self.assertLess(local.index("if (!ActiveRegionLedger::valid_anchor(feet))"),
+                        local.index("m_pendingLocalSimulationAnchor = feet;"))
+        self.assertEqual(function(local, "if (SimulationHostIntegrationEnabled())"),
+                         "m_pendingLocalSimulationAnchor = feet;")
+        self.assertIn("m_activeRegionLedger.set_local_anchor(*m_pendingLocalSimulationAnchor)",
+                      schedule)
+        self.assertIn("m_pendingLocalSimulationAnchor.reset();", schedule)
+        self.assertIn("!m_replicatedSimulationAnchors && m_pendingLocalSimulationAnchor", anchors)
+        self.assertIn("return {&*m_pendingLocalSimulationAnchor, 1};", anchors)
+        replace = function(session, "void GameSession::ReplaceActiveRegionLedger(")
+        self.assertIn("m_pendingLocalSimulationAnchor.reset();", replace)
         prepare = function(session, "bool GameSession::PrepareSimulationCollisions(")
         self.assertIn("SimulationHostIntegrationEnabled() ? SimulationAnchors() : "
                       "std::span<const Vec3>{}", prepare)
@@ -2241,6 +2254,7 @@ class SimulationHostWiring(unittest.TestCase):
         native = self.read("test/common/GameSessionHeadlessWorld_test.cpp")
         for case in ("BoundaryWaterAndFreezeIgnoreCameraFramesAndRestore",
                      "HostBoundaryInputsShareAuthoritySequenceWithoutRenderCadence",
+                     "LocalAnchorPreflightPreservesSavedCheckpointUntilCountedTick",
                      "DefaultSimulationSmokeHasPositiveWetRegionSeamPairs",
                      "HostAnchorAdmissionRefusesInvalidInputsWithoutReplacement",
                      "HostCollisionRefusalPreservesTheTickAndRetriesTheSameInputs",
