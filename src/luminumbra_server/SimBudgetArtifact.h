@@ -1,16 +1,75 @@
 #pragma once
 
+#include "RegionalCadenceWorkload.h"
 #include "luminumbra_common/simulation/SimBudgetProfile.h"
 #include "luminumbra_common/simulation/SimBudgetTelemetry.h"
 #include <cstddef>
 #include <cstdint>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace Luminumbra::Server {
+
+// Independent diagnostic block; telemetry-v2 stage identities and units stay unchanged.
+inline nlohmann::json RegionalCadenceJson(const RegionalCadenceDiagnostics& diagnostic) {
+    nlohmann::json owners = nlohmann::json::array();
+    for (const auto& owner : diagnostic.owners) {
+        owners.push_back({{"x", owner.key.x},
+                          {"z", owner.key.z},
+                          {"plant_services", owner.services},
+                          {"elapsed_steps", owner.elapsed_steps},
+                          {"last_plant_tick", owner.last_plant_tick},
+                          {"max_service_gap", owner.max_service_gap},
+                          {"service_gap", owner.service_gap},
+                          {"frozen_samples", owner.frozen_samples},
+                          {"unadmitted_samples", owner.unadmitted_samples},
+                          {"frozen_services", owner.frozen_services},
+                          {"missing_samples", owner.missing_samples},
+                          {"water_services", owner.water_services},
+                          {"water_interior_windows", owner.water_interior_windows},
+                          {"water_service_gap", owner.water_service_gap},
+                          {"max_water_service_gap", owner.max_water_service_gap},
+                          {"frozen_water_windows", owner.frozen_water_windows}});
+    }
+    return {{"tick", diagnostic.tick},
+            {"observations", diagnostic.observations},
+            {"owner_visits", diagnostic.owner_visits},
+            {"water_window_visits", diagnostic.water_window_visits},
+            {"owners", std::move(owners)},
+            {"replay_cell_visits_last", diagnostic.replay_cell_visits_last},
+            {"replay_cell_visits_max", diagnostic.replay_cell_visits_max},
+            {"preparation_pages_last", diagnostic.preparation_pages_last},
+            {"preparation_pages_max", diagnostic.preparation_pages_max},
+            {"replay_remaining_steps", diagnostic.replay_remaining_steps},
+            {"water_publications", diagnostic.water_publications},
+            {"water_deferred_samples", diagnostic.water_deferred_samples},
+            {"water_granted_windows", diagnostic.water_granted_windows},
+            {"water_border_windows", diagnostic.water_border_windows},
+            {"water_completed_cells", diagnostic.water_completed_cells},
+            {"water_preparation_cells", diagnostic.water_preparation_cells},
+            {"water_total_cells_max", diagnostic.water_total_cells_max},
+            {"water_resident_visits", diagnostic.water_resident_visits},
+            {"water_participant_visits", diagnostic.water_participant_visits}};
+}
+
+inline void AppendRegionalCadenceArtifact(nlohmann::json& artifact,
+                                          const std::optional<RegionalCadenceDiagnostics>& first,
+                                          const std::optional<RegionalCadenceDiagnostics>& replay) {
+    if (!first)
+        return;
+    artifact["regional_cadence"] = {
+        {"schema", "luminumbra.regional_cadence.v1"},
+        {"workload", "eight_distant_regions_v1"},
+        {"anchors", RegionalCadenceWorkload::kAnchors},
+        {"participants", RegionalCadenceWorkload::kParticipants},
+        {"observations_replay_match", replay && *first == *replay},
+        {"run", RegionalCadenceJson(*first)},
+        {"replay", replay ? RegionalCadenceJson(*replay) : nlohmann::json(nullptr)}};
+}
 
 // Additive artifact extension. Calling this with a disabled collector is byte-neutral.
 inline void AppendSimBudgetArtifact(nlohmann::json& artifact,

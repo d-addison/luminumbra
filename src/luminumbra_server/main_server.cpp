@@ -233,6 +233,10 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
             // (the WaterCrossBuild gate compares debug vs release sequences).
             options.smoke = true;
             options.water_hash_trace = true;
+        } else if (std::strcmp(arg, "--regional-cadence-workload") == 0) {
+            options.smoke = true;
+            options.sim_budget = true;
+            options.regional_cadence_workload = true;
         } else if (std::strcmp(arg, "--sim-budget") == 0) {
             options.smoke = true;
             options.sim_budget = true;
@@ -305,10 +309,10 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
     return options;
 }
 
-// Loads and validates --sim-budget-profile before any world is created. Returns 0 when no
-// profile was requested or it was accepted, 2 when it could not be read or was refused.
+// Refuses incompatible smoke diagnostics and validates --sim-budget-profile before boot.
+// Returns 0 for accepted options, 2 for incompatible flags or an unreadable/refused profile.
 int LoadSimBudgetProfileOption(ServerCliOptions& options) {
-    if (options.sim_budget_profile_path.empty()) {
+    if (options.sim_budget_profile_path.empty() && !options.regional_cadence_workload) {
         return 0;
     }
     // Only the smoke lane evaluates a profile; refuse modes that dispatch earlier or elsewhere
@@ -317,10 +321,16 @@ int LoadSimBudgetProfileOption(ServerCliOptions& options) {
         !options.replay_path.empty() || !options.record_path.empty() || options.heavy ||
         options.weather_bench || options.aether_bench || options.wind_bench || options.net_soak ||
         options.net_soak_client || options.net_host || options.net_join || options.replicate) {
-        LUMINUMBRA_CORE_ERROR("sim-budget-profile refused: only the smoke lane enforces a "
-                              "profile; remove the incompatible mode flag");
+        LUMINUMBRA_CORE_ERROR("Smoke diagnostic flags require the standalone smoke lane");
         return 2;
     }
+    if (options.regional_cadence_workload && !options.SupportsRegionalCadenceWorkload()) {
+        LUMINUMBRA_CORE_ERROR(
+            "Regional workload requires fresh fixed inputs without other rosters");
+        return 2;
+    }
+    if (options.sim_budget_profile_path.empty())
+        return 0;
     const std::string& path = options.sim_budget_profile_path;
     std::ifstream in(path, std::ios::binary);
     if (!in.is_open()) {
@@ -356,7 +366,7 @@ int main(int argc, char* argv[]) {
     if (options.parse_error) {
         LUMINUMBRA_CORE_ERROR(
             "Usage: luminumbra_server_app [--smoke] [--water-smoke] [--sim-budget] [--no-audio] "
-            "[--sim-budget-profile <path>] "
+            "[--sim-budget-profile <path>] [--regional-cadence-workload] "
             "[--heavy [--heavy-resim <n>]] "
             "[--record <path>] [--replay <path>] [--mutate-replay-fixture <path>] "
             "[--lockstep-loopback [--lockstep-delay-input <n>] [--lockstep-corrupt-tick <t>] "

@@ -22,6 +22,7 @@
 
 #include <vector>
 
+#include "RegionalCadenceWorkload.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
@@ -157,6 +158,8 @@ struct ServerWorldRunnerConfig {
     bool water_smoke = false;
     // Workload input only; dormant unless the session host authority profile is enabled.
     bool simulation_smoke = false;
+    bool regional_cadence_workload = false; // Explicit distributed smoke inputs.
+    bool regional_diagnostics = false;      // Independent observation toggle for parity checks.
     bool sim_budget = false; // Opt-in simulation stage observation; default artifact unchanged.
     // Applied via GameSession::SetRegionSchedulerConfig right after the root path is set, so it
     // takes effect for the fresh world Boot() creates. A loaded ledger must match an explicit
@@ -165,6 +168,7 @@ struct ServerWorldRunnerConfig {
 };
 
 struct ServerTickReport {
+    std::optional<RegionalCadenceDiagnostics> regional_cadence;
     std::uint64_t ticks_executed = 0;
     std::uint64_t frames_executed = 0;
     bool region_fault = false;
@@ -386,6 +390,7 @@ public:
 private:
     std::string m_bootError;
     ServerWorldRunnerConfig m_config;
+    std::optional<RegionalCadenceWorkload> m_regionalWorkload;
     world::OwnerContinuationOptions m_continuationOptions;
     std::uint64_t m_ownerStreamTick = 0;
     std::size_t m_spawnedAvatarCount = 0;

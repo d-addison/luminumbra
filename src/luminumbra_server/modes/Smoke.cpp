@@ -40,7 +40,8 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
     result.effective_simulation["weather_rain"] = session->WeatherRainEnabled();
 
     result.ticks = runner.RunFixedTicks(options.ticks);
-    if (session->SimulationHostIntegrationEnabled() && runner.Avatars().empty()) {
+    if (session->SimulationHostIntegrationEnabled() && runner.Avatars().empty() &&
+        !options.regional_cadence_workload) {
         const auto& anchor = runner.SimulationSmokeAnchor();
         if (!anchor || result.ticks.ticks_executed == 0 ||
             session->SimulationSmokeWetRegionSeamPairs(*anchor) == 0) {

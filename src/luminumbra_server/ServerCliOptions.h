@@ -63,6 +63,15 @@ struct ServerCliOptions {
     // percentiles and sim-load counters in the smoke artifact (see
     // ServerWorldRunnerConfig::water_smoke). Observability only; implies --smoke.
     bool water_smoke = false;
+    // Keep workload refusal before world/artifact creation or replay dispatch.
+    [[nodiscard]] bool SupportsRegionalCadenceWorkload() const {
+        return !lockstep_loopback && !heavy && !weather_bench && !aether_bench && !wind_bench &&
+               !net_soak && !net_soak_client && !net_host && !net_join && !replicate &&
+               mutate_replay_fixture.empty() && replay_path.empty() && record_path.empty() &&
+               world_id.empty() && avatars == 0 && !ecology_roster && !planted_roster && !moving &&
+               !water_smoke;
+    }
+    bool regional_cadence_workload = false; // --regional-cadence-workload implies smoke.
     bool sim_budget = false; // Opt-in simulation stage observation; default artifact unchanged.
     // --sim-budget-profile <path>: operator-supplied budget profile (implies --sim-budget and
     // --smoke). Parsed and validated before any world creation; never affects simulation output.
