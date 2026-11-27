@@ -8,12 +8,14 @@
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/PlantComponents.h"
 #include "luminumbra_common/core/PhaseScheduler.h"
+#include "luminumbra_common/core/WaterComponents.h"
 #include "luminumbra_common/persistence/PlantPersistence.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/simulation/SimBudgetTelemetry.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_server/ServerWorldRunner.h"
+#include "luminumbra_server/modes/SmokeArtifact.h"
 
 #include <array>
 #include <cstddef>
@@ -488,4 +490,119 @@ INSTANTIATE_TEST_SUITE_P(CapturePresets,
                          [](const testing::TestParamInfo<std::string>& parameter) {
                              return parameter.param;
                          });
+
+class RegionalCadenceRunner : public SimBudgetAutosave {};
+
+void ExpectCurrentRegionalWater(const Luminumbra::Server::ServerTickReport& report,
+                                const Luminumbra::Systems::WaterSystem& water,
+                                std::int64_t sources_before,
+                                std::uint64_t tick) {
+    using Luminumbra::Server::RegionalCadenceWorkload;
+    ASSERT_FALSE(report.region_fault) << report.region_fault_message;
+    ASSERT_EQ(report.ticks_executed, 1u);
+    ASSERT_EQ(report.frames_executed, 1u);
+    ASSERT_TRUE(report.regional_cadence.has_value());
+    if (!report.regional_cadence) {
+        return;
+    }
+    const auto& diagnostic = report.regional_cadence.value();
+    EXPECT_EQ(diagnostic.tick, tick);
+    EXPECT_EQ(diagnostic.observations, 1u);
+    EXPECT_EQ(diagnostic.owner_visits, RegionalCadenceWorkload::kParticipants);
+    ASSERT_EQ(water.debug_sources_seen() - sources_before, 9);
+    EXPECT_EQ(diagnostic.water_sources_seen, water.debug_sources_seen());
+    EXPECT_EQ(diagnostic.water_publications, 1u);
+    EXPECT_EQ(diagnostic.water_deferred_samples, 0u);
+    const auto& work = water.regional_work();
+    EXPECT_EQ(diagnostic.water_completed_cells, work.water_cells);
+    EXPECT_EQ(diagnostic.water_preparation_cells, work.preparation_cells);
+    EXPECT_EQ(diagnostic.water_granted_windows, work.allocated_windows);
+    EXPECT_EQ(diagnostic.water_border_windows, work.border_windows);
+    EXPECT_EQ(diagnostic.water_total_cells_max, work.total_cells);
+    EXPECT_EQ(diagnostic.water_resident_visits, work.residents_visited);
+    EXPECT_EQ(diagnostic.water_participant_visits, work.participants_visited);
+    EXPECT_LE(diagnostic.water_total_cells_max, 4096u);
+    EXPECT_GT(diagnostic.water_completed_cells, 0u);
+    for (const auto& owner : diagnostic.owners) {
+        EXPECT_EQ(owner.missing_samples, 0u);
+        EXPECT_EQ(owner.frozen_water_windows, 0u);
+    }
+    EXPECT_EQ(diagnostic.owners.back().unadmitted_samples, 1u);
+    EXPECT_EQ(diagnostic.owners.back().services, 0u);
+}
+
+TEST_P(RegionalCadenceRunner, WorkloadReportsEachWaterTickAndEmitsFinalPublication) {
+    namespace S = Luminumbra::Server;
+    namespace C = Luminumbra::Components;
+    S::ServerWorldRunnerConfig config;
+    config.root_path = root.generic_string() + "/";
+    config.seed = "1337";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    config.regional_cadence_workload = true;
+    config.regional_diagnostics = true;
+    config.autosave_interval_ticks = 0;
+    config.finite_hydrology = false;
+    S::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
+    auto* session = runner.Session();
+    ASSERT_NE(session, nullptr);
+    ASSERT_TRUE(session->SimulationHostIntegrationEnabled());
+    ASSERT_EQ(session->GetSimulationTickCount(), 0u);
+    EXPECT_EQ(session->GetRegistry().view<const C::PlantGrowthComponent>().size(), 9u);
+    EXPECT_EQ(session->GetRegistry().view<const C::FlowingWaterSourceComponent>().size(), 9u);
+    const auto* water = session->GetWaterSystem();
+    ASSERT_NE(water, nullptr);
+    // Boot settling must not leak publications into a counted invocation.
+    const auto empty = runner.RunFixedTicks(0);
+    ASSERT_TRUE(empty.regional_cadence.has_value());
+    if (!empty.regional_cadence) {
+        return;
+    }
+    EXPECT_EQ(empty.regional_cadence->observations, 0u);
+    EXPECT_EQ(empty.regional_cadence->water_publications, 0u);
+    S::SmokeRunResult run;
+    // Four single-tick invocations expose absolute attribution, stale work and
+    // the final publication without a long capture or an unbounded trace.
+    constexpr std::uint64_t ticks = 4;
+    for (std::uint64_t tick = 1; tick <= ticks; ++tick) {
+        SCOPED_TRACE(tick);
+        const auto sources_before = water->debug_sources_seen();
+        run.ticks = runner.RunFixedTicks(1);
+        ASSERT_NO_FATAL_FAILURE(
+            ExpectCurrentRegionalWater(run.ticks, *water, sources_before, tick));
+    }
+    run.ok = true;
+    run.world_hash = runner.ComputeWorldHash();
+    run.sub_hashes = runner.ComputeWorldSubHashes();
+    run.chunks_streamed = runner.StreamedChunkCount();
+    ASSERT_FALSE(run.world_hash.empty());
+    ASSERT_GT(run.chunks_streamed, 0u);
+    ServerCliOptions options;
+    options.ticks = 1;
+    options.regional_cadence_workload = true;
+    options.artifact_path = (root / "regional.json").generic_string();
+    ASSERT_EQ(S::WriteSmokeArtifact(options, run, run), 0);
+    nlohmann::json artifact;
+    {
+        std::ifstream input(root / "regional.json");
+        ASSERT_TRUE(input.is_open());
+        input >> artifact;
+    }
+    EXPECT_TRUE(artifact.at("passed").get<bool>());
+    const auto& regional = artifact.at("regional_cadence");
+    EXPECT_EQ(regional.at("anchors"), 8u);
+    EXPECT_EQ(regional.at("participants"), 9u);
+    for (const auto* label : {"run", "replay"}) {
+        const auto& diagnostic = regional.at(label);
+        EXPECT_EQ(diagnostic.at("tick"), ticks);
+        EXPECT_EQ(diagnostic.at("observations"), 1u);
+        EXPECT_EQ(diagnostic.at("water_publications"), 1u);
+        EXPECT_EQ(diagnostic.at("water_deferred_samples"), 0u);
+        EXPECT_EQ(diagnostic.at("water_completed_cells"), water->regional_work().water_cells);
+    }
+    runner.Shutdown();
+}
+
+INSTANTIATE_TEST_SUITE_P(DistributedWorkload, RegionalCadenceRunner, testing::Values("default"));
 } // namespace

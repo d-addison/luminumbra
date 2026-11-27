@@ -821,14 +821,6 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         }
         report.ticks_executed +=
             m_session->TickSimulation(fixed_dt, /*defer_water_authority=*/true);
-        if (report.regional_cadence && m_regionalWorkload) {
-            report.regional_cadence
-                ->Observe<Components::PlantGrowthComponent, Components::MortalComponent>(
-                    *m_session,
-                    m_session->GetRegistry(),
-                    *m_regionalWorkload,
-                    m_session->GetWaterSystem());
-        }
         if (m_session->SimulationHostIntegrationEnabled()) {
             for (std::size_t i = 0; i < m_avatars.size(); ++i) {
                 m_avatars[i].position = physics_system->get_avatar_position(i);
@@ -960,6 +952,16 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         // settled its writers and before autosave or any checkpoint can observe this tick.
         // sync_water_authority visits only queued changes, never the resident chunk set.
         world_system->sync_water_authority();
+        // Sample the completed tick only after update, activation and water authority
+        // promotion. The final counted tick uses the same boundary as earlier ticks.
+        if (report.regional_cadence && m_regionalWorkload) {
+            report.regional_cadence
+                ->Observe<Components::PlantGrowthComponent, Components::MortalComponent>(
+                    *m_session,
+                    m_session->GetRegistry(),
+                    *m_regionalWorkload,
+                    m_session->GetWaterSystem());
+        }
         if (budget.Enabled()) {
             // Include the complete update, including its final resident-chunk scan and
             // queue bookkeeping. Water has its own disjoint bracket; activation is separate.

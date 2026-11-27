@@ -276,6 +276,13 @@ luminumbra_configure_first_party_target(net_sockets_transport_test)
 # Sole definition of the alternate authority-profile constructor, for tests only.
 set(_authority_profile_test_seam common/GameSessionAuthorityProfileTestSeam.cpp)
 
+add_library(server_smoke_artifact_test_support STATIC
+    ../src/luminumbra_server/modes/SmokeArtifact.cpp
+)
+target_include_directories(server_smoke_artifact_test_support PRIVATE ../src)
+target_link_libraries(server_smoke_artifact_test_support PUBLIC luminumbra_common)
+luminumbra_configure_first_party_target(server_smoke_artifact_test_support)
+
 add_executable(common_tests
     ${_authority_profile_test_seam}
     ${MATERIAL_REGISTRY_TEST_SOURCES}
@@ -360,7 +367,6 @@ add_executable(common_tests
     common/DeterministicWorkBudget_test.cpp
     common/HeavyComparison_test.cpp
     common/SimBudgetProfile_test.cpp
-    ../src/luminumbra_server/modes/SmokeArtifact.cpp
     common/JobSystem_test.cpp
     common/JobWatchdog_test.cpp
     audio/AudioBankIntegrity_test.cpp
@@ -485,6 +491,7 @@ target_link_libraries(common_tests PRIVATE
     gtest_main
     luminumbra_common
     luminumbra_save_fixture_support
+    server_smoke_artifact_test_support
 )
 
 # Explicit capture tool: built by default, never registered with CTest discovery.
@@ -1885,7 +1892,7 @@ add_executable(world_open_refusal_test
 )
 target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common ../src/luminumbra_client)
 target_compile_definitions(world_open_refusal_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
-target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_common luminumbra_save_fixture_support)
+target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_common luminumbra_save_fixture_support server_smoke_artifact_test_support)
 
 # Surface admission exercises both shipping launch parsers without a device.
 add_executable(runtime_surface_options_test
