@@ -975,6 +975,7 @@ private:
     [[nodiscard]] std::map<RegionKey, std::uint64_t> AdvanceRegionalWeather(FieldPageState& fields,
                                                                             std::uint64_t tick);
     void StepRegionalWeather(FieldPageState* fields, std::uint64_t tick);
+    void StageProceduralStorms(FieldPageState& fields, std::uint64_t tick);
     // Query-only view of this tick's candidate, cleared after publication or on fault recovery.
     const FieldPageState* m_regionalFieldView = nullptr;
     std::size_t m_regionalFieldActivationVisits = 0;

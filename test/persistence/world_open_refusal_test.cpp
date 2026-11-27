@@ -6688,6 +6688,88 @@ TEST(WeatherScheduleTest, InstallationSamplesBothBackendsAndLocksEveryUpdateEntr
     }
 }
 
+TEST_F(WorldOpenRefusal, ActivatedAmbientPagesRefuseDamagedInputsAcrossLoadPaths) {
+    GameSession source;
+    source.SetRootPath(RootString());
+    source.SetJobSystem(&jobs);
+    source.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(source.CreateWorld("Activated refusal", "1337", "default"));
+    source.SetReplicatedSimulationAnchors({});
+    source.PinActiveRegion({0, 0}, true);
+    ASSERT_EQ(source.TickSimulation(source.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_FALSE(source.GetRegionSchedulerFault());
+    ASSERT_TRUE(source.GetFieldPages().has_ambient());
+    ASSERT_TRUE(source.SaveWorld());
+    const auto directory = source.GetWorldSaveDir();
+    const auto path = WorldSaveService::field_pages_path(directory);
+    const auto original = Read(path);
+    Persistence::SnapshotIndex index;
+    ASSERT_TRUE(Persistence::read_snapshot_index(directory, index, nullptr));
+    const auto index_path = Persistence::snapshot_index_path(directory);
+    const auto original_index = Read(index_path);
+    for (int damage = 0; damage < 5; ++damage) {
+        SCOPED_TRACE(damage);
+        auto bytes = original;
+        if (damage == 0) {
+            bytes.resize(7); // Partial header, with a matching outer index.
+        } else if (damage == 1) {
+            bytes[4] = 4; // Future FPG version, with both checksums consistent.
+            const auto checksum = Persistence::fnv1a64_bytes(bytes.data(), bytes.size() - 8);
+            for (unsigned shift = 0; shift < 8; ++shift)
+                bytes[bytes.size() - 8 + shift] =
+                    static_cast<char>((checksum >> (shift * 8)) & 255);
+        } else {
+            bytes.back() ^= 1; // Corrupt footer, or stale indexed member bytes.
+        }
+        if (damage == 4) {
+            ASSERT_TRUE(fs::remove(path)); // Indexed authority cannot become optional.
+        } else {
+            Write(path, bytes);
+        }
+        auto changed_index = index;
+        if (damage < 3) {
+            auto member = std::find_if(
+                changed_index.members.begin(), changed_index.members.end(), [](const auto& value) {
+                    return value.path == world::FieldPageState::kRelativePath;
+                });
+            ASSERT_NE(member, changed_index.members.end());
+            member->bytes = bytes.size();
+            member->fnv64 = Persistence::fnv1a64_bytes(bytes.data(), bytes.size());
+            Write(index_path, Persistence::encode_snapshot_index(changed_index));
+        }
+        const auto disk = DiskBytes(directory);
+        const auto fields = source.GetFieldPages().serialize();
+        const auto ledger = source.GetActiveRegionLedger().canonical_bytes();
+        const auto revision = source.WorldRevision();
+        EXPECT_FALSE(source.LoadWorld(source.GetMetadata().worldId));
+        EXPECT_FALSE(source.GetWorldOpenError().empty());
+        GameSession state_target;
+        state_target.SetRootPath(RootString());
+        state_target.SetJobSystem(&jobs);
+        state_target.SetActiveRegionsEnabled(true);
+        ASSERT_TRUE(state_target.CreateTransientWorld("Refused ambient state", "1337", "default"));
+        const auto state_fields = state_target.GetFieldPages().serialize();
+        const auto state_ledger = state_target.GetActiveRegionLedger().canonical_bytes();
+        // This entry point can invalidate resident chunks on legacy snapshot damage;
+        // it must still refuse publication of the staged field and ledger authority.
+        EXPECT_FALSE(state_target.LoadWorldStateFrom(directory));
+        EXPECT_FALSE(state_target.GetWorldOpenError().empty());
+        EXPECT_EQ(state_target.GetFieldPages().serialize(), state_fields);
+        EXPECT_EQ(state_target.GetActiveRegionLedger().canonical_bytes(), state_ledger);
+        EXPECT_EQ(state_target.GetSimulationTickCount(), 0u);
+        const auto prepared =
+            GameSession::PrepareWorldState(source.CaptureWorldPreparationOptions(), directory);
+        EXPECT_FALSE(source.AdoptPreparedWorld(prepared));
+        EXPECT_EQ(source.GetFieldPages().serialize(), fields);
+        EXPECT_EQ(source.GetActiveRegionLedger().canonical_bytes(), ledger);
+        EXPECT_EQ(source.WorldRevision(), revision);
+        EXPECT_EQ(DiskBytes(directory), disk);
+        Write(path, original);
+        Write(index_path, original_index);
+    }
+    ASSERT_TRUE(source.LoadWorldStateFrom(directory)) << source.GetWorldOpenError();
+}
+
 TEST_F(WorldOpenRefusal, RemovedScheduleCannotReturnAfterSavingLegacySnapshot) {
     const auto legacy_bytes = Read(save / "world_info.json");
     ASSERT_FALSE(nlohmann::json::parse(legacy_bytes).contains("renderCalendar"));
