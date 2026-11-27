@@ -40,7 +40,8 @@ class CreatedWorldArtifacts;
 struct BoundPublicationStage;
 namespace detail {
 struct NamespaceFlushObservation;
-}
+struct StableVolumeIdentity;
+} // namespace detail
 
 // Counters describing one incremental save pass over the streaming state.
 struct WorldSaveDirtyReport {
@@ -712,32 +713,46 @@ public:
                                       const std::string* expected_bytes = nullptr);
     // Recovery operations require the recorded object, including at the destructive operation.
     // A file with more than max_links names is reported as neither identified nor missing.
+    // Optional stable volume metadata comes from that same inspected handle; zero is unknown.
     static bool artifact_identity(const std::filesystem::path& path,
                                   ArtifactIdentity& identity,
                                   bool& missing,
                                   bool directory = false,
-                                  unsigned max_links = std::numeric_limits<unsigned>::max());
+                                  unsigned max_links = std::numeric_limits<unsigned>::max(),
+                                  detail::StableVolumeIdentity* stable_volume = nullptr);
     // Caller owns publication; this inspection does not reacquire the file's read lock.
     static bool artifact_version(const std::filesystem::path& path,
                                  std::array<std::uint64_t, 8>& version,
                                  bool& missing);
+    // Nondestructively isolate a receipt-inventoried directory in the same parent.
+    // Both identities are checked on bound no-reparse handles; never replace a name.
+    static bool retain_owned_directory(const std::filesystem::path& source,
+                                       const std::filesystem::path& destination,
+                                       const ArtifactIdentity& identity,
+                                       const ArtifactIdentity& parent_identity,
+                                       std::vector<std::string>* errors);
+    // A supplied known stable volume must also match the handle used for removal.
+    // Windows refuses a supplied unknown identity; callers retain its receipt.
     static bool remove_owned_entry(const std::filesystem::path& path,
                                    const ArtifactIdentity& identity,
                                    std::vector<std::string>* errors,
                                    bool directory = false,
-                                   const BoundPublicationStage* stage = nullptr);
+                                   const BoundPublicationStage* stage = nullptr,
+                                   const detail::StableVolumeIdentity* stable_volume = nullptr);
     static bool prepare_restoration(const std::filesystem::path& staging,
                                     const std::string& bytes,
                                     std::filesystem::path& temp,
                                     ArtifactIdentity& identity,
                                     std::vector<std::string>* errors);
+    // Receipt-backed replacement verifies retired_volume on the final deletion handle.
     static bool publish_restoration(const std::filesystem::path& temp,
                                     const std::filesystem::path& destination,
                                     const ArtifactIdentity& expected,
                                     const ArtifactIdentity& incoming,
                                     std::vector<std::string>* errors,
                                     const BoundPublicationStage* source_stage = nullptr,
-                                    const BoundPublicationStage* retired_stage = nullptr);
+                                    const BoundPublicationStage* retired_stage = nullptr,
+                                    const detail::StableVolumeIdentity* retired_volume = nullptr);
     // Complete a matching or newly published restoration before advancing rollback.
     // Rebinds the recorded identity; Windows retries its writable-handle flush, POSIX
     // repeats all four relevant parent barriers. Failure retains the recovery journal.

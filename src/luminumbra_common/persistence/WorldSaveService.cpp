@@ -42,6 +42,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -900,6 +901,17 @@ public:
         return closed;
     }
 
+    detail::StableVolumeIdentity stable_volume() const {
+#if defined(_WIN32)
+        return detail::VolumeIdentityFromHandle(m_handle);
+#else
+        struct stat info {};
+        if (m_descriptor < 0 || ::fstat(m_descriptor, &info) != 0)
+            return {};
+        return {.words = {static_cast<std::uint64_t>(info.st_dev), 1}};
+#endif
+    }
+
     bool identity(StagingIdentity& result, bool directory = false, unsigned links = 1) const {
 #if defined(_WIN32)
         BY_HANDLE_FILE_INFORMATION info{};
@@ -1249,11 +1261,50 @@ public:
         }
     }
 
-    bool remove_bound(bool directory = false, const BoundPublicationStage* stage = nullptr) {
+    bool remove_bound(bool directory = false,
+                      const BoundPublicationStage* stage = nullptr,
+                      const detail::StableVolumeIdentity* expected_volume = nullptr) {
         try {
 #if defined(_WIN32)
+            if (expected_volume) {
+                // Directory inspection has attributes-only access. Bind the final
+                // deletion handle and verify the stable identity on that handle,
+                // rather than letting a path reopen fall back to serial equality.
+                StagingIdentity held{};
+                if (!expected_volume->known() ||
+                    !identity(held, directory, std::numeric_limits<unsigned>::max()))
+                    return false;
+                const HANDLE retiring =
+                    ::CreateFileW(m_path.c_str(),
+                                  FILE_READ_ATTRIBUTES | DELETE,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                  nullptr,
+                                  OPEN_EXISTING,
+                                  FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                                  nullptr);
+                if (retiring == INVALID_HANDLE_VALUE)
+                    return false;
+                Filesystem::NativeFileOwner retirement_owner(retiring);
+                BY_HANDLE_FILE_INFORMATION info{};
+                const bool verified =
+                    ::GetFileType(retiring) == FILE_TYPE_DISK &&
+                    ::GetFileInformationByHandle(retiring, &info) &&
+                    (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
+                    ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) == directory &&
+                    (directory || info.nNumberOfLinks > 0) &&
+                    WorldSaveService::ArtifactIdentity{
+                        info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow} ==
+                        WorldSaveService::ArtifactIdentity{held[0], held[1], held[2]} &&
+                    detail::VolumeIdentityFromHandle(retiring) == *expected_volume;
+                if (verified && stage && stage->report)
+                    stage->report("crash-retirement-bound", m_path);
+                const bool removed = verified && Detail::WindowsDisposeLink(retiring);
+                const bool closed = ::CloseHandle(retirement_owner.release()) != 0;
+                return removed && closed && close();
+            }
             CreatedWorldArtifacts::remove_bound_entry(m_path, m_handle, directory, stage);
 #else
+            (void)expected_volume;
             CreatedWorldArtifacts::remove_bound_entry(m_path, m_descriptor, directory, stage);
 #endif
             return close();
@@ -1774,7 +1825,8 @@ bool PublishProtectedMember(const std::filesystem::path& temp,
                             const std::array<std::uint64_t, 3>& incoming,
                             std::vector<std::string>* errors,
                             const BoundPublicationStage* source_stage = nullptr,
-                            const BoundPublicationStage* retired_stage = nullptr) {
+                            const BoundPublicationStage* retired_stage = nullptr,
+                            const detail::StableVolumeIdentity* retired_volume = nullptr) {
     // Explicit stages belong to journal replay, whose recorded identities and
     // rollback slots are authoritative even if a live writer remains registered.
     const bool recorded_restoration = source_stage || retired_stage;
@@ -1801,9 +1853,17 @@ bool PublishProtectedMember(const std::filesystem::path& temp,
         } else {
             StagingFile current(destination, StagingFile::Mode::Inspect);
             StagingIdentity actual{};
+#if defined(_WIN32)
+            if (retired_volume && !retired_volume->known()) {
+                AddError(errors, "snapshot publication stable volume unknown");
+                return false;
+            }
+#endif
             if (!current.identity(actual) ||
                 !std::equal(expected.begin(), expected.end(), actual.begin()) ||
-                !current.remove_bound(false, retired_stage)) {
+                (retired_volume && retired_volume->known() &&
+                 current.stable_volume() != *retired_volume) ||
+                !current.remove_bound(false, retired_stage, retired_volume)) {
                 AddError(errors, "snapshot publication occupant changed");
                 return false;
             }
@@ -7452,22 +7512,13 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
     if (ok && observation) {
         completed_flush.succeeded = true;
 #if defined(_WIN32)
-        // Both queries use the SAME verified handle as FlushFileBuffers above.
-        // A remote server can report NTFS, so require a local volume GUID too.
-        // The extended Win32 path bound includes its terminating UTF-16 null.
-        std::array<wchar_t, 32768> final_name{};
-        const auto name_length =
-            ::GetFinalPathNameByHandleW(file,
-                                        final_name.data(),
-                                        static_cast<DWORD>(final_name.size()),
-                                        FILE_NAME_NORMALIZED | VOLUME_NAME_GUID);
-        const bool local_volume =
-            name_length != 0 && name_length < final_name.size() &&
-            std::wstring_view(final_name.data(), name_length).starts_with(L"\\\\?\\Volume{");
+        // Query the SAME verified handle as FlushFileBuffers above. A local GUID
+        // excludes remote NTFS reports and survives drive-letter remounts.
+        completed_flush.stable_volume = detail::VolumeIdentityFromHandle(file);
         // The filesystem name has its own fixed bound, independent of volume labels.
         std::array<wchar_t, 64> filesystem_name{};
         DWORD serial = 0;
-        if (local_volume &&
+        if (completed_flush.stable_volume.known() &&
             ::GetVolumeInformationByHandleW(file,
                                             nullptr,
                                             0,
@@ -7481,6 +7532,10 @@ bool WorldSaveService::append_journal_record(const std::filesystem::path& path,
             completed_flush.volume = serial;
             completed_flush.ntfs = std::wstring_view(filesystem_name.data()) == L"NTFS";
         }
+#else
+        completed_flush.volume_known = true;
+        completed_flush.volume = actual.front();
+        completed_flush.stable_volume = {.words = {actual.front(), 1}};
 #endif
     }
     SavedInputFile::Version appended_version{};
@@ -7522,13 +7577,18 @@ bool WorldSaveService::artifact_identity(const std::filesystem::path& path,
                                          ArtifactIdentity& result,
                                          bool& missing,
                                          bool directory,
-                                         unsigned max_links) {
+                                         unsigned max_links,
+                                         detail::StableVolumeIdentity* stable_volume) {
     result = {};
+    if (stable_volume)
+        *stable_volume = {};
     missing = false;
     StagingFile bound(path, directory ? StagingFile::Mode::Directory : StagingFile::Mode::Inspect);
     StagingIdentity identity{};
     if (bound.identity(identity, directory, max_links)) {
         std::copy_n(identity.begin(), result.size(), result.begin());
+        if (stable_volume)
+            *stable_volume = bound.stable_volume();
         return true;
     }
     std::error_code error;
@@ -7553,11 +7613,112 @@ bool WorldSaveService::artifact_version(const std::filesystem::path& path,
     return missing;
 }
 
+bool WorldSaveService::retain_owned_directory(const std::filesystem::path& source,
+                                              const std::filesystem::path& destination,
+                                              const ArtifactIdentity& expected,
+                                              const ArtifactIdentity& expected_parent,
+                                              std::vector<std::string>* errors) {
+    const SaveOwnership ownership;
+    const auto publish = LockPublication(source);
+    const auto name = destination.filename();
+    // Receipt carrier components bound this sibling name to at most 128 units.
+    if (source.parent_path() != destination.parent_path() || name.empty() ||
+        name.native().size() > 128 || name == "." || name == "..")
+        return false;
+#if defined(_WIN32)
+    const auto open_directory = [](const std::filesystem::path& path, DWORD access) {
+        return ::CreateFileW(path.c_str(),
+                             access | FILE_READ_ATTRIBUTES,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             nullptr,
+                             OPEN_EXISTING,
+                             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                             nullptr);
+    };
+    const Filesystem::NativeFileOwner parent(open_directory(source.parent_path(), 0));
+    const auto matches = [](HANDLE file, const ArtifactIdentity& identity) {
+        BY_HANDLE_FILE_INFORMATION info{};
+        return file != INVALID_HANDLE_VALUE && ::GetFileType(file) == FILE_TYPE_DISK &&
+               ::GetFileInformationByHandle(file, &info) &&
+               (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
+               (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+               ArtifactIdentity{
+                   info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow} == identity;
+    };
+    if (!matches(parent.get(), expected_parent))
+        return false;
+    const Filesystem::NativeFileOwner directory(
+        open_directory(Detail::WindowsPublicationPath(parent.get()) / source.filename(), DELETE));
+    if (!matches(directory.get(), expected))
+        return false;
+    // Rename the verified handle relative to the pinned parent. No path reopen,
+    // replacement, or deletion occurs, including when stable metadata is unknown.
+    alignas(FILE_RENAME_INFO) std::array<std::byte, sizeof(FILE_RENAME_INFO) + 256> storage{};
+    auto* rename_info = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
+    rename_info->ReplaceIfExists = FALSE;
+    rename_info->RootDirectory = parent.get();
+    rename_info->FileNameLength = static_cast<DWORD>(name.native().size() * sizeof(wchar_t));
+    std::memcpy(rename_info->FileName, name.c_str(), rename_info->FileNameLength);
+    if (!::SetFileInformationByHandle(
+            directory.get(),
+            FileRenameInfo,
+            rename_info,
+            static_cast<DWORD>(offsetof(FILE_RENAME_INFO, FileName) + rename_info->FileNameLength)))
+        return false;
+#else
+    const Filesystem::NativeFileOwner parent(
+        ::open(source.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    const Filesystem::NativeFileOwner directory(::openat(
+        parent.get(), source.filename().c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    const auto matches = [](int file, const ArtifactIdentity& identity) {
+        struct stat info {};
+        return file >= 0 && ::fstat(file, &info) == 0 && S_ISDIR(info.st_mode) &&
+               ArtifactIdentity{static_cast<std::uint64_t>(info.st_dev),
+                                static_cast<std::uint64_t>(info.st_ino),
+                                0} == identity;
+    };
+    if (!matches(parent.get(), expected_parent) || !matches(directory.get(), expected) ||
+        Detail::RenameWithoutReplacement(
+            parent.get(), source.filename().c_str(), parent.get(), name.c_str()) != 0)
+        return false;
+    // The destination is the inventoried quarantine. Check the moved entry
+    // before admitting a writer; a substituted entry is restored, never unlinked.
+    struct stat moved {};
+    if (::fstatat(parent.get(), name.c_str(), &moved, AT_SYMLINK_NOFOLLOW) != 0 ||
+        !S_ISDIR(moved.st_mode) ||
+        ArtifactIdentity{static_cast<std::uint64_t>(moved.st_dev),
+                         static_cast<std::uint64_t>(moved.st_ino),
+                         0} != expected) {
+        (void)Detail::RenameWithoutReplacement(
+            parent.get(), name.c_str(), parent.get(), source.filename().c_str());
+        return false;
+    }
+    int flushed = 0;
+    do {
+        flushed = ::fsync(parent.get());
+    } while (flushed != 0 && errno == EINTR);
+    if (flushed != 0) {
+        AddError(errors, "cannot flush retained journal parent");
+        return false;
+    }
+#endif
+    (void)errors;
+    PublicationRevision().fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
 bool WorldSaveService::remove_owned_entry(const std::filesystem::path& path,
                                           const ArtifactIdentity& expected,
                                           std::vector<std::string>* errors,
                                           bool directory,
-                                          const BoundPublicationStage* stage) {
+                                          const BoundPublicationStage* stage,
+                                          const detail::StableVolumeIdentity* stable_volume) {
+#if defined(_WIN32)
+    if (stable_volume && !stable_volume->known()) {
+        AddError(errors, "snapshot artifact stable volume unknown");
+        return false;
+    }
+#endif
     const SaveOwnership ownership;
     const auto publish = LockPublication(path);
     PublicationRevision().fetch_add(1, std::memory_order_relaxed);
@@ -7565,7 +7726,8 @@ bool WorldSaveService::remove_owned_entry(const std::filesystem::path& path,
     StagingIdentity identity{};
     if (!bound.identity(identity, directory, std::numeric_limits<unsigned>::max()) ||
         !std::equal(expected.begin(), expected.end(), identity.begin()) ||
-        !bound.remove_bound(directory, stage)) {
+        (stable_volume && stable_volume->known() && bound.stable_volume() != *stable_volume) ||
+        !bound.remove_bound(directory, stage, stable_volume)) {
         AddError(errors,
                  "snapshot artifact ownership changed: " + Filesystem::GenericUtf8PathString(path));
         return false;
@@ -7592,14 +7754,21 @@ bool WorldSaveService::publish_restoration(const std::filesystem::path& temp,
                                            const ArtifactIdentity& incoming,
                                            std::vector<std::string>* errors,
                                            const BoundPublicationStage* source_stage,
-                                           const BoundPublicationStage* retired_stage) {
+                                           const BoundPublicationStage* retired_stage,
+                                           const detail::StableVolumeIdentity* retired_volume) {
     const SaveOwnership ownership;
     report_snapshot_step("before-replace", destination);
     PublicationRevision().fetch_add(1, std::memory_order_relaxed);
     {
         const auto publication = LockPublication(destination);
-        if (!PublishProtectedMember(
-                temp, destination, expected, incoming, errors, source_stage, retired_stage))
+        if (!PublishProtectedMember(temp,
+                                    destination,
+                                    expected,
+                                    incoming,
+                                    errors,
+                                    source_stage,
+                                    retired_stage,
+                                    retired_volume))
             return false;
     }
     if (!complete_restoration(destination,

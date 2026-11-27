@@ -3108,24 +3108,65 @@ TEST(WorldSaveService, JournalFlushObservationRequiresAnAppendedCommit) {
     ASSERT_TRUE(std::filesystem::create_directory(journal));
     const auto control = journal / "txn.json";
     WorldSaveService::ArtifactIdentity identity{};
-    NamespaceFlushObservation observation{
-        .succeeded = true, .volume_known = true, .ntfs = true, .volume = 101};
+    NamespaceFlushObservation observation{.succeeded = true,
+                                          .volume_known = true,
+                                          .ntfs = true,
+                                          .volume = 101,
+                                          .stable_volume = {.words = {101, 1}}};
     ASSERT_TRUE(WorldSaveService::append_journal_record(
         control, "{}\n", identity, nullptr, 0, &observation));
     // Initial publication flushes bytes before retiring its source name. It supplies
     // no observation that could authorize a later namespace operation's receipt.
     EXPECT_FALSE(observation.succeeded);
     EXPECT_FALSE(observation.volume_known);
+    EXPECT_FALSE(observation.stable_volume.known());
     ASSERT_TRUE(WorldSaveService::append_journal_record(
         control, "{}\n", identity, nullptr, 0, &observation));
     EXPECT_TRUE(observation.succeeded);
     if (observation.volume_known) {
         EXPECT_EQ(observation.volume, identity.front());
+        WorldSaveService::ArtifactIdentity actual{};
+        bool missing = false;
+        Luminumbra::Persistence::detail::StableVolumeIdentity stable_volume{};
+        ASSERT_TRUE(WorldSaveService::artifact_identity(
+            control, actual, missing, false, 1, &stable_volume));
+        EXPECT_FALSE(missing);
+        EXPECT_EQ(actual, identity);
+        EXPECT_TRUE(stable_volume.known());
+        EXPECT_EQ(observation.stable_volume, stable_volume);
     }
 #if !defined(_WIN32)
-    EXPECT_FALSE(observation.volume_known);
+    EXPECT_TRUE(observation.volume_known);
     EXPECT_FALSE(observation.ntfs);
 #endif
+}
+
+TEST(WorldSaveService, OwnedRemovalRefusesDifferentStableVolumeBeforeMutation) {
+    using Luminumbra::Persistence::detail::StableVolumeIdentity;
+    const TempSaveDir save("stable_volume_removal");
+    const auto path = save.path() / "owned";
+    {
+        std::ofstream output(path, std::ios::binary);
+        output << "owned bytes";
+    }
+    WorldSaveService::ArtifactIdentity identity{};
+    StableVolumeIdentity volume{};
+    bool missing = false;
+    ASSERT_TRUE(WorldSaveService::artifact_identity(path, identity, missing, false, 1, &volume));
+    ASSERT_FALSE(missing);
+    ASSERT_TRUE(volume.known());
+    auto foreign_volume = volume;
+    foreign_volume.words[0] ^= 1;
+    EXPECT_FALSE(WorldSaveService::remove_owned_entry(
+        path, identity, nullptr, false, nullptr, &foreign_volume));
+    EXPECT_TRUE(std::filesystem::exists(path));
+    EXPECT_TRUE(
+        WorldSaveService::remove_owned_entry(path, identity, nullptr, false, nullptr, &volume));
+    EXPECT_FALSE(std::filesystem::exists(path));
+    EXPECT_TRUE(WorldSaveService::artifact_identity(path, identity, missing, false, 1, &volume));
+    EXPECT_TRUE(missing);
+    EXPECT_FALSE(volume.known());
+    EXPECT_EQ(identity, WorldSaveService::ArtifactIdentity{});
 }
 
 TEST(WorldSaveService, FailedJournalAppendClearsFlushObservation) {
@@ -3139,8 +3180,11 @@ TEST(WorldSaveService, FailedJournalAppendClearsFlushObservation) {
     ASSERT_TRUE(WorldSaveService::append_journal_record(control, "{}\n", identity, nullptr));
     for (const auto invalid : {0, 1, 2}) {
         SCOPED_TRACE(invalid);
-        NamespaceFlushObservation observation{
-            .succeeded = true, .volume_known = true, .ntfs = true, .volume = 101};
+        NamespaceFlushObservation observation{.succeeded = true,
+                                              .volume_known = true,
+                                              .ntfs = true,
+                                              .volume = 101,
+                                              .stable_volume = {.words = {101, 1}}};
         auto expected = identity;
         if (invalid == 0)
             expected[1] ^= 1;
@@ -3152,6 +3196,7 @@ TEST(WorldSaveService, FailedJournalAppendClearsFlushObservation) {
         EXPECT_FALSE(observation.volume_known);
         EXPECT_FALSE(observation.ntfs);
         EXPECT_EQ(observation.volume, 0u);
+        EXPECT_FALSE(observation.stable_volume.known());
         std::ifstream input(control, std::ios::binary);
         EXPECT_EQ(std::string(std::istreambuf_iterator<char>(input), {}), "{}\n");
     }
