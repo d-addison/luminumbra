@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import struct
 import sys
 import tempfile
 import unittest
@@ -17,6 +18,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import capture_active_regions as capture
 import check_active_regions as check
+from test_fixture_hash import directory_link, remove_directory_link
 
 HASH = "0123456789abcdef"
 EFFECTIVE = {"active_regions": True, "plant_growth": True, "future_gate": True,
@@ -36,8 +38,26 @@ def trace(ticks=2):
     return dict(value, checksum=f"{checksum:016x}")
 
 
-def receipt(ledger):
-    files = [{"path": "chunks/edited.bin", "size": 4, "sha256": hashlib.sha256(b"edit").hexdigest()},
+def region(payload=b"edit", *, block=None, others=()):
+    # Literal-only LZ4 blocks keep fixtures independent of external codecs.
+    def literal(raw):
+        size = len(raw)
+        extra = size - 15
+        prefix = bytes([min(size, 15) << 4])
+        if size >= 15:
+            prefix += b"\xff" * (extra // 255) + bytes([extra % 255])
+        return prefix + raw
+    records = [(7, payload, literal(payload) if block is None else block)]
+    records.extend((identity, raw, literal(raw)) for identity, raw in others)
+    headers = b"".join(struct.pack("<QBBII", identity, 0, 0, len(raw), len(compressed))
+                       for identity, raw, compressed in records)
+    return (b"LMR1" + struct.pack("<HH", 2, len(records)) + headers
+            + b"".join(compressed for _, _, compressed in records))
+
+
+def receipt(ledger, member=None):
+    member = region() if member is None else member
+    files = [{"path": "chunks/edited.bin", "size": len(member), "sha256": hashlib.sha256(member).hexdigest()},
              {"path": "chunks/region/active-regions.arl", "size": len(ledger),
               "sha256": hashlib.sha256(ledger).hexdigest()}]
     lines = "".join(f"{row['path']}\0{row['size']}\0{row['sha256']}\n" for row in files)
@@ -137,12 +157,13 @@ def fixture(base):
     with mock.patch.object(capture, "resolved_fixture_hash", return_value="b" * 64):
         identity = capture.identities(repository, root, binary, dump_binary, "default", runner)
     args.tour.parent.mkdir()
-    tour = {"schema": "luminumbra.active_region_tour.v1", "identity": identity,
+    tour = {"schema": "luminumbra.active_region_tour.v2", "identity": identity,
             "save_root": (base / "saved-world").as_posix(),
             "effective_simulation": EFFECTIVE, "worker_count": 1,
             "configuration": {"preset": "default", "seed": "1337", "ticks": 2,
                               "surface_radius": 1, "collision_radius": 1, "autosave_ticks": 30},
-            "edited_payload": {"path": "chunks/edited.bin", "sha256": hashlib.sha256(b"edit").hexdigest()},
+            "edited_payload": {"path": "chunks/edited.bin", "record_id": 7, "size": 4,
+                               "sha256": hashlib.sha256(b"edit").hexdigest()},
             "stages": [], "ledger": "ledger.arl", "ledger_dump": "dump.json"}
     for name in check.TOUR_STAGES:
         stage = {"name": name, "identity": identity, "worker_count": 1, "verified": True,
@@ -152,7 +173,10 @@ def fixture(base):
         (args.tour.parent / stage["log"]).write_bytes(b"verified boundary\n")
         if name in check.TOUR_STAGES[2:]:
             stage["receipt"] = name + ".json"
-            stage["saved_member_sha256"] = hashlib.sha256(b"edit").hexdigest()
+            stage["saved_member"] = name + ".bin"
+            stage["payload_offset"] = 0
+            stage["saved_member_sha256"] = hashlib.sha256(region()).hexdigest()
+            (args.tour.parent / stage["saved_member"]).write_bytes(region())
             (args.tour.parent / stage["receipt"]).write_bytes(encoded(receipt(ledger)))
         tour["stages"].append(stage)
     (args.tour.parent / "ledger.arl").write_bytes(ledger)
@@ -168,6 +192,125 @@ def run_capture(args, runner):
 
 
 class ActiveRegionCaptureContract(unittest.TestCase):
+    def test_staged_libraries_are_copied_and_bound_for_both_executables(self):
+        for filename in ("network.DLL", "libnetwork.so", "libnetwork.so.1", "libnetwork.dylib"):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temp:
+                args, _ = fixture(Path(temp))
+                library = args.binary.parent / filename
+                library.write_bytes(b"original library")
+                (args.binary.parent / "ignored.txt").write_bytes(b"not a library")
+                target = Path(temp) / "snapshot"
+                target.mkdir()
+                _, binary, exporter = capture.snapshot_inputs(args.root, args.binary, args.dump_binary, target)
+                for executable in (binary, exporter):
+                    staged = executable.parent / filename
+                    self.assertEqual(staged.read_bytes(), b"original library")
+                    self.assertNotEqual(staged, library)
+                    self.assertFalse((staged.parent / "ignored.txt").exists())
+                    self.assertEqual(capture.library_identity(executable), capture.library_identity(args.binary))
+
+    def test_changed_source_or_snapshot_libraries_refuse_publication(self):
+        for changed in ("source", "snapshot"):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temp:
+                args, runner = fixture(Path(temp))
+                library = args.binary.parent / "network.dll"
+                library.write_bytes(b"library")
+                tour = check.parse(args.tour.read_bytes())
+                with mock.patch.object(capture, "resolved_fixture_hash", return_value="b" * 64):
+                    identity = capture.identities(args.repository, args.root, args.binary, args.dump_binary,
+                                                  "default", runner)
+                tour["identity"] = identity
+                for stage in tour["stages"]:
+                    stage["identity"] = identity
+                args.tour.write_bytes(encoded(tour))
+
+                def change_library(argv, kwargs):
+                    if len(argv) != 2:
+                        return
+                    target = library if changed != "snapshot" else Path(argv[0]).parent / library.name
+                    target.chmod(0o600)
+                    target.write_bytes(b"replaced")
+                runner.hook = change_library
+                with self.assertRaisesRegex(ValueError, "identity changed"):
+                    run_capture(args, runner)
+                self.assertFalse((args.evidence_dir / "capture.json").exists())
+
+    def test_library_identity_binds_names_empty_sets_and_additions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args, _ = fixture(Path(temp))
+            empty = capture.library_identity(args.binary)
+            library = args.binary.parent / "network.dll"
+            library.write_bytes(b"library")
+            added = capture.library_identity(args.binary)
+            self.assertNotEqual(added, empty)
+            library.rename(library.with_name("renamed.dll"))
+            self.assertNotEqual(capture.library_identity(args.binary), added)
+            library.with_name("renamed.dll").unlink()
+            self.assertEqual(capture.library_identity(args.binary), empty)
+            library.write_bytes(b"1234")
+            library.with_name("second.dll").write_bytes(b"5678")
+            with mock.patch.object(check, "MAX_TOTAL", 7), self.assertRaisesRegex(ValueError, "oversized"):
+                capture.library_identity(args.binary)
+
+    def test_optional_placement_defaults_and_escape_in_runtime_snapshot(self):
+        for state in ("missing", "escape", "required"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as temp:
+                args, runner = fixture(Path(temp))
+                name = "pieces.json" if state == "required" else "placement.json"
+                placement = args.root / "data/common/structures/tree" / name
+                placement.parent.mkdir(parents=True)
+                destination = (Path(temp) / "missing" if state == "escape"
+                               else placement.parent / "missing")
+                directory_link(placement, destination)
+                try:
+                    if state == "missing":
+                        self.assertTrue(run_capture(args, runner)["passed"])
+                    else:
+                        with self.assertRaises((OSError, ValueError)):
+                            run_capture(args, runner)
+                        self.assertFalse((args.evidence_dir / "capture.json").exists())
+                finally:
+                    remove_directory_link(placement)
+
+    def test_library_and_content_scans_share_entry_and_byte_bounds(self):
+        for failure in ("entries", "depth", "bytes", "directory", "unreadable", "partial"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
+                args, _ = fixture(Path(temp))
+                library = args.binary.parent / "network.dll"
+                library.mkdir() if failure == "directory" else library.write_bytes(b"library")
+                target = Path(temp) / "snapshot"
+                target.mkdir()
+                if failure == "entries":
+                    # Runtime alone fits; both sibling scans must share its budget.
+                    runtime_work = 2 + len(list(capture.fixture_entries(args.root)))
+                    patch = mock.patch("fixture_hash.MAX_FIXTURE_ENTRIES", runtime_work)
+                elif failure == "depth":
+                    deep = args.root / "data/a/b/c/d"
+                    deep.mkdir(parents=True)
+                    patch = mock.patch("fixture_hash.MAX_FIXTURE_DEPTH", 4)
+                elif failure == "bytes":
+                    # Content and executables fit, but two library copies do not.
+                    size = sum(path.stat().st_size for path in args.root.rglob("*") if path.is_file())
+                    size += args.binary.stat().st_size + args.dump_binary.stat().st_size
+                    patch = mock.patch.object(check, "MAX_TOTAL", size)
+                else:
+                    reader = capture.open_regular
+                    @contextlib.contextmanager
+                    def read_library(root, path):
+                        if path != library:
+                            with reader(root, path) as stream:
+                                yield stream
+                        elif failure == "unreadable":
+                            raise PermissionError("denied")
+                        else:
+                            with reader(root, path) as stream:
+                                wrapped = mock.Mock(wraps=stream)
+                                wrapped.read.return_value = b""
+                                yield wrapped
+                    patch = mock.patch.object(capture, "open_regular", side_effect=read_library)
+                with patch, self.assertRaises((OSError, ValueError)):
+                    capture.snapshot_inputs(args.root, args.binary, args.dump_binary, target)
+
     def test_replaced_and_restored_sources_never_change_executed_snapshots(self):
         with tempfile.TemporaryDirectory() as temp:
             args, runner = fixture(Path(temp))
@@ -353,11 +496,13 @@ class ActiveRegionCaptureContract(unittest.TestCase):
                 self.assertFalse(any(argv[0] != "git" for argv, _ in runner.calls))
 
     def test_missing_and_mixed_tour_stages_refused(self):
-        for failure in ("missing", "mixed", "unverified", "payload", "receipt", "ledger"):
+        for failure in ("schema", "missing", "mixed", "unverified", "payload", "receipt", "ledger"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
                 args, runner = fixture(Path(temp))
                 tour = check.parse(args.tour.read_bytes())
-                if failure == "missing":
+                if failure == "schema":
+                    tour["schema"] = "luminumbra.active_region_tour.v1"
+                elif failure == "missing":
                     tour["stages"].pop()
                 elif failure == "mixed":
                     tour["stages"][1]["identity"] = dict(tour["identity"], revision="c" * 40)
@@ -374,6 +519,8 @@ class ActiveRegionCaptureContract(unittest.TestCase):
                     run_capture(args, runner)
                 self.assertFalse((args.evidence_dir / "capture.json").exists())
                 self.assertFalse(any("--record" in argv for argv, _ in runner.calls))
+                if failure == "schema":
+                    self.assertFalse(any(argv[0] != "git" for argv, _ in runner.calls))
 
     def test_final_publication_failure_keeps_only_diagnostic_pending_file(self):
         with tempfile.TemporaryDirectory() as temp:

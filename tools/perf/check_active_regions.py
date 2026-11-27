@@ -5,8 +5,13 @@ capture.json binds identities, fixed worker cells, process receipts and SHA-256
 file receipts. tour.json is an operator's edited-tour attestation: ordered
 edited/departed/saved/revisited/reopened stages, each with the same identity,
 worker count, successful command and verified edited-payload digest. The last
-three stages include standard save_receipt.v1 snapshots and saved_member_sha256
-for the containing file, which must also match the edited payload digest.
+three stages include standard save_receipt.v1 snapshots, a retained saved_member
+and saved_member_sha256 for the containing file. Each stage's payload_offset and
+the edited_payload size select bytes in its decoded lod-0 record_id independently
+of other saved data. The whole retained region is verified before decoding.
+Capture/tour v2 requires these members and staged-library identities; v1 evidence
+must be recaptured. Verdicts use v2 for the extended identity. Save receipts and
+engine save/replay formats are unchanged.
 Its ledger and the
 production-codec export are retained and compared with a fresh exporter result.
 Availability samples are observations; only final moving authority must agree.
@@ -20,6 +25,7 @@ import math
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
+import struct
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -35,8 +41,12 @@ MAX_TOTAL = 2 * 1024 * 1024 * 1024
 MAX_FILES = 128
 MAX_TICKS = 100000
 MAX_SAVE_FILES = 50000
+# Match the native LMR1 record and aggregate decoded-byte admission limits.
+MAX_RECORD = 64 * 1024 * 1024
+MAX_REGION_DECODED = 1024 * 1024 * 1024
 IDENTITY_KEYS = {"revision", "binary_sha256", "content_sha256", "systems_sha256",
-                 "preset_sha256", "dump_binary_sha256"}
+                 "preset_sha256", "dump_binary_sha256", "binary_libraries_sha256",
+                 "dump_binary_libraries_sha256"}
 
 
 def require(condition, message):
@@ -104,18 +114,19 @@ def read(root, name, *, limit=MAX_FILE):
     return read_bytes(root, relative(root, name), limit=limit)
 
 
-def digest_file(path):
+def digest_file(path, *, limit=None):
     """Hash the verified open handle, with a fixed memory and file-size bound."""
     digest = hashlib.sha256()
     size = 0
+    limit = MAX_TOTAL if limit is None else limit
     with open_regular(path.parent, path) as stream:
-        require(os.fstat(stream.fileno()).st_size <= MAX_TOTAL, "oversized identity input")
+        require(os.fstat(stream.fileno()).st_size <= limit, "oversized identity input")
         while True:
             block = stream.read(1024 * 1024)
             if not block:
                 break
             size += len(block)
-            require(size <= MAX_TOTAL, "growing identity input")
+            require(size <= limit, "growing identity input")
             digest.update(block)
     return {"size": size, "sha256": digest.hexdigest()}
 
@@ -213,6 +224,84 @@ def save_receipt(data):
     return result
 
 
+def decode_lz4(raw, size):
+    """Decode one bounded raw LZ4 block, including overlapping matches."""
+    require(uint(size, MAX_RECORD) and size > 0, "invalid decoded record size")
+    output = bytearray()
+    position = 0
+    last_match = None
+    finished = False
+
+    def length(value):
+        nonlocal position
+        if value == 15:
+            while True:
+                require(position < len(raw), "truncated LZ4 length")
+                extra = raw[position]
+                position += 1
+                value += extra
+                require(value <= size, "oversized LZ4 length")
+                if extra != 255:
+                    break
+        return value
+
+    # Input is bounded by the retained member; output never exceeds 64 MiB.
+    while position < len(raw):
+        token = raw[position]
+        position += 1
+        literals = length(token >> 4)
+        require(literals <= len(raw) - position and literals <= size - len(output),
+                "truncated or oversized LZ4 literals")
+        output.extend(raw[position:position + literals])
+        position += literals
+        if position == len(raw):
+            require(last_match is None or (literals >= 5 and last_match <= size - 12),
+                    "invalid LZ4 final sequence")
+            finished = True
+            break
+        require(len(raw) - position >= 2, "truncated LZ4 offset")
+        offset = raw[position] | raw[position + 1] << 8
+        position += 2
+        count = length(token & 15) + 4
+        require(0 < offset <= len(output) and count <= size - len(output), "invalid LZ4 match")
+        last_match = len(output)
+        start = len(output) - offset
+        # Doubling copies handle overlap in O(decoded bytes), without a byte loop.
+        while count:
+            copied = min(count, len(output) - start)
+            output.extend(output[start:start + copied])
+            count -= copied
+    require(finished and len(output) == size, "incomplete LZ4 record")
+    return output
+
+
+def saved_record(member, record_id):
+    """Select a lod-0 record only after validating the complete LMR1 framing."""
+    require(uint(record_id) and len(member) >= 8 and member[:4] == b"LMR1", "invalid region header")
+    version, count = struct.unpack_from("<HH", member, 4)
+    require(version == 2 and count > 0 and count <= (len(member) - 8) // 18,
+            "invalid region version or manifest")
+    position = 8 + count * 18
+    selected = None
+    decoded = 0
+    keys = set()
+    # u16 count bounds headers to 65535; only the selected record is decoded.
+    for index in range(count):
+        identity, lod, flags, size, compressed = struct.unpack_from("<QBBII", member, 8 + index * 18)
+        decoded += size
+        require(lod <= 2 and flags & ~3 == 0 and (lod, identity) not in keys
+                and 0 < size <= MAX_RECORD and decoded <= MAX_REGION_DECODED
+                and 0 < compressed <= MAX_RECORD + MAX_RECORD // 255 + 16
+                and compressed <= len(member) - position, "invalid region record")
+        keys.add((lod, identity))
+        if lod == 0 and identity == record_id:
+            selected = (position, compressed, size)
+        position += compressed
+    require(position == len(member) and selected is not None, "missing edited record or trailing region bytes")
+    position, compressed, size = selected
+    return decode_lz4(memoryview(member)[position:position + compressed], size)
+
+
 class Evidence:
     def __init__(self, root, files):
         require(isinstance(files, dict) and 0 < len(files) <= MAX_FILES, "invalid artifact inventory")
@@ -240,7 +329,7 @@ class Evidence:
 
 
 def validate_tour(tour, evidence, identity, effective, config):
-    require(isinstance(tour, dict) and tour.get("schema") == "luminumbra.active_region_tour.v1"
+    require(isinstance(tour, dict) and tour.get("schema") == "luminumbra.active_region_tour.v2"
             and tour.get("identity") == identity
             and canonical(tour.get("effective_simulation")) == canonical(effective)
             and canonical(tour.get("configuration")) == canonical(config),
@@ -249,7 +338,9 @@ def validate_tour(tour, evidence, identity, effective, config):
     worker = tour.get("worker_count")
     require(type(worker) is int and worker in WORKERS, "invalid tour worker count")
     payload = tour.get("edited_payload")
-    require(isinstance(payload, dict) and set(payload) == {"path", "sha256"}
+    require(isinstance(payload, dict) and set(payload) == {"path", "record_id", "size", "sha256"}
+            and uint(payload["record_id"])
+            and uint(payload["size"], MAX_FILE) and payload["size"] > 0
             and hex_string(payload["sha256"]), "missing edited payload")
     stages = tour.get("stages")
     require(isinstance(stages, list) and len(stages) == len(TOUR_STAGES), "missing tour stages")
@@ -265,9 +356,19 @@ def validate_tour(tour, evidence, identity, effective, config):
         if expected in TOUR_STAGES[2:]:
             final_files = save_receipt(evidence.json(stage.get("receipt")))
             require(isinstance(payload["path"], str) and payload["path"] in final_files
-                    and final_files[payload["path"]]["sha256"] == stage.get("saved_member_sha256")
-                    == payload["sha256"],
-                    "edited payload missing from saved/revisited/reopened receipt")
+                    and final_files[payload["path"]]["sha256"] == stage.get("saved_member_sha256"),
+                    "saved member/receipt mismatch")
+            member = evidence.raw(stage.get("saved_member"))
+            item = final_files[payload["path"]]
+            require(item["size"] == len(member)
+                    and item["sha256"] == hashlib.sha256(member).hexdigest(),
+                    "saved member/receipt mismatch")
+            record = saved_record(member, payload["record_id"])
+            offset = stage.get("payload_offset")
+            require(uint(offset, len(record)) and payload["size"] <= len(record) - offset,
+                    "invalid edited payload range")
+            require(hashlib.sha256(memoryview(record)[offset:offset + payload["size"]]).hexdigest()
+                    == payload["sha256"], "edited payload missing from saved member")
     ledger = evidence.raw(tour.get("ledger"))
     require(final_files is not None and "chunks/region/active-regions.arl" in final_files,
             "ledger missing from reopened receipt")
@@ -294,7 +395,7 @@ def validate_tour(tour, evidence, identity, effective, config):
 
 
 def validate(root, manifest):
-    require(isinstance(manifest, dict) and manifest.get("schema") == "luminumbra.active_region_capture.v1",
+    require(isinstance(manifest, dict) and manifest.get("schema") == "luminumbra.active_region_capture.v2",
             "unsupported capture schema")
     identity, config = manifest.get("identity"), manifest.get("configuration")
     validate_identity(identity)
@@ -404,7 +505,7 @@ def validate(root, manifest):
     require(tour["exporter"]["command"] == [manifest["dump_binary"],
             manifest["capture_root"] + "/" + tour["ledger"]], "exporter command mismatch")
     require(evidence.used == evidence.files.keys(), "unconsumed artifact inventory")
-    return {"schema": "luminumbra.active_region_verdict.v1", "passed": True,
+    return {"schema": "luminumbra.active_region_verdict.v2", "passed": True,
             "identity": identity, "configuration": config, "workers": list(WORKERS),
             "record_world_hash": baseline[1], "moving_world_hash": moving_baseline[0],
             "availability_timing": "observational", "tour_stages": list(TOUR_STAGES)}
