@@ -158,14 +158,18 @@ RunFireSpreadOnTick(entt::registry& reg,
     }
 
     std::vector<std::uint32_t> windows;
-    windows.reserve(ents.size());
-    std::uint32_t max_steps = 0;
-    for (auto entity : ents) {
-        const std::uint32_t steps = Elapsed ? elapsed_ticks(entity) : 1;
-        if (steps > 65536)
-            throw std::invalid_argument("Invalid fire elapsed window");
-        windows.push_back(steps);
-        max_steps = std::max(max_steps, steps);
+    std::uint32_t max_steps = ents.empty() ? 0u : 1u;
+    if constexpr (Elapsed) {
+        // At most one window per admitted combustible; legacy ticks need none.
+        windows.reserve(ents.size());
+        max_steps = 0;
+        for (auto entity : ents) {
+            const auto steps = elapsed_ticks(entity);
+            if (steps > 65536)
+                throw std::invalid_argument("Invalid fire elapsed window");
+            windows.push_back(steps);
+            max_steps = std::max(max_steps, steps);
+        }
     }
     stats.considered = static_cast<int>(ents.size());
 
@@ -256,8 +260,10 @@ RunFireSpreadOnTick(entt::registry& reg,
         // Snapshot before any mutation: a source exhausting its final burn tick
         // still delivers heat, and an ignition cannot chain within this substep.
         for (std::size_t index = 0; index < ents.size(); ++index) {
-            if (windows[index] < remaining)
-                continue;
+            if constexpr (Elapsed) {
+                if (windows[index] < remaining)
+                    continue;
+            }
             const auto entity = ents[index];
             const auto& cb = view.get<Comp::CombustibleComponent>(entity);
             if (cb.state() != Comp::BurnState::Burning)
@@ -271,8 +277,10 @@ RunFireSpreadOnTick(entt::registry& reg,
         }
 
         for (std::size_t index = 0; index < ents.size(); ++index) {
-            if (windows[index] < remaining)
-                continue;
+            if constexpr (Elapsed) {
+                if (windows[index] < remaining)
+                    continue;
+            }
             const auto e = ents[index];
             const auto& cb = view.get<Comp::CombustibleComponent>(e);
             const Comp::BurnState st = cb.state();

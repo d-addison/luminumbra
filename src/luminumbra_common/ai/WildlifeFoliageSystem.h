@@ -165,25 +165,33 @@ RunWildlifeFoliageOnTick(entt::registry& reg,
     // Validate all windows before mutation. Scratch is bounded by participating
     // plants/grazers and reused for at most 65,536 substeps; no world-sized copies.
     std::vector<std::uint32_t> plant_steps;
-    plant_steps.reserve(pents.size());
-    std::uint32_t max_steps = 0;
-    for (auto entity : pents) {
-        const std::uint32_t steps = Elapsed ? gate.ElapsedTicks(entity) : 1;
-        if (steps > 65536)
-            throw std::invalid_argument("Invalid grazing elapsed window");
-        plant_steps.push_back(steps);
-        max_steps = std::max(max_steps, steps);
+    std::vector<bool> grazed;
+    std::uint32_t max_steps = pents.empty() ? 0u : 1u;
+    stats.plants = static_cast<int>(pents.size());
+    if constexpr (Elapsed) {
+        // One window and one flag per admitted plant, only for elapsed replay.
+        plant_steps.reserve(pents.size());
+        grazed.resize(pents.size(), false);
+        max_steps = 0;
+        stats.plants = 0;
+        for (auto entity : pents) {
+            const auto steps = gate.ElapsedTicks(entity);
+            if (steps > 65536)
+                throw std::invalid_argument("Invalid grazing elapsed window");
+            plant_steps.push_back(steps);
+            max_steps = std::max(max_steps, steps);
+            stats.plants += steps != 0 ? 1 : 0;
+        }
     }
-    stats.plants = static_cast<int>(std::count_if(
-        plant_steps.begin(), plant_steps.end(), [](auto steps) { return steps != 0; }));
     std::vector<float> feed(grazers.size(), 0.0f);
-    std::vector<bool> grazed(pents.size(), false);
     for (std::uint32_t remaining = max_steps; remaining > 0; --remaining) {
         std::fill(feed.begin(), feed.end(), 0.0f);
         // --- 3. id-ordered pass over plants: count grazers in range, graze or regrow. ---
         for (std::size_t pi = 0; pi < pents.size(); ++pi) {
-            if (plant_steps[pi] < remaining)
-                continue;
+            if constexpr (Elapsed) {
+                if (plant_steps[pi] < remaining)
+                    continue;
+            }
             const auto pe = pents[pi];
             auto& gz = pview.get<Comp::GrazeableComponent>(pe);
             const auto& ptf = pview.get<const Comp::TransformComponent>(pe);
@@ -218,8 +226,12 @@ RunWildlifeFoliageOnTick(entt::registry& reg,
                 // Unsigned tick arithmetic preserves the existing 32-bit stamp wrap.
                 gz.last_grazed_tick = static_cast<std::uint32_t>(tick - (remaining - 1));
                 stats.biomass_removed += (before - after);
-                if (!grazed[pi]) {
-                    grazed[pi] = true;
+                if constexpr (Elapsed) {
+                    if (!grazed[pi]) {
+                        grazed[pi] = true;
+                        ++stats.grazed_plants;
+                    }
+                } else {
                     ++stats.grazed_plants;
                 }
             } else {

@@ -5,7 +5,11 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cstdint>
+#include <limits>
+#include <map>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -302,6 +306,148 @@ TEST(HerdAlarm, RunEqualsReplay) {
     for (std::size_t i = 0; i < run.size(); ++i) {
         // Exact equality: deterministic math must reproduce identical bits.
         EXPECT_EQ(run[i], replay[i]) << "divergence at sample " << i;
+    }
+}
+
+// The scalar one-tick entry remains the oracle for broad-phase and replay shortcuts.
+void CheckRegionalAlarmBits(float dt, float offset) {
+    namespace W = ::Luminumbra::world;
+    entt::registry actual, reference;
+    std::vector<entt::entity> entities;
+    for (int index = 0; index < 48; ++index) {
+        const float x = offset + static_cast<float>(index % 12) * 3.0f;
+        const float z = offset + static_cast<float>(index / 12) * 5.0f;
+        const bool predator = index % 5 == 0;
+        float level = index % 3 == 0 ? 0.6f : -0.0f;
+        if (index == 1)
+            level = std::numeric_limits<float>::quiet_NaN();
+        else if (index == 2)
+            level = std::numeric_limits<float>::infinity();
+        const std::uint8_t alarmed = index % 7 == 0 ? 1 : 0;
+        const bool dead = index % 11 == 0;
+        entities.push_back(spawnCreature(actual, x, z, predator, level, alarmed, dead));
+        spawnCreature(reference, x, z, predator, level, alarmed, dead);
+        actual.emplace<Comp::PlantRegionComponent>(entities.back()).owner_x = index % 4;
+        reference.emplace<Comp::PlantRegionComponent>(entities.back()).owner_x = index % 4;
+    }
+    const std::array<W::RegionKey, 4> due{{{0, 0}, {1, 0}, {2, 0}, {3, 0}}};
+    const std::map<W::RegionKey, std::uint32_t> windows{
+        {{0, 0}, 32}, {{1, 0}, 8}, {{2, 0}, 1}, {{3, 0}, 0}};
+    luminumbra::ai::CreatureTickAdmission admission;
+    admission.Capture(actual, W::RegionConsumerGate(actual, due, W::RegionElapsedTicks(windows)));
+    std::vector<bool> raised(entities.size(), false);
+    int expected_sources = 0;
+    for (std::size_t index = 0; index < entities.size(); ++index) {
+        const auto entity = entities[index];
+        const auto& alarm = actual.get<Comp::AlarmComponent>(entity);
+        if (index % 4 != 3 && !actual.get<Comp::CreatureComponent>(entity).eaten &&
+            (alarm.alarmed != 0 || alarm.level >= 0.25f)) {
+            ++expected_sources;
+        }
+    }
+    std::vector<float> before(entities.size());
+    for (std::uint32_t remaining = 32; remaining != 0; --remaining) {
+        std::vector<W::RegionKey> active;
+        for (const auto& [owner, ticks] : windows) {
+            if (ticks >= remaining)
+                active.push_back(owner);
+        }
+        for (std::size_t index = 0; index < entities.size(); ++index)
+            before[index] = levelOf(reference, entities[index]);
+        luminumbra::ai::CreatureTickAdmission single;
+        single.Capture(reference, W::RegionConsumerGate(reference, active));
+        RunHerdAlarmOnTick(reference, dt, &single);
+        for (std::size_t index = 0; index < entities.size(); ++index)
+            raised[index] =
+                raised[index] || levelOf(reference, entities[index]) > before[index] + 1.0e-6f;
+    }
+    const auto stats = RunHerdAlarmOnTick(actual, dt, &admission, true);
+    EXPECT_EQ(stats.participants, 36);
+    EXPECT_EQ(stats.sources, expected_sources);
+    EXPECT_EQ(stats.raised, std::count(raised.begin(), raised.end(), true));
+    for (const auto entity : entities) {
+        EXPECT_EQ(std::bit_cast<std::uint32_t>(levelOf(actual, entity)),
+                  std::bit_cast<std::uint32_t>(levelOf(reference, entity)));
+    }
+}
+
+TEST(HerdAlarm, RegionalBroadPhaseMatchesScalarBitsAndSuffixWindows) {
+    for (const float dt : {0.0f,
+                           kDt * 0.5f,
+                           kDt,
+                           kDt * 2.0f,
+                           -kDt,
+                           std::numeric_limits<float>::infinity(),
+                           std::numeric_limits<float>::quiet_NaN()}) {
+        for (const float offset : {-13.0f,
+                                   0.0f,
+                                   -536870912.0f,
+                                   536870848.0f,
+                                   536870912.0f,
+                                   536870976.0f,
+                                   std::numeric_limits<float>::infinity(),
+                                   std::numeric_limits<float>::quiet_NaN()}) {
+            SCOPED_TRACE(dt);
+            SCOPED_TRACE(offset);
+            CheckRegionalAlarmBits(dt, offset);
+        }
+    }
+}
+
+TEST(HerdAlarm, RegionalLargeRosterMaximumWindowPreservesFixedPointsAndLateJoin) {
+    namespace W = ::Luminumbra::world;
+    for (const bool dense : {false, true}) {
+        entt::registry registry;
+        std::vector<entt::entity> listeners;
+        // 256 participants: dense propagation and separated pairs both exercise
+        // the maximum window, including a source joining on the final tick.
+        for (int pair = 0; pair < 128; ++pair) {
+            const float x = dense ? 0.0f : static_cast<float>(pair) * 32.0f;
+            const auto source = spawnCreature(registry, x, 0, false, 1.0f, 1);
+            const auto listener = spawnCreature(registry, x + 2.0f, 0);
+            registry.emplace<Comp::PlantRegionComponent>(source).owner_x = pair == 127 ? 1 : 0;
+            registry.emplace<Comp::PlantRegionComponent>(listener).owner_x = 0;
+            listeners.push_back(listener);
+        }
+        const std::array<W::RegionKey, 2> due{{{0, 0}, {1, 0}}};
+        const std::map<W::RegionKey, std::uint32_t> windows{{{0, 0}, 65536}, {{1, 0}, 1}};
+        luminumbra::ai::CreatureTickAdmission admission;
+        admission.Capture(registry,
+                          W::RegionConsumerGate(registry, due, W::RegionElapsedTicks(windows)));
+        const auto stats = RunHerdAlarmOnTick(registry, kDt, &admission, true);
+        EXPECT_EQ(stats.participants, 256);
+        EXPECT_EQ(stats.sources, 128);
+        EXPECT_EQ(stats.raised, 128);
+        // Existing const grid diagnostics count real broad-phase probes. Dense
+        // fixed points must skip idle history, and sparse pairs must stay local.
+        const auto& scratch =
+            registry.ctx().get<luminumbra::ai::herd_alarm_detail::SpatialScratch>();
+        EXPECT_GT(scratch.grid.CandidateTests(), 0u);
+        EXPECT_LE(scratch.grid.CandidateTests(), 6u * 256u * 256u);
+        if (!dense) {
+            EXPECT_LT(scratch.grid.CandidateTests(), 2u * 256u * 256u);
+        }
+        const float expected = 0.9f * (1.0f - 2.0f * (1.0f / 12.0f));
+        for (const auto listener : listeners) {
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(levelOf(registry, listener)),
+                      std::bit_cast<std::uint32_t>(expected));
+        }
+        // Reusing the scratch must rebuild geometry after sources move away.
+        for (const auto entity : registry.view<Comp::AlarmComponent>()) {
+            if (registry.get<Comp::AlarmComponent>(entity).alarmed != 0)
+                registry.get<Comp::TransformComponent>(entity).position.z = 128.0f;
+        }
+        const std::map<W::RegionKey, std::uint32_t> single{{{0, 0}, 1}, {{1, 0}, 1}};
+        admission.Capture(registry,
+                          W::RegionConsumerGate(registry, due, W::RegionElapsedTicks(single)));
+        const auto moved = RunHerdAlarmOnTick(registry, kDt, &admission, true);
+        EXPECT_EQ(moved.raised, 0);
+        const float decayed = expected * (1.0f - (1.0f - 0.85f));
+        const float after_move = dense ? expected * 0.9f : decayed;
+        for (const auto listener : listeners) {
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(levelOf(registry, listener)),
+                      std::bit_cast<std::uint32_t>(after_move));
+        }
     }
 }
 
