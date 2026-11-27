@@ -304,6 +304,8 @@ int WriteSmokeArtifact(const ServerCliOptions& options,
 
     if (!first.effective_simulation.empty())
         artifact["effective_simulation"] = first.effective_simulation;
+    Luminumbra::Server::AppendRegionalCadenceArtifact(
+        artifact, first.ticks.regional_cadence, replay.ticks.regional_cadence);
     Luminumbra::Server::AppendSimBudgetArtifact(artifact, first.sim_budget, replay.sim_budget);
     if (options.sim_budget_profile) {
         Luminumbra::Server::AppendSimBudgetEnforcement(artifact,

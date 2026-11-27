@@ -1,5 +1,6 @@
 #include "../fixtures/TerrainFixtureParams.h"
 #include "../support/UniqueTempPath.h"
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
@@ -7,15 +8,20 @@
 
 #include <gtest/gtest.h>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
+#include <set>
 #include <string>
 #include <unordered_map>
 
 #include "../fixtures/smoke_artifact/FixedInputs.h"
+#include "luminumbra_common/components/MortalComponents.h"
+#include "luminumbra_common/core/WaterComponents.h"
 #include "luminumbra_common/simulation/SimBudgetProfile.h"
 #include "luminumbra_common/simulation/SimBudgetTelemetry.h"
+#include "luminumbra_common/systems/FarmingSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/world/Chunk.h"
@@ -63,6 +69,274 @@ TEST(SimBudgetTelemetry, DisabledProductionArtifactMatchesDevelBytes) {
         baseline = std::move(native);
 #endif
         EXPECT_EQ(actual, baseline);
+    }
+}
+
+void PopulateRegionalWorkload(Luminumbra::Server::RegionalCadenceWorkload& workload,
+                              entt::registry& registry) {
+    namespace F = luminumbra::foliage;
+    namespace C = Luminumbra::Components;
+    F::SpeciesTemplate species;
+    species.id = "regional_smoke_crop";
+    species.perennial = true;
+    species.lifespan_ticks = 900;
+    species.gene_lo.fill(0.3f);
+    species.gene_hi.fill(0.7f);
+    auto rng = luminumbra::core::DeterministicRng::seeded(F::kPlantSeedOffset, 9001u, 7u);
+    workload.Populate(registry, [&](entt::registry& output, const Luminumbra::Vec3& position) {
+        const auto entity = F::MakePlantFromSpecies(output, position, species, rng, 0);
+        output.remove<C::CropLifecycleComponent>(entity);
+        output.emplace<C::MortalComponent>(entity);
+        output.emplace<C::FlowingWaterSourceComponent>(entity);
+        return entity;
+    });
+}
+
+// Exercise the shipping profile through small in-memory sessions; no engine boot,
+// disk world or streaming workers are needed for these bounded consumer checks.
+TEST(SimBudgetTelemetry, RegionalWorkloadSmokeIsDeterministic) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Server;
+    world::GameSession first, replay;
+    RegionalCadenceWorkload workload(Vec3(0));
+    RegionalCadenceWorkload repeated(Vec3(0));
+    PopulateRegionalWorkload(workload, first.GetRegistry());
+    PopulateRegionalWorkload(repeated, replay.GetRegistry());
+    // Unrelated entities must not add diagnostic visits.
+    for (int index = 0; index < 64; ++index) {
+        static_cast<void>(first.GetRegistry().create());
+        static_cast<void>(replay.GetRegistry().create());
+    }
+    ASSERT_TRUE(first.SetHostSimulationAnchors(workload.Anchors()));
+    ASSERT_TRUE(replay.SetHostSimulationAnchors(repeated.Anchors()));
+    std::set<world::RegionKey> owners;
+    for (const auto& position : workload.positions)
+        owners.insert(world::ActiveRegionLedger::region_at(position));
+    EXPECT_EQ(owners.size(), RegionalCadenceWorkload::kParticipants);
+    EXPECT_EQ(first.GetRegistry().view<Components::SoilFeederComponent>().size(), 9u);
+    EXPECT_EQ(first.GetRegistry().view<Components::FlowingWaterSourceComponent>().size(), 9u);
+    EXPECT_TRUE(first.GetRegistry().view<Components::CropLifecycleComponent>().empty());
+    auto observed = RegionalCadenceDiagnostics::Start<Components::PlantGrowthComponent,
+                                                      Components::MortalComponent>(
+        workload, first.GetRegistry(), 0, nullptr);
+    auto observed_replay = RegionalCadenceDiagnostics::Start<Components::PlantGrowthComponent,
+                                                             Components::MortalComponent>(
+        repeated, replay.GetRegistry(), 0, nullptr);
+    for (int step = 0; step < 4; ++step) {
+        ASSERT_EQ(first.TickSimulation(1.0 / 30.0), 1u);
+        ASSERT_EQ(replay.TickSimulation(1.0 / 30.0), 1u);
+        ASSERT_FALSE(first.GetRegionSchedulerFault());
+        ASSERT_FALSE(replay.GetRegionSchedulerFault());
+        observed.Observe<Components::PlantGrowthComponent, Components::MortalComponent>(
+            first, first.GetRegistry(), workload, nullptr);
+        observed_replay.Observe<Components::PlantGrowthComponent, Components::MortalComponent>(
+            replay, replay.GetRegistry(), repeated, nullptr);
+        EXPECT_EQ(observed, observed_replay);
+        EXPECT_EQ(first.ComputePlantSubHash(), replay.ComputePlantSubHash());
+        EXPECT_EQ(first.GetActiveRegionLedger().encode(), replay.GetActiveRegionLedger().encode());
+        EXPECT_EQ(first.GetFieldPages().serialize(), replay.GetFieldPages().serialize());
+    }
+    for (std::size_t index = 0; index < RegionalCadenceWorkload::kAnchors; ++index) {
+        EXPECT_EQ(observed.owners[index].services, 4u);
+        EXPECT_EQ(observed.owners[index].elapsed_steps, 4u);
+        EXPECT_EQ(observed.owners[index].max_service_gap, 1u);
+    }
+    EXPECT_EQ(observed.owners.back().services, 0u);
+    EXPECT_EQ(observed.owners.back().elapsed_steps, 0u);
+    EXPECT_EQ(observed.owners.back().unadmitted_samples, 4u);
+    EXPECT_EQ(observed.owners.back().service_gap, 4u);
+    EXPECT_EQ(observed.owner_visits, 4u * RegionalCadenceWorkload::kParticipants);
+    EXPECT_EQ(observed.water_window_visits, 0u);
+    const auto before = first.ComputePlantSubHash();
+    EXPECT_THROW(PopulateRegionalWorkload(workload, first.GetRegistry()), std::invalid_argument);
+    EXPECT_EQ(first.ComputePlantSubHash(), before);
+    RegionalCadenceWorkload refused(Vec3(0));
+    entt::registry empty_registry;
+    EXPECT_THROW(
+        refused.Populate(empty_registry, [](entt::registry&, const Vec3&) { return entt::null; }),
+        std::invalid_argument);
+    EXPECT_TRUE(empty_registry.view<Components::PlantTag>().empty());
+    EXPECT_THROW(RegionalCadenceWorkload(Vec3(std::numeric_limits<float>::infinity())),
+                 std::invalid_argument);
+    EXPECT_THROW(RegionalCadenceWorkload(Vec3(16777000.0f, 0, 0)), std::invalid_argument);
+}
+
+TEST(SimBudgetTelemetry, RegionalDiagnosticsDoNotChangeAuthority) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Server;
+    world::GameSession observed_session, baseline;
+    RegionalCadenceWorkload workload(Vec3(0)), unobserved(Vec3(0));
+    PopulateRegionalWorkload(workload, observed_session.GetRegistry());
+    PopulateRegionalWorkload(unobserved, baseline.GetRegistry());
+    ASSERT_TRUE(observed_session.SetHostSimulationAnchors(workload.Anchors()));
+    ASSERT_TRUE(baseline.SetHostSimulationAnchors(unobserved.Anchors()));
+    observed_session.SetSimBudgetTelemetryEnabled(true);
+    baseline.SetSimBudgetTelemetryEnabled(true);
+    auto diagnostic = RegionalCadenceDiagnostics::Start<Components::PlantGrowthComponent,
+                                                        Components::MortalComponent>(
+        workload, observed_session.GetRegistry(), 0, nullptr);
+    for (int step = 0; step < 4; ++step) {
+        ASSERT_EQ(observed_session.TickSimulation(1.0 / 30.0), 1u);
+        ASSERT_EQ(baseline.TickSimulation(1.0 / 30.0), 1u);
+        diagnostic.Observe<Components::PlantGrowthComponent, Components::MortalComponent>(
+            observed_session, observed_session.GetRegistry(), workload, nullptr);
+        const auto once = diagnostic;
+        diagnostic.Observe<Components::PlantGrowthComponent, Components::MortalComponent>(
+            observed_session, observed_session.GetRegistry(), workload, nullptr);
+        EXPECT_EQ(diagnostic, once); // Repeated opportunities never double count.
+        EXPECT_EQ(observed_session.ComputePlantSubHash(), baseline.ComputePlantSubHash());
+        EXPECT_EQ(observed_session.GetActiveRegionLedger().encode(),
+                  baseline.GetActiveRegionLedger().encode());
+        EXPECT_EQ(observed_session.GetFieldPages().serialize(),
+                  baseline.GetFieldPages().serialize());
+        EXPECT_EQ(observed_session.SystemConfigIdentity(), baseline.SystemConfigIdentity());
+        EXPECT_TRUE(
+            observed_session.GetSimBudgetTelemetry().WorkMatches(baseline.GetSimBudgetTelemetry()));
+    }
+    EXPECT_EQ(diagnostic.observations, 4u);
+    EXPECT_EQ(diagnostic.water_deferred_samples, 4u);
+    observed_session.GetRegistry().destroy(workload.plants[0]);
+    ASSERT_EQ(observed_session.TickSimulation(1.0 / 30.0), 1u);
+    diagnostic.Observe<Components::PlantGrowthComponent, Components::MortalComponent>(
+        observed_session, observed_session.GetRegistry(), workload, nullptr);
+    EXPECT_EQ(diagnostic.owners[0].missing_samples, 1u);
+
+    nlohmann::json artifact;
+    AppendRegionalCadenceArtifact(artifact, diagnostic, std::nullopt);
+    EXPECT_FALSE(artifact.at("regional_cadence").at("observations_replay_match").get<bool>());
+    EXPECT_TRUE(artifact.at("regional_cadence").at("replay").is_null());
+    AppendRegionalCadenceArtifact(artifact, diagnostic, diagnostic);
+    EXPECT_TRUE(artifact.at("regional_cadence").at("observations_replay_match").get<bool>());
+}
+
+TEST(SimBudgetTelemetry, RegionalDiagnosticsObserveReducedFrozenAndWaterPublications) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Server;
+    world::GameSession session;
+    session.SetRegionSchedulerConfig({.work_limit = 0, .hold_ticks = 1, .reduced_shift = 1});
+    RegionalCadenceWorkload workload(Vec3(0));
+    PopulateRegionalWorkload(workload, session.GetRegistry());
+    ASSERT_TRUE(session.SetHostSimulationAnchors(workload.Anchors()));
+    const auto control = world::ActiveRegionLedger::region_at(workload.positions.back());
+    session.PinActiveRegion(control, true);
+    session.PinActiveRegion(control, false);
+    Systems::SHIELD_WorldSystem shield(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    Systems::WaterSystem water(nullptr, &shield);
+    water.SetRegionalScheduling(true);
+    water.SetSimResolution(8);
+    water.SetHydrology(false, 0, 0);
+    const auto position = workload.positions.front();
+    auto chunk = std::make_shared<Chunk>(IVec3(static_cast<int>(position.x) / CHUNK_SIZE_X,
+                                               0,
+                                               static_cast<int>(position.z) / CHUNK_SIZE_Z));
+    chunk->set_state(ChunkState::Idle);
+    chunk->has_water_sim = true;
+    chunk->current_water_resolution = 8;
+    chunk->water_depth_mm.assign(64, 1000);
+    chunk->water_bed_mm.assign(64, 1000);
+    chunk->water_edge_flux.assign(128, 0);
+    chunk->water_level_data.assign(64, 2.0f);
+    const std::array residents{chunk};
+    auto diagnostic = RegionalCadenceDiagnostics::Start<Components::PlantGrowthComponent,
+                                                        Components::MortalComponent>(
+        workload, session.GetRegistry(), 0, &water);
+    bool saw_reduced = false, saw_frozen = false;
+    for (int step = 0; step < 5; ++step) {
+        // Deterministic pressure input exercises the existing scheduler policy.
+        session.RecordActiveRegionWork({control, 1, 0, 0, 0});
+        ASSERT_EQ(session.TickSimulation(1.0 / 30.0), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        const auto state = session.GetActiveRegionLedger().records().at(control).state;
+        saw_reduced = saw_reduced || state == world::RegionState::Reduced;
+        saw_frozen = saw_frozen || state == world::RegionState::Frozen;
+        if (step == 0) {
+            auto ledger = session.GetActiveRegionLedger();
+            std::vector<world::RegionWork> completed;
+            water.UpdateRegional(
+                session.GetRegistry(), residents, ledger, session.GetRegionSchedule(), completed);
+            ASSERT_GT(water.regional_work().allocated_windows, 0u);
+            ASSERT_GT(water.regional_work().water_cells, 0u);
+        }
+        diagnostic.Observe<Components::PlantGrowthComponent, Components::MortalComponent>(
+            session, session.GetRegistry(), workload, &water);
+    }
+    EXPECT_TRUE(saw_reduced);
+    EXPECT_TRUE(saw_frozen);
+    EXPECT_GT(diagnostic.owners.back().frozen_samples, 0u);
+    EXPECT_EQ(diagnostic.owners.back().frozen_services, 0u);
+    EXPECT_EQ(diagnostic.water_publications, 1u);
+    EXPECT_EQ(diagnostic.water_deferred_samples, 4u);
+    EXPECT_EQ(diagnostic.water_granted_windows, water.regional_work().allocated_windows);
+    EXPECT_EQ(diagnostic.water_completed_cells, water.regional_work().water_cells);
+    EXPECT_LE(diagnostic.water_total_cells_max, 4096u);
+    EXPECT_EQ(diagnostic.owners.front().water_services, 1u);
+    EXPECT_EQ(diagnostic.owners.front().water_service_gap, 4u);
+    EXPECT_EQ(diagnostic.owners.front().water_interior_windows, diagnostic.water_granted_windows);
+    EXPECT_EQ(diagnostic.owner_visits, 5u * RegionalCadenceWorkload::kParticipants);
+    EXPECT_EQ(diagnostic.water_window_visits,
+              RegionalCadenceWorkload::kParticipants * water.regional_work().visits.size());
+}
+
+TEST(SimBudgetTelemetry, RegionalWorkloadRefusesConflictingModesBeforeBoot) {
+    ServerCliOptions options;
+    EXPECT_TRUE(options.SupportsRegionalCadenceWorkload());
+    const std::array incompatible = {&ServerCliOptions::lockstep_loopback,
+                                     &ServerCliOptions::heavy,
+                                     &ServerCliOptions::weather_bench,
+                                     &ServerCliOptions::aether_bench,
+                                     &ServerCliOptions::wind_bench,
+                                     &ServerCliOptions::net_soak,
+                                     &ServerCliOptions::net_soak_client,
+                                     &ServerCliOptions::net_host,
+                                     &ServerCliOptions::net_join,
+                                     &ServerCliOptions::replicate,
+                                     &ServerCliOptions::ecology_roster,
+                                     &ServerCliOptions::planted_roster,
+                                     &ServerCliOptions::moving,
+                                     &ServerCliOptions::water_smoke};
+    for (const auto flag : incompatible) {
+        options.*flag = true;
+        EXPECT_FALSE(options.SupportsRegionalCadenceWorkload());
+        options.*flag = false;
+    }
+    const std::array paths = {&ServerCliOptions::mutate_replay_fixture,
+                              &ServerCliOptions::replay_path,
+                              &ServerCliOptions::record_path,
+                              &ServerCliOptions::world_id};
+    for (const auto path : paths) {
+        options.*path = "input";
+        EXPECT_FALSE(options.SupportsRegionalCadenceWorkload());
+        (options.*path).clear();
+    }
+    for (const int avatars : {-1, 1, 64}) {
+        options.avatars = avatars;
+        EXPECT_FALSE(options.SupportsRegionalCadenceWorkload());
+    }
+    options.avatars = 0;
+    options.smoke = options.sim_budget = options.availability_trace = options.water_hash_trace =
+        true;
+    EXPECT_TRUE(options.SupportsRegionalCadenceWorkload());
+}
+
+TEST(SimBudgetTelemetry, DisabledRegionalDiagnosticsPreserveArtifactBytes) {
+    using namespace Luminumbra::Server;
+    for (const bool budget_enabled : {false, true}) {
+        SimBudgetTelemetry budget;
+        budget.SetEnabled(budget_enabled);
+        budget.Record(SimBudgetStage::Plants, 1, 9, 1.0);
+        nlohmann::json artifact = {{"schema", "luminumbra.server_tick.v1"},
+                                   {"world_hash", "fixed"}};
+        AppendSimBudgetArtifact(artifact, budget, budget);
+        const auto before = artifact.dump(2);
+        AppendRegionalCadenceArtifact(artifact, std::nullopt, std::nullopt);
+        EXPECT_EQ(artifact.dump(2), before);
+        AppendRegionalCadenceArtifact(artifact, std::nullopt, RegionalCadenceDiagnostics{});
+        EXPECT_EQ(artifact.dump(2), before);
+        EXPECT_FALSE(artifact.contains("regional_cadence"));
+        if (budget_enabled) {
+            EXPECT_EQ(artifact.at("sim_budget").at("schema"), "luminumbra.sim_budget.v2");
+        }
     }
 }
 

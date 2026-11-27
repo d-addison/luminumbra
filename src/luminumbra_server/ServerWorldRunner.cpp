@@ -32,6 +32,7 @@
 #include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/core/Profiler.h"
 #include "luminumbra_common/core/SystemConfig.h" // sim.water_high_res (host==peer)
+#include "luminumbra_common/core/WaterComponents.h"
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -174,6 +175,9 @@ bool HorizontalChunkHorizonCovers(const Vec3& center, const Vec3& candidate, int
 }
 
 world::AuthorityBootDescriptor DescribeWorkload(const ServerWorldRunnerConfig& config) {
+    if (config.regional_cadence_workload) {
+        throw std::invalid_argument("Regional smoke workload cannot be recorded in replay");
+    }
     if (config.avatar_count < 0 ||
         config.avatar_count > static_cast<int>(world::AuthorityBootDescriptor::kMaxAvatars)) {
         throw std::invalid_argument("Replay avatar roster exceeds descriptor bound");
@@ -241,6 +245,13 @@ bool ServerWorldRunner::Boot() {
         m_bootError = "Surface and collision radii must be between 0 and 12 chunks";
         return false;
     }
+    if (m_config.regional_cadence_workload &&
+        (!m_config.world_id.empty() || m_config.avatar_count != 0 || m_config.moving_anchor ||
+         m_config.water_smoke || m_config.ecology_roster || m_config.planted_roster ||
+         m_continuationOptions.owner_continuation)) {
+        m_bootError = "Regional workload requires a fresh standalone smoke world";
+        return false;
+    }
     if (m_booted) {
         return true;
     }
@@ -289,6 +300,12 @@ bool ServerWorldRunner::Boot() {
         m_session->SetParkedBytesLimit(static_cast<std::size_t>(m_config.parked_bytes_limit));
     }
     m_session->SetFiniteHydrologyEnabled(m_config.finite_hydrology);
+    if (m_config.regional_cadence_workload && !m_session->SimulationHostIntegrationEnabled()) {
+        m_bootError = "Regional workload requires the runtime regional authority profile";
+        m_session.reset();
+        m_jobSystem.shutdown();
+        return false;
+    }
     if (m_session->ActiveRegionsEnabled() &&
         m_config.avatar_count > static_cast<int>(Systems::PhysicsSystem::kSimulationOwnerBudget)) {
         m_bootError = "Avatar collider preparation budget exceeded";
@@ -509,6 +526,29 @@ bool ServerWorldRunner::Boot() {
         LUMINUMBRA_CORE_INFO("ServerWorldRunner: spawned deterministic plant roster (6 plants).");
     }
 
+    if (m_config.regional_cadence_workload) {
+        m_regionalWorkload.emplace(spawn_anchor);
+        namespace F = luminumbra::foliage;
+        F::SpeciesTemplate species;
+        species.id = "regional_smoke_crop";
+        species.perennial = true;
+        species.lifespan_ticks = 900;
+        species.gene_lo.fill(0.3f);
+        species.gene_hi.fill(0.7f);
+        auto rng = luminumbra::core::DeterministicRng::seeded(F::kPlantSeedOffset, 9001u, 7u);
+        m_regionalWorkload->Populate(
+            m_session->GetRegistry(), [&](entt::registry& registry, const Vec3& position) {
+                const auto entity = F::MakePlantFromSpecies(registry, position, species, rng, 0);
+                if (entity != entt::null) {
+                    // Keep the explicit roster at nine participants for long captures.
+                    registry.remove<Components::CropLifecycleComponent>(entity);
+                    registry.emplace<Components::MortalComponent>(entity);
+                    registry.emplace<Components::FlowingWaterSourceComponent>(entity);
+                }
+                return entity;
+            });
+    }
+
     // One shared bounded residency/water boot for runner and ordinary clients.
     // Bounded by the already admitted avatar roster, reused across all boot passes.
     std::vector<Vec3> boot_anchors;
@@ -517,6 +557,10 @@ bool ServerWorldRunner::Boot() {
         boot_anchors.push_back(avatar.position);
     }
     world::GameSession::BootSettleStats settle_stats;
+    if (m_regionalWorkload) {
+        const auto anchors = m_regionalWorkload->Anchors();
+        boot_anchors.assign(anchors.begin(), anchors.end());
+    }
     if (!m_session->SettleInitialSimulation(boot_anchors, settle_stats)) {
         m_bootError = "Initial simulation preparation failed";
         m_session.reset();
@@ -554,7 +598,12 @@ bool ServerWorldRunner::Boot() {
         }
         m_session->SetOwnerContinuationAnchor(m_ownerOrigin, m_ownerAnchor, m_ownerStreamTick);
     }
-    if (m_session->SimulationHostIntegrationEnabled()) {
+    if (m_session->SimulationHostIntegrationEnabled() && m_regionalWorkload) {
+        if (!m_session->SetHostSimulationAnchors(m_regionalWorkload->Anchors())) {
+            m_bootError = "Regional simulation anchors refused";
+            return false;
+        }
+    } else if (m_session->SimulationHostIntegrationEnabled()) {
         std::array<Vec3, Systems::PhysicsSystem::kSimulationOwnerBudget> anchors{};
         std::size_t count = 0;
         for (const auto& avatar : m_avatars) {
@@ -604,7 +653,7 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
 
     const auto& smoke_anchor = m_simulationSmokeAnchor;
     if (tick_count != 0 && m_session->SimulationHostIntegrationEnabled() &&
-        m_config.simulation_smoke && m_avatars.empty() && !smoke_anchor) {
+        m_config.simulation_smoke && !m_regionalWorkload && m_avatars.empty() && !smoke_anchor) {
         report.region_fault = true;
         report.region_fault_message = "Simulation smoke requires a wet region seam";
         return report;
@@ -630,6 +679,15 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         water_total_samples.reserve(n);
     }
 
+    if (m_regionalWorkload && m_config.regional_diagnostics) {
+        report.regional_cadence =
+            RegionalCadenceDiagnostics::Start<Components::PlantGrowthComponent,
+                                              Components::MortalComponent>(
+                *m_regionalWorkload,
+                m_session->GetRegistry(),
+                m_session->GetSimulationTickCount(),
+                m_session->GetWaterSystem());
+    }
     const auto wall_start = std::chrono::steady_clock::now();
     // Keep batch tick indices and telemetry in this invocation. Retries cannot
     // exceed the requested tick budget, even if preparation refuses permanently.
@@ -692,7 +750,11 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
             if (count == 0 && smoke_anchor) {
                 anchors[count++] = *smoke_anchor;
             }
-            if (!m_session->SetHostSimulationAnchors({anchors.data(), count})) {
+            if (m_regionalWorkload) {
+                if (!m_session->SetHostSimulationAnchors(m_regionalWorkload->Anchors())) {
+                    break;
+                }
+            } else if (!m_session->SetHostSimulationAnchors({anchors.data(), count})) {
                 break;
             }
         }
@@ -757,6 +819,14 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         }
         report.ticks_executed +=
             m_session->TickSimulation(fixed_dt, /*defer_water_authority=*/true);
+        if (report.regional_cadence && m_regionalWorkload) {
+            report.regional_cadence
+                ->Observe<Components::PlantGrowthComponent, Components::MortalComponent>(
+                    *m_session,
+                    m_session->GetRegistry(),
+                    *m_regionalWorkload,
+                    m_session->GetWaterSystem());
+        }
         if (m_session->SimulationHostIntegrationEnabled()) {
             for (std::size_t i = 0; i < m_avatars.size(); ++i) {
                 m_avatars[i].position = physics_system->get_avatar_position(i);
