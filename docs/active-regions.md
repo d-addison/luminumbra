@@ -369,6 +369,27 @@ save/load sequence under test. Their hashes are computed in the same build.
 `hashes.json` retains the historical capture values; it is not a save member or a
 portable hash oracle. Missing or changed fixture bytes still fail the tests.
 
+### Moving-anchor field diagnostics
+
+`regional_field_evidence --diagnostic-pressure` emits a seed-1337 axial 20,000 m
+packet with scheduler work limit 10, hold 2 and reduced shift 1, recording four
+ticks at each 128 m stop through the production session activation path.
+`regional_field_evidence --shipped-settings` retains the shipped scheduler limits
+for separate simulation-only tick and save/load timing observations with field
+capture outside the tick timer and unrelated water, rain, event and energy work
+disabled in this empty-world fixture.
+The packet records walking anchors, schedule and authority digests, due owners,
+completed work, owner states, physical page masks, exact frozen-owner byte checks
+and exact field/ledger equality on reopen and two continuation ticks.
+`python3 -I -B tools/perf/field_page_evidence.py <packet.json>` validates pressure
+proof and `--measurement` also accepts shipped-settings observations without
+requiring freezing.
+`RegionalFieldEvidence.ShortRouteRecordsActivationFreezeAndReopen` covers a
+2,048 m route in the existing common test target and `FieldPageEvidenceContract`
+checks synthetic refusals, while the full-route executable is outside CTest.
+Native route qualification, representative-world performance, paired oracle
+artifacts and client quit/reload evidence for issue #136 remain pending.
+
 ### Historical ambient hash portability investigation
 
 The historical world-hash literals encode the ambient fields' selected FastNoise

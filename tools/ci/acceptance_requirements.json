@@ -5297,6 +5297,42 @@
       "source": "docs/active-regions.md#file-and-compatibility",
       "quote": "Ordinary service-level removal and artifact-registry cleanup completion remain pending.",
       "text": "Ordinary service-level removal and artifact-registry cleanup completion remain pending."
+    },
+    {
+      "id": "ar.field-evidence.001",
+      "source": "docs/active-regions.md#moving-anchor-field-diagnostics",
+      "quote": "`regional_field_evidence --diagnostic-pressure` emits a seed-1337 axial 20,000 m packet with scheduler work limit 10, hold 2 and reduced shift 1, recording four ticks at each 128 m stop through the production session activation path.",
+      "text": "`regional_field_evidence --diagnostic-pressure` emits a seed-1337 axial 20,000 m packet with scheduler work limit 10, hold 2 and reduced shift 1, recording four ticks at each 128 m stop through the production session activation path."
+    },
+    {
+      "id": "ar.field-evidence.002",
+      "source": "docs/active-regions.md#moving-anchor-field-diagnostics",
+      "quote": "`regional_field_evidence --shipped-settings` retains the shipped scheduler limits for separate simulation-only tick and save/load timing observations with field capture outside the tick timer and unrelated water, rain, event and energy work disabled in this empty-world fixture.",
+      "text": "`regional_field_evidence --shipped-settings` retains the shipped scheduler limits for separate simulation-only tick and save/load timing observations with field capture outside the tick timer and unrelated water, rain, event and energy work disabled in this empty-world fixture."
+    },
+    {
+      "id": "ar.field-evidence.003",
+      "source": "docs/active-regions.md#moving-anchor-field-diagnostics",
+      "quote": "The packet records walking anchors, schedule and authority digests, due owners, completed work, owner states, physical page masks, exact frozen-owner byte checks and exact field/ledger equality on reopen and two continuation ticks.",
+      "text": "The packet records walking anchors, schedule and authority digests, due owners, completed work, owner states, physical page masks, exact frozen-owner byte checks and exact field/ledger equality on reopen and two continuation ticks."
+    },
+    {
+      "id": "ar.field-evidence.004",
+      "source": "docs/active-regions.md#moving-anchor-field-diagnostics",
+      "quote": "`python3 -I -B tools/perf/field_page_evidence.py <packet.json>` validates pressure proof and `--measurement` also accepts shipped-settings observations without requiring freezing.",
+      "text": "`python3 -I -B tools/perf/field_page_evidence.py <packet.json>` validates pressure proof and `--measurement` also accepts shipped-settings observations without requiring freezing."
+    },
+    {
+      "id": "ar.field-evidence.005",
+      "source": "docs/active-regions.md#moving-anchor-field-diagnostics",
+      "quote": "`RegionalFieldEvidence.ShortRouteRecordsActivationFreezeAndReopen` covers a 2,048 m route in the existing common test target and `FieldPageEvidenceContract` checks synthetic refusals, while the full-route executable is outside CTest.",
+      "text": "`RegionalFieldEvidence.ShortRouteRecordsActivationFreezeAndReopen` covers a 2,048 m route in the existing common test target and `FieldPageEvidenceContract` checks synthetic refusals, while the full-route executable is outside CTest."
+    },
+    {
+      "id": "ar.field-evidence.006",
+      "source": "docs/active-regions.md#moving-anchor-field-diagnostics",
+      "quote": "Native route qualification, representative-world performance, paired oracle artifacts and client quit/reload evidence for issue #136 remain pending.",
+      "text": "Native route qualification, representative-world performance, paired oracle artifacts and client quit/reload evidence for issue #136 remain pending."
     }
   ],
   "exclusions": [
