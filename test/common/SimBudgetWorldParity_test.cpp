@@ -522,7 +522,6 @@ void ExpectCurrentRegionalWater(const Luminumbra::Server::ServerTickReport& repo
     EXPECT_EQ(diagnostic.water_resident_visits, work.residents_visited);
     EXPECT_EQ(diagnostic.water_participant_visits, work.participants_visited);
     EXPECT_LE(diagnostic.water_total_cells_max, 4096u);
-    EXPECT_GT(diagnostic.water_completed_cells, 0u);
     for (const auto& owner : diagnostic.owners) {
         EXPECT_EQ(owner.missing_samples, 0u);
         EXPECT_EQ(owner.frozen_water_windows, 0u);
@@ -565,13 +564,18 @@ TEST_P(RegionalCadenceRunner, WorkloadReportsEachWaterTickAndEmitsFinalPublicati
     // Four single-tick invocations expose absolute attribution, stale work and
     // the final publication without a long capture or an unbounded trace.
     constexpr std::uint64_t ticks = 4;
+    // Boot-settled water may spend its first counted tick waking residents, so
+    // completed cells are required across the run rather than on every tick.
+    std::uint64_t completed_cells = 0;
     for (std::uint64_t tick = 1; tick <= ticks; ++tick) {
         SCOPED_TRACE(tick);
         const auto sources_before = water->debug_sources_seen();
         run.ticks = runner.RunFixedTicks(1);
         ASSERT_NO_FATAL_FAILURE(
             ExpectCurrentRegionalWater(run.ticks, *water, sources_before, tick));
+        completed_cells += run.ticks.regional_cadence->water_completed_cells;
     }
+    EXPECT_GT(completed_cells, 0u);
     run.ok = true;
     run.world_hash = runner.ComputeWorldHash();
     run.sub_hashes = runner.ComputeWorldSubHashes();
