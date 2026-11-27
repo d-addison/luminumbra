@@ -16,9 +16,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import capture_sim_budget as budget
 from fixture_paths import decode_text, open_regular, read_bytes
 from resolved_fixture import PRESETS, resolved_fixture_hash, unique_object
+import render_runner_process as process
 
 
-SCHEMA = "luminumbra.regional_cadence_capture.v1"
+SCHEMA = "luminumbra.regional_cadence_capture.v2"
+LEGACY_SCHEMA = "luminumbra.regional_cadence_capture.v1"
 WORKLOAD = "eight_distant_regions_v1"
 # Capture/parser allocation bounds only, independent of shipping admission.
 MAX_CELLS, MAX_TICKS = 32, 36000
@@ -269,6 +271,12 @@ def write_new(path, value):
         stream.flush()
 
 
+def path_labels(identity):
+    return {"binary": "binary-sha256-" + identity["binary_sha256"],
+            "runtime_root": "runtime-sha256-" + identity["content_sha256"],
+            "capture_root": "."}
+
+
 def capture(args, runner=None):
     runner = subprocess.run if runner is None else runner
     workload = matrix(list(args.presets), list(args.seeds), args.repeats, args.ticks,
@@ -281,8 +289,7 @@ def capture(args, runner=None):
     identity = identities(repository, root, binary, runner)
     evidence.mkdir(parents=True)  # Exclusive; an existing partial matrix is never reused.
     manifest = {"schema": SCHEMA, "identity": identity, "workload": workload,
-                "workload_sha256": digest(workload), "binary": binary.as_posix(), "runtime_root": root.as_posix(),
-                "capture_root": evidence.as_posix(), "cells": []}
+                "workload_sha256": digest(workload), **path_labels(identity), "cells": []}
     environment = {key: value for key, value in os.environ.items()
                    if not key.upper().startswith("LUMINUMBRA_")}
     total = 0
@@ -290,9 +297,20 @@ def capture(args, runner=None):
     for index, (preset, seed, repeat) in enumerate(cells(workload)):
         name = f"cell-{index}.json"
         argv = command(binary, root, evidence / name, workload, preset, seed)
-        with (evidence / f"cell-{index}.log").open("xb") as log:
-            completed = runner(argv, cwd=evidence, env=environment.copy(), stdout=log,
-                               stderr=subprocess.STDOUT, check=False, timeout=600)
+        status = {"evidence_errors": []}
+        try:
+            # Shared pipe drainer retains at most 16 MiB, with bounded shutdown
+            # draining on POSIX and Windows; no child writes directly to disk.
+            with process.bounded_log(evidence / f"cell-{index}.log", status, exclusive=True) as log:
+                completed = runner(argv, cwd=evidence, env=environment.copy(), stdout=log,
+                                   stderr=subprocess.STDOUT, check=False, timeout=600)
+        finally:
+            # Preserve safe diagnostics even on spawn failure or deadline expiry.
+            write_new(evidence / f"cell-{index}.log.json", {
+                key: status.get(key) for key in (
+                    "log_truncated", "log_limit_bytes", "log_bytes_retained")
+            } | {"log_complete": status.get("log_truncated") is False and not status["evidence_errors"]})
+        require(not status["evidence_errors"], "incomplete smoke log (truncation or I/O failure)")
         require(type(completed.returncode) is int and completed.returncode == 0, "unsuccessful smoke process")
         data, size = read_packet(evidence / name, min(MAX_FILE, MAX_TOTAL - total))
         # Canonical digest binds exactly the parsed object; never reopen raw evidence for hashing.
@@ -304,7 +322,9 @@ def capture(args, runner=None):
                 "divergent deterministic repeated traces")
         previous[preset, seed] = trace_digest
         manifest["cells"].append({"preset": preset, "seed": seed, "repeat": repeat,
-                                  "artifact": name, "artifact_sha256": digest(data), "command": argv})
+                                  "artifact": name, "artifact_sha256": digest(data),
+                                  "command": command(manifest["binary"], manifest["runtime_root"],
+                                                     name, workload, preset, seed)})
     require(identity == identities(repository, root, binary, runner), "capture identity changed")
     # Revalidate retained bytes, commands and the complete matrix before publishing the manifest last.
     load_capture(evidence, manifest)
@@ -315,7 +335,8 @@ def capture(args, runner=None):
 
 def load_capture(directory, manifest=None):
     manifest = read_json(directory / "capture.json") if manifest is None else manifest
-    require(isinstance(manifest, dict) and manifest.get("schema") == SCHEMA, "unsupported capture schema")
+    require(isinstance(manifest, dict) and manifest.get("schema") in (SCHEMA, LEGACY_SCHEMA),
+            "unsupported capture schema")
     value = manifest.get("workload")
     require(isinstance(value, dict), "missing workload identity")
     workload = matrix(value.get("presets"), value.get("seeds"), value.get("repeats"), value.get("ticks"),
@@ -328,13 +349,18 @@ def load_capture(directory, manifest=None):
             and re.fullmatch(r"[0-9a-f]{40}", identity["revision"]) is not None, "invalid source identity")
     require(all(isinstance(identity.get(key), str) and re.fullmatch(r"[0-9a-f]{64}", identity[key])
                 for key in ("binary_sha256", "content_sha256")), "invalid executable/content identity")
-    require(all(isinstance(manifest.get(key), str) and manifest[key] and "\0" not in manifest[key]
+    labels = path_labels(identity)
+    bindings = {key: manifest.get(key) for key in labels}
+    # Accept legacy absolute bindings for comparison, but publish only safe roles.
+    legacy_paths = all(isinstance(manifest.get(key), str) and manifest[key] and "\0" not in manifest[key]
                 and (PurePosixPath(manifest[key]).is_absolute() or PureWindowsPath(manifest[key]).is_absolute())
-                for key in ("binary", "runtime_root", "capture_root")), "invalid capture paths")
+                for key in ("binary", "runtime_root", "capture_root"))
+    require(legacy_paths if manifest["schema"] == LEGACY_SCHEMA else bindings == labels,
+            "invalid capture paths")
     rows = manifest.get("cells")
     require(isinstance(rows, list) and len(rows) == len(workload["presets"]) * len(workload["seeds"])
             * workload["repeats"], "incomplete capture matrix")
-    result, previous, total = [], {}, 0
+    result, published_rows, previous, total = [], [], {}, 0
     for index, ((preset, seed, repeat), row) in enumerate(zip(cells(workload), rows)):
         name = f"cell-{index}.json"
         require(isinstance(row, dict) and row.get("preset") == preset and row.get("seed") == seed
@@ -351,7 +377,17 @@ def load_capture(directory, manifest=None):
         require(previous.get((preset, seed), checksum) == checksum, "divergent deterministic repeated traces")
         previous[preset, seed] = checksum
         result.append(summary)
-    return {"manifest": manifest, "cells": result}
+        published_rows.append({key: row[key] for key in (
+            "preset", "seed", "repeat", "artifact", "artifact_sha256")})
+        published_rows[-1]["command"] = command(labels["binary"], labels["runtime_root"], name,
+                                               workload, preset, seed)
+    # Project known fields so legacy path bindings and unknown metadata cannot
+    # leak through either endpoint of the comparison report.
+    published = {"schema": SCHEMA, **labels, "workload": workload,
+                 "workload_sha256": digest(workload), "cells": published_rows,
+                 "identity": {key: identity[key] for key in (
+                     "revision", "source_dirty", "binary_sha256", "content_sha256")}}
+    return {"manifest": published, "cells": result}
 
 
 def compare(before, after):
@@ -366,7 +402,7 @@ def compare(before, after):
         integer.append({"cell": index, "same": old["integer"] == new["integer"],
                         "before": old["integer"], "after": new["integer"]})
         durations.append({"cell": index, "before": old["duration_ms"], "after": new["duration_ms"]})
-    return {"schema": "luminumbra.regional_cadence_compare.v1",
+    return {"schema": "luminumbra.regional_cadence_compare.v2",
             "before": left["manifest"], "after": right["manifest"],
             "integer_work_and_service": integer, "duration_ms": durations}
 

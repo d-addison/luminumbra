@@ -255,7 +255,7 @@ def report_timeout(receipt, log):
         complete_lines = complete_lines[1:]
     complete_lines = [line for line in complete_lines if line.endswith('\n')]
     phases = [line for line in complete_lines
-              if SURFACE_READY_PHASE.search(line)]
+              if not receipt.get('log_truncated', False) and SURFACE_READY_PHASE.search(line)]
     last_phase = phases[-1].strip() if phases else None
     receipt.update(log_tail=tail, last_observed_phase=last_phase)
     # Diagnostics are best effort: a closed or failing stderr must not replace
@@ -263,7 +263,9 @@ def report_timeout(receipt, log):
     try:
         print(f"render runner: timed out after {receipt['timeout_seconds']} s", file=sys.stderr)
         print(tail, file=sys.stderr)
-        print('last EnsureSurfaceReadyNear phase: ' + (last_phase or '(none observed)'),
+        phase_text = ('(unknown; log retention incomplete)' if receipt.get('log_truncated', False)
+                      else last_phase or '(none observed)')
+        print('last EnsureSurfaceReadyNear phase: ' + phase_text,
               file=sys.stderr)
     except (OSError, ValueError):
         pass
@@ -553,12 +555,13 @@ def _log_pipe_reader(descriptor):
 
 
 @contextmanager
-def bounded_log(log, receipt):
+def bounded_log(log, receipt, *, exclusive=False):
+    """Retain bounded process output, optionally refusing an existing log."""
     stopped = threading.Event()
     reader, writer = os.pipe()
     with os.fdopen(reader, 'rb', buffering=0) as source, os.fdopen(writer, 'wb', buffering=0) as destination:
         read_block = _log_pipe_reader(source.fileno())
-        with log.open('wb') as output:
+        with log.open('xb' if exclusive else 'wb') as output:
             receipt.update(log_truncated=False, log_limit_bytes=MAX_LOG_BYTES, log_bytes_retained=0)
 
             def drain():
@@ -579,22 +582,29 @@ def bounded_log(log, receipt):
                         remaining = MAX_LOG_BYTES - receipt['log_bytes_retained']
                         retained = block[:remaining]
                         if len(block) > remaining:
+                            if not receipt['log_truncated']:
+                                receipt['evidence_errors'].append('log exceeded byte cap; retained prefix only')
                             receipt['log_truncated'] = True
                         if retained and not write_failed:
                             try:
-                                output.write(retained)
-                                receipt['log_bytes_retained'] += len(retained)
+                                written = output.write(retained)
+                                receipt['log_bytes_retained'] += written
+                                if written != len(retained):
+                                    raise OSError(errno.EIO, 'short log write')
                             except OSError as error:
                                 receipt['evidence_errors'].append(f'log write: {error}')
+                                receipt['log_truncated'] = True
                                 write_failed = True
                         if finishing:
                             shutdown_bytes += len(block)
                             if shutdown_bytes >= MAX_LOG_DRAIN_BYTES:
                                 receipt['evidence_errors'].append('log pipe exceeded shutdown drain cap')
+                                receipt['log_truncated'] = True
                                 break
                     output.flush()
                 except OSError as error:
                     receipt['evidence_errors'].append(f'log drain: {error}')
+                    receipt['log_truncated'] = True
                     # Unblock any producer if the pipe itself becomes unreadable.
                     source.close()
 
@@ -608,8 +618,6 @@ def bounded_log(log, receipt):
                 finally:
                     stopped.set()
                     worker.join()
-                if receipt['log_truncated']:
-                    receipt['evidence_errors'].append('log exceeded byte cap; retained prefix only')
 
 
 def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_path,

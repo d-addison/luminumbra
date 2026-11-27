@@ -99,6 +99,35 @@ class ProcessReceiptSummaryTest(unittest.TestCase):
         self.assertFalse(entry['log_missing'])
         self.assertEqual(document['counts']['timed_out'], 1)
 
+    def test_truncated_timeout_log_is_validated_without_classifying_prefix(self):
+        path = self.write_timeout('truncated')
+        receipt = json.loads(path.read_bytes())
+        receipt['log_truncated'] = True
+        path.write_text(json.dumps(receipt), encoding='utf-8')
+        log = path.with_name('truncated.log')
+        for payload in (b'', b'Shutdown stage: world_save_started\n', b'\xe2'):
+            with self.subTest(payload=payload):
+                log.write_bytes(payload)
+                entry = self.document([str(path)])['receipts'][0]
+                self.assertTrue(entry['log_truncated'])
+                self.assertFalse(entry['log_missing'])
+                self.assertIsNone(entry['last_shutdown_stage'])
+                self.assertIsNone(entry['placement'])
+        log.unlink()
+        self.assertTrue(self.document([str(path)])['receipts'][0]['log_missing'])
+        log.mkdir()
+        self.assertEqual(self.run_cli([str(path)])[0], 2)
+        log.rmdir()
+        with log.open('wb') as output:
+            output.truncate(checker.MAX_FILE_BYTES + 1)
+        self.assertEqual(self.run_cli([str(path)])[0], 2)
+
+    def test_log_truncation_metadata_requires_a_boolean(self):
+        for value in (None, 0, 1, 'false', [], {}):
+            with self.subTest(value=value):
+                path = self.write_receipt('invalid.process.json', log_truncated=value)
+                self.assertEqual(self.run_cli([str(path)])[0], 2)
+
     def test_changed_executable_keeps_original_process_classification(self):
         for outcome in summary.OUTCOMES:
             with self.subTest(outcome=outcome):
