@@ -1,10 +1,18 @@
 #include "persistence/RecoveryDurability.h"
+#include "persistence/WorldSaveService.h"
+
+#include "../support/UniqueTempPath.h"
 
 #include <gtest/gtest.h>
 
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -166,5 +174,99 @@ TEST(RecoveryDurability, EmptyParentsAndInvalidBindings) {
         EXPECT_EQ(trace, (std::vector<std::string>{"bind-index", "close-index"}));
     }
 }
+
+using Luminumbra::Persistence::WorldSaveService;
+
+class NativeRecoveryDurability : public ::testing::Test {
+protected:
+    void SetUp() override {
+        root = Luminumbra::TestSupport::CreateUniqueTempDirectory("recovery_");
+        // Four private parents and one tiny member bound the native filesystem work.
+        for (std::size_t index = 0; index < parents.size(); ++index) {
+            parents[index] = root / std::to_string(index);
+            ASSERT_TRUE(std::filesystem::create_directory(parents[index]));
+        }
+        ASSERT_TRUE(WorldSaveService::prepare_restoration(
+            parents.front() / "member", "restored bytes", member, identity, &errors));
+        ASSERT_NE(identity, Identity{});
+    }
+
+    void TearDown() override {
+        std::error_code error;
+        std::filesystem::remove_all(root, error);
+        EXPECT_FALSE(error);
+    }
+
+    std::filesystem::path root;
+    std::filesystem::path member;
+    Parents parents{};
+    Identity identity{};
+    std::vector<std::string> errors;
+};
+
+TEST_F(NativeRecoveryDurability, MatchingMemberCompletesTwiceAndReleasesNativeHandle) {
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        ASSERT_TRUE(WorldSaveService::complete_restoration(member, identity, parents, &errors));
+        Identity observed{};
+        bool missing = false;
+        ASSERT_TRUE(WorldSaveService::artifact_identity(member, observed, missing));
+        EXPECT_FALSE(missing);
+        EXPECT_EQ(observed, identity);
+        EXPECT_EQ(std::filesystem::file_size(member), 14u);
+    }
+    EXPECT_TRUE(errors.empty());
+    // Windows refuses this rename if completion leaked its non-delete-sharing handle.
+    const auto renamed = parents.front() / "completed";
+    std::filesystem::rename(member, renamed);
+    EXPECT_TRUE(std::filesystem::remove(renamed));
+}
+
+TEST_F(NativeRecoveryDurability, InvalidIdentityAndMissingOrNonregularMemberRefuse) {
+    auto foreign = identity;
+    foreign.back() ^= 1;
+    for (const auto& expected : {Identity{}, foreign}) {
+        EXPECT_FALSE(WorldSaveService::complete_restoration(member, expected, parents, &errors));
+    }
+    EXPECT_FALSE(
+        WorldSaveService::complete_restoration(root / "absent", identity, parents, &errors));
+    EXPECT_FALSE(WorldSaveService::complete_restoration(root, identity, parents, &errors));
+    ASSERT_TRUE(WorldSaveService::complete_restoration(member, identity, parents, &errors));
+    EXPECT_TRUE(std::filesystem::remove(member));
+}
+
+#if defined(_WIN32)
+TEST_F(NativeRecoveryDurability, DeniedWritableBindingRefusesAndRetriesAfterReaderCloses) {
+    const HANDLE reader = ::CreateFileW(member.c_str(),
+                                        GENERIC_READ,
+                                        FILE_SHARE_READ,
+                                        nullptr,
+                                        OPEN_EXISTING,
+                                        FILE_ATTRIBUTE_NORMAL,
+                                        nullptr);
+    ASSERT_NE(reader, INVALID_HANDLE_VALUE);
+    const bool completed =
+        WorldSaveService::complete_restoration(member, identity, parents, &errors);
+    EXPECT_NE(::CloseHandle(reader), 0);
+    EXPECT_FALSE(completed);
+    ASSERT_TRUE(WorldSaveService::complete_restoration(member, identity, parents, &errors));
+    EXPECT_TRUE(std::filesystem::remove(member));
+}
+#else
+TEST_F(NativeRecoveryDurability, EveryNativeParentBarrierRefusesMissingOrRegularParentsAndRetries) {
+    for (std::size_t index = 0; index < parents.size(); ++index) {
+        auto invalid = parents;
+        invalid[index] = root / "absent";
+        EXPECT_FALSE(WorldSaveService::complete_restoration(member, identity, invalid, &errors));
+        invalid[index] = member;
+        EXPECT_FALSE(WorldSaveService::complete_restoration(member, identity, invalid, &errors));
+        ASSERT_TRUE(WorldSaveService::complete_restoration(member, identity, parents, &errors));
+    }
+    const Parents empty{};
+    EXPECT_FALSE(WorldSaveService::complete_restoration(member, identity, empty, &errors));
+    const Parents destination_only{parents.front(), {}, {}, {}};
+    EXPECT_TRUE(
+        WorldSaveService::complete_restoration(member, identity, destination_only, &errors));
+}
+#endif
 
 } // namespace
