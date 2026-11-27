@@ -130,6 +130,9 @@ namespace {
 
 using Luminumbra::JobSystem;
 using Luminumbra::world::GameSession;
+// These fixtures exercise the original per-due-call consumers and externally
+// driven water boundary. Production cadence has separate integration oracles.
+constexpr GameSession::AuthorityProfileOptions kLegacyCadenceProfile{};
 using Luminumbra::world::WorldConfigValidationResult;
 
 using Luminumbra::TestSupport::AdoptRegionGoldenChunk;
@@ -2895,7 +2898,11 @@ TEST(GameSessionHeadlessWorldTest, ActiveClockSaveLoadContinuationMatchesUninter
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession original, control, loaded, absent_energy, wrong_clock;
+    GameSession original{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        control{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        loaded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        absent_energy{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        wrong_clock{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     for (auto* session : {&original, &control, &loaded, &absent_energy, &wrong_clock}) {
         session->SetRootPath(root.root_string());
         session->SetJobSystem(&jobs);
@@ -4778,7 +4785,10 @@ TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHol
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession original, uninterrupted, render_only, loaded;
+    GameSession original{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        uninterrupted{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        render_only{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        loaded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     for (auto* session : {&original, &uninterrupted, &render_only, &loaded}) {
         session->SetRootPath(root.root_string());
         session->SetJobSystem(&jobs);
@@ -5122,17 +5132,29 @@ TEST(GameSessionHeadlessWorldTest, EmptyReplicatedAnchorsNeverUseLocalSpawnFallb
     ASSERT_EQ(server.GetActiveRegionLedger().local_anchor(),
               std::optional<Luminumbra::Vec3>(spawn));
     server.SetReplicatedSimulationAnchors({});
+    const Luminumbra::Vec3 walking(504, 8, 8);
+    server.SetLocalPlayerSimulationPosition(walking, true);
+    ASSERT_TRUE(server.PrepareSimulationCollisions(1));
+    EXPECT_EQ(server.GetPhysicsSystem()->simulation_collision_sample_count(), 0u);
     const auto dt = server.GetSimulationClock().fixed_dt();
     ASSERT_EQ(server.TickSimulation(dt), 1u);
+    EXPECT_EQ(server.GetActiveRegionLedger().local_anchor(),
+              std::optional<Luminumbra::Vec3>(walking));
     EXPECT_TRUE(server.GetActiveRegionLedger().records().empty());
     EXPECT_TRUE(server.GetRegionSchedule().due.empty());
+    // A nonempty roster owns the representative even when walking input is staged too.
+    server.SetLocalPlayerSimulationPosition({1024, 8, 8}, true);
     server.SetReplicatedSimulationAnchors({spawn});
     ASSERT_EQ(server.TickSimulation(dt), 1u);
+    EXPECT_EQ(server.GetActiveRegionLedger().local_anchor(),
+              std::optional<Luminumbra::Vec3>(spawn));
     const auto key = Luminumbra::world::ActiveRegionLedger::region_at(spawn);
     EXPECT_EQ(server.GetActiveRegionLedger().records().at(key).last_proximity, 2u);
     server.SetReplicatedSimulationAnchors({});
     server.RecordActiveRegionWork({key, 1, 0, 0, 0});
     ASSERT_EQ(server.TickSimulation(dt), 1u);
+    EXPECT_EQ(server.GetActiveRegionLedger().local_anchor(),
+              std::optional<Luminumbra::Vec3>(spawn));
     for (const auto& [region, record] : server.GetActiveRegionLedger().records()) {
         (void)region;
         EXPECT_EQ(record.last_proximity, 2u);
@@ -5789,11 +5811,37 @@ TEST(GameSessionHeadlessWorldTest, InvalidHostInputsNeverThrowAndAreCounted) {
     EXPECT_FALSE(session.GetRegionSchedulerFault().has_value());
     EXPECT_EQ(session.GetActiveRegionLedger().records().count({0, 0}), 1u);
     const Luminumbra::Vec3 walking(256, 0, 256);
+    const auto committed_anchor = session.GetActiveRegionLedger().local_anchor();
     session.SetLocalPlayerSimulationPosition(walking, true);
     session.SetLocalPlayerSimulationPosition(Luminumbra::Vec3(nan, 0, 0), true);
+    EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(), committed_anchor);
+    EXPECT_EQ(session.GetRegionInputRejections().anchors, 2u);
+
+    // Malformed replicated owners are ignored individually by every consumer,
+    // including an entirely invalid or explicitly empty roster.
+    session.SetReplicatedSimulationAnchors({Luminumbra::Vec3(nan), Luminumbra::Vec3(inf)});
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
     EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(),
               std::optional<Luminumbra::Vec3>(walking));
-    EXPECT_EQ(session.GetRegionInputRejections().anchors, 2u);
+    EXPECT_EQ(session.GetRegionSchedule().rejected.anchors, 2u);
+    EXPECT_EQ(session.GetPhysicsSystem()->simulation_collision_sample_count(), 0u);
+    session.SetReplicatedSimulationAnchors({});
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    EXPECT_EQ(session.GetRegionSchedule().rejected.anchors, 0u);
+    EXPECT_EQ(session.GetPhysicsSystem()->simulation_collision_sample_count(), 0u);
+
+    // The raw input cap applies before filtering; refusal leaves the tick and
+    // authority untouched, and a maximum-sized valid retry consumes that tick.
+    session.SetReplicatedSimulationAnchors(std::vector<Luminumbra::Vec3>(65, walking));
+    const auto before = SessionWorldSubHashes(session);
+    const auto tick = session.GetSimulationTickCount();
+    EXPECT_FALSE(session.PrepareSimulationCollisions(tick + 1));
+    EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 0u);
+    EXPECT_EQ(session.GetSimulationTickCount(), tick);
+    EXPECT_EQ(SessionWorldSubHashes(session), before);
+    session.SetReplicatedSimulationAnchors(std::vector<Luminumbra::Vec3>(64, walking));
+    ASSERT_EQ(session.TickSimulation(0), 1u);
+    EXPECT_FALSE(session.GetRegionSchedulerFault());
 }
 
 namespace {
@@ -6738,7 +6786,7 @@ TEST(GameSessionHeadlessWorldTest, LegacyEvolvedWaterOnGeneratedChunkSurvivesReg
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession owner;
+    GameSession owner{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     owner.SetActiveRegionsEnabled(false);
     owner.SetRootPath(root.root_string());
     owner.SetJobSystem(&jobs);
@@ -6771,7 +6819,7 @@ TEST(GameSessionHeadlessWorldTest, LegacyEvolvedWaterOnGeneratedChunkSurvivesReg
         EXPECT_FALSE(legacy->has_water_authority());
         EXPECT_EQ(legacy->water_depth_mm, evolved);
     }
-    GameSession upgraded;
+    GameSession upgraded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     EnableSnapshotSession(upgraded, root, jobs);
     ASSERT_TRUE(upgraded.LoadWorld(worldId));
     const auto adopted = upgraded.GetWorldSystem()->find_streamed_chunk(distant);
@@ -6785,7 +6833,7 @@ TEST(GameSessionHeadlessWorldTest, LegacyEvolvedWaterOnGeneratedChunkSurvivesReg
     ASSERT_NE(indexed.chunk, nullptr);
     EXPECT_TRUE(indexed.chunk->has_water_authority());
     EXPECT_EQ(indexed.chunk->water_depth_mm, evolved);
-    GameSession reopened;
+    GameSession reopened{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     EnableSnapshotSession(reopened, root, jobs);
     ASSERT_TRUE(reopened.LoadWorld(worldId));
     ASSERT_TRUE(reopened.GetWorldSystem()->restore_authoritative_chunk(distant));
@@ -6956,7 +7004,7 @@ struct FrozenWaterSnapshot {
 struct RegionalWaterScenario {
     // WaterSystem retains this map's address; destroy the session before the map.
     std::unordered_map<ChunkID, std::shared_ptr<Chunk>> water_chunks;
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
 };
 
 void SeedRegionalWaterFixture(RegionalWaterScenario& scenario,
@@ -7255,7 +7303,7 @@ TEST(GameSessionHeadlessWorldTest, DisplacementWaterPromotesBeforeFreezeAndSurvi
         ASSERT_NO_FATAL_FAILURE(PersistRegionalWaterBeforeRetention(
             session, chunk, work_region, coords, frozen_record));
 
-        GameSession reopened;
+        GameSession reopened{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
         ASSERT_NO_FATAL_FAILURE(
             ReopenRegionalWaterBeforeRetention(session, reopened, root, jobs, coords));
         ASSERT_NO_FATAL_FAILURE(TickRegionalWaterRetention(
@@ -7263,7 +7311,7 @@ TEST(GameSessionHeadlessWorldTest, DisplacementWaterPromotesBeforeFreezeAndSurvi
         ASSERT_NO_FATAL_FAILURE(AssertDurableWaterContinuation(
             session, reopened, chunk, coords, water_region, frozen_record, evolved));
         ASSERT_TRUE(session.SaveWorldState());
-        GameSession after_retention;
+        GameSession after_retention{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
         EnableSnapshotSession(after_retention, root, jobs);
         ASSERT_TRUE(after_retention.LoadWorld(session.GetMetadata().worldId))
             << after_retention.GetWorldOpenError();
@@ -7331,7 +7379,7 @@ TEST(GameSessionHeadlessWorldTest, FrozenRegionWaterChangeHashesCurrentAuthority
 
     ASSERT_TRUE(session.SaveWorldState());
     EXPECT_EQ(session.ComputeChunkStateHash(), changed_hash);
-    GameSession reopened;
+    GameSession reopened{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     EnableSnapshotSession(reopened, root, jobs);
     ASSERT_TRUE(reopened.LoadWorld(session.GetMetadata().worldId)) << reopened.GetWorldOpenError();
     EXPECT_EQ(reopened.GetActiveRegionLedger().encode(), session.GetActiveRegionLedger().encode());
@@ -7463,11 +7511,11 @@ TEST(GameSessionHeadlessWorldTest, NoEditWaterTickAfterOpenMatchesFreshSaveBytes
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession owner;
+    GameSession owner{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     EnableSnapshotSession(owner, root, jobs);
     ASSERT_TRUE(owner.CreateWorld("No-edit water", "1337", "default"));
     ASSERT_TRUE(owner.SaveWorldState());
-    GameSession control;
+    GameSession control{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     RegionalWaterScenario scenario;
     auto& opened = scenario.session;
     for (auto* session : {&control, &opened}) {
@@ -7622,7 +7670,7 @@ TEST(GameSessionHeadlessWorldTest, GenuineWaterChangesAfterCleanInitializationPe
         session.GetWorldSystem()->clear_world(session.GetPhysicsSystem());
         // Adoption deliberately migrates saved grids to the selected session resolution.
         // Match the resized grid here to test persistence without a second resample.
-        GameSession reopened;
+        GameSession reopened{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
         EnableSnapshotSession(reopened, root, jobs);
         reopened.SetWaterHighResEnabled(mutation == 4);
         ASSERT_TRUE(reopened.CreateWorld("Water mutation reload", "1337", "default"));
@@ -7731,7 +7779,9 @@ void ExpectPopulatedSaveParity(GameSession& session, const HeadlessRoot& root, J
         return bytes;
     };
     EXPECT_EQ(region_bytes(complete), region_bytes(incremental));
-    GameSession restored_incremental, restored_complete;
+    GameSession restored_incremental{kLegacyCadenceProfile,
+                                     GameSession::AuthorityProfileTestOnly{}},
+        restored_complete{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     for (auto* restored : {&restored_incremental, &restored_complete}) {
         EnableSnapshotSession(*restored, root, jobs);
         ASSERT_TRUE(restored->CreateWorld("Restored populated work", "1337", "default"));
@@ -8419,7 +8469,7 @@ TEST(GameSessionHeadlessWorldTest, FlagOnSpawnReturnsSequentialIdsAndPublishesGr
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(session, root, jobs, "Ground spawn");
     GroundEvents seen;
     CollectGroundEvents(session, seen);
@@ -8438,7 +8488,7 @@ TEST(GameSessionHeadlessWorldTest, RefusedGroundSpawnsCountRejectionsAndConsumeN
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(session, root, jobs, "Ground refused");
     EXPECT_EQ(SpawnGround(session, Luminumbra::world::GroundObjectStore::kMaxCoordinateMm, -1500),
               0u);
@@ -8453,7 +8503,8 @@ TEST(GameSessionHeadlessWorldTest, GroundSpawnRegionAdmissionRetainsSaveableLedg
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession owner, loaded;
+    GameSession owner{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        loaded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(owner, root, jobs, "Ground region admission");
     ActiveRegionLedger ledger;
     const auto limit = ActiveRegionLedger::kMaxRegions - 1;
@@ -8489,7 +8540,9 @@ TEST(GameSessionHeadlessWorldTest, LoadedGroundNotificationCursorNeverWrapsOnSpa
         const HeadlessRoot root;
         JobSystem jobs;
         jobs.startup(1);
-        GameSession owner, loaded, reloaded;
+        GameSession owner{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+            loaded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+            reloaded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
         CreateGroundWorld(owner, root, jobs, "Ground sequence admission");
         owner.GetSimulationEventBus().restore_pending({}, cursor);
         ASSERT_TRUE(owner.SaveWorld());
@@ -8528,7 +8581,8 @@ TEST(GameSessionHeadlessWorldTest,
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession owner, loaded;
+    GameSession owner{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        loaded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(owner, root, jobs, "Ground exhausted cursor");
     const auto maximum = std::numeric_limits<std::uint64_t>::max();
     owner.GetSimulationEventBus().restore_pending({}, maximum);
@@ -8577,7 +8631,8 @@ TEST(GameSessionHeadlessWorldTest, ExhaustedGroundDespawnSequenceLatchesFaultWit
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession owner, loaded;
+    GameSession owner{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        loaded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(owner, root, jobs, "Ground despawn exhaustion");
     const auto maximum = std::numeric_limits<std::uint64_t>::max();
     owner.GetSimulationEventBus().restore_pending({}, maximum - 1);
@@ -8606,7 +8661,7 @@ TEST(GameSessionHeadlessWorldTest, InsufficientGroundDespawnCapacityPreservesAll
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(session, root, jobs, "Ground despawn capacity");
     ASSERT_EQ(SpawnGround(session, 5200, -1500, 1), 1u);
     ASSERT_EQ(SpawnGround(session, 600000, -1500, 1), 2u);
@@ -8627,7 +8682,8 @@ TEST(GameSessionHeadlessWorldTest, GroundSpawnBurstRemainsSaveableAtAdmissionLim
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session, loaded;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        loaded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(session, root, jobs, "Ground admission");
     const auto limit = GroundSpawnAdmissionLimit();
     ASSERT_GT(limit, 1u);
@@ -8662,7 +8718,7 @@ TEST(GameSessionHeadlessWorldTest, UnknownRegionWorkFromEventCallbackIsRejectedA
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(session, root, jobs, "Unknown callback work");
     const Luminumbra::world::RegionKey unknown{300, -300};
     ASSERT_FALSE(session.GetActiveRegionLedger().records().contains(unknown));
@@ -8693,7 +8749,7 @@ TEST(GameSessionHeadlessWorldTest, SpawnActivatesItsRegionWithoutTerrainEdit) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(session, root, jobs, "Ground activation");
     ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
     const auto& records = session.GetActiveRegionLedger().records();
@@ -8713,7 +8769,7 @@ TEST(GameSessionHeadlessWorldTest, DespawnAfterRemovesObjectAndPublishesGroundDe
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(session, root, jobs, "Ground despawn");
     GroundEvents seen;
     CollectGroundEvents(session, seen);
@@ -8761,7 +8817,7 @@ TEST(GameSessionHeadlessWorldTest, MetadataOnlySaveAfterSpawnWritesObjectFileAnd
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(session, root, jobs, "Ground metadata");
     const auto save = session.GetWorldSaveDir();
     P::SnapshotIndex initial;
@@ -8816,7 +8872,7 @@ TEST(GameSessionHeadlessWorldTest, InvalidGroundNotificationsRefuseSaveWithoutCh
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(session, root, jobs, "Ground notification admission");
     ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
     ASSERT_TRUE(session.SaveWorld());
@@ -8870,7 +8926,7 @@ TEST_F(GameSessionGroundMetadataTest, GroundMetadataSaveCommitsOneGeneration) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(session, root, jobs, "Ground metadata transaction"));
     const auto save = session.GetWorldSaveDir();
     ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
@@ -8952,7 +9008,8 @@ TEST_F(GameSessionGroundMetadataTest, EmptyGroundMetadataSavePreservesNotificati
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session, loaded;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        loaded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(session, root, jobs, "Empty ground metadata"));
     const auto save = session.GetWorldSaveDir();
     const auto ground_path = P::WorldSaveService::ground_objects_path(save);
@@ -8995,7 +9052,8 @@ TEST(GameSessionHeadlessWorldTest, EmptyGroundMetadataSaveRemovesExistingFile) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session, loaded;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        loaded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(session, root, jobs, "Ground metadata removal"));
     ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
     ASSERT_TRUE(session.SaveWorld());
@@ -9030,7 +9088,8 @@ TEST(GameSessionHeadlessWorldTest, ReloadedSessionRestoresGroundObjectsAndContin
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession owner, loaded;
+    GameSession owner{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        loaded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(owner, root, jobs, "Ground reload");
     ASSERT_EQ(SpawnGround(owner, 5200, -1500), 1u);
     ASSERT_EQ(SpawnGround(owner, 5300, -1500), 2u);
@@ -9047,7 +9106,9 @@ TEST(GameSessionHeadlessWorldTest, ResumedSessionMatchesUninterruptedGroundObjec
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession original, uninterrupted, loaded;
+    GameSession original{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        uninterrupted{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        loaded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(original, root, jobs, "Ground resume");
     CreateGroundWorld(uninterrupted, root, jobs, "Ground twin");
     for (auto* s : {&original, &uninterrupted}) {
@@ -9075,7 +9136,9 @@ TEST(GameSessionHeadlessWorldTest, CorruptGroundObjectsFileRefusesToOpen) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession owner, control, victim;
+    GameSession owner{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        control{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        victim{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(owner, root, jobs, "Ground corrupt");
     ASSERT_EQ(SpawnGround(owner, 5200, -1500), 1u);
     ASSERT_TRUE(owner.SaveWorldState());
@@ -9095,7 +9158,9 @@ TEST(GameSessionHeadlessWorldTest, BetweenTickGroundSpawnSaveRestoresDeliveryTim
         const HeadlessRoot root;
         JobSystem jobs;
         jobs.startup(1);
-        GameSession original, uninterrupted, loaded;
+        GameSession original{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+            uninterrupted{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+            loaded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
         CreateGroundWorld(original, root, jobs, "Ground pending save");
         CreateGroundWorld(uninterrupted, root, jobs, "Ground pending twin");
         GroundEvents resumed_events, uninterrupted_events;
@@ -9146,7 +9211,8 @@ TEST(GameSessionHeadlessWorldTest, SavingPendingEventsDoesNotInvokeConsumers) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session, loaded;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        loaded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(session, root, jobs, "Ground save delivery");
     ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
     int calls = 0;
@@ -9189,7 +9255,7 @@ TEST(GameSessionHeadlessWorldTest, RefusedSavePreservesPendingEventsWorkAndHash)
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(session, root, jobs, "Ground save refusal");
     ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
     int calls = 0;
@@ -9226,7 +9292,8 @@ TEST(GameSessionHeadlessWorldTest, FaultedSessionSavesWithFutureNotificationsWit
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session, loaded;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        loaded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(session, root, jobs, "Ground fault save");
     ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
     session.GetSimulationEventBus().publish(100, "ground.spawned", "future");
@@ -9254,7 +9321,8 @@ TEST(GameSessionHeadlessWorldTest, GroundObjectsChangeTheWorldHash) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession bare, with;
+    GameSession bare{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        with{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(bare, root, jobs, "Ground hash");
     CreateGroundWorld(with, root, jobs, "Ground hash");
     const auto before = SessionWorldHash(with);
@@ -9267,7 +9335,7 @@ TEST(GameSessionHeadlessWorldTest, GroundNotificationHashIncludesEveryDurableFie
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(session, root, jobs, "Ground notification hash");
     const auto empty_hash = SessionWorldHash(session);
     EXPECT_TRUE(session.CaptureGroundNotifications().canonical_bytes().empty());
@@ -9303,7 +9371,7 @@ TEST(GameSessionHeadlessWorldTest, GroundNotificationHashIncludesEveryDurableFie
     session.GetSimulationEventBus().restore_pending(reversed, notifications.next_sequence);
     EXPECT_EQ(SessionWorldHash(session), hash);
     ASSERT_TRUE(session.SaveWorldState());
-    GameSession loaded;
+    GameSession loaded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     EnableSnapshotSession(loaded, root, jobs);
     ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId)) << loaded.GetWorldOpenError();
     EXPECT_EQ(SessionWorldHash(loaded), hash);
@@ -9315,7 +9383,8 @@ TEST(GameSessionHeadlessWorldTest, FlagOnIndexedSaveWithGroundObjectsReloadsThro
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession owner, loaded;
+    GameSession owner{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        loaded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(owner, root, jobs, "Ground snapshot");
     ASSERT_EQ(SpawnGround(owner, 5200, -1500), 1u);
     ASSERT_EQ(SpawnGround(owner, 5300, -1500), 2u);
@@ -9337,7 +9406,7 @@ TEST(GameSessionHeadlessWorldTest, GroundSpawnQuantizesAndUsesProceduralHeightBe
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(session, root, jobs, "Procedural ground height");
     auto* world = session.GetWorldSystem();
     const float height = world->GetTerrainHeightAt(8, 8);
@@ -9390,7 +9459,7 @@ TEST(GameSessionHeadlessWorldTest, GroundSpawnIgnoresGeneratedCaveFloorsAndStruc
         const HeadlessRoot root;
         JobSystem jobs;
         jobs.startup(1);
-        GameSession session;
+        GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
         CreateGroundWorld(session, root, jobs, "Generated ground height");
         auto chunk = GroundSurfaceChunk({0, 0, 0}, cave ? 2.5f : 12.5f);
         if (cave) {
@@ -9424,7 +9493,8 @@ TEST(GameSessionHeadlessWorldTest, DespawnedGroundWorkSurvivesBoundarySaveAndReo
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession owner, loaded;
+    GameSession owner{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        loaded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(owner, root, jobs, "Completed despawn work");
     EnableSnapshotSession(loaded, root, jobs);
     ASSERT_EQ(SpawnGround(owner, 5200, -1500, 1), 1u);
@@ -9456,7 +9526,7 @@ TEST(GameSessionHeadlessWorldTest, EventConsumerFaultStopsDeliveryAndClearsCompl
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession owner;
+    GameSession owner{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(owner, root, jobs, "Consumer event fault");
     ASSERT_EQ(SpawnGround(owner, 5200, -1500, 1), 1u);
     int later_calls = 0;
@@ -9483,7 +9553,7 @@ TEST(GameSessionHeadlessWorldTest,
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(session, root, jobs, "Ground residency independence");
     auto* world = session.GetWorldSystem();
     constexpr float x = 328.25f, z = 328.5f;
@@ -9533,7 +9603,7 @@ TEST(GameSessionHeadlessWorldTest, GroundIntegerLimitsSettleAtSpawnAndAfterReloa
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(session, root, jobs, "Ground integer limits");
     using Luminumbra::world::GroundObjectStore;
     constexpr auto edge = GroundObjectStore::kMaxCoordinateMm - 1;
@@ -9592,7 +9662,7 @@ TEST(GameSessionHeadlessWorldTest, EmptyGroundStoreSkipsAdvancementWork) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(session, root, jobs, "Empty ground advancement");
     session.PinActiveRegion(kGroundRegion, true);
     const auto before = session.GetGroundObjectAdvanceCount();
@@ -9617,7 +9687,8 @@ TEST(GameSessionHeadlessWorldTest,
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession original, reopened;
+    GameSession original{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        reopened{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(original, root, jobs, "Distant ground continuation");
     auto* world = original.GetWorldSystem();
     const float height = world->GetTerrainHeightAt(5208.25f, -1527.5f);
@@ -9701,7 +9772,7 @@ TEST(GameSessionHeadlessWorldTest, GroundSettlingNeverReadsCommittedTerrain) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     CreateGroundWorld(session, root, jobs, "Ground without terrain reads");
     auto* world = session.GetWorldSystem();
     const float height = world->GetTerrainHeightAt(5208, -1528);
@@ -10294,7 +10365,7 @@ void CheckScheduledFieldFaultRollback(bool standard_exception) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
     FieldPageState fields;
     ASSERT_NO_FATAL_FAILURE(PopulateSessionFieldFixture(fields, 1337));
@@ -11746,7 +11817,7 @@ void CheckBoundedWeatherOverlay(std::size_t unrelated_pages, WeatherOverlayFailu
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     std::map<RegionKey, RegionState> owners{{kFieldOwner, RegionState::Active},
                                             {{1, 0}, RegionState::Frozen}};
     // Each unrelated page sits 1536 m apart and its owner must exist for the saved world to load.
@@ -15279,7 +15350,7 @@ void CheckFoliageSessionPublication() {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     const auto ledger =
         ScheduledFieldLedger(std::uint64_t{31}, {{kFieldOwner, RegionState::Active}});
     ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
@@ -15316,7 +15387,7 @@ void CheckFoliageConsumerRollback(bool standard_exception,
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     auto ledger = ScheduledFieldLedger(std::uint64_t{31}, {{kFieldOwner, RegionState::Active}});
     std::uint64_t parent_id{1};
     if (!first_id) {
@@ -15397,7 +15468,7 @@ void CheckFoliageIdleStaging() {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     const auto ledger =
         ScheduledFieldLedger(std::uint64_t{31}, {{kFieldOwner, RegionState::Reduced}});
     ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
@@ -15441,7 +15512,7 @@ void CheckFoliageEmptyTickEvents(bool participants, bool due, int failure) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     const auto tick = std::uint64_t{33} + ActiveRegionLedger::phase(kFieldOwner, 2);
     const auto ledger = ScheduledFieldLedger(
         tick - 1, {{kFieldOwner, due ? RegionState::Active : RegionState::Reduced}});
@@ -15493,7 +15564,7 @@ void CheckFoliageCallbacks(bool birth, int failure) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     auto ledger = ScheduledFieldLedger(std::uint64_t{31}, {{kFieldOwner, RegionState::Active}});
     std::uint64_t parent_id = 0;
     ASSERT_TRUE(ledger.allocate_persistent_id(parent_id));
@@ -15579,7 +15650,7 @@ void CheckUnscheduledFoliage(RegionState state, bool owner) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     const std::map<RegionKey, RegionState> owners =
         owner ? std::map<RegionKey, RegionState>{{kFieldOwner, state}}
               : std::map<RegionKey, RegionState>{};
@@ -15649,7 +15720,7 @@ void CheckIndependentFoliageParticipant(bool complete) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     const auto ledger =
         ScheduledFieldLedger(std::uint64_t{31}, {{kFieldOwner, RegionState::Active}});
     ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
@@ -15690,7 +15761,7 @@ void CheckFoliageCallbackRemoval(bool destroy) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     const auto ledger =
         ScheduledFieldLedger(std::uint64_t{31}, {{kFieldOwner, RegionState::Active}});
     ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
@@ -15780,7 +15851,7 @@ TEST(GameSessionHeadlessWorldTest, ExhaustedCallbackAllocatorStopsTheFrameAfterF
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     auto ledger = ScheduledFieldLedger(std::uint64_t{31}, {{kFieldOwner, RegionState::Active}});
     std::uint64_t identity = 0;
     ASSERT_TRUE(ledger.allocate_persistent_id(identity));
@@ -15821,7 +15892,7 @@ TEST(GameSessionHeadlessWorldTest, WaterObserverAllocatorChangesRefuseStaleFolia
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     auto ledger = ScheduledFieldLedger(std::uint64_t{31}, {{kFieldOwner, RegionState::Active}});
     std::uint64_t parent_id = 0;
     ASSERT_TRUE(ledger.allocate_persistent_id(parent_id));
@@ -15861,7 +15932,7 @@ TEST(GameSessionHeadlessWorldTest, WaterObserverLatchedFaultAbortsFoliageAndRegi
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     auto ledger = ScheduledFieldLedger(std::uint64_t{31}, {{kFieldOwner, RegionState::Active}});
     std::uint64_t identity = 0;
     ASSERT_TRUE(ledger.allocate_persistent_id(identity));
@@ -15903,7 +15974,7 @@ TEST(GameSessionHeadlessWorldTest, CallbackWaterSettlesForEmptyPlantAndCreatureT
             const HeadlessRoot root;
             JobSystem jobs;
             jobs.startup(1);
-            GameSession session;
+            GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
             const auto ledger =
                 ScheduledFieldLedger(std::uint64_t{31}, {{kFieldOwner, RegionState::Active}});
             ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
@@ -16181,7 +16252,9 @@ void CheckFoliagePrePrepareFaultRecovery(bool warm, bool populated) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session, reference, reloaded;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        reference{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        reloaded{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     const RegionKey frozen{1, 0};
     auto ledger = ScheduledFieldLedger(
         31, {{kFieldOwner, RegionState::Active}, {frozen, RegionState::Frozen}});
@@ -16304,7 +16377,8 @@ TEST(GameSessionHeadlessWorldTest, FoliagePrePrepareFaultRestoresNewlyScheduledO
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session, reference;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        reference{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     const auto ledger = ScheduledFieldLedger(31, {});
     ASSERT_NO_FATAL_FAILURE(
         LoadScheduledFieldFixture(session, root, jobs, ledger, {}, std::string{}));
@@ -16502,7 +16576,9 @@ TEST(GameSessionHeadlessWorldTest, FoliageStagingKeepsEmptyDefaultAndFlagOffWorl
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession defaults, enabled, disabled;
+    GameSession defaults{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        enabled{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        disabled{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     for (auto* session : {&defaults, &enabled, &disabled}) {
         session->SetRootPath(root.root_string());
         session->SetJobSystem(&jobs);
@@ -16535,7 +16611,7 @@ TEST(GameSessionHeadlessWorldTest, DueFoliageFailureRestoresExistingResourceGrid
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     const auto ledger = ScheduledFieldLedger(31u, {{kFieldOwner, RegionState::Active}});
     ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
     const auto plant = ClockTestPlant(session.GetRegistry(), {32.0f, 0.0f, 32.0f});
@@ -16606,7 +16682,7 @@ TEST(GameSessionHeadlessWorldTest, FoliageHistoryDropsEveryEvictedOwnerIncluding
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     const auto tick = ActiveRegionLedger::kIdleEvictionTicks;
     std::map<RegionKey, RegionState> owners;
     for (int index = 0; index < 32; ++index) {
@@ -16683,7 +16759,7 @@ TEST(GameSessionHeadlessWorldTest, FoliageThawToReducedResumesWithoutAnyDueOwner
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     auto ledger = ScheduledFieldLedger(30,
                                        {{kFieldOwner, RegionState::Frozen}},
                                        {std::numeric_limits<std::uint64_t>::max(), 1, 2});
@@ -16716,7 +16792,8 @@ TEST(GameSessionHeadlessWorldTest, FoliageReplayAllowanceIsIndependentOfHostFram
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession batched, separate;
+    GameSession batched{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        separate{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
     FieldPageState fields;
     ASSERT_TRUE(fields.set_soil({8, 8}, 0));
@@ -16744,7 +16821,7 @@ TEST(GameSessionHeadlessWorldTest, ScentAdmissionUsesSchedulingBeforeFoliageStam
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
     const auto committed_tick = ledger.records().at(kFieldOwner).last_ticked;
     FieldPageState fields;
@@ -16784,7 +16861,8 @@ TEST(GameSessionHeadlessWorldTest, LongFoliageWindowStopsRemainingHostBatchUntil
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession batched, separate;
+    GameSession batched{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        separate{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     auto ledger = ScheduledFieldLedger(
         0, {{*owner, RegionState::Reduced}}, {std::numeric_limits<std::uint64_t>::max(), 10000, 6});
     FieldPageState fields;
@@ -16822,7 +16900,7 @@ TEST(GameSessionHeadlessWorldTest, FoliageFaultRestoresWhenTheCopiedScheduleIsIn
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
     FieldPageState fields;
     ASSERT_TRUE(fields.set_soil({8, 8}, 0));
@@ -16855,7 +16933,7 @@ TEST(GameSessionHeadlessWorldTest, FoliagePublicationFaultSavesAlreadyCommittedF
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
     auto& record =
         const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(kFieldOwner);
@@ -16907,7 +16985,7 @@ TEST(GameSessionHeadlessWorldTest, FoliagePublicationRefusesMissingFrozenOrChang
         const HeadlessRoot root;
         JobSystem jobs;
         jobs.startup(1);
-        GameSession session;
+        GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
         auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
         auto& record =
             const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(kFieldOwner);
@@ -19182,7 +19260,7 @@ TEST(GameSessionHeadlessWorldTest, RefusedCatchupPreservesPendingTicksAndFractio
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     EnableSnapshotSession(session, root, jobs);
     ASSERT_TRUE(session.CreateTransientWorld("Catchup collision refusal", "1337", "default"));
     auto* physics = session.GetPhysicsSystem();
@@ -19659,7 +19737,8 @@ TEST(GameSessionHeadlessWorldTest, SessionCollisionBarrierPrecedesTheFirstCreatu
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession reference, streamed;
+    GameSession reference{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        streamed{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     for (auto* session : {&reference, &streamed}) {
         EnableSnapshotSession(*session, root, jobs);
         ASSERT_TRUE(session->CreateTransientWorld("First creature collision", "1337", "default"));
@@ -20184,7 +20263,55 @@ TEST(GameSessionHeadlessWorldTest, HostBoundaryInputsShareAuthoritySequenceWitho
         ExpectPositionBits(local.GetPhysicsSystem()->get_body_position(bodies[2]), settled);
         ExpectHostAuthorityEqual(networked, server);
         ExpectHostAuthorityEqual(local, server);
+        EXPECT_EQ(local.GetActiveRegionLedger().local_anchor(),
+                  std::optional<Luminumbra::Vec3>(anchors.front()));
     }
+}
+
+TEST(GameSessionHeadlessWorldTest, LocalAnchorPreflightPreservesSavedCheckpointUntilCountedTick) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession local, reloaded;
+    for (auto* session : {&local, &reloaded}) {
+        ConfigureHostAuthoritySession(*session, root, jobs);
+    }
+    ASSERT_TRUE(local.CreateWorld("Local checkpoint", "1337", "default"));
+    const auto committed_anchor = local.GetActiveRegionLedger().local_anchor();
+    const auto checkpoint = SessionWorldSubHashes(local);
+    const Luminumbra::Vec3 feet(504, 8, 8);
+    // Repeated walking inputs select the last valid position. Noclip and invalid
+    // inputs cannot replace it or publish it into a save before a counted tick.
+    local.SetLocalPlayerSimulationPosition({520, 8, 8}, true);
+    local.SetLocalPlayerSimulationPosition(feet, true);
+    local.SetLocalPlayerSimulationPosition({2048, 8, 8}, false);
+    for (const float invalid : {std::numeric_limits<float>::infinity(),
+                                std::numeric_limits<float>::quiet_NaN(),
+                                std::numeric_limits<float>::max()}) {
+        local.SetLocalPlayerSimulationPosition({invalid, 8, 8}, true);
+    }
+    EXPECT_EQ(local.GetRegionInputRejections().anchors, 3u);
+    EXPECT_EQ(SessionWorldSubHashes(local), checkpoint);
+    ASSERT_TRUE(local.PrepareSimulationCollisions(1));
+    const auto dt = local.GetSimulationClock().fixed_dt();
+    ASSERT_EQ(local.TickSimulation(dt / 2), 0u);
+    EXPECT_EQ(local.GetActiveRegionLedger().local_anchor(), committed_anchor);
+    ASSERT_TRUE(local.SaveWorldState());
+    ASSERT_TRUE(reloaded.LoadWorld(local.GetMetadata().worldId)) << reloaded.GetWorldOpenError();
+    EXPECT_EQ(reloaded.GetActiveRegionLedger().local_anchor(), committed_anchor);
+    // Adoption clears pending input as well as replicated input; it cannot leak
+    // the preflight position into the first counted tick after reopening.
+    ASSERT_TRUE(local.LoadWorldState());
+    EXPECT_EQ(local.GetActiveRegionLedger().local_anchor(), committed_anchor);
+    ASSERT_EQ(local.TickSimulation(dt), 1u);
+    EXPECT_EQ(local.GetActiveRegionLedger().local_anchor(), committed_anchor);
+    local.SetLocalPlayerSimulationPosition(feet, true);
+    ASSERT_EQ(local.TickSimulation(dt), 1u);
+    EXPECT_EQ(local.GetActiveRegionLedger().local_anchor(), std::optional<Luminumbra::Vec3>(feet));
+    ASSERT_TRUE(local.SaveWorldState());
+    ASSERT_TRUE(reloaded.LoadWorldState());
+    EXPECT_EQ(reloaded.GetActiveRegionLedger().local_anchor(),
+              std::optional<Luminumbra::Vec3>(feet));
 }
 
 TEST(GameSessionHeadlessWorldTest, DefaultSimulationSmokeHasPositiveWetRegionSeamPairs) {
@@ -20255,8 +20382,11 @@ TEST(GameSessionHeadlessWorldTest, HostAnchorAdmissionRefusesInvalidInputsWithou
     GameSession session(kHostAuthorityProfile, GameSession::AuthorityProfileTestOnly{});
     ConfigureHostAuthoritySession(session, root, jobs);
     ASSERT_TRUE(session.CreateTransientWorld("Host inputs", "1337", "default"));
+    const auto checkpoint = SessionWorldSubHashes(session);
     const std::array valid{Luminumbra::Vec3(504, 8, 8)};
     ASSERT_TRUE(session.SetHostSimulationAnchors(valid));
+    // Host preflight cannot mutate a restored checkpoint or a refused tick.
+    EXPECT_EQ(SessionWorldSubHashes(session), checkpoint);
     std::array<Luminumbra::Vec3, 64> maximum{};
     maximum.fill(valid.front());
     ASSERT_TRUE(session.SetHostSimulationAnchors(maximum));
@@ -20268,7 +20398,10 @@ TEST(GameSessionHeadlessWorldTest, HostAnchorAdmissionRefusesInvalidInputsWithou
         const std::array bad{Luminumbra::Vec3(invalid, 8, 8)};
         EXPECT_FALSE(session.SetHostSimulationAnchors(bad));
     }
+    EXPECT_EQ(SessionWorldSubHashes(session), checkpoint);
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(),
+              std::optional<Luminumbra::Vec3>(valid.front()));
     EXPECT_TRUE(session.GetActiveRegionLedger().records().contains({1, 0}));
     ASSERT_TRUE(session.SetHostSimulationAnchors({}));
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
@@ -20276,33 +20409,45 @@ TEST(GameSessionHeadlessWorldTest, HostAnchorAdmissionRefusesInvalidInputsWithou
 }
 
 TEST(GameSessionHeadlessWorldTest, HostCollisionRefusalPreservesTheTickAndRetriesTheSameInputs) {
-    const HeadlessRoot root;
-    JobSystem jobs;
-    jobs.startup(1);
-    GameSession session(kHostAuthorityProfile, GameSession::AuthorityProfileTestOnly{});
-    ConfigureHostAuthoritySession(session, root, jobs);
-    ASSERT_TRUE(session.CreateTransientWorld("Host collision refusal", "1337", "default"));
-    const std::array anchors{Luminumbra::Vec3(504, 8, 8)};
-    ASSERT_TRUE(session.SetHostSimulationAnchors(anchors));
-    auto partial = BoundaryFlowingChunk({31, 0, 0});
-    const auto heights = partial->heightmap_data;
-    partial->heightmap_data.resize(1);
-    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(partial));
-    const auto dt = session.GetSimulationClock().fixed_dt();
-    ASSERT_EQ(session.TickSimulation(dt / 2), 0u);
-    const auto before = SessionWorldSubHashes(session);
-    const auto accumulator = session.GetSimulationClock().accumulator();
-    EXPECT_FALSE(session.PrepareSimulationCollisions(1));
-    EXPECT_EQ(session.TickSimulation(dt / 2), 0u);
-    EXPECT_EQ(session.GetSimulationTickCount(), 0u);
-    EXPECT_EQ(session.GetWorldClock().tick(), 0u);
-    EXPECT_EQ(session.GetSimulationClock().accumulator(), accumulator + dt / 2);
-    EXPECT_EQ(SessionWorldSubHashes(session), before);
-    partial->heightmap_data = heights;
-    ASSERT_TRUE(session.PrepareSimulationCollisions(1));
-    ASSERT_EQ(session.TickSimulation(0), 1u);
-    EXPECT_EQ(session.GetPhysicsSystem()->simulation_collision_sample_count(), 9u);
-    EXPECT_EQ(session.GetSimulationTickCount(), 1u);
+    for (const bool local_input : {false, true}) {
+        SCOPED_TRACE(local_input);
+        const HeadlessRoot root;
+        JobSystem jobs;
+        jobs.startup(1);
+        GameSession session(kHostAuthorityProfile, GameSession::AuthorityProfileTestOnly{});
+        ConfigureHostAuthoritySession(session, root, jobs);
+        ASSERT_TRUE(session.CreateTransientWorld("Host collision refusal", "1337", "default"));
+        const std::array anchors{Luminumbra::Vec3(504, 8, 8)};
+        const auto committed_anchor = session.GetActiveRegionLedger().local_anchor();
+        if (local_input) {
+            session.SetLocalPlayerSimulationPosition(anchors.front(), true);
+        } else {
+            ASSERT_TRUE(session.SetHostSimulationAnchors(anchors));
+        }
+        EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(), committed_anchor);
+        auto partial = BoundaryFlowingChunk({31, 0, 0});
+        const auto heights = partial->heightmap_data;
+        partial->heightmap_data.resize(1);
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(partial));
+        const auto dt = session.GetSimulationClock().fixed_dt();
+        ASSERT_EQ(session.TickSimulation(dt / 2), 0u);
+        const auto before = SessionWorldSubHashes(session);
+        const auto accumulator = session.GetSimulationClock().accumulator();
+        EXPECT_FALSE(session.PrepareSimulationCollisions(1));
+        EXPECT_EQ(session.TickSimulation(dt / 2), 0u);
+        EXPECT_EQ(session.GetSimulationTickCount(), 0u);
+        EXPECT_EQ(session.GetWorldClock().tick(), 0u);
+        EXPECT_EQ(session.GetSimulationClock().accumulator(), accumulator + dt / 2);
+        EXPECT_EQ(SessionWorldSubHashes(session), before);
+        EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(), committed_anchor);
+        partial->heightmap_data = heights;
+        ASSERT_TRUE(session.PrepareSimulationCollisions(1));
+        ASSERT_EQ(session.TickSimulation(0), 1u);
+        EXPECT_EQ(session.GetPhysicsSystem()->simulation_collision_sample_count(), 9u);
+        EXPECT_EQ(session.GetSimulationTickCount(), 1u);
+        EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(),
+                  std::optional<Luminumbra::Vec3>(anchors.front()));
+    }
 }
 
 TEST(GameSessionHeadlessWorldTest, DefaultSimulationSmokeRefusesAnEntirelyDryPreset) {
@@ -21579,7 +21724,9 @@ void CheckSchedulerRoundTrip(bool regions, int resolution, std::size_t count) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession original, fresh, changed;
+    GameSession original{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        fresh{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}},
+        changed{kLegacyCadenceProfile, GameSession::AuthorityProfileTestOnly{}};
     for (auto* session : {&original, &fresh, &changed}) {
         session->SetRootPath(root.root_string());
         session->SetJobSystem(&jobs);
@@ -21756,6 +21903,165 @@ TEST(GameSessionHeadlessWorldTest, ExplicitFullSnapshotHandlesAnEmptyCleanWorld)
     P::WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
     EXPECT_FALSE(saved);
     EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), before);
+}
+
+namespace {
+void CheckNonresidentWaterBoot(GameSession& reopened,
+                               const Luminumbra::Chunk& saved,
+                               const std::string& saved_state) {
+    const auto saved_bytes = P::SerializeChunkRecordPayloadJson(saved);
+    ASSERT_EQ(reopened.RestoredOwnerContinuation(), nullptr);
+    ASSERT_EQ(reopened.GetLastLoadedChunkCount(), 0u);
+    ASSERT_TRUE(reopened.RestoredWorldSnapshot());
+    ASSERT_TRUE(reopened.GetWorldSystem()->snapshot_streamed_chunks().empty());
+    ASSERT_EQ(reopened.GetWorldSystem()->durable_chunk_inventory(),
+              (std::vector<Luminumbra::IVec3>{saved.get_coords()}));
+    EXPECT_EQ(reopened.ComputeChunkStateHash(), saved_state);
+    const auto clock = reopened.GetWorldClock().canonical_bytes();
+    const auto tick = reopened.GetSimulationTickCount();
+    reopened.GetWorldSystem()->debug_set_streaming_radius_cap(1);
+    ASSERT_TRUE(reopened.PrepareInitialSimulation(0, 0));
+    GameSession::BootSettleStats stats;
+    ASSERT_TRUE(reopened.SettleInitialSimulation({}, stats));
+    EXPECT_TRUE(stats.water_settle_skipped);
+    EXPECT_EQ(stats.iterations, 0);
+    EXPECT_EQ(reopened.GetWorldClock().canonical_bytes(), clock);
+    EXPECT_EQ(reopened.GetSimulationTickCount(), tick);
+    const auto after = reopened.GetWorldSystem()->inspect_water_column(saved.get_coords());
+    ASSERT_NE(after, nullptr);
+    EXPECT_TRUE(after->same_water_state(saved));
+    EXPECT_EQ(P::SerializeChunkRecordPayloadJson(*after), saved_bytes);
+    EXPECT_EQ(reopened.ComputeChunkStateHash(), saved_state);
+}
+
+void CheckRestoredSnapshotReplacement(GameSession& reopened,
+                                      const HeadlessRoot& root,
+                                      const fs::path& save,
+                                      const std::string& saved_state,
+                                      bool prepared) {
+    // Refused/cancelled replacement keeps the committed snapshot diagnostic.
+    EXPECT_FALSE(reopened.LoadWorldStateFrom({}));
+    std::stop_source cancellation;
+    cancellation.request_stop();
+    const auto cancelled = GameSession::PrepareWorldState(
+        reopened.CaptureWorldPreparationOptions(), save, cancellation.get_token());
+    EXPECT_FALSE(reopened.AdoptPreparedWorld(cancelled));
+    EXPECT_TRUE(reopened.RestoredWorldSnapshot());
+    EXPECT_EQ(reopened.ComputeChunkStateHash(), saved_state);
+    ASSERT_TRUE(reopened.LoadWorldStateFrom(root.path() / "absent-snapshot"));
+    EXPECT_FALSE(reopened.RestoredWorldSnapshot());
+    ASSERT_TRUE(reopened.LoadWorldStateFrom(save)) << reopened.GetWorldOpenError();
+    EXPECT_TRUE(reopened.RestoredWorldSnapshot());
+    EXPECT_EQ(reopened.GetLastLoadedChunkCount(), 0u);
+    const auto corrupt = root.path() / "partial-snapshot";
+    ASSERT_TRUE(P::WorldSaveService::write_file_durably(corrupt / "world_info.json", "{"));
+    const auto refused =
+        GameSession::PrepareWorldState(reopened.CaptureWorldPreparationOptions(), corrupt);
+    EXPECT_FALSE(reopened.AdoptPreparedWorld(refused));
+    EXPECT_TRUE(reopened.RestoredWorldSnapshot());
+    EXPECT_EQ(reopened.ComputeChunkStateHash(), saved_state);
+    if (prepared) {
+        ASSERT_TRUE(reopened.CreateTransientWorld("Fresh transient", "1337", "default"));
+    } else {
+        ASSERT_TRUE(reopened.CreateWorld("Fresh snapshot reader", "1337", "default"));
+        EXPECT_FALSE(reopened.RestoredWorldSnapshot());
+        ASSERT_TRUE(reopened.LoadWorldState());
+    }
+    EXPECT_FALSE(reopened.RestoredWorldSnapshot());
+    EXPECT_EQ(reopened.GetLastLoadedChunkCount(), 0u);
+    ASSERT_TRUE(reopened.LoadWorldStateFrom(save)) << reopened.GetWorldOpenError();
+    ASSERT_TRUE(reopened.RestoredWorldSnapshot());
+    // A fatal direct replacement clears both diagnostics with resident state.
+    EXPECT_FALSE(reopened.LoadWorldStateFrom(corrupt));
+    EXPECT_FALSE(reopened.RestoredWorldSnapshot());
+    EXPECT_EQ(reopened.GetLastLoadedChunkCount(), 0u);
+}
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, NonresidentSnapshotWaterSkipsBootSettlement) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession source;
+    source.SetRootPath(root.root_string());
+    source.SetJobSystem(&jobs);
+    source.SetActiveRegionsEnabled(true);
+    source.SetWaterHighResEnabled(false);
+    source.SetWeatherRainEnabled(false);
+    source.SetWeatherEventsEnabled(false);
+    source.SetFiniteHydrologyEnabled(true);
+    auto preset = nlohmann::json::parse(ReadClockTestFile(SourcePresetPath()));
+    preset["generation_params"]["terrain"]["height_offset"] = 256.0;
+    const auto custom = preset.dump();
+    ASSERT_TRUE(source.CreateWorld("Elevated snapshot", "1337", "default", &custom));
+    EXPECT_FALSE(source.RestoredWorldSnapshot());
+    const Luminumbra::IVec3 column_coords{0, 0, 0};
+    // The saved canonical column is below the terrain surface load footprint.
+    const auto wanted = source.TakeInitialChunkLoadList();
+    ASSERT_TRUE(std::none_of(
+        wanted.begin(), wanted.end(), [&](const auto& coords) { return coords == column_coords; }));
+    const auto column = source.GetWorldSystem()->resolve_water_column(column_coords);
+    ASSERT_NE(column, nullptr);
+    // One parked canonical 8x8 pond, with an awake nonuniform depth field.
+    constexpr std::size_t cells = 8 * 8;
+    column->water_depth_mm.assign(cells, 1000);
+    column->water_depth_mm[cells / 2 + 4] = 3000;
+    column->water_bed_mm.assign(cells, 300000);
+    column->water_edge_flux.assign(cells * 2, 0);
+    column->water_level_data.assign(cells, 301.0f);
+    column->water_sim_terrain_height.assign(cells, 300.0f);
+    column->water_rest_level.assign(cells, 300.0f);
+    column->water_flow_data.assign(cells, Luminumbra::Vec2(0.0f));
+    column->has_water_sim.store(true);
+    column->current_water_resolution.store(8);
+    column->is_water_sleeping.store(false);
+    column->set_water_authority();
+    column->mark_water_data_dirty();
+    ASSERT_TRUE(column->has_complete_water_state());
+    ASSERT_TRUE(source.GetWorldSystem()->snapshot_streamed_chunks().empty());
+    Luminumbra::world::WorldStateSaveReport report;
+    ASSERT_TRUE(source.SaveWorldStateTo(source.GetWorldSaveDir(), &report, true));
+    ASSERT_EQ(report.chunks_total, 1u);
+    ASSERT_EQ(source.GetWorldSystem()->durable_chunk_inventory(),
+              (std::vector<Luminumbra::IVec3>{column_coords}));
+    const auto save = source.GetWorldSaveDir();
+    const auto saved_files = ReadClockTestDirectory(save);
+    const auto saved = P::WorldSaveService::read_chunk(save, column->get_coords(), true);
+    ASSERT_NE(saved.chunk, nullptr) << saved.error;
+    ASSERT_TRUE(saved.chunk->has_water_authority());
+    ASSERT_TRUE(saved.chunk->has_complete_water_state());
+    // The chunk hash includes durable and parked regional authority. The water
+    // diagnostic sub-hash only describes streamed residents and cannot round-trip
+    // across a change in residency.
+    const auto saved_state = source.ComputeChunkStateHash();
+    ASSERT_FALSE(saved_state.empty());
+
+    for (const bool prepared : {false, true}) {
+        SCOPED_TRACE(prepared);
+        GameSession reopened;
+        reopened.SetRootPath(root.root_string());
+        reopened.SetJobSystem(&jobs);
+        reopened.SetActiveRegionsEnabled(true);
+        reopened.SetWaterHighResEnabled(false);
+        reopened.SetWeatherRainEnabled(false);
+        reopened.SetWeatherEventsEnabled(false);
+        reopened.SetFiniteHydrologyEnabled(true);
+        EXPECT_FALSE(reopened.RestoredWorldSnapshot());
+        if (prepared) {
+            ASSERT_TRUE(reopened.CreateWorld("Snapshot reader", "1337", "default", &custom));
+            auto options = reopened.CaptureWorldPreparationOptions();
+            options.wanted_chunks.clear();
+            const auto candidate = GameSession::PrepareWorldState(options, save);
+            ASSERT_TRUE(reopened.AdoptPreparedWorld(candidate)) << reopened.GetWorldOpenError();
+        } else {
+            ASSERT_TRUE(reopened.LoadWorld(source.GetMetadata().worldId))
+                << reopened.GetWorldOpenError();
+        }
+        ASSERT_NO_FATAL_FAILURE(CheckNonresidentWaterBoot(reopened, *saved.chunk, saved_state));
+        EXPECT_EQ(ReadClockTestDirectory(save), saved_files);
+        ASSERT_NO_FATAL_FAILURE(
+            CheckRestoredSnapshotReplacement(reopened, root, save, saved_state, prepared));
+    }
 }
 
 TEST(GameSessionHeadlessWorldTest, AuthorityCaptureRequiresACompletedWorldBoundary) {

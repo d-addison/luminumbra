@@ -354,8 +354,10 @@ bool ServerWorldRunner::Boot() {
     // stepping advances the loaded session past the original's saved state and the
     // water sub-hash can never round-trip. Pause BEFORE the first streaming call
     // (EnsureSurfaceReadyNear runs the water update too); unpause at the end of Boot.
+    // Empty initial snapshots are fresh; nonresident durable records are restored.
     const auto* continuation = m_session->RestoredOwnerContinuation();
-    const bool water_loaded_from_save = continuation || m_session->GetLastLoadedChunkCount() > 0;
+    const bool water_loaded_from_save = continuation || m_session->RestoredWorldSnapshot() ||
+                                        m_session->GetLastLoadedChunkCount() > 0;
     if (water_loaded_from_save) {
         world_system->SetWaterBootPaused(true);
     }

@@ -8,6 +8,7 @@
 // file in a reserved temporary directory and removed afterward, so the suite never
 // touches the committed gate fixtures.
 
+#include "../support/GameSessionTestWorld.h"
 #include "../support/SystemConfigVariants.h"
 #include "../support/UniqueTempPath.h"
 #include <gtest/gtest.h>
@@ -30,16 +31,19 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "luminumbra_common/core/FilesystemPath.h"
+#include "luminumbra_common/core/WaterComponents.h"
 #include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/persistence/ReplacementOutputFile.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/SavedInputFile.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 #include "luminumbra_common/replay/ReplayStream.h"
+#include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include <nlohmann/json.hpp>
 #include <stdexcept>
@@ -3558,6 +3562,134 @@ TEST_F(ReplayStreamTest, AmbientActivationRefusesPreviousEnabledReplayBeforePlay
                 matching, session.SystemConfigIdentity(), header.preset_content_hash));
         }
     }
+}
+
+TEST_F(ReplayStreamTest, RegionalCadenceRevisionAdmission) {
+    // Parsing remains historical inspection; admission rejects both historical
+    // enabled identities before consuming input, including the earlier revision 9.
+    for (const bool regions : {false, true}) {
+        for (const std::uint32_t revision : {8u, 9u}) {
+            for (const auto version :
+                 {replay::kLrec1Version, replay::kLrec1BootVersion, replay::kLrec1WeatherVersion}) {
+                SCOPED_TRACE(::testing::Message() << regions << ',' << revision << ',' << version);
+                Luminumbra::world::GameSession session;
+                session.SetActiveRegionsEnabled(regions);
+                std::string previous = !regions        ? "bafe22eabc5fc385"
+                                       : revision == 8 ? "45664f7615d96904"
+                                                       : "bf48b15682a969bd";
+                auto header = MakeHeader();
+                header.version = version;
+                if (version == replay::kLrec1WeatherVersion) {
+                    const Luminumbra::Systems::WeatherSchedule schedule{
+                        .phases = {{0, Luminumbra::Systems::WeatherCategory::Clear, 0, 0}},
+                        .strike_tick = std::nullopt};
+                    ASSERT_TRUE(session.SetWeatherSchedule(schedule));
+                    header.weather_schedule = schedule.canonical_bytes();
+                    previous = std::string(Luminumbra::Systems::WeatherSchedule::kIdentityPrefix) +
+                               replay::Fnv1a64Hex(previous + header.weather_schedule);
+                }
+                header.system_config_identity = previous;
+                if (version == replay::kLrec1BootVersion) {
+                    header.authority_boot =
+                        replay::CaptureReplayBoot(session, 424242, session.GetRenderCalendar());
+                    header.authority_boot->authority_rules_revision = regions ? revision : 8u;
+                    header.authority_boot->system_config_identity = previous;
+                }
+                replay::ReplayWriter writer;
+                ASSERT_TRUE(writer.Open(m_path, header));
+                writer.RecordInput(1, {9});
+                ASSERT_TRUE(writer.Finalize(1));
+                const auto contents = replay::ReadReplay(m_path);
+                ASSERT_TRUE(contents.has_value());
+                if (!contents)
+                    return;
+                EXPECT_FALSE(contents->truncated);
+                EXPECT_TRUE(contents->trailer_present);
+                // Full streams and their suffix variants share admission rules.
+                for (const auto admission_version :
+                     {version, static_cast<std::uint16_t>(version + 1)}) {
+                    auto candidate = contents->header;
+                    candidate.version = admission_version;
+                    EXPECT_EQ(replay::ConfigurationMatches(candidate,
+                                                           session.SystemConfigIdentity(),
+                                                           header.preset_content_hash),
+                              !regions);
+                }
+                ASSERT_EQ(contents->inputs.size(), 1u);
+                EXPECT_EQ(contents->inputs.front().tick, 1u);
+                EXPECT_EQ(session.GetSimulationTickCount(), 0u);
+                auto matching = contents->header;
+                matching.system_config_identity = session.SystemConfigIdentity();
+                if (matching.authority_boot) {
+                    matching.authority_boot =
+                        replay::CaptureReplayBoot(session, 424242, session.GetRenderCalendar());
+                    EXPECT_EQ(matching.authority_boot->authority_rules_revision, regions ? 9u : 8u);
+                }
+                EXPECT_TRUE(replay::ConfigurationMatches(
+                    matching, session.SystemConfigIdentity(), header.preset_content_hash));
+            }
+        }
+    }
+}
+
+TEST_F(ReplayStreamTest, RegionalWaterRunsOncePerSimulationTick) {
+    const Luminumbra::TestSupport::HeadlessRoot root;
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    std::unordered_map<Luminumbra::ChunkID, std::shared_ptr<Luminumbra::Chunk>> presentation_chunks;
+    Luminumbra::world::GameSession batched, single;
+    for (auto* session : {&batched, &single}) {
+        session->SetJobSystem(&jobs);
+        session->SetRootPath(root.root_string());
+        session->SetWeatherRainEnabled(false);
+        ASSERT_TRUE(session->SimulationHostIntegrationEnabled());
+        ASSERT_TRUE(session->CreateTransientWorld("Fixed water", "777", "default"));
+        session->GetWorldSystem()->SetWaterSimResolution(8);
+        session->SetReplicatedSimulationAnchors({Luminumbra::Vec3(24, 0, 24)});
+        ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session->GetRegionSchedulerFault());
+        ASSERT_EQ(session->GetWaterSystem()->regional_work().visits.size(), 9u);
+        const auto source = session->GetRegistry().create();
+        session->GetRegistry()
+            .emplace<Luminumbra::Components::TransformComponent>(source)
+            .position = Luminumbra::Vec3(24, -100, 24);
+        session->GetRegistry()
+            .emplace<Luminumbra::Components::FlowingWaterSourceComponent>(source)
+            .flow_rate = 1.0f;
+    }
+    // Nine columns and four ticks; no camera or frame update may add a water step.
+    const auto before = batched.ComputeChunkStateHash();
+    const auto work = batched.GetWaterSystem()->regional_work();
+    for (const auto id : work.visits) {
+        auto chunk =
+            batched.GetWorldSystem()->inspect_water_column(Luminumbra::Chunk::decode_id(id));
+        ASSERT_TRUE(chunk);
+        presentation_chunks.emplace(id, std::move(chunk));
+    }
+    ASSERT_EQ(presentation_chunks.size(), 9u);
+    for (int frame = 0; frame < 3; ++frame) {
+        ASSERT_EQ(batched.TickSimulation(0), 0u);
+        batched.GetWaterSystem()->update(batched.GetRegistry(), presentation_chunks, true);
+    }
+    EXPECT_EQ(batched.ComputeChunkStateHash(), before);
+    EXPECT_EQ(batched.GetWaterSystem()->regional_work(), work);
+    const double dt = batched.GetSimulationClock().fixed_dt();
+    // Session catch-up is capped at two ticks per frame. Exercise batching
+    // within that production cap so this oracle never asks the clock to drop time.
+    ASSERT_EQ(batched.TickSimulation(2 * dt), 2u);
+    ASSERT_EQ(batched.TickSimulation(dt), 1u);
+    ASSERT_FALSE(batched.GetRegionSchedulerFault());
+    for (int tick = 0; tick < 3; ++tick) {
+        ASSERT_EQ(single.TickSimulation(dt), 1u);
+        ASSERT_FALSE(single.GetRegionSchedulerFault());
+        EXPECT_GT(single.GetWaterSystem()->regional_work().source_mm, 0);
+        EXPECT_LE(single.GetWaterSystem()->regional_work().total_cells, 4096u);
+    }
+    EXPECT_EQ(batched.GetSimulationTickCount(), 4u);
+    EXPECT_EQ(batched.GetWaterSystem()->regional_work(), single.GetWaterSystem()->regional_work());
+    EXPECT_EQ(batched.ComputeChunkStateHash(), single.ComputeChunkStateHash());
+    EXPECT_EQ(batched.GetActiveRegionLedger().canonical_bytes(),
+              single.GetActiveRegionLedger().canonical_bytes());
 }
 
 TEST_F(ReplayStreamTest, LegacyHeaderWithoutConfigIdentityIsRejected) {

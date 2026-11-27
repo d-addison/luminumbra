@@ -53,7 +53,11 @@ and reproduction integers would lose adjacent values if converted to binary32. S
 zeros remain distinct. FNV-1a uses offset
 14695981039346656037 and prime 1099511628211, with unsigned 64-bit wraparound. The result
 is 16 lowercase hex digits emitted without locale formatting. Shipped defaults serialize
-to **339 bytes → `bf48b15682a969bd`** for revision 9 with active regions enabled.
+to **359 bytes → `c1cfd4e42aa58f8d`** for revision 9 with active regions enabled.
+The final 20 bytes are ASCII `regional-cadence:v1:`, appended after the calendar
+only for enabled revision-9 configurations. This distinguishes the earlier enabled
+revision-9 profile (**339 bytes → `bf48b15682a969bd`**) before elapsed consumers
+and fixed-tick regional water were activated.
 The approved off profile retains revision 8 and **339 bytes → `bafe22eabc5fc385`**.
 The explicit legacy revision-3 encoder still yields **297 bytes → `60ab3c242d54ce89`**. The independent stdlib computation in
 `test/tools/test_system_config_identity.py` resolves JSON inputs through binary32 as
@@ -135,18 +139,22 @@ restored on the first SHIELD update) changed it to `bf3da613768a50cb`. Revision 
 (reproduction-born creatures die, decompose and leave the population) changes it again to
 `45664f7615d96904`. The shared issue #136/#138 activation revision is 9, named
 `kRegionalActivationAuthorityRulesRevision`; issue #138 reuses this value.
-Enabled configurations select it, producing `bf48b15682a969bd` for shipping defaults.
+Enabled configurations select it and the regional cadence suffix, producing
+`c1cfd4e42aa58f8d` for shipping defaults.
 Off configurations keep revision 8 and their exact existing identity bytes.
 Replay boot capture uses the same effective revision selector. Enabled revision-8
-peers and replays are refused before advancement; off revision-8 recordings remain
+peers and replays, and earlier enabled revision-9 identities without the cadence
+suffix, are refused before advancement; off revision-8 recordings remain
 compatible. The revision-4 through revision-7 identities are no longer admitted. No world-state, terrain, water, save-format or replay checkpoint
 encoding changes in this identity step.
 
-The frozen current vectors in `SystemConfig_test.cpp` cover the complete 339-byte
-encoding: the 297-byte registry/session prefix with the v4 domain, four revision
-bytes, then the 18-byte calendar epoch tag and five u32 calendar values. Older
+The current vectors in `SystemConfig_test.cpp` cover the complete encoding
+(339 bytes off, 359 bytes enabled): the 297-byte registry/session prefix with the
+v4 domain, four revision bytes, then the 18-byte calendar epoch tag and five u32
+calendar values, followed by the enabled-only 20-byte cadence suffix. Older
 301-byte vectors omitted that calendar suffix. Every current per-setting and
-session-option digest is recomputed once with the resolved calendar. With active regions off and no world marker, the calendar is
+session-option digest includes the resolved calendar and the enabled-only suffix.
+With active regions off and no world marker, the calendar is
 `(216000, 8, 1, 2, 8)`; with regions on it is `(162000, 8, 2, 3, 8)`.
 The independent encoder checks every literal in both C++ vector tables, including
 binary32 rounding before adding one to each configuration parameter.

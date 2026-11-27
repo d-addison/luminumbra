@@ -19,7 +19,8 @@ SHIPPED = json.loads((ROOT / "data/common/systems.json").read_text(encoding="utf
 
 def canonical_bytes(document, *, finite_hydrology=True, rain_scale_mm=25,
                     region_work_limit=(1 << 64) - 1, region_hold_ticks=30,
-                    region_reduced_shift=1, authority_rules_revision=None, calendar=None):
+                    region_reduced_shift=1, authority_rules_revision=None, calendar=None,
+                    regional_cadence=True):
     if authority_rules_revision is None:
         active = document.get("sim", {}).get("active_regions", {}).get("enabled", True)
         authority_rules_revision = 9 if active else 8
@@ -64,6 +65,9 @@ def canonical_bytes(document, *, finite_hydrology=True, rain_scale_mm=25,
             calendar = (162000, 8, 2, 3, 8) if active else (216000, 8, 1, 2, 8)
         result.extend(b"calendar-epoch:v1:")
         result.extend(struct.pack("<IIIII", *calendar))
+        if (regional_cadence and authority_rules_revision == 9 and
+                document.get("sim", {}).get("active_regions", {}).get("enabled", True)):
+            result.extend(b"regional-cadence:v1:")
     return bytes(result)
 
 
@@ -209,13 +213,13 @@ class SystemConfigIdentityTest(unittest.TestCase):
         self.assertRegex(source, r"if \(!legacy\)\s*\{\s*integer\(revision, 32\);")
 
     def test_exact_revision5_shipping_pin(self):
-        self.assertEqual(len(canonical_bytes(SHIPPED)), 339)
+        self.assertEqual(len(canonical_bytes(SHIPPED)), 359)
         self.assertEqual(identity(SHIPPED, authority_rules_revision=3), "60ab3c242d54ce89")
         self.assertEqual(identity(SHIPPED, authority_rules_revision=5), "35e233a89e8c87b1")
         self.assertEqual(identity(SHIPPED, authority_rules_revision=6), "b439df88e7c3623a")
         self.assertEqual(identity(SHIPPED, authority_rules_revision=7), "bf3da613768a50cb")
         self.assertEqual(identity(SHIPPED, authority_rules_revision=8), "45664f7615d96904")
-        self.assertEqual(identity(SHIPPED), "bf48b15682a969bd")
+        self.assertEqual(identity(SHIPPED, regional_cadence=False), "bf48b15682a969bd")
         self.assertEqual(canonical_bytes({}), canonical_bytes(SHIPPED))
 
     def test_authority_rules_revision_is_bound(self):
@@ -253,6 +257,23 @@ class SystemConfigIdentityTest(unittest.TestCase):
         disabled = {"sim": {"active_regions": {"enabled": False}}}
         self.assertEqual(identity(disabled), "bafe22eabc5fc385")
         self.assertEqual(canonical_bytes(disabled)[297:301], struct.pack("<I", 8))
+
+    def test_regional_cadence_authority_identity(self):
+        source = (ROOT / "src/luminumbra_common/core/SystemConfig.cpp").read_text(encoding="utf-8")
+        self.assertRegex(source, r'if \(revision == kRegionalActivationAuthorityRulesRevision &&\s*'
+                         r'enabled\[static_cast<std::size_t>\(SysKey::SimActiveRegions\)\]\) \{')
+        self.assertIn('std::string("regional-cadence:v1:")', source)
+        self.assertEqual(identity(SHIPPED), "c1cfd4e42aa58f8d")
+        for name, config in applied_setting_variants():
+            with self.subTest(setting=name):
+                for regions in (False, True):
+                    config.setdefault("sim", {}).setdefault("active_regions", {})["enabled"] = regions
+                    previous = canonical_bytes(config, regional_cadence=False)
+                    self.assertEqual(canonical_bytes(config), previous +
+                                     (b"regional-cadence:v1:" if regions else b""))
+                    self.assertEqual(canonical_bytes(config, authority_rules_revision=3),
+                                     canonical_bytes(config, authority_rules_revision=3,
+                                                     regional_cadence=False))
 
     def test_revision5_profile_pins_are_independently_encoded(self):
         historical = json.loads((ROOT / "test/fixtures/historical-defaults-off.json").read_text(encoding="utf-8"))

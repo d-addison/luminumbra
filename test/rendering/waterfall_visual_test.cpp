@@ -215,7 +215,9 @@ WaterfallPixelStats AnalyzeWaterfall(const std::vector<unsigned char>& rgba, int
         h / 3; // top third in OpenGL bottom-up == top of frame after flip; we read raw
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
-            const std::size_t i = (static_cast<std::size_t>(y) * w + x) * 4u;
+            const std::size_t i = (static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
+                                   static_cast<std::size_t>(x)) *
+                                  4u;
             const int r = rgba[i], g = rgba[i + 1], b = rgba[i + 2];
             const int luma = (r * 54 + g * 183 + b * 19) >> 8;
             // Skip the dark clear background.
@@ -250,7 +252,9 @@ void WritePpm(const fs::path& path, int w, int h, const std::vector<unsigned cha
     out << "P6\n" << w << " " << h << "\n255\n";
     for (int y = h - 1; y >= 0; --y) {
         for (int x = 0; x < w; ++x) {
-            const std::size_t i = (static_cast<std::size_t>(y) * w + x) * 4u;
+            const std::size_t i = (static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
+                                   static_cast<std::size_t>(x)) *
+                                  4u;
             const unsigned char rgb[3] = {rgba[i], rgba[i + 1], rgba[i + 2]};
             out.write(reinterpret_cast<const char*>(rgb), 3);
         }
@@ -634,6 +638,8 @@ LiveWaterRun RunLiveWaterScenario(const std::string& root) {
         Luminumbra::world::GameSession session;
         session.SetJobSystem(&jobs);
         session.SetRootPath(root);
+        // This fixture drives legacy frame water directly through world updates.
+        session.SetActiveRegionsEnabled(false);
         // This crest-edit fixture needs the replenished standing-water rest level;
         // finite catchment depletion is covered by the hydrology tests.
         session.SetFiniteHydrologyEnabled(false);

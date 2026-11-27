@@ -124,7 +124,23 @@ void DirtyHostChunk(GameSession& session) {
             return;
         }
     }
-    FAIL() << "Boot must supply a chunk to make recovery persistence non-vacuous";
+    // Regional boot can retain only water-owned columns whose saved terrain is
+    // regenerable. Supply a CPU terrain edit so recovery still owes a real write.
+    auto* world = session.GetWorldSystem();
+    ASSERT_NE(world, nullptr);
+    const auto coords = world->world_to_chunk_coords(session.GetMetadata().spawnPoint);
+    const auto existing = world->find_streamed_chunk(coords);
+    // Preserve any canonical water owner already resident at this identity.
+    const auto chunk = existing ? existing : std::make_shared<Luminumbra::Chunk>(coords);
+    world->GenerateChunkData(*chunk);
+    ASSERT_FALSE(chunk->sdf_data.empty());
+    chunk->sdf_data.front() = 1234.5f;
+    chunk->mark_sdf_loaded_or_edited();
+    chunk->mark_voxel_data_dirty();
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    if (!existing) {
+        ASSERT_TRUE(world->adopt_streamed_chunk(chunk));
+    }
 }
 
 struct PreparationReads;
@@ -640,7 +656,10 @@ TEST_F(HostSchedulerFault, SmokeComparesOnlyTwoCompleteRuns) {
         observation.inject_fault = false;
         observation.refuse_call = refused_call;
         auto options = Options();
-        options.ticks = 1;
+        // High-resolution regional water funds only part of the nine-column
+        // ring per tick. Two rotations seed both smoke seam endpoints, so the
+        // first complete run reaches the separately injected second refusal.
+        options.ticks = 18;
         options.artifact_path = (root / "smoke.json").string();
         WriteHostFile(options.artifact_path, "previous complete artifact");
         EXPECT_EQ(RunSchedulerFaultSmoke(options), 1);
@@ -857,7 +876,7 @@ TEST_F(HostSchedulerFault, ReplayRefusalRestoresRemovedStaleTrace) {
 TEST_F(HostSchedulerFault, ClientFaultRequestsQuitAndSavesStateBeforeSpawnMetadata) {
     Luminumbra::JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session({}, GameSession::AuthorityProfileTestOnly{});
     session.SetJobSystem(&jobs);
     session.SetRootPath(root.generic_string() + "/");
     session.SetActiveRegionsEnabled(true);
@@ -1050,7 +1069,7 @@ TEST_F(HostSchedulerFault, VerifiedSnapshotLoadsOriginalAfterLiveSaveReplacement
 TEST_F(HostSchedulerFault, ClientMetadataSaveFailureSuppressesSuccessAndAllowsRetry) {
     Luminumbra::JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session({}, GameSession::AuthorityProfileTestOnly{});
     session.SetJobSystem(&jobs);
     session.SetRootPath(root.generic_string() + "/");
     session.SetActiveRegionsEnabled(true);

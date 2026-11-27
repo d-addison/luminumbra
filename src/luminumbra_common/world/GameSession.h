@@ -124,14 +124,13 @@ struct PersistenceStatus {
 
 class GameSession {
 public:
-    // Dormant caller contract for tests; never configured, serialized or hashed.
+    // Test overrides for individual authority consumers. Production selects the
+    // negotiated regional profile; these overrides are never shipping settings.
     struct AuthorityProfileOptions {
-        // Slice I will bind this predicate to its negotiated authority revision.
+        // Residency eviction remains separate from regional cadence activation.
         bool residency_free_eviction = false;
-        // Dormant until negotiated authority enables fixed-tick water ownership.
         bool regional_water = false;
         bool simulation_host_integration = false;
-        // Dormant elapsed foliage integration; activation binds negotiated authority later.
         bool elapsed_consumers = false;
     };
 
@@ -144,8 +143,8 @@ public:
     // Link boundary: this constructor is DEFINED only in
     // test/common/GameSessionAuthorityProfileTestSeam.cpp, which is compiled into test
     // executables and never into a src/ library. A runtime, client, server or replay
-    // binary that names it fails to link, so nothing can opt in before slice I ties
-    // the option to negotiated identity.
+    // binary that names it fails to link. Only the default production profile is
+    // negotiated; partial profiles remain confined to regression tests.
     GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTestOnly);
     explicit GameSession(const OwnerContinuationOptions& options);
     // Internal owner-thread binding. The roster outlives the session; capture occurs
@@ -352,6 +351,11 @@ public:
     bool LoadWorldStateFrom(const std::filesystem::path& save_dir);
     std::size_t GetLastLoadedChunkCount() const {
         return m_lastLoadedChunkCount;
+    }
+    // Nonempty admitted snapshot state, including durable records outside initial
+    // resident retention. Empty initial snapshots leave fresh-world boot enabled.
+    bool RestoredWorldSnapshot() const {
+        return m_restoredWorldSnapshot;
     }
     std::filesystem::path GetWorldSaveDir() const;
     std::vector<IVec3> TakeInitialChunkLoadList();
@@ -753,6 +757,8 @@ public:
     // ledger must match an explicit override or loading refuses. Without an override,
     // loaded settings become the effective configuration, also retained by world resets.
     void SetRegionSchedulerConfig(RegionSchedulerConfig config);
+    // Enabled host profiles stage walking input for preflight and publish it on a counted tick.
+    // Noclip and invalid inputs preserve the last valid input and committed anchor.
     void SetLocalPlayerSimulationPosition(const Vec3& feet, bool walking);
     void SetReplicatedSimulationAnchors(std::vector<Vec3> anchors);
     // Dormant host wiring shares the ownership profile until negotiated activation.
@@ -851,7 +857,7 @@ public:
     std::filesystem::path GetSaveRootPath() const;
 
 private:
-    // Advances opt-in regional water for one fixed tick; a no-op when it is dormant.
+    // Advances regional water for one fixed tick; a no-op with active regions off.
     void UpdateRegionalWaterFromSimulation();
     struct AuthorityProfileTag {};
     // The single real constructor; the default and the test-only constructors delegate here.
@@ -946,6 +952,8 @@ private:
     // Reused by the per-tick consumer gate so steady-state ticks allocate nothing.
     std::vector<std::uint64_t> m_consumerGateScratch;
     std::optional<std::vector<Vec3>> m_replicatedSimulationAnchors;
+    // Walking input for collision preflight; only a counted tick publishes it to the ledger.
+    std::optional<Vec3> m_pendingLocalSimulationAnchor;
     std::vector<RegionWork> m_regionWork;          // External inputs for the next schedule call.
     std::vector<RegionWork> m_regionCompletedWork; // Successful consumer work this tick.
     GroundObjectStore m_groundObjects;
@@ -1057,6 +1065,7 @@ private:
     // diagnostics alone never change this; only coherent adoption enables it.
     bool m_worldUsable = false;
     std::size_t m_lastLoadedChunkCount = 0;
+    bool m_restoredWorldSnapshot = false;
     std::optional<std::vector<IVec3>> m_preparedInitialChunks;
     std::vector<std::filesystem::path> m_requiredClientAssets;
 

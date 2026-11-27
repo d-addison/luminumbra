@@ -258,11 +258,9 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertIn("common/GameSessionHeadlessWorld_test.cpp", cmake)
         self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
 
-    def test_profile_opt_in_is_reachable_only_from_tests(self):
-        # Until slice I binds the option to negotiated identity, no production
-        # binary may construct a non-default profile. The opt-in constructor is
-        # declared in the header but defined only in a test-only source, so a
-        # production caller fails to link instead of relying on a nameable friend.
+    def test_partial_profile_overrides_are_reachable_only_from_tests(self):
+        # Production selects the complete regional profile. Partial overrides
+        # remain behind the existing test-only link boundary.
         header = (ROOT / "src/luminumbra_common/world/GameSession.h").read_text(
             encoding="utf-8")
         tag = function(header, "struct AuthorityProfileTestOnly")
@@ -298,10 +296,20 @@ class RegionAuthorityWiring(unittest.TestCase):
             text = path.read_text(encoding="utf-8", errors="replace")
             expected = 1 if rel == "test/CMakeLists.txt" else 0
             self.assertEqual(text.count(seam_name), expected, rel)
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        for target in ("common_tests", "frontier_gates_test", "world_open_refusal_test"):
+            sources = cmake.split("add_executable(" + target, 1)[1].split(")", 1)[0]
+            self.assertIn("${_authority_profile_test_seam}", sources, target)
 
-    def test_regional_water_is_dormant_until_authority_profile_opt_in(self):
+    def test_regional_water_is_bound_to_enabled_production_authority(self):
         session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
             encoding="utf-8")
+        self.assertIn(".regional_water = true", session)
+        self.assertIn(".simulation_host_integration = true", session)
+        self.assertIn(".elapsed_consumers = true", session)
+        self.assertRegex(session, r"GameSession::GameSession\(\)\s*:\s*GameSession\("
+                         r"AuthorityProfileOptions\{\.regional_water = true,\s*"
+                         r"\.simulation_host_integration = true,\s*\.elapsed_consumers = true\}")
         for name, operation in (
                 ("void GameSession::ApplyWaterResolutionWiring(", "SetRegionalScheduling"),
                 ("void GameSession::UpdateRegionalWaterFromSimulation(",
@@ -491,7 +499,7 @@ class RegionAuthorityWiring(unittest.TestCase):
     def test_session_water_regressions_are_reachable_and_registered(self):
         native = (ROOT / "test/common/WaterSeedInputs_test.cpp").read_text(encoding="utf-8")
         for case in ("SessionRegionalParticipantsIgnoreCameraStreamingAndWorkerReadiness",
-                     "DefaultAuthorityProfileKeepsLegacyWaterWithActiveRegionsOn",
+                     "ExplicitLegacyAuthorityProfileKeepsLegacyWaterWithActiveRegionsOn",
                      "RegionalPressureDefersIdenticallyWithOppositeRendererResidency",
                      "RegionalWaterRewindMatchesUninterruptedSavedTimeline",
                      "RegionalSimulationAnchorsPreferReplicatedIncludingEmpty",
@@ -687,12 +695,13 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertEqual(function(header, "struct AuthorityProfileOptions"),
                          "bool residency_free_eviction = false; bool regional_water = false; bool simulation_host_integration = false; bool elapsed_consumers = false;")
         self.assertIn("const AuthorityProfileOptions m_authorityProfile;", header)
-        self.assertIn(": GameSession(AuthorityProfileOptions{}, AuthorityProfileTag{}) {}", session)
+        self.assertNotIn(": GameSession(AuthorityProfileOptions{}, AuthorityProfileTag{}) {}", session)
         self.assertIn(": m_authorityProfile(authority_profile)", session)
         # Uses are confined to construction, eviction, water and elapsed-consumer gates.
-        # Config, hashes and save writers cannot read this dormant profile.
-        self.assertEqual(session.count("m_authorityProfile"), 19)
-        self.assertEqual(session.count("m_authorityProfile.regional_water"), 9)
+        # Config and save formats share the negotiated production selection;
+        # the override object itself remains outside their encodings.
+        self.assertEqual(session.count("m_authorityProfile"), 20)
+        self.assertEqual(session.count("m_authorityProfile.regional_water"), 10)
         self.assertEqual(session.count("residency_free_eviction"), 1)
         native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(
             encoding="utf-8")
@@ -950,7 +959,7 @@ class SimulationCollisionWiring(unittest.TestCase):
             encoding="utf-8")
         step = function(source, "bool NetworkedSessionDriver::StepAgreedTick(")
         prepare = step.index("PrepareSimulationCollisions(")
-        self.assertIn("SetHostSimulationAnchors({&ctx->spawn_anchor, 1})", step)
+        self.assertIn("SetHostSimulationAnchors({})", step)
         self.assertIn("&m_impl->host_ctx, &m_impl->client_ctx", step)
         self.assertLess(prepare, step.index("m_impl->host->PumpTick("))
         self.assertIn("return true;", step[prepare:step.index("m_impl->host->PumpTick(")])
@@ -2049,7 +2058,23 @@ class SimulationHostWiring(unittest.TestCase):
         self.assertIn("return RegionalWaterAnchors(m_replicatedSimulationAnchors, "
                       "m_activeRegionLedger.local_anchor());", anchors)
         publish_inputs = function(session, "bool GameSession::SetHostSimulationAnchors(")
-        self.assertIn("m_activeRegionLedger.set_local_anchor(anchors.front())", publish_inputs)
+        self.assertNotIn("m_activeRegionLedger.set_local_anchor", publish_inputs)
+        schedule = function(session, "void GameSession::RunRegionScheduler(")
+        self.assertIn("m_activeRegionLedger.set_local_anchor(m_replicatedSimulationAnchors->front())",
+                      schedule)
+        local = function(session, "void GameSession::SetLocalPlayerSimulationPosition(")
+        self.assertIn("if (!m_activeRegionsEnabled || !walking)", local)
+        self.assertLess(local.index("if (!ActiveRegionLedger::valid_anchor(feet))"),
+                        local.index("m_pendingLocalSimulationAnchor = feet;"))
+        self.assertEqual(function(local, "if (SimulationHostIntegrationEnabled())"),
+                         "m_pendingLocalSimulationAnchor = feet;")
+        self.assertIn("m_activeRegionLedger.set_local_anchor(*m_pendingLocalSimulationAnchor)",
+                      schedule)
+        self.assertIn("m_pendingLocalSimulationAnchor.reset();", schedule)
+        self.assertIn("!m_replicatedSimulationAnchors && m_pendingLocalSimulationAnchor", anchors)
+        self.assertIn("return {&*m_pendingLocalSimulationAnchor, 1};", anchors)
+        replace = function(session, "void GameSession::ReplaceActiveRegionLedger(")
+        self.assertIn("m_pendingLocalSimulationAnchor.reset();", replace)
         prepare = function(session, "bool GameSession::PrepareSimulationCollisions(")
         self.assertIn("SimulationHostIntegrationEnabled() ? SimulationAnchors() : "
                       "std::span<const Vec3>{}", prepare)
@@ -2076,7 +2101,7 @@ class SimulationHostWiring(unittest.TestCase):
         self.assertIn("ActiveRegionsEnabled() && !m_session->SimulationHostIntegrationEnabled()", publish)
         for entry in ("bool NetSessionApplyStep(", "bool NetworkedSessionDriver::StepAgreedTick("):
             step = function(network, entry)
-            self.assertIn("SetHostSimulationAnchors({&ctx->spawn_anchor, 1})", step)
+            self.assertIn("SetHostSimulationAnchors({})", step)
             self.assertLess(step.index("SetHostSimulationAnchors("),
                             step.index("PrepareSimulationCollisions("))
         # Every legacy external rigid step is excluded from the fixed-tick profile.
@@ -2186,7 +2211,7 @@ class SimulationHostWiring(unittest.TestCase):
                 (0, "SimulationHostIntegrationEnabled() ? SimulationAnchors()",
                  "SimulationHostIntegrationEnabled() ? camera_anchors"),
                 (2, "anchors[count++] = avatar.position;", "anchors[count++] = camera.position;"),
-                (3, "SetHostSimulationAnchors({&ctx->spawn_anchor, 1})",
+                (3, "SetHostSimulationAnchors({})",
                  "SetHostSimulationAnchors({&camera.position, 1})"),
                 (4, "benchmark_v4 && g_camera &&\n                                !gameSession->SimulationHostIntegrationEnabled()",
                  "benchmark_v4 && g_camera")):
@@ -2229,6 +2254,7 @@ class SimulationHostWiring(unittest.TestCase):
         native = self.read("test/common/GameSessionHeadlessWorld_test.cpp")
         for case in ("BoundaryWaterAndFreezeIgnoreCameraFramesAndRestore",
                      "HostBoundaryInputsShareAuthoritySequenceWithoutRenderCadence",
+                     "LocalAnchorPreflightPreservesSavedCheckpointUntilCountedTick",
                      "DefaultSimulationSmokeHasPositiveWetRegionSeamPairs",
                      "HostAnchorAdmissionRefusesInvalidInputsWithoutReplacement",
                      "HostCollisionRefusalPreservesTheTickAndRetriesTheSameInputs",

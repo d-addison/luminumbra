@@ -792,6 +792,14 @@ std::string SimulationIdentityValues::ComputeIdentityForRevision(std::uint32_t r
         integer(daylight_numerator, 32);
         integer(daylight_denominator, 32);
         integer(lunar_cycle_days, 32);
+        if (revision == kRegionalActivationAuthorityRulesRevision &&
+            enabled[static_cast<std::size_t>(SysKey::SimActiveRegions)]) {
+            // Distinguish enabled recordings made before elapsed consumers and
+            // fixed-tick water joined the shared activation revision. Off and
+            // historical inspection projections retain their exact bytes.
+            for (const char ch : std::string("regional-cadence:v1:"))
+                byte(static_cast<std::uint8_t>(static_cast<unsigned char>(ch)));
+        }
     }
     // Hex digits are emitted explicitly so even the result is independent of locale.
     constexpr char digits[] = "0123456789abcdef";

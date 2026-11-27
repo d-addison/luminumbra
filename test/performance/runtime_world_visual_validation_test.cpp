@@ -1146,7 +1146,7 @@ TEST(ClientBootPreparation, LoadedEntryPreservesWaterAtTickZero) {
     // loaded entry may regenerate clean chunks instead of adopting them; either way the
     // shared boot preparation must reproduce the same water state at tick zero.
     ASSERT_TRUE(original.SaveWorldStateTo(original.GetWorldSaveDir(), nullptr, true));
-    const auto before = original.GetWorldSystem()->debug_water_state_hash();
+    const auto before = original.ComputeChunkStateHash();
 
     world::GameSession loaded;
     loaded.SetJobSystem(&jobs);
@@ -1154,8 +1154,9 @@ TEST(ClientBootPreparation, LoadedEntryPreservesWaterAtTickZero) {
     ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId));
     loaded.GetWorldSystem()->debug_set_streaming_radius_cap(1);
     ASSERT_TRUE(loaded.PrepareInitialSimulation(0, 0));
-    EXPECT_EQ(loaded.GetWorldSystem()->debug_water_state_hash().hash, before.hash);
-    EXPECT_EQ(loaded.GetWorldSystem()->debug_water_state_hash().water_chunks, before.water_chunks);
+    // Regional authority includes parked canonical columns; residency can differ
+    // after reopening while the complete authoritative state stays identical.
+    EXPECT_EQ(loaded.ComputeChunkStateHash(), before);
     EXPECT_EQ(loaded.GetSimulationTickCount(), 0u);
     EXPECT_EQ(loaded.TickSimulation(loaded.GetSimulationClock().fixed_dt()), 1u);
 }
@@ -1169,6 +1170,9 @@ TEST(ClientBootPreparation, RadiusZeroSettlesStreamingAndWaterAtTickZero) {
     client.SetRootPath(root.root_string());
     ASSERT_TRUE(client.CreateWorld("Client", "424242", "default"));
     ASSERT_TRUE(client.LoadWorldState());
+    ASSERT_EQ(client.GetLastLoadedChunkCount(), 0u);
+    ASSERT_TRUE(client.GetWorldSystem()->durable_chunk_inventory().empty());
+    ASSERT_FALSE(client.RestoredWorldSnapshot());
     client.GetWorldSystem()->debug_set_streaming_radius_cap(1);
     ASSERT_TRUE(client.PrepareInitialSimulation(0, 0));
     auto* world_system = client.GetWorldSystem();
@@ -1179,12 +1183,51 @@ TEST(ClientBootPreparation, RadiusZeroSettlesStreamingAndWaterAtTickZero) {
     ASSERT_FALSE(chunks.empty());
     for (const auto& chunk : chunks) {
         ASSERT_TRUE(chunk);
-        EXPECT_TRUE(chunk->has_water_sim.load(std::memory_order_acquire));
+    }
+    // Regional water belongs to the nine canonical columns around the boot
+    // anchor, including parked columns. Stacked render layers do not own grids.
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const auto column = world_system->inspect_water_column({spawn.x + dx, 0, spawn.z + dz});
+            ASSERT_TRUE(column);
+            EXPECT_TRUE(column->has_water_sim.load(std::memory_order_acquire));
+            EXPECT_TRUE(column->has_complete_water_state());
+            EXPECT_TRUE(column->has_water_authority());
+        }
     }
     EXPECT_TRUE(std::any_of(chunks.begin(), chunks.end(), [&](const auto& chunk) {
         return chunk->get_coords().x != spawn.x || chunk->get_coords().z != spawn.z;
     }));
     EXPECT_EQ(client.GetSimulationTickCount(), 0u);
+}
+
+TEST(ClientBootPreparation, RegionalWaterParkingRefusalLeavesBootUncountedAndCanRetry) {
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    world::GameSession client;
+    client.SetActiveRegionsEnabled(true);
+    client.SetJobSystem(&jobs);
+    client.SetRootPath(root.root_string());
+    ASSERT_TRUE(client.CreateTransientWorld("Boot water refusal", "424242", "default"));
+    auto* world_system = client.GetWorldSystem();
+    world_system->debug_set_streaming_radius_cap(1);
+    const auto ledger = client.GetActiveRegionLedger().encode();
+    world_system->set_parked_bytes_limit(SHIELD_WorldSystem::kWaterColumnReservationBytes - 1);
+    world::GameSession::BootSettleStats stats;
+    EXPECT_FALSE(client.SettleInitialSimulation({}, stats));
+    EXPECT_EQ(stats.water_chunks, 0u);
+    EXPECT_EQ(stats.uninited, 9u);
+    EXPECT_EQ(client.GetSimulationTickCount(), 0u);
+    EXPECT_EQ(client.GetActiveRegionLedger().encode(), ledger);
+
+    world_system->set_parked_bytes_limit(9 * SHIELD_WorldSystem::kWaterColumnReservationBytes);
+    ASSERT_TRUE(client.SettleInitialSimulation({}, stats));
+    EXPECT_EQ(stats.water_chunks, 9u);
+    EXPECT_EQ(stats.uninited, 0u);
+    EXPECT_EQ(client.GetSimulationTickCount(), 0u);
+    EXPECT_EQ(client.GetActiveRegionLedger().encode(), ledger);
+    EXPECT_EQ(client.TickSimulation(client.GetSimulationClock().fixed_dt()), 1u);
 }
 
 TEST(ClientBootPreparation, SpawnFarTerrainBuildsAfterWaterSettle) {
