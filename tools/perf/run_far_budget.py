@@ -157,8 +157,10 @@ def build_index(matrix, results):
     if [cell['id'] for cell in results] != expected:
         raise ValueError('evidence index requires every world/profile/display/workload cell')
     complete = all(cell['state'] == 'complete' for cell in results)
+    state = 'fail' if any(cell['state'] == 'fail' for cell in results) else (
+        'complete' if complete else 'incomplete')
     return dict(schema=budget.INDEX_SCHEMA, matrix_sha256=budget.digest(budget.canonical(matrix)),
-                scope='measurement only; no acceptance receipt', state='complete' if complete else 'incomplete',
+                scope='measurement only; no acceptance receipt', state=state,
                 group_count=16, cells=results,
                 candidate_caps=dict(status='awaiting measured proposal and owner approval',
                     tiers=[dict(tier=tier, resident_bytes=None, builds=None, uploads=None, upload_bytes=None)

@@ -15,11 +15,15 @@ import copy
 import hashlib
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_active_regions as check
+from fixture_hash import fixture_entries
+from fixture_paths import open_regular
 from resolved_fixture import resolved_fixture_hash
 
 
@@ -64,6 +68,52 @@ def write_new(root, name, raw):
 
 def capture(args, runner=None):
     runner = subprocess.run if runner is None else runner
+    # Private copies live through every invocation and are removed on refusal as
+    # well as success. TemporaryDirectory also handles read-only files on Windows.
+    with tempfile.TemporaryDirectory(prefix="active-region-inputs-") as directory:
+        return capture_snapshot(args, runner, Path(directory))
+
+
+def snapshot_inputs(root, binary, dump_binary, directory):
+    """Freeze runtime inputs and executables without hard links or path rereads."""
+    runtime = directory / "runtime"
+    runtime.mkdir()
+    # fixture_entries caps the complete runtime scan at 4096 entries/depth 64.
+    # All copied bytes, including both binaries, share the 2 GiB admission cap;
+    # each copy uses at most 1 MiB of memory and a verified regular-file handle.
+    entries = list(fixture_entries(root))
+    copies = [(root, path, runtime / path.relative_to(root), False)
+              for path, _, status in entries if stat.S_ISREG(status.st_mode)]
+    for path, _, status in entries:
+        if stat.S_ISDIR(status.st_mode):
+            (runtime / path.relative_to(root)).mkdir()
+    selected = []
+    for name, source in (("server", binary), ("exporter", dump_binary)):
+        target = directory / name / source.name
+        target.parent.mkdir()
+        copies.append((source.parent, source, target, True))
+        selected.append(target)
+    remaining = check.MAX_TOTAL
+    for source_root, source, target, executable in copies:
+        with open_regular(source_root, source) as stream, target.open("xb") as output:
+            size = os.fstat(stream.fileno()).st_size
+            check.require(size <= remaining, "input snapshot byte budget exceeded")
+            copied = 0
+            while True:
+                block = stream.read(min(1024 * 1024, remaining + 1))
+                if not block:
+                    break
+                check.require(len(block) <= remaining, "input snapshot byte budget exceeded")
+                check.require(output.write(block) == len(block), "short input snapshot write")
+                remaining -= len(block)
+                copied += len(block)
+            check.require(copied == size, "input snapshot file size changed")
+            output.flush()
+        target.chmod(0o500 if executable else 0o400)
+    return runtime, *selected
+
+
+def capture_snapshot(args, runner, directory):
     repository = args.repository.resolve(strict=True)
     root = args.root.resolve(strict=True)
     outside(root, (repository,))
@@ -98,6 +148,10 @@ def capture(args, runner=None):
         raw = check.read(tour_path.parent, name, limit=min(check.MAX_FILE, check.MAX_TOTAL - input_bytes))
         input_bytes += len(raw)
         inputs[name] = raw
+    source_root, source_binary, source_dump_binary = root, binary, dump_binary
+    root, binary, dump_binary = snapshot_inputs(root, binary, dump_binary, directory)
+    check.require(identity == identities(repository, root, binary, dump_binary, args.preset, runner),
+                  "input snapshot identity mismatch")
     systems = check.read(root, "data/common/systems.json")
     preset = check.read(root, "worlds/atlas/presets/" + args.preset + ".json")
     evidence.mkdir(parents=True)  # Exclusive: existing, partial evidence is never reused.
@@ -184,7 +238,9 @@ def capture(args, runner=None):
             else:
                 register(cell[mode + "_artifact"])
         manifest["cells"].append(cell)
-    check.require(identity == identities(repository, root, binary, dump_binary, args.preset, runner),
+    check.require(identity == identities(repository, source_root, source_binary, source_dump_binary,
+                                         args.preset, runner)
+                  == identities(repository, root, binary, dump_binary, args.preset, runner),
                   "source, executable or content identity changed during capture")
     verdict = check.validate(evidence, manifest)
     # Manifest publication is last. Partial files remain diagnostic-only.
