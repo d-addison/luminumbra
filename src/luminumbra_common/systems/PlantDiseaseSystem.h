@@ -7,10 +7,10 @@
 //   1. (snapshot) collect every INFECTED plant's position + infectious strength.
 //   2. (expose)   for every plant, sum the infection pressure from infected
 //      neighbours within kDiseaseRadius, scaled by (1 - this plant's resistance).
-//      A Healthy plant whose infection crosses kInfectThreshold tips to Infected.
+//      A Healthy or Recovered plant at kInfectThreshold tips to Infected.
 //      An Infected plant accrues infected_ticks and, once past kSickTicks, resolves
 //      to Recovered (if resistant enough) or Dead (otherwise); recovery raises
-//      resistance (acquired immunity).
+//      resistance (acquired resistance).
 //
 // DETERMINISM (this changes sim state -> world_hash):
 //   * Each source contribution becomes an integer before summation. Legacy
@@ -64,7 +64,7 @@ inline constexpr float kDiseaseRadius = 4.0f;
 // plant at zero distance; it falls off linearly to zero at kDiseaseRadius.
 inline constexpr std::uint16_t kDiseaseBasePressure = 220u;
 
-// Infection (milli-units) at/above which a Healthy plant tips to Infected.
+// Infection (milli-units) at/above which a Healthy or Recovered plant tips to Infected.
 inline constexpr std::uint16_t kInfectThreshold = 500u;
 
 // An Infected plant resolves (recover-or-die) once it has been sick this long.
@@ -73,7 +73,7 @@ inline constexpr std::uint32_t kSickTicks = 90u; // ~3s @ 30Hz
 // At resolution, a plant with resistance at/above this RECOVERS; otherwise it DIES.
 inline constexpr std::uint16_t kRecoverResistance = 400u;
 
-// Recovery raises resistance by this much (acquired immunity), saturating at 1000.
+// Recovery raises resistance by this much, saturating at 1000.
 inline constexpr std::uint16_t kRecoveryResistanceGain = 250u;
 
 // While Infected and below resolution, infection naturally decays a little each
@@ -222,7 +222,8 @@ inline PlantDiseaseStats Run(entt::registry& reg,
             }
 
             if (h.infection >= kInfectThreshold &&
-                h.state == static_cast<std::uint8_t>(Comp::PlantDiseaseState::Healthy)) {
+                (h.state == static_cast<std::uint8_t>(Comp::PlantDiseaseState::Healthy) ||
+                 h.state == static_cast<std::uint8_t>(Comp::PlantDiseaseState::Recovered))) {
                 h.state = static_cast<std::uint8_t>(Comp::PlantDiseaseState::Infected);
                 h.infected_ticks = 0;
                 ++stats.new_infections;

@@ -33,8 +33,8 @@ parameter emits its `SysParam` id as u8, then a scalar type tag and little-endia
 After the registry slots, v4 appends these fixed-width little-endian values without
 padding: finite hydrology (u8, 0 or 1), rain scale (i32, modulo-2^32 representation), region
 work limit (u64), hold ticks (u32), reduced cadence shift (u8) and authority-rules
-revision (u32: 9 with active regions enabled, 8 otherwise). All six values are included even when their associated feature is disabled. No float conversion loses
-adjacent integer values. The enabled defaults append `0119000000ffffffffffffffff1e0000000109000000`.
+revision (u32: 10 in both region modes). All six values are included even when their associated feature is disabled. No float conversion loses
+adjacent integer values. The enabled defaults append `0119000000ffffffffffffffff1e000000010a000000`.
 The explicit historical revision-3 encoder starts with `system-config:v3:` and ends with
 `0119000000ffffffffffffffff1e00000001`, without an appended revision integer.
 Next comes ASCII `calendar-epoch:v1:`, followed by five little-endian u32 values:
@@ -53,12 +53,12 @@ and reproduction integers would lose adjacent values if converted to binary32. S
 zeros remain distinct. FNV-1a uses offset
 14695981039346656037 and prime 1099511628211, with unsigned 64-bit wraparound. The result
 is 16 lowercase hex digits emitted without locale formatting. Shipped defaults serialize
-to **359 bytes → `c1cfd4e42aa58f8d`** for revision 9 with active regions enabled.
+to **359 bytes → `a281d995a5f63702`** for revision 10 with active regions enabled.
 The final 20 bytes are ASCII `regional-cadence:v1:`, appended after the calendar
-only for enabled revision-9 configurations. This distinguishes the earlier enabled
+only for enabled configurations at revision 9 or later. This distinguishes the earlier enabled
 revision-9 profile (**339 bytes → `bf48b15682a969bd`**) before elapsed consumers
 and fixed-tick regional water were activated.
-The approved off profile retains revision 8 and **339 bytes → `bafe22eabc5fc385`**.
+The off profile uses revision 10 and **339 bytes → `6f0b1285671af053`**.
 The explicit legacy revision-3 encoder still yields **297 bytes → `60ab3c242d54ce89`**. The independent stdlib computation in
 `test/tools/test_system_config_identity.py` resolves JSON inputs through binary32 as
 SystemConfig does, applies effective fallback/clamping/count conversion, encodes with
@@ -94,11 +94,10 @@ still requires a boot contract supplying its stable IDs and cursor.
 ## Setter audit and pins
 
 Regional foliage pages, plant ownership and water continuation use the existing
-identity slots. Fixed-tick regional water remains behind the test-only authority
-profile; the active-region switch alone does not select it. This integration adds
-no configuration field, identity domain, authority revision or mutable-state hash
-binding. Persistence resource limits and autosave intervals remain outside the
-simulation identity.
+identity slots. Enabled active regions select fixed-tick regional water in production.
+These consumers add no configuration field or mutable-state hash binding;
+revision 10 changes the rules identity for the plant corrections described below.
+Persistence resource limits and autosave intervals remain outside the simulation identity.
 
 `GameSession` supplies the current finite-hydrology boolean, signed rain scale, all
 three live ledger `RegionSchedulerConfig` fields and its resolved calendar to the core encoder.
@@ -128,7 +127,7 @@ Deliberate exclusions from the setter audit:
   locate content, and required-client-asset lists validate client files; neither is a
   simulation rule value. Worldgen content is bound separately by the preset identity below.
 
-The current encoder selects authority-rules revision from the effective active-region gate so admission can distinguish
+The current encoder selects authority-rules revision 10 in both region modes so admission can distinguish
 compiled authority rules as well as configured values. It retains the resolved
 calendar that the admission identity already folds in. The shipping identity
 changed from `49f694fd70645bcc` to the revision-4 value `2f2a9405252345a8` when the revision
@@ -139,14 +138,19 @@ restored on the first SHIELD update) changed it to `bf3da613768a50cb`. Revision 
 (reproduction-born creatures die, decompose and leave the population) changes it again to
 `45664f7615d96904`. The shared issue #136/#138 activation revision is 9, named
 `kRegionalActivationAuthorityRulesRevision`; issue #138 reuses this value.
-Enabled configurations select it and the regional cadence suffix, producing
-`c1cfd4e42aa58f8d` for shipping defaults.
-Off configurations keep revision 8 and their exact existing identity bytes.
-Replay boot capture uses the same effective revision selector. Enabled revision-8
-peers and replays, and earlier enabled revision-9 identities without the cadence
-suffix, are refused before advancement; off revision-8 recordings remain
-compatible. The revision-4 through revision-7 identities are no longer admitted. No world-state, terrain, water, save-format or replay checkpoint
-encoding changes in this identity step.
+Revision 10 (issue #1331) preserves parents and identity cursors when farming
+refuses crop birth, completes senescence only after successful child creation,
+and lets recovered plants become infected again while retaining acquired resistance.
+Both legacy one-tick and elapsed consumers use these rules. Enabled configurations
+retain the regional cadence suffix and identify as `a281d995a5f63702`; off
+configurations identify as `6f0b1285671af053`.
+Replay boot capture uses the same effective revision selector. Earlier enabled
+identities, including revision-9 cadence identity `c1cfd4e42aa58f8d`, and off
+revision-8 identity `bafe22eabc5fc385` refuse peer and replay admission before
+advancement. Historical replay parsing remains available for inspection. Existing
+save readers retain their validation and resume admitted saves under current rules;
+no historical simulation lane or save converter is introduced. World-state,
+terrain, water, save-format and replay checkpoint encodings remain unchanged.
 
 The current vectors in `SystemConfig_test.cpp` cover the complete encoding
 (339 bytes off, 359 bytes enabled): the 297-byte registry/session prefix with the
@@ -169,7 +173,7 @@ revision-3 identity `60ab3c242d54ce89`, earlier authority identity
 Existing matching codec literals are fixtures, not a live admission fallback.
 Hello version and wire layout are unchanged.
 
-The current historical-defaults-off configuration has identity `a73bf062e167d55c`;
+The current historical-defaults-off configuration has identity `5a7f0aead43a85bf`;
 its explicit revision-3 identity remains `74f285c5fa387d66`. Newly created worlds
 record the current render calendar even when active regions are disabled, so the
 live identity continues to follow that marker.
@@ -417,7 +421,7 @@ Capturing shipping-default absolute hashes still requires native runs.
 
 ## Water scheduling and peer refusal
 
-Authority rules revision 8 retains the current configuration identity encoding and
+Authority rules revision 10 retains the current configuration identity encoding and
 its existing raw global water-scheduler cursor binding. Nonzero cursors contribute
 the existing water-cursor suffix to streamed world and water hashes; regional
 chunk captures also include the raw cursor in their established regional
