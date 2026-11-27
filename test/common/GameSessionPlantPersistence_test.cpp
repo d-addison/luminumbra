@@ -5,16 +5,22 @@
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/ecs/EntitySnapshot.h"
+#include "luminumbra_common/persistence/PlantPersistence.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <map>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -192,6 +198,168 @@ TEST(GameSessionHeadlessWorldTest,
                   ReadClockTestFile(fixture / entry.path().filename()));
     }
     EXPECT_EQ(files, 3u); // plant roster, dirty region and manifest; no clean region
+}
+
+std::string CadencePlantBytes(GameSession& session) {
+    return Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
+        luminumbra::foliage::BuildPlantEntitySnapshot(session.GetRegistry(), true));
+}
+
+void ExpectPendingCadencePersistenceUnchanged(GameSession& session,
+                                              const fs::path& save,
+                                              const fs::path& refused,
+                                              const std::array<fs::path, 6>& members,
+                                              const std::array<std::string, 6>& disk) {
+    const auto ledger = session.GetActiveRegionLedger().encode();
+    const auto field_bytes = session.GetFieldPages().serialize();
+    const auto plant_bytes = CadencePlantBytes(session);
+    const auto clock_bytes = session.GetWorldClock().canonical_bytes();
+    const auto revision = session.WorldRevision();
+    const auto remaining = session.GetFoliageReplayRemainingSteps();
+    const auto publications = session.GetFoliageRegistryPublications();
+    EXPECT_FALSE(session.SaveWorldState());
+    EXPECT_FALSE(session.SaveWorldStateTo(refused));
+    EXPECT_FALSE(fs::exists(refused));
+    EXPECT_FALSE(session.LoadWorldStateFrom(save));
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), ledger);
+    EXPECT_EQ(session.GetFieldPages().serialize(), field_bytes);
+    EXPECT_EQ(CadencePlantBytes(session), plant_bytes);
+    EXPECT_EQ(session.GetWorldClock().canonical_bytes(), clock_bytes);
+    EXPECT_EQ(session.WorldRevision(), revision);
+    EXPECT_EQ(session.GetFoliageReplayRemainingSteps(), remaining);
+    EXPECT_EQ(session.GetFoliageRegistryPublications(), publications);
+    EXPECT_FALSE(P::journal_pending(save));
+    for (std::size_t index = 0; index < members.size(); ++index)
+        EXPECT_EQ(ReadClockTestFile(members[index]), disk[index]);
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalCadencePendingReplayRefusesSaveThenReopens) {
+    namespace W = Luminumbra::world;
+    namespace C = Luminumbra::Components;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    // One plant and one sparse soil page; this owner is due at tick 34 modulo 64.
+    constexpr W::RegionKey owner{-64, -49};
+    ASSERT_EQ(W::ActiveRegionLedger::phase(owner, 6), 34u);
+    const W::WorldClock clock(1);
+    W::ActiveRegionLedger seed({std::numeric_limits<std::uint64_t>::max(), 10000, 6}, clock);
+    seed.pin(owner, true, clock);
+    std::uint64_t plant_id = 0;
+    ASSERT_TRUE(seed.allocate_persistent_id(plant_id));
+    auto& record =
+        const_cast<std::map<W::RegionKey, W::ActiveRegionRecord>&>(seed.records()).at(owner);
+    record.first_active = 0;
+    record.wake_pending = false;
+    record.state = W::RegionState::Reduced;
+    record.cadence_shift = 6;
+    record.cadence_phase = 34;
+    W::FieldPageState fields;
+    ASSERT_TRUE(fields.set_soil({owner.x * 512 + 8, owner.z * 512 + 8}, 0));
+    entt::registry plants;
+    const auto plant = ClockTestPlant(
+        plants, {static_cast<float>(owner.x * 512 + 8), 0, static_cast<float>(owner.z * 512 + 8)});
+    auto& growth = plants.get<C::PlantGrowthComponent>(plant);
+    growth.planted_tick = growth.last_tick = clock.tick();
+    plants.emplace<C::PlantRegionComponent>(plant, plant_id, owner.x, owner.z, clock.tick());
+    const auto plant_snapshot = luminumbra::foliage::BuildPlantEntitySnapshot(plants, true);
+    std::string plant_error;
+    ASSERT_TRUE(luminumbra::foliage::ValidatePlantEntitySnapshot(
+        plant_snapshot, seed, W::GroundObjectStore{}, plant_error))
+        << plant_error;
+    const auto input = root.path() / "cadence-input";
+    fs::create_directories(input);
+    {
+        P::WorldSaveService::SaveFactsScope facts(input);
+        P::SaveTransaction transaction(
+            input, clock.tick(), {}, &P::WorldSaveService::member_digest);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(transaction.begin(&errors));
+        nlohmann::json metadata = {{"container_version", P::WorldSaveService::kContainerVersion}};
+        clock.write_metadata(metadata);
+        ASSERT_TRUE(P::WorldSaveService::save_field_pages(fields, input, &errors));
+        ASSERT_TRUE(P::WorldSaveService::save_plant_entities(plant_snapshot, input, &errors));
+        ASSERT_TRUE(P::WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), seed, input, &errors));
+        ASSERT_TRUE(P::WorldSaveService::finalize_indexed_envelope(input, &errors));
+        ASSERT_TRUE(transaction.commit(&errors));
+    }
+    GameSession uninterrupted, reopened;
+    const auto configure = [&](GameSession& session) {
+        session.SetRootPath(root.root_string());
+        session.SetJobSystem(&jobs);
+        session.SetAetherStateEnabled(false);
+        session.SetWaterHighResEnabled(false);
+        session.SetWeatherRainEnabled(false);
+        session.SetWeatherEventsEnabled(false);
+        ASSERT_TRUE(session.CreateWorld("Cadence continuation", "1337", "default"));
+        session.SetReplicatedSimulationAnchors({});
+    };
+    ASSERT_NO_FATAL_FAILURE(configure(uninterrupted));
+    ASSERT_TRUE(uninterrupted.LoadWorldStateFrom(input)) << uninterrupted.GetWorldOpenError();
+    // Adopt the validated identity and allocator together, as on a production reopen.
+    ASSERT_EQ(CadencePlantBytes(uninterrupted),
+              Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(plant_snapshot));
+    ASSERT_EQ(uninterrupted.GetActiveRegionLedger().next_persistent_id(), plant_id + 1);
+    for (unsigned tick = 2; tick <= 31; ++tick) {
+        ASSERT_EQ(uninterrupted.TickSimulation(uninterrupted.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(uninterrupted.GetRegionSchedulerFault());
+    }
+    ASSERT_TRUE(uninterrupted.SaveWorldState());
+    const auto save = uninterrupted.GetWorldSaveDir();
+    ASSERT_NO_FATAL_FAILURE(configure(reopened));
+    ASSERT_TRUE(reopened.LoadWorldStateFrom(save)) << reopened.GetWorldOpenError();
+    const std::array members{P::WorldSaveService::active_regions_path(save),
+                             P::WorldSaveService::field_pages_path(save),
+                             P::WorldSaveService::plant_entities_path(save),
+                             P::WorldSaveService::plant_identities_path(save),
+                             save / "world_info.json",
+                             P::WorldSaveService::world_manifest_path(save)};
+    std::array<std::string, members.size()> disk;
+    for (std::size_t index = 0; index < members.size(); ++index)
+        disk[index] = ReadClockTestFile(members[index]);
+    const auto expect_same = [&] {
+        EXPECT_EQ(reopened.GetWorldClock().canonical_bytes(),
+                  uninterrupted.GetWorldClock().canonical_bytes());
+        EXPECT_EQ(reopened.GetActiveRegionLedger().canonical_bytes(),
+                  uninterrupted.GetActiveRegionLedger().canonical_bytes());
+        EXPECT_EQ(reopened.GetFieldPages().serialize(), uninterrupted.GetFieldPages().serialize());
+        EXPECT_EQ(CadencePlantBytes(reopened), CadencePlantBytes(uninterrupted));
+    };
+    for (unsigned tick = 32; tick <= 34; ++tick) {
+        for (auto* session : {&uninterrupted, &reopened}) {
+            ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
+            ASSERT_FALSE(session->GetRegionSchedulerFault());
+            ExpectPendingCadencePersistenceUnchanged(
+                *session, save, root.path() / "pending-cadence-save", members, disk);
+        }
+        expect_same();
+    }
+    bool saw_stall = false;
+    // The 35-step page replay is bounded; allow eight host opportunities.
+    for (unsigned attempt = 0; attempt < 8 && uninterrupted.GetWorldClock().tick() < 35;
+         ++attempt) {
+        const auto completed =
+            uninterrupted.TickSimulation(uninterrupted.GetSimulationClock().fixed_dt());
+        EXPECT_EQ(reopened.TickSimulation(reopened.GetSimulationClock().fixed_dt()), completed);
+        ASSERT_FALSE(uninterrupted.GetRegionSchedulerFault());
+        ASSERT_FALSE(reopened.GetRegionSchedulerFault());
+        saw_stall = saw_stall || completed == 0;
+        expect_same();
+    }
+    EXPECT_TRUE(saw_stall);
+    ASSERT_EQ(uninterrupted.GetWorldClock().tick(), 35u);
+    EXPECT_EQ(uninterrupted.GetFoliageReplayRemainingSteps(), 0u);
+    EXPECT_EQ(uninterrupted.GetFoliageRegistryPublications(), 1u);
+    EXPECT_EQ(reopened.GetFoliageRegistryPublications(), 1u);
+    ASSERT_TRUE(uninterrupted.SaveWorldState());
+    ASSERT_TRUE(reopened.LoadWorldStateFrom(save)) << reopened.GetWorldOpenError();
+    EXPECT_EQ(reopened.GetActiveRegionLedger().encode(),
+              uninterrupted.GetActiveRegionLedger().encode());
+    expect_same();
+    for (auto* session : {&uninterrupted, &reopened})
+        ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
+    expect_same();
 }
 
 TEST(GameSessionHeadlessWorldTest, EffectiveIdentityUsesDefaultsAndCurrentSetters) {
