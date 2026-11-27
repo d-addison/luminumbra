@@ -211,13 +211,22 @@ CollectPollinationParticipants(entt::registry& reg,
 
 namespace pollination_detail {
 
+struct Cross {
+    entt::entity receiver;
+    std::uint64_t receiver_id;
+    std::uint64_t donor_id;
+    Comp::PlantGenomeComponent receiver_genome;
+    Comp::PlantGenomeComponent donor_genome;
+};
+
 inline PollinationStats Run(entt::registry& reg,
                             std::span<const entt::entity> ents,
                             std::uint64_t tick,
                             const ::Luminumbra::Vec2& wind_xz,
                             std::uint64_t world_seed,
                             float mutation_frac,
-                            const ::Luminumbra::world::RegionConsumerGate& gate) {
+                            const ::Luminumbra::world::RegionConsumerGate& gate,
+                            std::vector<Cross>& crosses) {
     PollinationStats stats;
     auto view = reg.view<Comp::PollinationTag,
                          Comp::PlantGenomeComponent,
@@ -263,14 +272,7 @@ inline PollinationStats Run(entt::registry& reg,
 
     //  (read): for each receiver pick its best donor (smallest wind-biased
     // effective distance within reach; ties -> lowest donor id). Snapshot the cross.
-    struct Cross {
-        entt::entity receiver;
-        std::uint64_t receiver_id;
-        std::uint64_t donor_id;
-        Comp::PlantGenomeComponent receiver_genome;
-        Comp::PlantGenomeComponent donor_genome;
-    };
-    std::vector<Cross> crosses;
+    crosses.clear();
     crosses.reserve(ents.size()); // At most one cross per admitted receiver.
 
     const auto participant_id = [&reg, &gate](entt::entity entity) {
@@ -377,8 +379,9 @@ RunPollinationOnTick(entt::registry& reg,
                      float mutation_frac = kPollinationMutationFrac,
                      const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
     const auto participants = CollectPollinationParticipants(reg, gate);
+    std::vector<pollination_detail::Cross> crosses;
     return pollination_detail::Run(
-        reg, participants, tick, wind_xz, world_seed, mutation_frac, gate);
+        reg, participants, tick, wind_xz, world_seed, mutation_frac, gate, crosses);
 }
 
 // Sample wind/genomes/stages at due time. At each chronological virtual tick both
@@ -395,9 +398,10 @@ RunPollinationRegional(entt::registry& reg,
     const auto participants = CollectPollinationParticipants(reg, gate);
     plant_elapsed_detail::RegionalPlantTicks schedule(reg, participants, gate, due_tick);
     PollinationStats total;
+    std::vector<pollination_detail::Cross> crosses;
     schedule.Run([&](std::span<const entt::entity> active, std::uint64_t tick, std::uint32_t) {
-        const auto stats =
-            pollination_detail::Run(reg, active, tick, wind_xz, world_seed, mutation_frac, gate);
+        const auto stats = pollination_detail::Run(
+            reg, active, tick, wind_xz, world_seed, mutation_frac, gate, crosses);
         plant_elapsed_detail::AddCount(total.considered, stats.considered);
         plant_elapsed_detail::AddCount(total.donors, stats.donors);
         plant_elapsed_detail::AddCount(total.crossed, stats.crossed);

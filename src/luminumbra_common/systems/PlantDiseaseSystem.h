@@ -123,8 +123,14 @@ inline std::vector<entt::entity> Collect(entt::registry& reg,
     return ents;
 }
 
-inline PlantDiseaseStats
-Run(entt::registry& reg, std::span<const entt::entity> ents, bool saturate) {
+struct Source {
+    float x, y, z;
+};
+
+inline PlantDiseaseStats Run(entt::registry& reg,
+                             std::span<const entt::entity> ents,
+                             bool saturate,
+                             std::vector<Source>& sources) {
     PlantDiseaseStats stats;
     auto view =
         reg.view<Comp::PlantTag, Comp::PlantHealthComponent, const Comp::TransformComponent>();
@@ -133,10 +139,8 @@ Run(entt::registry& reg, std::span<const entt::entity> ents, bool saturate) {
 
     //  (snapshot): record every INFECTED plant's position. Reading the
     // infected set BEFORE any mutation makes spread order-independent within a tick.
-    struct Source {
-        float x, y, z;
-    };
-    std::vector<Source> sources;
+    // At most one source per admitted plant; regional steps retain this capacity.
+    sources.clear();
     sources.reserve(ents.size());
     for (auto e : ents) {
         const auto& h = view.get<Comp::PlantHealthComponent>(e);
@@ -246,7 +250,8 @@ RunPlantDiseaseOnTick(entt::registry& reg,
     (void)tick;
     (void)world_seed;
     const auto participants = disease_detail::Collect<StableIdentity>(reg, gate);
-    return disease_detail::Run(reg, participants, false);
+    std::vector<disease_detail::Source> sources;
+    return disease_detail::Run(reg, participants, false, sources);
 }
 
 // Each substep snapshots only sources whose windows overlap that tick. Frozen,
@@ -261,8 +266,9 @@ RunPlantDiseaseRegional(entt::registry& reg,
     const auto participants = disease_detail::Collect<StableIdentity>(reg, gate);
     plant_elapsed_detail::RegionalPlantTicks schedule(reg, participants, gate, due_tick);
     PlantDiseaseStats total;
+    std::vector<disease_detail::Source> sources;
     schedule.Run([&](std::span<const entt::entity> active, std::uint64_t, std::uint32_t) {
-        const auto stats = disease_detail::Run(reg, active, true);
+        const auto stats = disease_detail::Run(reg, active, true, sources);
         plant_elapsed_detail::AddCount(total.considered, stats.considered);
         plant_elapsed_detail::AddCount(total.infected, stats.infected);
         plant_elapsed_detail::AddCount(total.new_infections, stats.new_infections);

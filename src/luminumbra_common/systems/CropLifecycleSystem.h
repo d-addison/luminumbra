@@ -101,26 +101,7 @@ inline std::vector<entt::entity> Collect(entt::registry& reg,
     return ents;
 }
 
-// An installed allocator supplies a shared persistent ID or refuses before parent
-// mutation. remaining == 0 selects the exact legacy one-tick behaviour.
-template<typename IdentityAllocator>
-inline CropLifecycleStats RunCropLifecycle(entt::registry& reg,
-                                           std::span<const entt::entity> ents,
-                                           std::uint64_t tick,
-                                           std::uint64_t world_seed,
-                                           const ::Luminumbra::world::RegionConsumerGate& gate,
-                                           const IdentityAllocator& allocate_identity,
-                                           ::Luminumbra::world::ActiveRegionLedger* allocator,
-                                           std::uint32_t remaining = 0) {
-    namespace Comp = ::Luminumbra::Components;
-    namespace dm = ::Luminumbra::DeterministicMath;
-    CropLifecycleStats stats;
-    auto view = reg.view<Comp::CropLifecycleComponent,
-                         Comp::PlantGrowthComponent,
-                         const Comp::PlantGenomeComponent,
-                         const Comp::TransformComponent>();
-    const std::uint8_t kFruiting = static_cast<std::uint8_t>(Comp::PlantStage::Fruiting);
-
+struct Scratch {
     struct Birth {
         entt::entity parent;
         std::uint32_t ripe_ticks;
@@ -135,8 +116,35 @@ inline CropLifecycleStats RunCropLifecycle(entt::registry& reg,
     };
     std::vector<Birth> births;
     std::vector<entt::entity> deaths;
-    // Each admitted parent contributes at most one birth and one death. Candidate
-    // publication needs no vector growth after allocating an offspring identity.
+};
+
+// An installed allocator supplies a shared persistent ID or refuses before parent
+// mutation. remaining == 0 selects the exact legacy one-tick behaviour.
+template<typename IdentityAllocator>
+inline CropLifecycleStats RunCropLifecycle(entt::registry& reg,
+                                           std::span<const entt::entity> ents,
+                                           std::uint64_t tick,
+                                           std::uint64_t world_seed,
+                                           const ::Luminumbra::world::RegionConsumerGate& gate,
+                                           const IdentityAllocator& allocate_identity,
+                                           ::Luminumbra::world::ActiveRegionLedger* allocator,
+                                           Scratch& scratch,
+                                           std::uint32_t remaining = 0) {
+    namespace Comp = ::Luminumbra::Components;
+    namespace dm = ::Luminumbra::DeterministicMath;
+    CropLifecycleStats stats;
+    auto view = reg.view<Comp::CropLifecycleComponent,
+                         Comp::PlantGrowthComponent,
+                         const Comp::PlantGenomeComponent,
+                         const Comp::TransformComponent>();
+    const std::uint8_t kFruiting = static_cast<std::uint8_t>(Comp::PlantStage::Fruiting);
+
+    auto& births = scratch.births;
+    auto& deaths = scratch.deaths;
+    births.clear();
+    deaths.clear();
+    // At most one birth and death per admitted parent. Regional callers reuse
+    // these capacities across all 65,536 bounded substeps.
     if (allocator || remaining != 0) {
         births.reserve(ents.size());
         deaths.reserve(ents.size());
@@ -239,7 +247,7 @@ inline CropLifecycleStats RunCropLifecycle(entt::registry& reg,
     }
 
     // Apply AFTER the read pass (no view invalidation mid-iteration).
-    for (const Birth& b : births) {
+    for (const auto& b : births) {
         // Candidate births allocate through the shared factory, in parent identity order;
         // each parent has one child (ordinal zero).
         // A refused birth leaves that parent's lifecycle, growth and grazing untouched.
@@ -288,8 +296,9 @@ RunCropLifecycleOnTick(entt::registry& reg,
                        const ::Luminumbra::world::RegionConsumerGate& gate = {},
                        const IdentityAllocator& allocate_identity = {}) {
     const auto participants = crop_detail::Collect(reg, gate, nullptr);
+    crop_detail::Scratch scratch;
     return crop_detail::RunCropLifecycle(
-        reg, participants, tick, world_seed, gate, allocate_identity, nullptr);
+        reg, participants, tick, world_seed, gate, allocate_identity, nullptr, scratch);
 }
 
 // Dormant candidate lane, in both regional modes. Detached callers use the stage's
@@ -301,8 +310,15 @@ RunCropLifecycleOnTick(entt::registry& reg,
                        const ::Luminumbra::world::RegionConsumerGate& gate,
                        ::Luminumbra::world::ActiveRegionLedger& allocator) {
     const auto participants = crop_detail::Collect(reg, gate, &allocator);
-    return crop_detail::RunCropLifecycle(
-        reg, participants, tick, world_seed, gate, LegacyPlantIdentityAllocator{}, &allocator);
+    crop_detail::Scratch scratch;
+    return crop_detail::RunCropLifecycle(reg,
+                                         participants,
+                                         tick,
+                                         world_seed,
+                                         gate,
+                                         LegacyPlantIdentityAllocator{},
+                                         &allocator,
+                                         scratch);
 }
 
 namespace crop_detail {
@@ -317,15 +333,17 @@ inline CropLifecycleStats RunRegional(entt::registry& reg,
     const auto participants = Collect(reg, gate, allocator);
     plant_elapsed_detail::RegionalPlantTicks schedule(reg, participants, gate, due_tick);
     CropLifecycleStats total;
-    schedule.Run(
-        [&](std::span<const entt::entity> active, std::uint64_t tick, std::uint32_t remaining) {
-            const auto stats = RunCropLifecycle(
-                reg, active, tick, world_seed, gate, allocate_identity, allocator, remaining);
-            plant_elapsed_detail::AddCount(total.ripening, stats.ripening);
-            plant_elapsed_detail::AddCount(total.reseeded, stats.reseeded);
-            plant_elapsed_detail::AddCount(total.reset, stats.reset);
-            plant_elapsed_detail::AddCount(total.died, stats.died);
-        });
+    Scratch scratch;
+    schedule.Run([&](std::span<const entt::entity> active,
+                     std::uint64_t tick,
+                     std::uint32_t remaining) {
+        const auto stats = RunCropLifecycle(
+            reg, active, tick, world_seed, gate, allocate_identity, allocator, scratch, remaining);
+        plant_elapsed_detail::AddCount(total.ripening, stats.ripening);
+        plant_elapsed_detail::AddCount(total.reseeded, stats.reseeded);
+        plant_elapsed_detail::AddCount(total.reset, stats.reset);
+        plant_elapsed_detail::AddCount(total.died, stats.died);
+    });
     return total;
 }
 

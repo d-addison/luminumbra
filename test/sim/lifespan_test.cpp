@@ -231,4 +231,60 @@ TEST(Lifespan, RegionalElapsedNewbornAndReusedHandleHaveOnlyCurrentTick) {
     EXPECT_EQ(RunLifespanOnTick<true>(empty).aged, 0);
 }
 
+TEST(Lifespan, RegionalOversizedWindowRefusesWholeRosterBeforeMutation) {
+    namespace W = ::Luminumbra::world;
+    // Bare mortal, uncaptured creature, and captured creature owner windows.
+    for (const int mode : {0, 1, 2}) {
+        const bool capture = mode == 2;
+        for (const bool invalid_dead : {false, true}) {
+            for (const auto ticks : {65537u, 0xFFFFFFFFu}) {
+                SCOPED_TRACE(mode);
+                SCOPED_TRACE(invalid_dead);
+                SCOPED_TRACE(ticks);
+                entt::registry registry;
+                const auto valid = spawnMortalCreature(registry, 1, 1.0f);
+                const auto invalid = spawnMortalCreature(registry, 5, 1.0f);
+                const auto plant = spawnMortal(registry, 5, 2);
+                registry.emplace<Comp::PlantRegionComponent>(valid).owner_x = 0;
+                registry.emplace<Comp::PlantRegionComponent>(invalid).owner_x = mode == 0 ? 0 : 1;
+                registry.emplace<Comp::PlantRegionComponent>(plant).owner_x = mode == 0 ? 1 : 0;
+                registry.get<Comp::MortalComponent>(mode == 0 ? plant : invalid).dead =
+                    invalid_dead ? 1 : 0;
+                const std::array<W::RegionKey, 2> due{{{0, 0}, {1, 0}}};
+                const std::map<W::RegionKey, std::uint32_t> windows{{{0, 0}, 1}, {{1, 0}, ticks}};
+                const W::RegionConsumerGate gate(registry, due, W::RegionElapsedTicks(windows));
+                luminumbra::ai::CreatureTickAdmission admission;
+                admission.Capture(registry, gate);
+                EXPECT_THROW(
+                    RunLifespanOnTick<true>(registry, ticks, gate, capture ? &admission : nullptr),
+                    std::invalid_argument);
+                EXPECT_EQ(registry.get<Comp::MortalComponent>(valid).age_ticks, 0u);
+                EXPECT_EQ(registry.get<Comp::MortalComponent>(valid).dead, 0u);
+                EXPECT_FALSE(registry.get<Comp::CreatureComponent>(valid).eaten);
+                EXPECT_EQ(registry.get<Comp::MortalComponent>(invalid).age_ticks, 0u);
+                EXPECT_EQ(registry.get<Comp::MortalComponent>(invalid).dead,
+                          mode != 0 && invalid_dead ? 1u : 0u);
+                EXPECT_FALSE(registry.get<Comp::CreatureComponent>(invalid).eaten);
+                EXPECT_EQ(registry.get<Comp::MortalComponent>(plant).age_ticks, 2u);
+                EXPECT_EQ(registry.get<Comp::MortalComponent>(plant).dead,
+                          mode == 0 && invalid_dead ? 1u : 0u);
+                // The legacy entry still ignores observational elapsed values.
+                EXPECT_EQ(RunLifespanOnTick(registry, ticks, gate).aged, invalid_dead ? 2 : 3);
+            }
+        }
+    }
+}
+
+TEST(Lifespan, RegionalDeniedOversizedWindowIsIgnored) {
+    namespace W = ::Luminumbra::world;
+    entt::registry registry;
+    const auto denied = spawnMortal(registry, 5);
+    registry.emplace<Comp::PlantRegionComponent>(denied).owner_x = 1;
+    const std::array<W::RegionKey, 1> due{{{0, 0}}};
+    const std::map<W::RegionKey, std::uint32_t> windows{{{1, 0}, 0xFFFFFFFFu}};
+    const W::RegionConsumerGate gate(registry, due, W::RegionElapsedTicks(windows));
+    EXPECT_EQ(RunLifespanOnTick<true>(registry, 1, gate).aged, 0);
+    EXPECT_EQ(registry.get<Comp::MortalComponent>(denied).age_ticks, 0u);
+}
+
 } // namespace
