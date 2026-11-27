@@ -290,7 +290,10 @@ public:
     // Owner-thread acquisition at a simulation boundary. Both pointers own their
     // objects; pass them together with epoch to retained session capture.
     FarCaptureBinding AcquireFarWorldCaptureBinding() const;
-    void PumpFarWorldAuthorityCapture();
+    // Boundary-only mode refreshes saved authority and fences worker publication;
+    // an attached render controller then exclusively owns incremental capture.
+    // False means reads remain fenced by an enclosing save or paused owner.
+    bool PumpFarWorldAuthorityCapture(bool prepare_only = false);
     void FenceFarWorldAuthorityReads(bool paused);
 
     // Save current persistent state and metadata, including captured spawn changes.
@@ -348,6 +351,10 @@ public:
     bool LoadWorldStateFrom(const std::filesystem::path& save_dir);
     std::size_t GetLastLoadedChunkCount() const {
         return m_lastLoadedChunkCount;
+    }
+    // Snapshot admission is independent of initial resident-chunk retention.
+    bool RestoredWorldSnapshot() const {
+        return m_restoredWorldSnapshot;
     }
     std::filesystem::path GetWorldSaveDir() const;
     std::vector<IVec3> TakeInitialChunkLoadList();
@@ -978,6 +985,7 @@ private:
     [[nodiscard]] std::map<RegionKey, std::uint64_t> AdvanceRegionalWeather(FieldPageState& fields,
                                                                             std::uint64_t tick);
     void StepRegionalWeather(FieldPageState* fields, std::uint64_t tick);
+    void StageProceduralStorms(FieldPageState& fields, std::uint64_t tick);
     // Query-only view of this tick's candidate, cleared after publication or on fault recovery.
     const FieldPageState* m_regionalFieldView = nullptr;
     std::size_t m_regionalFieldActivationVisits = 0;
@@ -1056,6 +1064,7 @@ private:
     // diagnostics alone never change this; only coherent adoption enables it.
     bool m_worldUsable = false;
     std::size_t m_lastLoadedChunkCount = 0;
+    bool m_restoredWorldSnapshot = false;
     std::optional<std::vector<IVec3>> m_preparedInitialChunks;
     std::vector<std::filesystem::path> m_requiredClientAssets;
 

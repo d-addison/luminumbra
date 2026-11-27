@@ -499,7 +499,7 @@ class RegionAuthorityWiring(unittest.TestCase):
     def test_session_water_regressions_are_reachable_and_registered(self):
         native = (ROOT / "test/common/WaterSeedInputs_test.cpp").read_text(encoding="utf-8")
         for case in ("SessionRegionalParticipantsIgnoreCameraStreamingAndWorkerReadiness",
-                     "DefaultAuthorityProfileKeepsLegacyWaterWithActiveRegionsOn",
+                     "ExplicitLegacyAuthorityProfileKeepsLegacyWaterWithActiveRegionsOn",
                      "RegionalPressureDefersIdenticallyWithOppositeRendererResidency",
                      "RegionalWaterRewindMatchesUninterruptedSavedTimeline",
                      "RegionalSimulationAnchorsPreferReplicatedIncludingEmpty",
