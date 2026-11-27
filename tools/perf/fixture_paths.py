@@ -213,13 +213,14 @@ def _windows_final_path(descriptor: int) -> Path:
 
 
 @contextmanager
-def open_regular(root: Path, path: Path):
+def open_regular(root: Path, path: Path, *, limit: int | None = None):
     """Read only a contained regular descriptor, never a checked pathname again.
 
     Contained links are resolved before opening. POSIX anchors the canonical
     path to directory descriptors and refuses replacement links at every step.
     Windows verifies the opened handle's long path, including ancestor swaps.
     Both branches compare file identity before permitting any bytes to be read.
+    Optional byte admission uses the owning descriptor before wrapping it.
     """
     checked = contain_path(root, path)
     root = root.resolve()
@@ -243,6 +244,8 @@ def open_regular(root: Path, path: Path):
             raise ValueError(f"opened fixture reference changed target: {path}")
         if (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
             raise ValueError(f"opened fixture reference changed target: {path}")
+        if limit is not None and os.fstat(descriptor).st_size > limit:
+            raise ValueError(f"oversized fixture file: {path.name}")
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
             yield stream
     finally:
@@ -251,9 +254,7 @@ def open_regular(root: Path, path: Path):
 
 def read_bytes(root: Path, path: Path, *, limit: int | None = None) -> bytes:
     """Read through the verified descriptor, enforcing optional size bounds."""
-    with open_regular(root, path) as stream:
-        if limit is not None and os.fstat(stream.fileno()).st_size > limit:
-            raise ValueError(f"oversized fixture file: {path.name}")
+    with open_regular(root, path, limit=limit) as stream:
         data = stream.read() if limit is None else stream.read(limit + 1)
         if limit is not None and len(data) > limit:
             raise ValueError(f"oversized fixture file: {path.name}")

@@ -12,6 +12,7 @@ import subprocess
 import struct
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -27,6 +28,32 @@ EFFECTIVE = {"active_regions": True, "plant_growth": True, "future_gate": True,
 
 def encoded(value):
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def elf(*, tags=(), dependency=None, wide=True, endian="<"):
+    """Minimal ELF metadata for loader checks; never executed by these tests."""
+    header_format = endian + ("HHIQQQIHHHHHH" if wide else "HHIIIIIHHHHHH")
+    ph_format = endian + ("IIQQQQQQ" if wide else "IIIIIIII")
+    dyn_format = endian + ("qQ" if wide else "iI")
+    header_size = 16 + struct.calcsize(header_format)
+    ph_size = struct.calcsize(ph_format)
+    start = header_size + 2 * ph_size
+    strings = (dependency + b"\0") if dependency is not None else b""
+    dynamic_tags = list(tags)
+    if dependency is not None:
+        dynamic_tags += [(1, 0), (5, 4096 + start), (10, len(strings))]
+    dynamic = b"".join(struct.pack(dyn_format, *tag) for tag in dynamic_tags + [(0, 0)])
+    size = start + len(strings) + len(dynamic)
+    ident = b"\x7fELF" + bytes([2 if wide else 1, 1 if endian == "<" else 2, 1]) + bytes(9)
+    header = struct.pack(header_format, 2, 62 if wide else 3, 1, 0, header_size,
+                         0, 0, header_size, ph_size, 2, 0, 0, 0)
+    if wide:
+        load = (1, 4, 0, 4096, 0, size, size, 1)
+        table = (2, 4, start + len(strings), 0, 0, len(dynamic), len(dynamic), 1)
+    else:
+        load = (1, 0, 4096, 0, size, size, 4, 1)
+        table = (2, start + len(strings), 0, 0, len(dynamic), len(dynamic), 4, 1)
+    return ident + header + struct.pack(ph_format, *load) + struct.pack(ph_format, *table) + strings + dynamic
 
 
 def trace(ticks=2):
@@ -143,8 +170,8 @@ def fixture(base):
     for preset in ("default", "mountains", "archipelago"):
         (root / "worlds/atlas/presets" / (preset + ".json")).write_bytes(b"{}\n")
     binary, dump_binary = base / "server", base / "exporter"
-    binary.write_bytes(b"synthetic server")
-    dump_binary.write_bytes(b"synthetic exporter")
+    binary.write_bytes(elf())
+    dump_binary.write_bytes(elf())
     ledger = b"synthetic ledger"
     dump = {"schema": "luminumbra.active_regions_dump.v1", "source_version": 3,
             "source_bytes": len(ledger), "tick": 2, "header_tick": 2,
@@ -192,6 +219,153 @@ def run_capture(args, runner):
 
 
 class ActiveRegionCaptureContract(unittest.TestCase):
+    def test_source_identities_refuse_oversized_content_before_capture(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args, runner = fixture(Path(temp))
+            (args.root / "data/common/large.bin").write_bytes(b"x" * 257)
+            with mock.patch("fixture_hash.MAX_FIXTURE_FILE_BYTES", 256, create=True), \
+                    self.assertRaisesRegex(ValueError, "oversized fixture file"):
+                capture.capture(args, runner)
+            self.assertFalse(args.evidence_dir.exists())
+            self.assertFalse(any(argv[0] != "git" for argv, _ in runner.calls))
+
+    def test_each_invocation_isolates_inherited_loader_environment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args, runner = fixture(Path(temp))
+            inherited = {"LD_LIBRARY_PATH": "/inherited/sdk", "LD_PRELOAD": "inherited.so",
+                         "LD_AUDIT": "audit.so", "DYLD_LIBRARY_PATH": "/inherited/mac",
+                         "DYLD_INSERT_LIBRARIES": "inherited.dylib", "DYLD_FRAMEWORK_PATH": "/frameworks"}
+            with mock.patch.dict(os.environ, inherited):
+                before = dict(os.environ)
+                self.assertTrue(run_capture(args, runner)["passed"])
+                self.assertEqual(dict(os.environ), before)
+            native = [(argv, kw) for argv, kw in runner.calls if argv[0] != "git"]
+            self.assertEqual(len(native), 10)
+            for argv, kwargs in native:
+                env = kwargs["env"]
+                if os.name == "nt":
+                    self.assertEqual({key: env[key] for key in inherited}, inherited)
+                else:
+                    for key in inherited.keys() - {"LD_LIBRARY_PATH"}:
+                        self.assertNotIn(key, env)
+                    if sys.platform.startswith("linux"):
+                        self.assertEqual(env["LD_LIBRARY_PATH"], str(Path(argv[0]).parent))
+                    else:
+                        self.assertNotIn("LD_LIBRARY_PATH", env)
+
+    def test_loader_platform_and_directory_refusals(self):
+        with tempfile.TemporaryDirectory() as temp:
+            binary = Path(temp) / "server"
+            binary.write_bytes(elf())
+            (binary.parent / "library.so").write_bytes(elf())
+            windows = types.SimpleNamespace(**(vars(os) | {"name": "nt"}))
+            with mock.patch.object(capture, "os", windows):
+                self.assertEqual(capture.loader_environment(binary), {})
+            posix = types.SimpleNamespace(**(vars(os) | {"name": "posix"}))
+            with mock.patch.object(capture, "os", posix):
+                for platform in ("darwin", "freebsd"):
+                    with self.subTest(platform=platform), mock.patch.object(capture.sys, "platform", platform):
+                        with self.assertRaisesRegex(ValueError, "cannot isolate staged libraries"):
+                            capture.loader_environment(binary)
+                with mock.patch.object(capture.sys, "platform", "linux"):
+                    for delimiter in (":", ";", "$"):
+                        unsafe = binary.parent / ("unsafe" + delimiter) / binary.name
+                        with self.subTest(delimiter=delimiter), \
+                                self.assertRaisesRegex(ValueError, "unsafe staged library directory"):
+                            capture.loader_environment(unsafe)
+                    (binary.parent / "library.so").write_bytes(b"unknown library format")
+                    with self.assertRaisesRegex(ValueError, "unsupported executable/library format"):
+                        capture.loader_environment(binary)
+                    alias = binary.parent / "library.so.1"
+                    shared = elf(dependency=b"library.so.1", tags=[(14, 0)])
+                    (binary.parent / "library.so").write_bytes(shared)
+                    with self.assertRaisesRegex(ValueError, "SONAME missing from staged set"):
+                        capture.loader_environment(binary)
+                    alias.write_bytes(shared)
+                    self.assertEqual(capture.loader_environment(binary), {"LD_LIBRARY_PATH": str(binary.parent)})
+                    alias.unlink()
+                (binary.parent / "library.so").unlink()
+                with mock.patch.object(capture.sys, "platform", "darwin"):
+                    self.assertEqual(capture.loader_environment(binary), {})
+
+    def test_linux_loader_checks_both_executables_and_libraries_before_publication(self):
+        posix = types.SimpleNamespace(**(vars(os) | {"name": "posix"}))
+        for selected in ("binary", "dump_binary", "library"):
+            with self.subTest(selected=selected), tempfile.TemporaryDirectory() as temp:
+                args, runner = fixture(Path(temp))
+                source = args.binary.parent / "libnetwork.so" if selected == "library" else getattr(args, selected)
+                source.write_bytes(elf(tags=[(15, 0)]))
+                tour = check.parse(args.tour.read_bytes())
+                with mock.patch.object(capture, "resolved_fixture_hash", return_value="b" * 64):
+                    identity = capture.identities(args.repository, args.root, args.binary, args.dump_binary,
+                                                  "default", runner)
+                tour["identity"] = identity
+                args.tour.write_bytes(encoded(tour))
+                with mock.patch.object(capture, "os", posix), \
+                        mock.patch.object(capture.sys, "platform", "linux"), \
+                        self.assertRaisesRegex(ValueError, "cannot isolate Linux dependencies"):
+                    run_capture(args, runner)
+                self.assertFalse(args.evidence_dir.exists())
+                self.assertFalse(any(argv[0] != "git" for argv, _ in runner.calls))
+
+    def test_linux_loader_metadata_and_import_refusals(self):
+        with tempfile.TemporaryDirectory() as temp:
+            binary = Path(temp) / "server"
+            for wide in (False, True):
+                for endian in ("<", ">"):
+                    for dependency in (None, b"libnetwork.so"):
+                        binary.write_bytes(elf(wide=wide, endian=endian, dependency=dependency,
+                                               tags=[(29, 0)]))  # RUNPATH follows LD_LIBRARY_PATH.
+                        capture.check_linux_loader(binary)
+            for tag in (15, 0x6FFFFEFB, 0x6FFFFEFC, 0x7FFFFFFD, 0x7FFFFFFF):
+                binary.write_bytes(elf(tags=[(tag, 0)]))
+                with self.subTest(tag=tag), self.assertRaisesRegex(ValueError, "RPATH/audit/filter"):
+                    capture.check_linux_loader(binary)
+            for name in (b"/sdk/lib.so", b"../lib.so", b"$ORIGIN", b"", b"x" * 4096):
+                binary.write_bytes(elf(dependency=name))
+                with self.subTest(name=name[:20]), self.assertRaisesRegex(ValueError, "invalid import"):
+                    capture.check_linux_loader(binary)
+            for raw in (b"", b"unknown format" * 3, elf()[:30], elf()[:-1],
+                        elf(tags=[(1, 0)]), elf(dependency=b"lib.so", tags=[(5, 0)]),
+                        elf(tags=[(1, 0), (5, 0), (10, 1)]),
+                        elf(tags=[(1, 100), (5, 4096), (10, 1)]),
+                        elf(tags=[(1, 0), (5, 4096), (10, 2**32)])):
+                binary.write_bytes(raw)
+                with self.subTest(raw=raw[:20]), self.assertRaisesRegex(ValueError, "cannot isolate Linux"):
+                    capture.check_linux_loader(binary)
+            malformed = []
+            for offset, fmt, value in ((54, "H", 0), (56, "H", 4097),
+                                       (64, "I", 2), (152, "Q", 15),
+                                       (152, "Q", 4097 * 16), (176, "q", 1)):
+                raw = bytearray(elf())
+                struct.pack_into("<" + fmt, raw, offset, value)
+                malformed.append(raw)
+            for raw in malformed:
+                binary.write_bytes(raw)
+                with self.subTest(metadata=bytes(raw)), \
+                        self.assertRaisesRegex(ValueError, "cannot isolate Linux"):
+                    capture.check_linux_loader(binary)
+            static = bytearray(elf()[:64])
+            struct.pack_into("<H", static, 56, 0)
+            binary.write_bytes(static)
+            capture.check_linux_loader(binary)
+            binary.write_bytes(elf())
+            with mock.patch.object(capture, "open_regular", side_effect=PermissionError("denied")), \
+                    self.assertRaises(PermissionError):
+                capture.check_linux_loader(binary)
+            reader = capture.open_regular
+
+            @contextlib.contextmanager
+            def partial(root, path):
+                with reader(root, path) as stream:
+                    wrapped = mock.Mock(wraps=stream)
+                    wrapped.read.side_effect = lambda count: stream.read(count)[:-1]
+                    yield wrapped
+
+            with mock.patch.object(capture, "open_regular", partial), \
+                    self.assertRaisesRegex(ValueError, "truncated ELF"):
+                capture.check_linux_loader(binary)
+
     def test_staged_libraries_are_copied_and_bound_for_both_executables(self):
         for filename in ("network.DLL", "libnetwork.so", "libnetwork.so.1", "libnetwork.dylib"):
             with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temp:
@@ -214,7 +388,7 @@ class ActiveRegionCaptureContract(unittest.TestCase):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temp:
                 args, runner = fixture(Path(temp))
                 library = args.binary.parent / "network.dll"
-                library.write_bytes(b"library")
+                library.write_bytes(elf())
                 tour = check.parse(args.tour.read_bytes())
                 with mock.patch.object(capture, "resolved_fixture_hash", return_value="b" * 64):
                     identity = capture.identities(args.repository, args.root, args.binary, args.dump_binary,

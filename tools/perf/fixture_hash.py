@@ -50,12 +50,15 @@ import sys
 from pathlib import Path
 from typing import Any, Iterator
 
-from fixture_paths import contain_path, path_exists, read_bytes, resolve_reference
+from fixture_paths import contain_path, open_regular, path_exists, read_bytes, resolve_reference
 
 # JSON object keys beginning with this prefix are documentation for humans, not
 # input to the engine. `data/common/systems.json` uses the convention heavily
 # (`_water_high_res_comment` and friends).
 COMMENT_KEY_PREFIX = "_"
+# Match active-region capture's per-artifact admission cap. Non-JSON reads use
+# at most 1 MiB; JSON is admitted before allocating its bounded parse buffer.
+MAX_FIXTURE_FILE_BYTES = 256 * 1024 * 1024
 SCOPES = ("all", "headless-server")
 SERVER_RENDER_ONLY_FILES = frozenset({
     "foliage/scatter_set.json",
@@ -83,10 +86,11 @@ def canonical_file_digest(path: Path, *, reference_root: Path | None = None,
                           max_reference_depth: int | None = None) -> str:
     """Digest one file, optionally carrying the enclosing traversal's depth cap.
 
-    Standalone callers have no traversal budget and keep their existing support.
+    The same byte admission applies to standalone, tree and dependency callers.
     """
-    raw = read_bytes(containment_root if containment_root is not None else path.parent, path)
+    root = containment_root if containment_root is not None else path.parent
     if path.suffix.lower() == ".json":
+        raw = read_bytes(root, path, limit=MAX_FIXTURE_FILE_BYTES)
         try:
             # utf-8-sig: several fixtures carry a byte-order mark.
             parsed = json.loads(raw.decode("utf-8-sig"))
@@ -108,7 +112,18 @@ def canonical_file_digest(path: Path, *, reference_root: Path | None = None,
             strip_comment_keys(parsed), sort_keys=True, separators=(",", ":")
         )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return hashlib.sha256(raw).hexdigest()
+    digest = hashlib.sha256()
+    with open_regular(root, path, limit=MAX_FIXTURE_FILE_BYTES) as stream:
+        remaining = MAX_FIXTURE_FILE_BYTES
+        while True:
+            block = stream.read(min(1024 * 1024, remaining + 1))
+            if not block:
+                break
+            if len(block) > remaining:
+                raise ValueError(f"oversized fixture file: {path.name}")
+            remaining -= len(block)
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def fixture_entry_status(root: Path, path: Path):
