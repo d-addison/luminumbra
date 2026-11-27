@@ -155,16 +155,20 @@ class FixtureBudget:
         self.remaining -= 1
 
 
-def fixture_entries(root: Path, *, budget: FixtureBudget | None = None):
+def fixture_entries(root: Path, *, budget: FixtureBudget | None = None,
+                    separate_roots: tuple[Path, ...] = (), depth_offset: int = 0):
     """Stream contained entries with O(depth) scanners and active ancestry.
 
     No directory listing or pending ancestry copies are accumulated. At most
     MAX_FIXTURE_DEPTH + 1 scanners are open, and every encountered name is charged
     before status queries, optional omission, descent or yielding to a collector.
     Logical aliases remain separate entries; only active-ancestry cycles refuse.
+    Separate roots are admitted and yielded but traversed separately by the
+    caller with the same budget and depth offset (for example, data within a
+    runtime tree).
     """
     budget = budget if budget is not None else FixtureBudget()
-    budget.take(0)
+    budget.take(depth_offset)
     target = root.resolve()
     ancestors = {target}
     stack = [(os.scandir(root), target)]
@@ -177,7 +181,7 @@ def fixture_entries(root: Path, *, budget: FixtureBudget | None = None):
                 stack.pop()
                 ancestors.remove(target)
                 continue
-            budget.take(len(stack))
+            budget.take(len(stack) + depth_offset)
             path = Path(entry.path)
             contained, status = fixture_entry_status(root, path)
             if status is None:
@@ -187,6 +191,8 @@ def fixture_entries(root: Path, *, budget: FixtureBudget | None = None):
                 if target in ancestors:
                     raise ValueError(f"cyclic fixture directory reference: {path}")
                 yield path, contained, status
+                if path in separate_roots:
+                    continue
                 scanner = os.scandir(path)
                 stack.append((scanner, target))
                 ancestors.add(target)

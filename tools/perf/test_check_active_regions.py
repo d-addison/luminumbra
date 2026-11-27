@@ -15,10 +15,12 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_active_regions as check
-from test_capture_active_regions import encoded, fixture, run_capture, trace
+from test_capture_active_regions import encoded, fixture, receipt, region, run_capture, trace
 
 
-class ActiveRegionEvidenceContract(unittest.TestCase):
+class EvidenceFixture(unittest.TestCase):
+    """Shared synthetic capture; holds no tests of its own."""
+
     @classmethod
     def setUpClass(cls):
         temporary = tempfile.TemporaryDirectory()
@@ -37,6 +39,11 @@ class ActiveRegionEvidenceContract(unittest.TestCase):
         self.original = check.parse((self.root / "capture.json").read_bytes())
         self.manifest = copy.deepcopy(self.original)
 
+    def restore(self, *names):
+        for name in names:
+            (self.root / name).write_bytes(self.clean_evidence[Path(name)])
+        self.manifest = copy.deepcopy(self.original)
+
     def update(self, name, data):
         raw = data if isinstance(data, bytes) else encoded(data)
         (self.root / name).write_bytes(raw)
@@ -48,6 +55,13 @@ class ActiveRegionEvidenceContract(unittest.TestCase):
     def validate(self):
         return check.validate(self.root, self.manifest)
 
+    def validate_retained_tour(self):
+        return check.validate_tour(self.artifact("tour.json"), check.Evidence(self.root, self.manifest["files"]),
+                                   self.manifest["identity"], self.manifest["effective_simulation"],
+                                   self.manifest["configuration"])
+
+
+class ActiveRegionEvidenceContract(EvidenceFixture):
     def test_valid_deterministic_output_and_convergent_availability(self):
         self.assertEqual(self.validate(), self.expected)
         first = io.StringIO()
@@ -69,16 +83,16 @@ class ActiveRegionEvidenceContract(unittest.TestCase):
             stage = tour["stages"][index]
             raw = (self.root / stage["receipt"]).read_bytes()
             with self.subTest(stage=stage["name"]):
-                saved = check.parse(raw)
-                saved["files"][0]["sha256"] = hashlib.sha256(b"lost edit").hexdigest()
+                member = region(b"lost edit")
+                saved = receipt((self.root / "tour/ledger.arl").read_bytes(), member)
+                self.update(stage["saved_member"], member)
                 stage["saved_member_sha256"] = saved["files"][0]["sha256"]
-                lines = "".join(f"{row['path']}\0{row['size']}\0{row['sha256']}\n" for row in saved["files"])
-                saved["tree_digest"] = hashlib.sha256(lines.encode()).hexdigest()
                 self.update(stage["receipt"], saved)
                 self.update("tour.json", tour)
                 with self.assertRaisesRegex(ValueError, "edited payload missing"):
-                    self.validate()
+                    self.validate_retained_tour()
                 self.update(stage["receipt"], raw)
+                self.update(stage["saved_member"], region())
         self.update("tour.json", original)
         self.assertTrue(self.validate()["passed"])
 
@@ -228,6 +242,7 @@ class ActiveRegionEvidenceContract(unittest.TestCase):
 
     def test_malformed_evidence_and_unsupported_metadata(self):
         variants = [None, [], {}, dict(self.original, schema="future"),
+                    dict(self.original, schema="luminumbra.active_region_capture.v1"),
                     dict(self.original, identity={}), dict(self.original, cells=[]),
                     dict(self.original, files={}), dict(self.original, configuration={})]
         for value in variants:
@@ -299,11 +314,13 @@ class ActiveRegionEvidenceContract(unittest.TestCase):
 
     def test_tour_stage_identity_receipts_and_dump_are_required(self):
         original = (self.root / "tour.json").read_bytes()
-        for failure in ("stage", "identity", "worker", "failed", "payload", "exporter", "dump", "ledger"):
+        for failure in ("schema", "stage", "identity", "worker", "failed", "payload", "exporter", "dump", "ledger"):
             with self.subTest(failure=failure):
                 self.manifest = copy.deepcopy(self.original)
                 tour = check.parse(original)
-                if failure == "stage":
+                if failure == "schema":
+                    tour["schema"] = "luminumbra.active_region_tour.v1"
+                elif failure == "stage":
                     tour["stages"] = tour["stages"][:-1]
                 elif failure == "identity":
                     tour["stages"][3]["identity"]["revision"] = "f" * 40
