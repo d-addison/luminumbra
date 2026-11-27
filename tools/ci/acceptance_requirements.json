@@ -5301,14 +5301,14 @@
     {
       "id": "ar.field-evidence.001",
       "source": "docs/active-regions.md#moving-anchor-field-diagnostics",
-      "quote": "`regional_field_evidence --diagnostic-pressure` emits a seed-1337 axial 20,000 m packet with scheduler work limit 10, hold 2 and reduced shift 1, recording four ticks at each 128 m stop through the production session activation path using the local walking anchor and no replicated roster with ambient page updates supplying completed work and pressure.",
-      "text": "`regional_field_evidence --diagnostic-pressure` emits a seed-1337 axial 20,000 m packet with scheduler work limit 10, hold 2 and reduced shift 1, recording four ticks at each 128 m stop through the production session activation path using the local walking anchor and no replicated roster with ambient page updates supplying completed work and pressure."
+      "quote": "`regional_field_evidence --diagnostic-pressure --out <packet.json>` writes a seed-1337 axial 20,000 m packet with scheduler work limit 10, hold 2 and reduced shift 1, recording four ticks at each 128 m stop through the production session activation path using the local walking anchor and no replicated roster with ambient page updates supplying completed work and pressure, with the JSON packet written separately from production logs.",
+      "text": "`regional_field_evidence --diagnostic-pressure --out <packet.json>` writes a seed-1337 axial 20,000 m packet with scheduler work limit 10, hold 2 and reduced shift 1, recording four ticks at each 128 m stop through the production session activation path using the local walking anchor and no replicated roster with ambient page updates supplying completed work and pressure, with the JSON packet written separately from production logs."
     },
     {
       "id": "ar.field-evidence.002",
       "source": "docs/active-regions.md#moving-anchor-field-diagnostics",
-      "quote": "`regional_field_evidence --shipped-settings` retains the shipped scheduler limits for separate simulation-only tick and save/load timing observations with field capture outside the tick timer and unrelated water, rain, event and energy work disabled in this empty-world fixture.",
-      "text": "`regional_field_evidence --shipped-settings` retains the shipped scheduler limits for separate simulation-only tick and save/load timing observations with field capture outside the tick timer and unrelated water, rain, event and energy work disabled in this empty-world fixture."
+      "quote": "`regional_field_evidence --shipped-settings --out <packet.json>` retains the shipped scheduler limits for separate simulation-only tick and save/load timing observations with field capture outside the tick timer and unrelated water, rain, event and energy work disabled in this empty-world fixture.",
+      "text": "`regional_field_evidence --shipped-settings --out <packet.json>` retains the shipped scheduler limits for separate simulation-only tick and save/load timing observations with field capture outside the tick timer and unrelated water, rain, event and energy work disabled in this empty-world fixture."
     },
     {
       "id": "ar.field-evidence.003",
@@ -5319,8 +5319,8 @@
     {
       "id": "ar.field-evidence.004",
       "source": "docs/active-regions.md#moving-anchor-field-diagnostics",
-      "quote": "`python3 -I -B tools/perf/field_page_evidence.py <packet.json>` validates pressure proof and `--measurement` also accepts shipped-settings observations without requiring freezing.",
-      "text": "`python3 -I -B tools/perf/field_page_evidence.py <packet.json>` validates pressure proof and `--measurement` also accepts shipped-settings observations without requiring freezing."
+      "quote": "`python3 -I -B tools/perf/field_page_evidence.py <packet.json>` validates per-owner mask counts and consecutive over-limit holds for pressure proof and `--measurement` also accepts shipped-settings observations without requiring freezing.",
+      "text": "`python3 -I -B tools/perf/field_page_evidence.py <packet.json>` validates per-owner mask counts and consecutive over-limit holds for pressure proof and `--measurement` also accepts shipped-settings observations without requiring freezing."
     },
     {
       "id": "ar.field-evidence.005",

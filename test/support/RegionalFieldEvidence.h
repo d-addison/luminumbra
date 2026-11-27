@@ -4,17 +4,67 @@
 #include "GameSessionTestWorld.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace Luminumbra::TestSupport {
+
+struct RegionalFieldEvidenceOptions {
+    bool pressure = false;
+    std::filesystem::path output;
+};
+
+inline RegionalFieldEvidenceOptions ParseRegionalFieldEvidenceOptions(int argc,
+                                                                      const char* const* argv) {
+    constexpr auto usage = "usage: regional_field_evidence "
+                           "(--diagnostic-pressure|--shipped-settings) --out <packet.json>";
+    if (argc != 4) {
+        throw std::invalid_argument(usage);
+    }
+    RegionalFieldEvidenceOptions options;
+    bool profile = false, output = false;
+    // Exactly three argument tokens; refuse repeats before constructing the driver.
+    for (int index = 1; index < argc; ++index) {
+        const std::string_view argument(argv[index]);
+        if (!profile && (argument == "--diagnostic-pressure" || argument == "--shipped-settings")) {
+            options.pressure = argument == "--diagnostic-pressure";
+            profile = true;
+        } else if (!output && argument == "--out" && index + 1 < argc) {
+            const std::string_view destination(argv[++index]);
+            if (destination.empty() || destination.starts_with("--")) {
+                throw std::invalid_argument(usage);
+            }
+            options.output = Filesystem::PathFromUtf8(destination);
+            output = true;
+        } else {
+            throw std::invalid_argument(usage);
+        }
+    }
+    if (!profile || !output) {
+        throw std::invalid_argument(usage);
+    }
+    return options;
+}
+
+inline void WriteRegionalFieldEvidence(const std::filesystem::path& output,
+                                       const nlohmann::json& packet) {
+    // Reuse the checked writer on both Windows and POSIX: write and flush a
+    // unique sibling, close before atomic replacement, and remove failed staging.
+    // A final directory-flush failure may leave a complete packet, never a partial one.
+    if (!Persistence::WorldSaveService::write_file_durably(output, packet.dump() + '\n')) {
+        throw std::runtime_error("cannot write field evidence packet");
+    }
+}
 
 class RegionalFieldEvidence {
 public:

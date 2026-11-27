@@ -4,6 +4,8 @@
 Pressure proof and shipped-settings observations are separate profiles. Timings
 include simulation only; mask/digest capture and save/load are reported separately.
 This packet is diagnostic evidence, not a replacement for paired oracle artifacts.
+Capture with regional_field_evidence (--diagnostic-pressure|--shipped-settings)
+--out <packet.json>; production logs are separate from the packet file.
 """
 from __future__ import annotations
 
@@ -40,9 +42,9 @@ def digest(value):
             "invalid digest")
 
 
-def key(value):
+def key(value, minimum=-32768, maximum=32767):
     require(type(value) is list and len(value) == 2 and
-            all(type(axis) is int and -32768 <= axis <= 32767 for axis in value), "invalid key")
+            all(type(axis) is int and minimum <= axis <= maximum for axis in value), "invalid key")
     return tuple(value)
 
 
@@ -82,6 +84,8 @@ def validate(packet, *, full_route=False, measurement=False):
     frames = rows(packet["frames"], MAX_FRAMES)
     require(len(frames) == 4 * (1 + (distance + stride - 1) // stride), "truncated route")
     previous = {}
+    reduced_since = {}
+    pressure_run = 0
     activations = freezes = stable = completed = 0
     for index, frame in enumerate(frames):
         keys(frame, "tick anchor schedule_digest schedule_work activation_visits due owners masks fields_digest ledger_digest tick_us")
@@ -93,6 +97,7 @@ def validate(packet, *, full_route=False, measurement=False):
             digest(frame[name])
         require(uint(frame["tick_us"]) and uint(frame["schedule_work"]) and
                 uint(frame["activation_visits"], 256), "invalid work or timing")
+        pressure_run = pressure_run + 1 if frame["schedule_work"] > config["work_limit"] else 0
         require(type(frame["due"]) is list and len(frame["due"]) <= 256, "invalid due owners")
         due = [key(item) for item in frame["due"]]
         require(len(due) == len(set(due)) and frame["activation_visits"] == len(due), "invalid due visits")
@@ -107,6 +112,8 @@ def validate(packet, *, full_route=False, measurement=False):
                     uint(owner["completed_work"]), "invalid owner")
             digest(owner["digest"])
             prior = previous.get(owner_key)
+            if owner["state"] == 1 and (prior is None or prior["state"] != 1):
+                reduced_since[owner_key] = tick
             require(prior is None or owner["cells"] >= prior["cells"], "lost initialized owner cells")
             activated = owner["cells"] > 0 and (prior is None or prior["cells"] == 0)
             require(owner["activated"] == activated, "invalid activation witness")
@@ -123,6 +130,13 @@ def validate(packet, *, full_route=False, measurement=False):
                 if prior["state"] == 2:
                     require(all(owner[name] == prior[name] for name in
                                 ("frozen_at", "frozen_digest", "last_ticked")), "frozen stamps changed")
+                elif pressure:
+                    # ActiveRegionLedger selects using the preceding hold_ticks-1
+                    # over ticks plus this tick, and resets holds on each transition.
+                    # Reduced -> Frozen therefore needs a fresh hold after reduction.
+                    require(pressure_run >= config["hold_ticks"], "freeze without held pressure")
+                    require(tick - reduced_since[owner_key] >= config["hold_ticks"],
+                            "freeze before reduced hold")
                 freezes += prior["state"] != 2
                 stable += prior["state"] == 2
             if owner["completed_work"]:
@@ -135,17 +149,33 @@ def validate(packet, *, full_route=False, measurement=False):
             if owner["completed_work"] and owner_key not in due:
                 require(boundary_work(owner_key, owners, tick), "work outside scheduled authority")
         mask_keys = []
-        cells = 0
+        cells = dict.fromkeys(owners, 0)
         require(type(frame["masks"]) is list and len(frame["masks"]) <= 1024, "invalid mask count")
         for mask in frame["masks"]:
             keys(mask, "key words")
-            mask_keys.append(key(mask["key"]))
+            page_x, page_z = key(mask["key"], -(2**31), 2**31 - 1)
+            mask_keys.append((page_x, page_z))
             words = mask["words"]
             require(type(words) is list and len(words) == 4 and all(uint(word) for word in words),
                     "invalid mask")
             require(any(words), "empty mask")
-            cells += sum(word.bit_count() for word in words)
-        require(mask_keys == sorted(set(mask_keys)) and cells == sum(o["cells"] for o in owners.values()),
+            # FieldPageState::CellSlotOf / RegionAxisOfCell: 16x16 pages,
+            # row-major bits, 24 m cells owned by their centres in 512 m regions.
+            # At most 1024 * 256 bit visits per frame; no world scan.
+            for word_index, word in enumerate(words):
+                while word:
+                    bit = (word & -word).bit_length() - 1
+                    slot = word_index * 64 + bit
+                    cell_x, cell_z = page_x * 16 + slot % 16, page_z * 16 + slot // 16
+                    require(-699051 <= cell_x <= 699050 and -699051 <= cell_z <= 699050,
+                            "mask cell outside field bounds")
+                    owner_key = ((cell_x * 24000 + 12000) // 512000,
+                                 (cell_z * 24000 + 12000) // 512000)
+                    require(owner_key in owners, "mask owner outside roster")
+                    cells[owner_key] += 1
+                    word &= word - 1
+        require(mask_keys == sorted(set(mask_keys)) and
+                all(cells[owner_key] == owner["cells"] for owner_key, owner in owners.items()),
                 "mask/owner cell mismatch")
         previous = owners
     require(activations > 0 and completed > 0, "zero activation or completed work")

@@ -34,8 +34,8 @@ def packet():
                            "completed_work": 0 if frozen else 1})
         frames.append({"tick": tick, "anchor": [256 + ((tick - 1) // 4) * 512, 0, 256],
                        "schedule_digest": "c" * 16, "fields_digest": "d" * 16, "ledger_digest": "e" * 16,
-                       "schedule_work": 2, "activation_visits": len(due), "due": due,
-                       "owners": owners, "masks": [{"key": row["key"], "words": [1, 0, 0, 0]}
+                       "schedule_work": 11 if tick > 1 else 2, "activation_visits": len(due), "due": due,
+                       "owners": owners, "masks": [{"key": [row["key"][0] * 2, 0], "words": [1, 0, 0, 0]}
                                                     for row in owners], "tick_us": 1})
     return {"schema": "luminumbra.field_page_evidence.v1", "profile": "diagnostic-pressure",
             "scheduler": {"work_limit": 10, "hold_ticks": 2, "reduced_shift": 1}, "seed": "1337",
@@ -45,6 +45,101 @@ def packet():
 
 
 class FieldPageEvidenceContract(unittest.TestCase):
+    def test_freeze_requires_consecutive_over_limit_work(self):
+        for work in (0, 2, 10):
+            value = packet()
+            for frame in value["frames"]:
+                frame["schedule_work"] = work
+            with self.subTest(work=work), self.assertRaisesRegex(ValueError, "held pressure"):
+                evidence.validate(value)
+        for interrupted_tick in (8, 9):
+            value = packet()
+            value["frames"][interrupted_tick - 1]["schedule_work"] = 10
+            with self.subTest(tick=interrupted_tick), self.assertRaisesRegex(ValueError, "held pressure"):
+                evidence.validate(value)
+        # Native holds include the transition tick, rather than requiring an
+        # extra tick after the first over-limit sample. Two ticks suffice.
+        value = packet()
+        for frame in value["frames"][:7]:
+            frame["schedule_work"] = 10
+        self.assertEqual(evidence.validate(value)["freezes"], 1)
+
+    def test_freeze_requires_fresh_hold_after_reduction(self):
+        value = packet()
+        value["frames"][6]["owners"][0]["state"] = 0
+        with self.assertRaisesRegex(ValueError, "before reduced hold"):
+            evidence.validate(value)
+        # A recovery to Active resets the Reduced hold even after old pressure.
+        value = packet()
+        value["frames"][5]["owners"][0]["state"] = 1
+        value["frames"][6]["owners"][0]["state"] = 0
+        with self.assertRaisesRegex(ValueError, "before reduced hold"):
+            evidence.validate(value)
+
+    def test_scheduler_fields_are_unsigned_integers(self):
+        for name in ("work_limit", "hold_ticks", "reduced_shift"):
+            for invalid in (True, False, -1, 2**64, 1e38, 10.0, None, "2", {}, []):
+                value = packet()
+                value["scheduler"][name] = invalid
+                with self.subTest(name=name, invalid=invalid), self.assertRaisesRegex(ValueError, "scheduler"):
+                    evidence.validate(value)
+
+    def test_mask_foreign_owner(self):
+        value = packet()
+        value["frames"][0]["masks"][0]["key"] = [100, 0]
+        with self.assertRaisesRegex(ValueError, "outside roster"):
+            evidence.validate(value)
+
+    def test_mask_per_owner_mismatch(self):
+        value = packet()
+        # Preserve total counts and mask ordering, but assign both cells to owner 0.
+        value["frames"][4]["masks"][1]["key"] = [1, 0]
+        with self.assertRaisesRegex(ValueError, "mask/owner cell mismatch"):
+            evidence.validate(value)
+
+    def test_mask_cell_mapping_boundaries_and_negative_coordinates(self):
+        # Explicit native centre-ownership examples: bits straddle x and z
+        # boundaries, all four words, and the valid physical-coordinate limits.
+        cases = (([1, 0], 4, [0, 0]), ([1, 0], 5, [1, 0]),
+                 ([-1, 0], 15, [-1, 0]), ([-2, 0], 10, [-2, 0]),
+                 ([-2, 0], 11, [-1, 0]), ([0, 1], 64, [0, 0]),
+                 ([0, 1], 80, [0, 1]), ([0, 0], 128, [0, 0]),
+                 ([0, 0], 255, [0, 0]), ([-43691, 0], 5, [-32768, 0]),
+                 ([43690, 0], 10, [32767, 0]))
+        for page_key, bit, owner_key in cases:
+            value = packet()
+            for frame in value["frames"]:
+                frame["owners"] = frame["owners"][:1]
+                frame["owners"][0]["key"] = owner_key
+                frame["due"] = [] if frame["owners"][0]["state"] == 2 else [owner_key]
+                frame["activation_visits"] = len(frame["due"])
+                words = [0] * 4
+                words[bit // 64] = 1 << (bit % 64)
+                frame["masks"] = [{"key": page_key, "words": words}]
+            with self.subTest(page=page_key, bit=bit):
+                self.assertEqual(evidence.validate(value)["freezes"], 1)
+        # One physical page can contain bits from multiple owners.
+        value = packet()
+        for frame in value["frames"][4:]:
+            frame["masks"] = [{"key": [1, 0], "words": [(1 << 4) | (1 << 5), 0, 0, 0]}]
+        self.assertEqual(evidence.validate(value)["freezes"], 1)
+
+    def test_masks_refuse_out_of_bounds_cells_and_invalid_words(self):
+        for page_key, bit in (([-43691, 0], 4), ([43690, 0], 11),
+                              ([0, -43691], 64), ([0, 43690], 176)):
+            value = packet()
+            words = [0] * 4
+            words[bit // 64] = 1 << (bit % 64)
+            value["frames"][0]["masks"] = [{"key": page_key, "words": words}]
+            with self.subTest(page=page_key, bit=bit), self.assertRaisesRegex(ValueError, "field bounds"):
+                evidence.validate(value)
+        for words in ([0, 0, 0, 0], [1, 0, 0], [1, 0, 0, 0, 0],
+                      [True, 0, 0, 0], [-1, 0, 0, 0], [2**64, 0, 0, 0]):
+            value = packet()
+            value["frames"][0]["masks"][0]["words"] = words
+            with self.subTest(words=words), self.assertRaisesRegex(ValueError, "mask"):
+                evidence.validate(value)
+
     def test_reduced_boundary_work_between_interior_due_ticks(self):
         value = packet()
         frame = value["frames"][5]
