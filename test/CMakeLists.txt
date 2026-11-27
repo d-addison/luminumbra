@@ -392,6 +392,7 @@ add_executable(common_tests
     common/ActiveRegionPriority_test.cpp
     common/ActiveRegionScale_test.cpp
     common/ActiveRegionAcceptance_test.cpp
+    common/RegionalFieldEvidence_test.cpp
     common/SimulationIdentityAllocator_test.cpp
     common/PlantCreationIdentity_test.cpp
     common/GroundObjectStore_test.cpp
@@ -492,6 +493,13 @@ target_include_directories(region_fixture_capture PRIVATE ../src)
 target_compile_definitions(region_fixture_capture PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 target_link_libraries(region_fixture_capture PRIVATE gtest luminumbra_common)
 luminumbra_configure_first_party_target(region_fixture_capture)
+
+# Full 20 km diagnostic capture, deliberately absent from CTest discovery.
+add_executable(regional_field_evidence tools/RegionalFieldEvidence.cpp)
+target_include_directories(regional_field_evidence PRIVATE ../src)
+target_compile_definitions(regional_field_evidence PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(regional_field_evidence PRIVATE gtest luminumbra_common)
+luminumbra_configure_first_party_target(regional_field_evidence)
 
 # Frozen-water rendering exercises the client bridge and mesh implementation.
 add_executable(far_frozen_water_mesh_test rendering/FarFrozenWaterMesh_test.cpp)
@@ -2646,6 +2654,9 @@ set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tool
 add_test(NAME RegionalAdmissionReportContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_regional_admission_report.py")
 set_tests_properties(RegionalAdmissionReportContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
+add_test(NAME FieldPageEvidenceContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_field_page_evidence.py")
+set_tests_properties(FieldPageEvidenceContract PROPERTIES LABELS "simulation;tools" TIMEOUT 5)
 add_test(NAME ActiveRegionScaleReportContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_active_region_scale.py")
 set_tests_properties(ActiveRegionScaleReportContract PROPERTIES LABELS "simulation;tools" TIMEOUT 5)

@@ -21905,6 +21905,79 @@ TEST(GameSessionHeadlessWorldTest, ExplicitFullSnapshotHandlesAnEmptyCleanWorld)
     EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), before);
 }
 
+namespace {
+void CheckNonresidentWaterBoot(GameSession& reopened,
+                               const Luminumbra::Chunk& saved,
+                               const std::string& saved_state) {
+    const auto saved_bytes = P::SerializeChunkRecordPayloadJson(saved);
+    ASSERT_EQ(reopened.RestoredOwnerContinuation(), nullptr);
+    ASSERT_EQ(reopened.GetLastLoadedChunkCount(), 0u);
+    ASSERT_TRUE(reopened.RestoredWorldSnapshot());
+    ASSERT_TRUE(reopened.GetWorldSystem()->snapshot_streamed_chunks().empty());
+    ASSERT_EQ(reopened.GetWorldSystem()->durable_chunk_inventory(),
+              (std::vector<Luminumbra::IVec3>{saved.get_coords()}));
+    EXPECT_EQ(reopened.ComputeChunkStateHash(), saved_state);
+    const auto clock = reopened.GetWorldClock().canonical_bytes();
+    const auto tick = reopened.GetSimulationTickCount();
+    reopened.GetWorldSystem()->debug_set_streaming_radius_cap(1);
+    ASSERT_TRUE(reopened.PrepareInitialSimulation(0, 0));
+    GameSession::BootSettleStats stats;
+    ASSERT_TRUE(reopened.SettleInitialSimulation({}, stats));
+    EXPECT_TRUE(stats.water_settle_skipped);
+    EXPECT_EQ(stats.iterations, 0);
+    EXPECT_EQ(reopened.GetWorldClock().canonical_bytes(), clock);
+    EXPECT_EQ(reopened.GetSimulationTickCount(), tick);
+    const auto after = reopened.GetWorldSystem()->inspect_water_column(saved.get_coords());
+    ASSERT_NE(after, nullptr);
+    EXPECT_TRUE(after->same_water_state(saved));
+    EXPECT_EQ(P::SerializeChunkRecordPayloadJson(*after), saved_bytes);
+    EXPECT_EQ(reopened.ComputeChunkStateHash(), saved_state);
+}
+
+void CheckRestoredSnapshotReplacement(GameSession& reopened,
+                                      const HeadlessRoot& root,
+                                      const fs::path& save,
+                                      const std::string& saved_state,
+                                      bool prepared) {
+    // Refused/cancelled replacement keeps the committed snapshot diagnostic.
+    EXPECT_FALSE(reopened.LoadWorldStateFrom({}));
+    std::stop_source cancellation;
+    cancellation.request_stop();
+    const auto cancelled = GameSession::PrepareWorldState(
+        reopened.CaptureWorldPreparationOptions(), save, cancellation.get_token());
+    EXPECT_FALSE(reopened.AdoptPreparedWorld(cancelled));
+    EXPECT_TRUE(reopened.RestoredWorldSnapshot());
+    EXPECT_EQ(reopened.ComputeChunkStateHash(), saved_state);
+    ASSERT_TRUE(reopened.LoadWorldStateFrom(root.path() / "absent-snapshot"));
+    EXPECT_FALSE(reopened.RestoredWorldSnapshot());
+    ASSERT_TRUE(reopened.LoadWorldStateFrom(save)) << reopened.GetWorldOpenError();
+    EXPECT_TRUE(reopened.RestoredWorldSnapshot());
+    EXPECT_EQ(reopened.GetLastLoadedChunkCount(), 0u);
+    const auto corrupt = root.path() / "partial-snapshot";
+    ASSERT_TRUE(P::WorldSaveService::write_file_durably(corrupt / "world_info.json", "{"));
+    const auto refused =
+        GameSession::PrepareWorldState(reopened.CaptureWorldPreparationOptions(), corrupt);
+    EXPECT_FALSE(reopened.AdoptPreparedWorld(refused));
+    EXPECT_TRUE(reopened.RestoredWorldSnapshot());
+    EXPECT_EQ(reopened.ComputeChunkStateHash(), saved_state);
+    if (prepared) {
+        ASSERT_TRUE(reopened.CreateTransientWorld("Fresh transient", "1337", "default"));
+    } else {
+        ASSERT_TRUE(reopened.CreateWorld("Fresh snapshot reader", "1337", "default"));
+        EXPECT_FALSE(reopened.RestoredWorldSnapshot());
+        ASSERT_TRUE(reopened.LoadWorldState());
+    }
+    EXPECT_FALSE(reopened.RestoredWorldSnapshot());
+    EXPECT_EQ(reopened.GetLastLoadedChunkCount(), 0u);
+    ASSERT_TRUE(reopened.LoadWorldStateFrom(save)) << reopened.GetWorldOpenError();
+    ASSERT_TRUE(reopened.RestoredWorldSnapshot());
+    // A fatal direct replacement clears both diagnostics with resident state.
+    EXPECT_FALSE(reopened.LoadWorldStateFrom(corrupt));
+    EXPECT_FALSE(reopened.RestoredWorldSnapshot());
+    EXPECT_EQ(reopened.GetLastLoadedChunkCount(), 0u);
+}
+} // namespace
+
 TEST(GameSessionHeadlessWorldTest, NonresidentSnapshotWaterSkipsBootSettlement) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -21922,20 +21995,46 @@ TEST(GameSessionHeadlessWorldTest, NonresidentSnapshotWaterSkipsBootSettlement) 
     const auto custom = preset.dump();
     ASSERT_TRUE(source.CreateWorld("Elevated snapshot", "1337", "default", &custom));
     EXPECT_FALSE(source.RestoredWorldSnapshot());
-    const auto column = Luminumbra::TestSupport::SchedulerChunk(0, 8);
+    const Luminumbra::IVec3 column_coords{0, 0, 0};
     // The saved canonical column is below the terrain surface load footprint.
     const auto wanted = source.TakeInitialChunkLoadList();
-    ASSERT_TRUE(std::none_of(wanted.begin(), wanted.end(), [&](const auto& coords) {
-        return coords == column->get_coords();
-    }));
-    ASSERT_TRUE(source.GetWorldSystem()->adopt_streamed_chunk(column));
-    ASSERT_TRUE(source.SaveWorldStateTo(source.GetWorldSaveDir(), nullptr, true));
+    ASSERT_TRUE(std::none_of(
+        wanted.begin(), wanted.end(), [&](const auto& coords) { return coords == column_coords; }));
+    const auto column = source.GetWorldSystem()->resolve_water_column(column_coords);
+    ASSERT_NE(column, nullptr);
+    // One parked canonical 8x8 pond, with an awake nonuniform depth field.
+    constexpr std::size_t cells = 8 * 8;
+    column->water_depth_mm.assign(cells, 1000);
+    column->water_depth_mm[cells / 2 + 4] = 3000;
+    column->water_bed_mm.assign(cells, 300000);
+    column->water_edge_flux.assign(cells * 2, 0);
+    column->water_level_data.assign(cells, 301.0f);
+    column->water_sim_terrain_height.assign(cells, 300.0f);
+    column->water_rest_level.assign(cells, 300.0f);
+    column->water_flow_data.assign(cells, Luminumbra::Vec2(0.0f));
+    column->has_water_sim.store(true);
+    column->current_water_resolution.store(8);
+    column->is_water_sleeping.store(false);
+    column->set_water_authority();
+    column->mark_water_data_dirty();
+    ASSERT_TRUE(column->has_complete_water_state());
+    ASSERT_TRUE(source.GetWorldSystem()->snapshot_streamed_chunks().empty());
+    Luminumbra::world::WorldStateSaveReport report;
+    ASSERT_TRUE(source.SaveWorldStateTo(source.GetWorldSaveDir(), &report, true));
+    ASSERT_EQ(report.chunks_total, 1u);
+    ASSERT_EQ(source.GetWorldSystem()->durable_chunk_inventory(),
+              (std::vector<Luminumbra::IVec3>{column_coords}));
     const auto save = source.GetWorldSaveDir();
     const auto saved_files = ReadClockTestDirectory(save);
     const auto saved = P::WorldSaveService::read_chunk(save, column->get_coords(), true);
     ASSERT_NE(saved.chunk, nullptr) << saved.error;
-    const auto saved_bytes = P::SerializeChunkRecordPayloadJson(*saved.chunk);
-    const auto saved_water = SchedulerSessionCapture(source).sub.water;
+    ASSERT_TRUE(saved.chunk->has_water_authority());
+    ASSERT_TRUE(saved.chunk->has_complete_water_state());
+    // The chunk hash includes durable and parked regional authority. The water
+    // diagnostic sub-hash only describes streamed residents and cannot round-trip
+    // across a change in residency.
+    const auto saved_state = source.ComputeChunkStateHash();
+    ASSERT_FALSE(saved_state.empty());
 
     for (const bool prepared : {false, true}) {
         SCOPED_TRACE(prepared);
@@ -21958,66 +22057,10 @@ TEST(GameSessionHeadlessWorldTest, NonresidentSnapshotWaterSkipsBootSettlement) 
             ASSERT_TRUE(reopened.LoadWorld(source.GetMetadata().worldId))
                 << reopened.GetWorldOpenError();
         }
-        ASSERT_EQ(reopened.RestoredOwnerContinuation(), nullptr);
-        ASSERT_EQ(reopened.GetLastLoadedChunkCount(), 0u);
-        ASSERT_TRUE(reopened.RestoredWorldSnapshot());
-        ASSERT_TRUE(reopened.GetWorldSystem()->snapshot_streamed_chunks().empty());
-        EXPECT_EQ(reopened.GetWorldSystem()->durable_chunk_inventory(),
-                  (std::vector<Luminumbra::IVec3>{column->get_coords()}));
-        EXPECT_EQ(SchedulerSessionCapture(reopened).sub.water, saved_water);
-        const auto clock = reopened.GetWorldClock().canonical_bytes();
-        const auto tick = reopened.GetSimulationTickCount();
-        reopened.GetWorldSystem()->debug_set_streaming_radius_cap(1);
-        ASSERT_TRUE(reopened.PrepareInitialSimulation(0, 0));
-        GameSession::BootSettleStats stats;
-        ASSERT_TRUE(reopened.SettleInitialSimulation({}, stats));
-        EXPECT_TRUE(stats.water_settle_skipped);
-        EXPECT_EQ(stats.iterations, 0);
-        EXPECT_EQ(reopened.GetWorldClock().canonical_bytes(), clock);
-        EXPECT_EQ(reopened.GetSimulationTickCount(), tick);
-        const auto after = reopened.GetWorldSystem()->inspect_water_column(column->get_coords());
-        ASSERT_NE(after, nullptr);
-        EXPECT_TRUE(after->same_water_state(*saved.chunk));
-        EXPECT_EQ(P::SerializeChunkRecordPayloadJson(*after), saved_bytes);
-        EXPECT_EQ(SchedulerSessionCapture(reopened).sub.water, saved_water);
+        ASSERT_NO_FATAL_FAILURE(CheckNonresidentWaterBoot(reopened, *saved.chunk, saved_state));
         EXPECT_EQ(ReadClockTestDirectory(save), saved_files);
-
-        // Refused/cancelled replacement keeps the committed snapshot diagnostic.
-        EXPECT_FALSE(reopened.LoadWorldStateFrom({}));
-        std::stop_source cancellation;
-        cancellation.request_stop();
-        const auto cancelled = GameSession::PrepareWorldState(
-            reopened.CaptureWorldPreparationOptions(), save, cancellation.get_token());
-        EXPECT_FALSE(reopened.AdoptPreparedWorld(cancelled));
-        EXPECT_TRUE(reopened.RestoredWorldSnapshot());
-        EXPECT_EQ(SchedulerSessionCapture(reopened).sub.water, saved_water);
-        ASSERT_TRUE(reopened.LoadWorldStateFrom(root.path() / "absent-snapshot"));
-        EXPECT_FALSE(reopened.RestoredWorldSnapshot());
-        ASSERT_TRUE(reopened.LoadWorldStateFrom(save)) << reopened.GetWorldOpenError();
-        EXPECT_TRUE(reopened.RestoredWorldSnapshot());
-        EXPECT_EQ(reopened.GetLastLoadedChunkCount(), 0u);
-        const auto corrupt = root.path() / "partial-snapshot";
-        ASSERT_TRUE(P::WorldSaveService::write_file_durably(corrupt / "world_info.json", "{"));
-        const auto refused =
-            GameSession::PrepareWorldState(reopened.CaptureWorldPreparationOptions(), corrupt);
-        EXPECT_FALSE(reopened.AdoptPreparedWorld(refused));
-        EXPECT_TRUE(reopened.RestoredWorldSnapshot());
-        EXPECT_EQ(SchedulerSessionCapture(reopened).sub.water, saved_water);
-        if (prepared) {
-            ASSERT_TRUE(reopened.CreateTransientWorld("Fresh transient", "1337", "default"));
-        } else {
-            ASSERT_TRUE(reopened.CreateWorld("Fresh snapshot reader", "1337", "default"));
-            EXPECT_FALSE(reopened.RestoredWorldSnapshot());
-            ASSERT_TRUE(reopened.LoadWorldState());
-        }
-        EXPECT_FALSE(reopened.RestoredWorldSnapshot());
-        EXPECT_EQ(reopened.GetLastLoadedChunkCount(), 0u);
-        ASSERT_TRUE(reopened.LoadWorldStateFrom(save)) << reopened.GetWorldOpenError();
-        ASSERT_TRUE(reopened.RestoredWorldSnapshot());
-        // A fatal direct replacement clears both diagnostics with resident state.
-        EXPECT_FALSE(reopened.LoadWorldStateFrom(corrupt));
-        EXPECT_FALSE(reopened.RestoredWorldSnapshot());
-        EXPECT_EQ(reopened.GetLastLoadedChunkCount(), 0u);
+        ASSERT_NO_FATAL_FAILURE(
+            CheckRestoredSnapshotReplacement(reopened, root, save, saved_state, prepared));
     }
 }
 
