@@ -309,6 +309,14 @@ public:
     // Activate and wake a consumer-owned region without a persistent terrain edit.
     // The consumer must retain it through the scheduler's ownership probe.
     void activate_owned(RegionKey key, const WorldClock& clock);
+    // Stage a bounded, sorted unique owner set without waking existing records. New
+    // records start at tick(), with no historical resume window. Empty input discards
+    // pending adoption. Register preparation reserves the combined envelope capacity.
+    // Refusal leaves both live records and the previous preparation unchanged.
+    bool prepare_owner_adoption(std::span<const RegionKey> owners);
+    // Publish prepared owners only after successful register preparation, on the same
+    // owner thread. Transfers preallocated nodes; existing records stay untouched.
+    void commit_owner_adoption() noexcept;
     // Wake an edited owner, retaining matching materialized-completion stamps
     // while frozen_at still identifies an unacknowledged resume.
     void mark_edited(RegionKey key, const WorldClock& clock);

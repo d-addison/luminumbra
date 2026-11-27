@@ -11,6 +11,7 @@
 #include "../../include/luminumbra/core/Types.h"
 #include "FarWorldRenderer.h"
 #include "FarWorldReplay.h"
+#include "FarWorldSessionLimits.h"
 #include "FrameBufferObject.h" // FrameBufferObject (extracted)
 #include "GBuffer.h"           // GBuffer (extracted)
 #include "GraphicsRuntimeConfig.h"
@@ -1033,6 +1034,24 @@ public:
     // Internal, non-persisted request. Normal worlds retain a typed refusal until
     // immutable committed authority is available. Fixtures bind explicitly.
     void set_far_world_mode(FarWorldMode requested);
+    // Owner-boundary bridge supplied by the client, keeping game/session types
+    // outside the renderer. Callbacks run once per frame/boundary, never per item.
+    // Context and jobs outlive world rendering; attachment returns owning handles.
+    struct FarSessionHost {
+        void* context = nullptr;
+        bool (*ready)(void*, const Systems::SHIELD_WorldSystem&) = nullptr;
+        bool (*attach)(void*,
+                       const World::FarWorldAuthorityConfig&,
+                       std::string&,
+                       std::shared_ptr<World::FarWorldAuthorityProducer>&,
+                       std::shared_ptr<const Systems::SHIELD_WorldSystem>&) = nullptr;
+        bool (*prepare)(void*) = nullptr;
+        void (*fence)(void*, bool) = nullptr;
+    };
+    // Explicit --far-ladder-diagnostics only. No controller, producer, storage
+    // or capture pumps exist without this call.
+    void enable_far_ladder_diagnostics(JobSystem& jobs, const FarSessionHost& host);
+    void resume_far_world_readers();
     // Startup/world-entry policy; runtime changes first reset history via
     // set_far_world_mode. Returns the resolved request for caller diagnostics.
     FarWorldCavePolicy set_far_world_cave_policy(std::optional<World::FarCaveMode> requested);
@@ -1615,7 +1634,11 @@ private:
     // Inventory includes compatibility stores retained across selection changes,
     // using values published by the Legacy branch rather than Ladder reading its counters.
     std::size_t m_legacy_far_resident_bytes = 0, m_legacy_far_vertex_arrays = 0;
+    struct FarSessionDiagnostics;
+    void prepare_far_session_diagnostics(Systems::SHIELD_WorldSystem& world_system,
+                                         const Camera& camera);
     std::unique_ptr<FarWorldRenderer> m_far_world;
+    std::unique_ptr<FarSessionDiagnostics> m_far_session_diagnostics;
     FarWorldSelection m_frame_far_selection;
     std::uint64_t m_far_world_frame = 0;
     bool m_far_world_preview = false;

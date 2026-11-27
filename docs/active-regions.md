@@ -132,15 +132,15 @@ Journal v5 binds undo, publication and quarantine identities before either POSIX
 Before that point, successful rollback restores the complete previous committed member tree and leaves dirty and revision acknowledgements pending.
 After that point, cleanup failure preserves the new commit and leaves recovery work.
 Failed rollback of any transaction with a previous commit retains the recovery journal and refuses further admission until recovery succeeds.
-Creation alone may retire its journal before artifact rollback, because no previous commit exists and the created-artifacts registry retains identities and failed-rollback evidence until cleanup succeeds.
+Initial creation completes admitted snapshot files through the v5 journal before clearing registry identities, while remaining artifact rollback may follow journal retirement because no previous commit exists and the registry retains failed-cleanup evidence.
 Rollback and journal retirement refuse foreign occupants and unknown contents; Windows checks the bound handle at deletion and POSIX verifies a quarantined entry before unlinking it.
 Journal control records are limited to 16 MiB and snapshot membership to 1,048,576 entries, with overflow-safe admission before allocation.
-Receipt phases record namespace completion, a later successful same-volume NTFS file flush, and separate receipt retirement, while POSIX repeats directory fsync.
+Receipt phases record namespace completion, a later successful same-volume NTFS file flush, and separate receipt retirement while POSIX repeats directory fsync, with immutable per-path generations starting at zero and advancing only after retirement or explicit reset.
 On ReFS, FAT/exFAT, network and unknown volumes, receipts remain retained and durability remains unqualified.
 Recovery verifies identities again, refuses removal of foreign and unknown artifacts, and re-deletes resurrected owned names before completing their receipts.
 Receipt streams retain the 16 MiB journal limit, reserve completion capacity before forward publication, and bound save-root discovery by the existing member ceiling.
 NTFS abrupt VM reset qualification remains pending in a later native slice.
-Ordinary service-level removal and artifact-registry cleanup completion remain pending.
+World-owned v5 removal, publication retirement and recorded staging cleanup use explicit namespace completion, with empty never-committed save-root, chunks and chunks/region directories excluded because they hold no committed state and non-world removals plus ledger staging cleanup excluded and unqualified on Windows under issue #1324.
 Client periodic and pressure saves use the same entry, digest and capture-content refusal gate as exit saves.
 Region digest operations copy only each region's inputs and admit the index once per operation, invalidating that admission on publication while checking actual region bytes on every read, and water authority synchronization visits only queued dirty chunks.
 

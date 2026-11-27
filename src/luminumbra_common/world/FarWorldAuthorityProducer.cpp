@@ -727,20 +727,6 @@ FarWorldAuthorityProducer::Error FarWorldAuthorityProducer::Impl::Assemble() {
             }
             const auto& window = active->windows[pending.tile];
             auto read = reader.read(window, limits);
-            if (active->deadline.expired()) {
-                return Error::SourceReadExpired;
-            }
-            if (read.membership == Save::AuthorityMembership::Unavailable) {
-                set_read_error(read.error);
-                return Error::CommittedReadRefused;
-            }
-            if (progress.reads != 0 && (read.source_identity != result.source_identity ||
-                                        read.generation != result.generation)) {
-                set_read_error("source changed");
-                return Error::CommittedReadRefused;
-            }
-            result.source_identity = read.source_identity;
-            result.generation = read.generation;
             progress.last_window = window;
             progress.last_columns = static_cast<std::uint64_t>(std::int64_t(window.max_chunk_x) -
                                                                window.min_chunk_x + 1) *
@@ -753,6 +739,20 @@ FarWorldAuthorityProducer::Error FarWorldAuthorityProducer::Impl::Assemble() {
             progress.columns += progress.last_columns;
             progress.members += progress.last_members;
             ++progress.reads;
+            if (active->deadline.expired()) {
+                return Error::SourceReadExpired;
+            }
+            if (read.membership == Save::AuthorityMembership::Unavailable) {
+                set_read_error(read.error);
+                return Error::CommittedReadRefused;
+            }
+            if (progress.reads > 1 && (read.source_identity != result.source_identity ||
+                                       read.generation != result.generation)) {
+                set_read_error("source changed");
+                return Error::CommittedReadRefused;
+            }
+            result.source_identity = read.source_identity;
+            result.generation = read.generation;
             pending.read = std::move(read);
             pending.cursor = 0;
             pending.phase = Phase::Members;

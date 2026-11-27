@@ -2939,6 +2939,141 @@ void SubstituteBeforeRemoval(const char* step, const std::filesystem::path& path
 }
 } // namespace
 
+namespace {
+struct RemovalCompletionFailure {
+    unsigned remaining = 0;
+    unsigned observed = 0;
+};
+RemovalCompletionFailure& RemovalCompletionSchedule() {
+    static RemovalCompletionFailure schedule;
+    return schedule;
+}
+void InterruptRemovalCompletion(const char* step, const std::filesystem::path&) {
+    auto& schedule = RemovalCompletionSchedule();
+    if (std::string_view(step) == "crash-before-namespace-completion" && schedule.remaining != 0) {
+        --schedule.remaining;
+        ++schedule.observed;
+        throw std::runtime_error("interrupted removal completion");
+    }
+}
+struct RemovalHookReset {
+    ~RemovalHookReset() {
+        Luminumbra::Persistence::set_snapshot_step_hook_for_testing(nullptr);
+    }
+};
+} // namespace
+
+TEST(WorldSaveService, RemovalCompletionFailureRemainsRetryable) {
+    using namespace Luminumbra::Persistence;
+    const TempSaveDir save("removal_completion_retry");
+    const auto member = save.path() / "world_info.json";
+    ASSERT_TRUE(WorldSaveService::create_file_durably(member, "original"));
+    SaveTransaction transaction(
+        save.path(),
+        1,
+        {},
+        +[](const std::filesystem::path& root,
+            std::string_view relative,
+            MemberDigest& digest,
+            std::string&) {
+            return hash_file(
+                root / std::string(relative), digest.bytes, digest.fnv64, digest.present, nullptr);
+        });
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+    const TempSaveDir outside("removal_completion_outside");
+    const auto foreign = outside.path() / "world_info.json.tmp.1.2";
+    ASSERT_TRUE(WorldSaveService::create_file_durably(foreign, "foreign"));
+    const auto refused = SaveTransaction::complete_owned_removal(foreign, nullptr, false);
+    ASSERT_TRUE(refused.has_value());
+    if (refused.has_value()) {
+        EXPECT_FALSE(*refused);
+    }
+    EXPECT_EQ(ReadFileBytes(foreign), "foreign");
+    const auto unrecorded = save.path() / "world_info.json.tmp.1.2";
+    ASSERT_TRUE(WorldSaveService::create_file_durably(unrecorded, "unrecorded"));
+    WorldSaveService::reclaim_file_staging(member);
+    EXPECT_EQ(ReadFileBytes(unrecorded), "unrecorded");
+    ASSERT_TRUE(std::filesystem::remove(unrecorded));
+    const RemovalHookReset reset;
+    RemovalCompletionSchedule() = {.remaining = 2, .observed = 0};
+    set_snapshot_step_hook_for_testing(&InterruptRemovalCompletion);
+    for (unsigned attempt = 0; attempt < 2; ++attempt) {
+        SCOPED_TRACE(attempt);
+        EXPECT_THROW(WorldSaveService::durable_remove(member), std::runtime_error);
+        EXPECT_FALSE(std::filesystem::exists(member));
+        EXPECT_TRUE(journal_pending(save.path()));
+    }
+    EXPECT_EQ(RemovalCompletionSchedule().observed, 2u);
+    set_snapshot_step_hook_for_testing(nullptr);
+    // The shared helper must join the explicitly registered world member too.
+    EXPECT_TRUE(WorldSaveService::remove_file_and_staging(member));
+    EXPECT_FALSE(std::filesystem::exists(member));
+    transaction.abort(nullptr);
+    EXPECT_EQ(ReadFileBytes(member), "original");
+    EXPECT_FALSE(journal_pending(save.path()));
+}
+
+TEST(WorldSaveService, FreshPlantSaveCompletesAbsentRegionMembers) {
+    using namespace Luminumbra::Persistence;
+    for (const unsigned directory_depth : {0u, 1u, 2u}) {
+        SCOPED_TRACE(directory_depth);
+        const TempSaveDir save("absent_region_members");
+        const auto chunks = save.path() / "chunks";
+        const auto region = chunks / "region";
+        if (directory_depth != 0) {
+            ASSERT_TRUE(std::filesystem::create_directory(chunks));
+        }
+        if (directory_depth == 2) {
+            ASSERT_TRUE(std::filesystem::create_directory(region));
+        }
+        SaveTransaction transaction(save.path(), 1, {}, &WorldSaveService::member_digest);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(transaction.begin(&errors)) << ::testing::PrintToString(errors);
+        const Luminumbra::Ecs::EntityRegistrySnapshot empty_plants;
+        // No plant file has been installed. Saving and retrying its absence
+        // must complete without requiring payload directories to be created.
+        for (unsigned attempt = 0; attempt < 2; ++attempt) {
+            ASSERT_TRUE(WorldSaveService::save_plant_entities(empty_plants, save.path(), &errors))
+                << ::testing::PrintToString(errors);
+            EXPECT_EQ(std::filesystem::exists(chunks), directory_depth != 0);
+            EXPECT_EQ(std::filesystem::exists(region), directory_depth == 2);
+        }
+        transaction.abort(&errors);
+        EXPECT_TRUE(errors.empty()) << ::testing::PrintToString(errors);
+        EXPECT_FALSE(journal_pending(save.path()));
+        EXPECT_EQ(std::filesystem::exists(chunks), directory_depth != 0);
+        EXPECT_EQ(std::filesystem::exists(region), directory_depth == 2);
+    }
+}
+
+TEST(WorldSaveService, AbsentRegionRemovalRefusesNonDirectoryAncestors) {
+    using namespace Luminumbra::Persistence;
+    for (const bool chunks_directory : {false, true}) {
+        SCOPED_TRACE(chunks_directory);
+        const TempSaveDir save("invalid_region_parent");
+        const auto chunks = save.path() / "chunks";
+        if (chunks_directory) {
+            ASSERT_TRUE(std::filesystem::create_directory(chunks));
+        }
+        SaveTransaction transaction(save.path(), 1, {}, &WorldSaveService::member_digest);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(transaction.begin(&errors)) << ::testing::PrintToString(errors);
+        // The strict inventory refuses a foreign file at begin, so the obstruction
+        // appears only after the transaction has started, as a concurrent writer would.
+        const auto obstruction = chunks_directory ? chunks / "region" : chunks;
+        ASSERT_TRUE(WorldSaveService::create_file_durably(obstruction, "foreign"));
+        errors.clear();
+        EXPECT_FALSE(WorldSaveService::remove_member(
+            save.path(), "chunks/region/plant-identities.json", &errors));
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(ReadFileBytes(obstruction), "foreign");
+        transaction.abort(nullptr);
+        EXPECT_EQ(ReadFileBytes(obstruction), "foreign");
+        EXPECT_FALSE(journal_pending(save.path()));
+    }
+}
+
 TEST(WorldSaveService, DurableRemovalRefusesSubstitutedOccupant) {
     const TempSaveDir save("remove_substitution");
     const auto path = save.path() / "world_info.json";

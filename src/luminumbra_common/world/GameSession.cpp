@@ -3155,6 +3155,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             // publication. Keep ambient authority staged until every consumer succeeds.
             PublishRegionCompletedWork(scheduled_energy, defer_water_authority);
             if (field_candidate) {
+                m_activeRegionLedger.commit_owner_adoption();
                 m_fieldPages.adopt_weather_state(*field_candidate);
                 m_fieldPages.adopt_scheduled_pages(std::move(*field_candidate));
             }
@@ -3959,6 +3960,8 @@ std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint6
     m_regionalWeatherProjectionVisitCount = 0;
     if (!m_activeRegionsEnabled || !m_worldSystem)
         return std::nullopt;
+    if (!m_activeRegionLedger.prepare_owner_adoption({}))
+        throw std::runtime_error("Regional weather owner reset refused");
     const auto& records = m_activeRegionLedger.records();
     const auto refresh_boundary = [this](RegionKey changed) {
         // Stored velocity is capped at 32 m/s, so only immediate neighbours can target it.
@@ -4046,9 +4049,51 @@ std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint6
         return std::nullopt;
     m_regionalWeatherParticipating = true;
     next.begin_weather_update(m_fieldPages);
+    if (!m_fieldPages.has_ambient())
+        StageProceduralStorms(next, tick);
     for (const auto& [owner, updates] : work)
         m_regionCompletedWork.push_back(RegionWork{owner, 0, 0, 0, updates});
     return next;
+}
+
+void GameSession::StageProceduralStorms(FieldPageState& fields, std::uint64_t tick) {
+    if (!m_weatherSystem || m_weatherSchedule)
+        return;
+    const auto& storms = m_weatherSystem->StormCells();
+    if (storms.size() > static_cast<std::size_t>(Systems::kMaxStormCells))
+        throw std::runtime_error("Procedural storm admission refused");
+    m_regionalWeatherScanCount += storms.size();
+    // Handover runs once, before binding the first ambient candidate. Both the scan
+    // and owner storage are bounded by the existing 16-cell procedural storm cap.
+    std::vector<RegionKey> owners;
+    owners.reserve(storms.size());
+    for (const auto& storm : storms) {
+        if (storm.spawn_tick >= tick || tick - 1 - storm.spawn_tick >= storm.lifetime_ticks)
+            throw std::runtime_error("Procedural storm age refused");
+        const auto owner =
+            ActiveRegionLedger::region_at(Vec3(storm.center_world.x, 0.0f, storm.center_world.y));
+        fields.stage_weather_owner(owner).storms.push_back(
+            {owner,
+             std::bit_cast<std::uint32_t>(storm.center_world.x),
+             std::bit_cast<std::uint32_t>(storm.center_world.y),
+             std::bit_cast<std::uint32_t>(storm.velocity.x),
+             std::bit_cast<std::uint32_t>(storm.velocity.y),
+             std::bit_cast<std::uint32_t>(storm.intensity),
+             storm.spawn_tick,
+             storm.lifetime_ticks,
+             storm.seed_salt,
+             static_cast<std::uint32_t>(tick - 1 - storm.spawn_tick)});
+        owners.push_back(owner);
+    }
+    std::sort(owners.begin(), owners.end());
+    owners.erase(std::unique(owners.begin(), owners.end()), owners.end());
+    if (!fields.prepare_weather_update())
+        throw std::runtime_error("Procedural storm state admission refused");
+    m_regionalWeatherScanCount += fields.weather_validation_visits();
+    if (!m_activeRegionLedger.prepare_owner_adoption(owners))
+        throw std::runtime_error("Procedural storm owner admission refused");
+    // The completed tick's strikes have already been delivered. The first regional
+    // tick schedules only its own strikes, using each adopted storm's active age.
 }
 
 GameSession::RegionalEnergyStep* GameSession::AdvanceEnergy(std::uint64_t tick) {
@@ -5682,21 +5727,23 @@ GameSession::FarCaptureBinding GameSession::AcquireFarWorldCaptureBinding() cons
     }
     return {m_farWorldAuthorityProducer, m_worldSystem, m_worldRevision, m_farWorldBindingEpoch};
 }
-void GameSession::PumpFarWorldAuthorityCapture() {
+bool GameSession::PumpFarWorldAuthorityCapture(bool prepare_only) {
     if (!m_farWorldAuthorityProducer || !m_worldUsable || !IsSimulationTickBoundary()) {
-        return;
+        return false;
     }
     if (m_farWorldAuthorityProducer->capture_status().paused) {
-        m_farWorldAuthorityProducer->pump_capture();
-        return;
+        if (!prepare_only)
+            m_farWorldAuthorityProducer->pump_capture();
+        return false;
     }
     if (m_farWorldSourceNeedsRefresh) {
         if (Persistence::SaveTransaction::active_for(GetWorldSaveDir())) {
             const bool paused = m_farWorldAuthorityProducer->capture_status().paused;
             FenceFarWorldAuthorityReads(true);
-            m_farWorldAuthorityProducer->pump_capture();
+            if (!prepare_only)
+                m_farWorldAuthorityProducer->pump_capture();
             FenceFarWorldAuthorityReads(paused);
-            return;
+            return false;
         }
         std::string error;
         bool refreshed = false;
@@ -5707,16 +5754,18 @@ void GameSession::PumpFarWorldAuthorityCapture() {
             });
         } catch (const std::exception& failure) {
             LUMINUMBRA_CORE_ERROR("Source refresh refused: {}", failure.what());
-            return;
+            return true;
         }
         if (!refreshed) {
-            return;
+            return true;
         }
         m_farWorldSourceNeedsRefresh = false;
     }
     if (m_farWorldAuthorityProducer->needs_capture_boundary()) {
         m_worldSystem->quiesce_streaming_jobs_for_save();
     }
+    if (prepare_only)
+        return true;
     if (m_farWorldAuthorityProducer->capture_status().active) {
         // Only an active capture reads committed bytes. Keep idle pumps and
         // published-memory capture on the owner without per-frame job allocation.
@@ -5745,6 +5794,7 @@ void GameSession::PumpFarWorldAuthorityCapture() {
     } else {
         m_farWorldAuthorityProducer->pump_capture();
     }
+    return true;
 }
 void GameSession::FenceFarWorldAuthorityReads(bool paused) {
     if (m_farWorldAuthorityProducer) {

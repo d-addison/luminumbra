@@ -8,6 +8,7 @@
 #include "FarVolumeGlBackend.h"
 #include "FarWorldReplay.h"
 #include "FarWorldReplayGl.h"
+#include "FarWorldSessionController.h"
 #include "GBufferTargets.h"
 #include "GraphicsRuntimeConfig.h"
 #include "ImpostorBake.h"  //  far-field tree impostor atlas (opt-in)
@@ -337,6 +338,22 @@ private:
 };
 
 // --- CONSTRUCTOR / DESTRUCTOR ---
+
+// Exists only under the command-line diagnostics opt-in. Fixed renderer limits
+// bound wanted sets to 512 keys; the two scratch vectors reserve that bound once.
+struct RenderPipeline::FarSessionDiagnostics {
+    FarSessionDiagnostics(JobSystem& workers, const FarSessionHost& callbacks)
+        : jobs(workers)
+        , host(callbacks) {
+        wanted.reserve(512);
+        previous.reserve(512);
+    }
+    JobSystem& jobs;
+    FarSessionHost host;
+    std::unique_ptr<FarWorldSessionController> controller;
+    std::vector<World::FarTileKey> wanted, previous;
+    bool attempted = false, paused = false;
+};
 
 RenderPipeline::RenderPipeline()
     : m_farlod(std::make_unique<FarLodSystem>())
@@ -1684,6 +1701,89 @@ bool RenderPipeline::capture_ssao_parity(const std::filesystem::path& out_dir,
     return report_written && ok;
 }
 
+void RenderPipeline::enable_far_ladder_diagnostics(JobSystem& jobs, const FarSessionHost& host) {
+    if (!m_far_session_diagnostics && host.context && host.ready && host.attach && host.prepare &&
+        host.fence)
+        m_far_session_diagnostics = std::make_unique<FarSessionDiagnostics>(jobs, host);
+}
+
+void RenderPipeline::resume_far_world_readers() {
+    if (m_far_session_diagnostics && m_far_session_diagnostics->controller) {
+        const auto& host = m_far_session_diagnostics->host;
+        host.fence(host.context, false);
+        m_far_session_diagnostics->paused = false;
+    }
+}
+
+void RenderPipeline::prepare_far_session_diagnostics(Systems::SHIELD_WorldSystem& world_system,
+                                                     const Camera& camera) {
+    if (!m_far_session_diagnostics || m_far_world_preview || m_offscreen_target_active ||
+        m_far_world_paired || !m_far_world_submission ||
+        m_far_world->Selection(FarWorldPurpose::World).requested != FarWorldMode::Ladder)
+        return;
+    auto& state = *m_far_session_diagnostics;
+    if (state.paused || !state.host.ready(state.host.context, world_system))
+        return;
+    if (!state.controller) {
+        if (state.attempted || world_system.pending_publication_chunks() != 0 ||
+            !world_system.get_streaming_telemetry_stats().quiescent())
+            return;
+        state.attempted = true;
+        const auto caves = m_far_world->CavePolicy(FarWorldPurpose::World).requested;
+        if (!caves)
+            return;
+        const World::FarWorldAuthorityProducer::FrozenPolicy policy{
+            World::WorldFarVolumeIdentity(world_system,
+                                          *caves,
+                                          World::FarVolumeNumericProfile::RawFloat,
+                                          world_system.debug_water_sim_resolution()),
+            *caves,
+            World::FarVolumeNumericProfile::RawFloat,
+            world_system.debug_water_sim_resolution()};
+        const auto limits = FarWorldDiagnosticsSessionLimits([](const void*) noexcept {
+            return static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count());
+        });
+        auto controller = std::make_unique<FarWorldSessionController>(*m_far_world);
+        const auto configured =
+            controller->Configure(state.jobs, m_far_world_epoch, policy, limits);
+        std::string error;
+        std::shared_ptr<World::FarWorldAuthorityProducer> producer;
+        std::shared_ptr<const Systems::SHIELD_WorldSystem> world;
+        if (configured != FarWorldRefusal::None ||
+            !state.host.attach(
+                state.host.context, controller->SourceConfig(), error, producer, world)) {
+            LUMINUMBRA_CORE_WARN("Far ladder diagnostics binding refused: {} {}",
+                                 FarWorldRefusalName(configured),
+                                 error);
+            return;
+        }
+        const auto attached = controller->Attach(producer, world);
+        if (attached != FarWorldRefusal::None) {
+            LUMINUMBRA_CORE_WARN("Far ladder diagnostics binding refused: {}",
+                                 FarWorldRefusalName(attached));
+            return;
+        }
+        state.controller = std::move(controller);
+    }
+    // Preparation runs even while effective selection is still Legacy. Refresh
+    // saved authority through the session, but delegate every capture pump to the
+    // controller. Workers finish before any new source image copies live data.
+    if (!state.host.prepare(state.host.context))
+        return;
+    if (World::ComputeFarWantedSet(camera.Position.x, camera.Position.z, state.wanted) !=
+        World::FarWantedError::None)
+        return;
+    if (state.wanted != state.previous) {
+        world_system.quiesce_streaming_jobs_for_save();
+        if (state.controller->Request(state.wanted))
+            state.previous = state.wanted;
+    }
+    state.controller->Pump(m_far_world_frame + 1);
+}
+
 void RenderPipeline::attach_farlod_job_system(JobSystem* job_system) {
     if (m_gbuffer_pass)
         m_gbuffer_pass->attach_mesh_jobs(job_system);
@@ -1715,6 +1815,12 @@ void RenderPipeline::wait_for_accepted_far_tile_writes() {
 }
 
 void RenderPipeline::wait_for_world_readers() {
+    // Pause only; a failed open resumes the same retained capture and target.
+    if (m_far_session_diagnostics && m_far_session_diagnostics->controller) {
+        m_far_session_diagnostics->paused = true;
+        const auto& host = m_far_session_diagnostics->host;
+        host.fence(host.context, true);
+    }
     // Volume renderers own immutable authority; legacy builds/writers borrow the live world.
     m_far_world->WaitForAcceptedCacheWrites();
     if (m_farlod)
@@ -1722,6 +1828,12 @@ void RenderPipeline::wait_for_world_readers() {
 }
 
 void RenderPipeline::prepare_world_swap() {
+    if (m_far_session_diagnostics) {
+        m_far_session_diagnostics->controller.reset();
+        m_far_session_diagnostics->previous.clear();
+        m_far_session_diagnostics->attempted = false;
+        m_far_session_diagnostics->paused = false;
+    }
     m_far_world->PrepareWorldSwap();
     m_waterfall_pass->destroy_geometry();
     m_capture_waterfall_geometry = false;
@@ -2975,6 +3087,8 @@ void RenderPipeline::render_frame(entt::registry& registry,
     const auto purpose = m_offscreen_target_active ? FarWorldPurpose::OffscreenPreview
                          : m_far_world_preview     ? FarWorldPurpose::Preview
                                                    : FarWorldPurpose::World;
+    if (m_far_session_diagnostics && purpose == FarWorldPurpose::World)
+        prepare_far_session_diagnostics(world_system, camera);
     select_frame_far_world(
         FarWorldSubmissionOverride(
             ApplyLegacyFarWorldEnable(m_far_world->Selection(purpose), m_legacy_far_enabled),
@@ -4929,6 +5043,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_post_pass->destroy(m_render_registry);
     // Release allocations while the captured context is current, including
     // startup failure. Repeated shutdown/destruction sees an empty owner.
+    m_far_session_diagnostics.reset();
     m_far_world->Shutdown();
     if (m_farlod) {
         m_farlod->shutdown();
