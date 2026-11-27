@@ -725,6 +725,7 @@ public:
                                  std::array<std::uint64_t, 8>& version,
                                  bool& missing);
     // A supplied known stable volume must also match the handle used for removal.
+    // Windows refuses a supplied unknown identity; callers retain its receipt.
     static bool remove_owned_entry(const std::filesystem::path& path,
                                    const ArtifactIdentity& identity,
                                    std::vector<std::string>* errors,
@@ -736,13 +737,15 @@ public:
                                     std::filesystem::path& temp,
                                     ArtifactIdentity& identity,
                                     std::vector<std::string>* errors);
+    // Receipt-backed replacement verifies retired_volume on the final deletion handle.
     static bool publish_restoration(const std::filesystem::path& temp,
                                     const std::filesystem::path& destination,
                                     const ArtifactIdentity& expected,
                                     const ArtifactIdentity& incoming,
                                     std::vector<std::string>* errors,
                                     const BoundPublicationStage* source_stage = nullptr,
-                                    const BoundPublicationStage* retired_stage = nullptr);
+                                    const BoundPublicationStage* retired_stage = nullptr,
+                                    const detail::StableVolumeIdentity* retired_volume = nullptr);
     // Complete a matching or newly published restoration before advancing rollback.
     // Rebinds the recorded identity; Windows retries its writable-handle flush, POSIX
     // repeats all four relevant parent barriers. Failure retains the recovery journal.

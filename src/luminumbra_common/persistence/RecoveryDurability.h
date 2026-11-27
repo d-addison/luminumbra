@@ -136,6 +136,10 @@ NamespaceRetirementOutcome CompleteNamespaceRetirement(NamespaceReceipt& receipt
          receipt.phase != NamespaceReceiptPhase::NamespaceDone &&
          receipt.phase != NamespaceReceiptPhase::FlushObserved))
         return NamespaceRetirementOutcome::Failed;
+    if constexpr (RequireNtfs) {
+        if (!receipt.stable_volume.known())
+            return NamespaceRetirementOutcome::Retained;
+    }
     const NamespaceEntryState entry = operations.inspect_namespace(receipt.identity);
     if (entry == NamespaceEntryState::Refused)
         return NamespaceRetirementOutcome::Failed;

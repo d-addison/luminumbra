@@ -1260,11 +1260,50 @@ public:
         }
     }
 
-    bool remove_bound(bool directory = false, const BoundPublicationStage* stage = nullptr) {
+    bool remove_bound(bool directory = false,
+                      const BoundPublicationStage* stage = nullptr,
+                      const detail::StableVolumeIdentity* expected_volume = nullptr) {
         try {
 #if defined(_WIN32)
+            if (expected_volume) {
+                // Directory inspection has attributes-only access. Bind the final
+                // deletion handle and verify the stable identity on that handle,
+                // rather than letting a path reopen fall back to serial equality.
+                StagingIdentity held{};
+                if (!expected_volume->known() ||
+                    !identity(held, directory, std::numeric_limits<unsigned>::max()))
+                    return false;
+                const HANDLE retiring =
+                    ::CreateFileW(m_path.c_str(),
+                                  FILE_READ_ATTRIBUTES | DELETE,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                  nullptr,
+                                  OPEN_EXISTING,
+                                  FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                                  nullptr);
+                if (retiring == INVALID_HANDLE_VALUE)
+                    return false;
+                Filesystem::NativeFileOwner retirement_owner(retiring);
+                BY_HANDLE_FILE_INFORMATION info{};
+                const bool verified =
+                    ::GetFileType(retiring) == FILE_TYPE_DISK &&
+                    ::GetFileInformationByHandle(retiring, &info) &&
+                    (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
+                    ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) == directory &&
+                    (directory || info.nNumberOfLinks > 0) &&
+                    WorldSaveService::ArtifactIdentity{
+                        info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow} ==
+                        WorldSaveService::ArtifactIdentity{held[0], held[1], held[2]} &&
+                    detail::VolumeIdentityFromHandle(retiring) == *expected_volume;
+                if (verified && stage && stage->report)
+                    stage->report("crash-retirement-bound", m_path);
+                const bool removed = verified && Detail::WindowsDisposeLink(retiring);
+                const bool closed = ::CloseHandle(retirement_owner.release()) != 0;
+                return removed && closed && close();
+            }
             CreatedWorldArtifacts::remove_bound_entry(m_path, m_handle, directory, stage);
 #else
+            (void)expected_volume;
             CreatedWorldArtifacts::remove_bound_entry(m_path, m_descriptor, directory, stage);
 #endif
             return close();
@@ -1785,7 +1824,8 @@ bool PublishProtectedMember(const std::filesystem::path& temp,
                             const std::array<std::uint64_t, 3>& incoming,
                             std::vector<std::string>* errors,
                             const BoundPublicationStage* source_stage = nullptr,
-                            const BoundPublicationStage* retired_stage = nullptr) {
+                            const BoundPublicationStage* retired_stage = nullptr,
+                            const detail::StableVolumeIdentity* retired_volume = nullptr) {
     // Explicit stages belong to journal replay, whose recorded identities and
     // rollback slots are authoritative even if a live writer remains registered.
     const bool recorded_restoration = source_stage || retired_stage;
@@ -1812,9 +1852,17 @@ bool PublishProtectedMember(const std::filesystem::path& temp,
         } else {
             StagingFile current(destination, StagingFile::Mode::Inspect);
             StagingIdentity actual{};
+#if defined(_WIN32)
+            if (retired_volume && !retired_volume->known()) {
+                AddError(errors, "snapshot publication stable volume unknown");
+                return false;
+            }
+#endif
             if (!current.identity(actual) ||
                 !std::equal(expected.begin(), expected.end(), actual.begin()) ||
-                !current.remove_bound(false, retired_stage)) {
+                (retired_volume && retired_volume->known() &&
+                 current.stable_volume() != *retired_volume) ||
+                !current.remove_bound(false, retired_stage, retired_volume)) {
                 AddError(errors, "snapshot publication occupant changed");
                 return false;
             }
@@ -7564,6 +7612,12 @@ bool WorldSaveService::remove_owned_entry(const std::filesystem::path& path,
                                           bool directory,
                                           const BoundPublicationStage* stage,
                                           const detail::StableVolumeIdentity* stable_volume) {
+#if defined(_WIN32)
+    if (stable_volume && !stable_volume->known()) {
+        AddError(errors, "snapshot artifact stable volume unknown");
+        return false;
+    }
+#endif
     const SaveOwnership ownership;
     const auto publish = LockPublication(path);
     PublicationRevision().fetch_add(1, std::memory_order_relaxed);
@@ -7572,7 +7626,7 @@ bool WorldSaveService::remove_owned_entry(const std::filesystem::path& path,
     if (!bound.identity(identity, directory, std::numeric_limits<unsigned>::max()) ||
         !std::equal(expected.begin(), expected.end(), identity.begin()) ||
         (stable_volume && stable_volume->known() && bound.stable_volume() != *stable_volume) ||
-        !bound.remove_bound(directory, stage)) {
+        !bound.remove_bound(directory, stage, stable_volume)) {
         AddError(errors,
                  "snapshot artifact ownership changed: " + Filesystem::GenericUtf8PathString(path));
         return false;
@@ -7599,14 +7653,21 @@ bool WorldSaveService::publish_restoration(const std::filesystem::path& temp,
                                            const ArtifactIdentity& incoming,
                                            std::vector<std::string>* errors,
                                            const BoundPublicationStage* source_stage,
-                                           const BoundPublicationStage* retired_stage) {
+                                           const BoundPublicationStage* retired_stage,
+                                           const detail::StableVolumeIdentity* retired_volume) {
     const SaveOwnership ownership;
     report_snapshot_step("before-replace", destination);
     PublicationRevision().fetch_add(1, std::memory_order_relaxed);
     {
         const auto publication = LockPublication(destination);
-        if (!PublishProtectedMember(
-                temp, destination, expected, incoming, errors, source_stage, retired_stage))
+        if (!PublishProtectedMember(temp,
+                                    destination,
+                                    expected,
+                                    incoming,
+                                    errors,
+                                    source_stage,
+                                    retired_stage,
+                                    retired_volume))
             return false;
     }
     if (!complete_restoration(destination,

@@ -1177,7 +1177,9 @@ bool RecordReceipts(const fs::path& save_dir,
 
 // Validate every candidate through its object handle before recording any reset.
 // A private slot may not exist yet; its verified publication source supplies identity.
-bool ObserveReceiptVolume(const fs::path& save_dir, RetirementReceipt& receipt) {
+bool ObserveReceiptVolume(const fs::path& save_dir,
+                          const JournalDocument& document,
+                          RetirementReceipt& receipt) {
     ArtifactIdentity actual{};
     bool missing = false;
     const auto artifact_path =
@@ -1199,6 +1201,31 @@ bool ObserveReceiptVolume(const fs::path& save_dir, RetirementReceipt& receipt) 
                                               &receipt.completion.stable_volume) ||
          (!missing && actual != receipt.completion.identity)))
         return false;
+    if (missing) {
+        // Consumed aliases and rollback occupants no longer have an object handle.
+        // Their recorded publication uses same-volume rename/link operations into
+        // the journal. Inspect its bound directory with the same no-reparse rules;
+        // after directory retirement the bound save root is the remaining source.
+        if (!WorldSaveService::artifact_identity(journal_directory(save_dir),
+                                                 actual,
+                                                 missing,
+                                                 true,
+                                                 std::numeric_limits<unsigned>::max(),
+                                                 &receipt.completion.stable_volume) ||
+            (!missing && actual != document.journal_identity))
+            return false;
+        if (missing && document.root_identity != ArtifactIdentity{} &&
+            (!WorldSaveService::artifact_identity(save_dir,
+                                                  actual,
+                                                  missing,
+                                                  true,
+                                                  std::numeric_limits<unsigned>::max(),
+                                                  &receipt.completion.stable_volume) ||
+             (!missing && actual != document.root_identity)))
+            return false;
+        if (!missing && actual.front() != receipt.completion.identity.front())
+            return false;
+    }
     receipt.source_path.clear();
     return true;
 }
@@ -1211,7 +1238,7 @@ bool PrepareReceipts(const fs::path& save_dir,
                      bool new_artifact = false) {
     std::vector<RetirementReceipt*> resets;
     for (auto& [name, candidate] : candidates) {
-        if (!ObserveReceiptVolume(save_dir, candidate))
+        if (!ObserveReceiptVolume(save_dir, document, candidate))
             return false;
         const auto found = LatestReceipt(document, name);
         if (found == document.receipts.end() || found->second.retired || found->second.reset ||
@@ -1380,6 +1407,13 @@ detail::NamespaceRetirementOutcome CompleteReceipts(const fs::path& save_dir,
         AddError(errors, "cannot complete recorded snapshot namespaces");
         return detail::NamespaceRetirementOutcome::Failed;
     };
+#if defined(_WIN32)
+    // Retain the entire batch before any reset/removal. A serial-only receipt
+    // cannot establish ownership, even when its legacy file identity matches.
+    for (const auto& removal : removals)
+        if (!removal.receipt->completion.stable_volume.known())
+            return detail::NamespaceRetirementOutcome::Retained;
+#endif
     std::vector<RetirementReceipt*> resets;
     std::vector<bool> owned;
     owned.reserve(removals.size());
@@ -1613,6 +1647,19 @@ std::optional<bool> CompleteSupersededAbsence(const fs::path& save_dir,
     // A receipt-backed removal re-checks the stable volume bound to its private slot.
     const auto completion_name = Filesystem::GenericUtf8PathString(
         (stage.directory / stage.name).lexically_relative(save_dir));
+    if (identity != ArtifactIdentity{} &&
+        (kNeedsFileReceipts || HasReceipt(document, completion_name)) &&
+        !PrepareReceipt(save_dir,
+                        document,
+                        stage.directory / stage.name,
+                        identity,
+                        false,
+                        control,
+                        errors,
+                        false,
+                        false,
+                        path))
+        return false;
     const auto* stable_volume =
         HasReceipt(document, completion_name)
             ? &ReceiptFor(document, completion_name).completion.stable_volume
@@ -1858,13 +1905,33 @@ bool RollbackEntries(const fs::path& save_dir,
                     if (!AppendEntry(save_dir, document, *entry, control, errors))
                         return false;
                 }
+                const auto retired_path = retired_stage.directory / retired_stage.name;
+                const auto retired_name =
+                    Filesystem::GenericUtf8PathString(retired_path.lexically_relative(save_dir));
+                if (document.modern && (kNeedsFileReceipts || HasReceipt(document, retired_name)) &&
+                    !PrepareReceipt(save_dir,
+                                    document,
+                                    retired_path,
+                                    current,
+                                    false,
+                                    control,
+                                    errors,
+                                    false,
+                                    false,
+                                    destination))
+                    return false;
+                const auto* retired_volume =
+                    HasReceipt(document, retired_name)
+                        ? &ReceiptFor(document, retired_name).completion.stable_volume
+                        : nullptr;
                 if (!WorldSaveService::publish_restoration(temporary,
                                                            destination,
                                                            current,
                                                            entry->restored_identity,
                                                            errors,
                                                            &restored_stage,
-                                                           &retired_stage))
+                                                           &retired_stage,
+                                                           retired_volume))
                     return false;
             }
             // A prior rename may have succeeded before its flush failed. Matching bytes
@@ -2343,6 +2410,15 @@ bool FinishJournal(const fs::path& save_dir,
     const auto file_outcome = CompleteReceipts(save_dir, document, file_removals, control, errors);
     if (file_outcome == detail::NamespaceRetirementOutcome::Failed)
         return false;
+    if (file_outcome == detail::NamespaceRetirementOutcome::Retained &&
+        std::any_of(file_removals.begin(), file_removals.end(), [](const auto& removal) {
+            return !removal.receipt->completion.stable_volume.known();
+        })) {
+        // An unverifiable occupant may still be inside these directories. Keep
+        // the whole carrier discoverable without making reopening a failure.
+        AddError(errors, "namespace receipts retained; filesystem durability unqualified");
+        return true;
+    }
     bool all_retired = file_outcome == detail::NamespaceRetirementOutcome::Retired;
     report_snapshot_step("journal-unlinked", journal / "txn.json");
     std::vector<ReceiptRemoval> directory_removals;
@@ -2370,13 +2446,21 @@ bool FinishJournal(const fs::path& save_dir,
                                              .name = ReceiptCarrier(save_dir, document).filename(),
                                              .directory_identity = document.root_identity,
                                              .report = &report_snapshot_step};
+    // The carrier was published from this journal by a same-volume operation.
     return WorldSaveService::remove_owned_entry(
-        ReceiptCarrier(save_dir, document), control, errors, false, &carrier_slot);
+        ReceiptCarrier(save_dir, document),
+        control,
+        errors,
+        false,
+        &carrier_slot,
+        &ReceiptFor(document, "journal").completion.stable_volume);
 }
 
 // Receipt names are a closed, bounded inventory in the save root. They remain
 // discoverable after txn.json and both journal directories have disappeared.
-bool RecoverReceiptCarriers(const fs::path& save_dir, std::vector<std::string>* errors) {
+bool RecoverReceiptCarriers(const fs::path& save_dir,
+                            std::vector<std::string>* errors,
+                            ArtifactIdentity& retained_journal) {
     std::vector<fs::path> carriers;
     std::error_code iterator_error;
     fs::directory_iterator iterator(save_dir, iterator_error);
@@ -2448,6 +2532,15 @@ bool RecoverReceiptCarriers(const fs::path& save_dir, std::vector<std::string>* 
         }
         if (!FinishJournal(save_dir, document, identity, errors))
             return false;
+        // Unknown Windows receipts can retain occupants and their containers.
+        // The verified carrier already inventoried this journal; do not mistake
+        // its retained leaves for an orphan journal lacking a control record.
+        if (!WorldSaveService::artifact_identity(
+                journal_directory(save_dir), journal_identity, missing, true) ||
+            (!missing && journal_identity != document.journal_identity))
+            return false;
+        if (!missing)
+            retained_journal = journal_identity;
     }
     return true;
 }
@@ -2769,9 +2862,15 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
         return RecoveryOutcome::Failed;
     };
     try {
-        if (!RecoverReceiptCarriers(save_dir, errors)) {
+        ArtifactIdentity retained_journal{};
+        if (!RecoverReceiptCarriers(save_dir, errors, retained_journal)) {
             AddError(errors, "snapshot receipt recovery refused");
             return fail();
+        }
+        if (retained_journal != ArtifactIdentity{}) {
+            if (!MatchesIdentity(journal_directory(save_dir), retained_journal, true))
+                return fail();
+            return RecoveryOutcome::DiscardedStale;
         }
         const fs::path journal = journal_directory(save_dir);
         std::error_code ec;
