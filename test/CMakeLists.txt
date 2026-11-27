@@ -2664,6 +2664,12 @@ set_tests_properties(FieldPageEvidenceContract PROPERTIES LABELS "simulation;too
 add_test(NAME ActiveRegionScaleReportContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_active_region_scale.py")
 set_tests_properties(ActiveRegionScaleReportContract PROPERTIES LABELS "simulation;tools" TIMEOUT 5)
+if(TARGET luminumbra_active_regions_bench)
+    add_test(NAME ActiveRegionScaleProducerContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_active_region_scale.py"
+            --binary "$<TARGET_FILE:luminumbra_active_regions_bench>")
+    set_tests_properties(ActiveRegionScaleProducerContract PROPERTIES LABELS "simulation;tools" TIMEOUT 30)
+endif()
 add_test(NAME DeferredStackEvidenceContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_deferred_stack.py")
 set_tests_properties(DeferredStackEvidenceContract PROPERTIES LABELS "perf;tools" TIMEOUT 30)
