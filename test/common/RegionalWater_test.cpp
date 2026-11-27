@@ -4472,6 +4472,8 @@ TEST(RegionalWaterCadence, ReopenPreservesCursorDebtAndSealedMass) {
         ASSERT_TRUE(P::WorldSaveService::finalize_indexed_envelope(save, &errors));
         ASSERT_TRUE(transaction.commit(&errors));
     }
+    // Joined writers publish last_save on disk; the owner acknowledges only after commit.
+    ledger.mark_saved(WorldClock(4));
     const auto ledger_bytes = ledger.encode();
     ASSERT_GE(ledger_bytes.size(), 6u);
     EXPECT_EQ(ledger_bytes.substr(0, 4), "ARL1");
@@ -4485,6 +4487,10 @@ TEST(RegionalWaterCadence, ReopenPreservesCursorDebtAndSealedMass) {
         << ::testing::PrintToString(errors);
     ASSERT_TRUE(P::WorldSaveService::load_active_regions(restored_ledger, save, &errors));
     EXPECT_EQ(restored_ledger.encode(), ledger_bytes);
+    for (const auto& [key, record] : ledger.records()) {
+        EXPECT_EQ(record.last_save, 4u);
+        EXPECT_EQ(restored_ledger.records().at(key).last_save, record.last_save);
+    }
     const auto loaded_chunks = restored.snapshot_chunks();
     ASSERT_EQ(loaded_chunks.size(), chunks.size());
     const auto persistent_water = [](const Chunk& chunk) {

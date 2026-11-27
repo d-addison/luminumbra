@@ -256,6 +256,17 @@ TEST(GameSessionHeadlessWorldTest, RegionalCadencePendingReplayRefusesSaveThenRe
     record.cadence_phase = 34;
     W::FieldPageState fields;
     ASSERT_TRUE(fields.set_soil({owner.x * 512 + 8, owner.z * 512 + 8}, 0));
+    entt::registry plants;
+    const auto plant = ClockTestPlant(
+        plants, {static_cast<float>(owner.x * 512 + 8), 0, static_cast<float>(owner.z * 512 + 8)});
+    auto& growth = plants.get<C::PlantGrowthComponent>(plant);
+    growth.planted_tick = growth.last_tick = clock.tick();
+    plants.emplace<C::PlantRegionComponent>(plant, plant_id, owner.x, owner.z, clock.tick());
+    const auto plant_snapshot = luminumbra::foliage::BuildPlantEntitySnapshot(plants, true);
+    std::string plant_error;
+    ASSERT_TRUE(luminumbra::foliage::ValidatePlantEntitySnapshot(
+        plant_snapshot, seed, W::GroundObjectStore{}, plant_error))
+        << plant_error;
     const auto input = root.path() / "cadence-input";
     fs::create_directories(input);
     {
@@ -267,6 +278,7 @@ TEST(GameSessionHeadlessWorldTest, RegionalCadencePendingReplayRefusesSaveThenRe
         nlohmann::json metadata = {{"container_version", P::WorldSaveService::kContainerVersion}};
         clock.write_metadata(metadata);
         ASSERT_TRUE(P::WorldSaveService::save_field_pages(fields, input, &errors));
+        ASSERT_TRUE(P::WorldSaveService::save_plant_entities(plant_snapshot, input, &errors));
         ASSERT_TRUE(P::WorldSaveService::save_metadata_and_active_regions(
             metadata.dump(), seed, input, &errors));
         ASSERT_TRUE(P::WorldSaveService::finalize_indexed_envelope(input, &errors));
@@ -285,13 +297,10 @@ TEST(GameSessionHeadlessWorldTest, RegionalCadencePendingReplayRefusesSaveThenRe
     };
     ASSERT_NO_FATAL_FAILURE(configure(uninterrupted));
     ASSERT_TRUE(uninterrupted.LoadWorldStateFrom(input)) << uninterrupted.GetWorldOpenError();
-    const auto plant = ClockTestPlant(
-        uninterrupted.GetRegistry(),
-        {static_cast<float>(owner.x * 512 + 8), 0, static_cast<float>(owner.z * 512 + 8)});
-    // Enabled continuation replaces the persistent roster, including on repeated loads.
-    uninterrupted.GetRegistry().emplace<C::PlantRegionComponent>(
-        plant, plant_id, owner.x, owner.z, std::uint64_t{0});
-    uninterrupted.GetRegistry().get<C::PlantGrowthComponent>(plant).planted_tick = 1;
+    // Adopt the validated identity and allocator together, as on a production reopen.
+    ASSERT_EQ(CadencePlantBytes(uninterrupted),
+              Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(plant_snapshot));
+    ASSERT_EQ(uninterrupted.GetActiveRegionLedger().next_persistent_id(), plant_id + 1);
     for (unsigned tick = 2; tick <= 31; ++tick) {
         ASSERT_EQ(uninterrupted.TickSimulation(uninterrupted.GetSimulationClock().fixed_dt()), 1u);
         ASSERT_FALSE(uninterrupted.GetRegionSchedulerFault());
