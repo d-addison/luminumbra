@@ -245,6 +245,8 @@ TEST(GameSessionHeadlessWorldTest, RegionalCadencePendingReplayRefusesSaveThenRe
     const W::WorldClock clock(1);
     W::ActiveRegionLedger seed({std::numeric_limits<std::uint64_t>::max(), 10000, 6}, clock);
     seed.pin(owner, true, clock);
+    std::uint64_t plant_id = 0;
+    ASSERT_TRUE(seed.allocate_persistent_id(plant_id));
     auto& record =
         const_cast<std::map<W::RegionKey, W::ActiveRegionRecord>&>(seed.records()).at(owner);
     record.first_active = 0;
@@ -286,6 +288,9 @@ TEST(GameSessionHeadlessWorldTest, RegionalCadencePendingReplayRefusesSaveThenRe
     const auto plant = ClockTestPlant(
         uninterrupted.GetRegistry(),
         {static_cast<float>(owner.x * 512 + 8), 0, static_cast<float>(owner.z * 512 + 8)});
+    // Enabled continuation replaces the persistent roster, including on repeated loads.
+    uninterrupted.GetRegistry().emplace<C::PlantRegionComponent>(
+        plant, plant_id, owner.x, owner.z, std::uint64_t{0});
     uninterrupted.GetRegistry().get<C::PlantGrowthComponent>(plant).planted_tick = 1;
     for (unsigned tick = 2; tick <= 31; ++tick) {
         ASSERT_EQ(uninterrupted.TickSimulation(uninterrupted.GetSimulationClock().fixed_dt()), 1u);

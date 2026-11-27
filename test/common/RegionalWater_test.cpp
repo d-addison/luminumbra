@@ -4445,8 +4445,9 @@ TEST(RegionalWaterCadence, ReopenPreservesCursorDebtAndSealedMass) {
     const auto total_mass =
         Mass(*chunks[0]) + Mass(*chunks[1]) + Mass(*chunks[2]) + Mass(*chunks[3]);
     entt::registry registry;
-    // Nine opportunities, four 8x8 grids, one funded window per opportunity.
-    for (std::uint64_t tick = 1; tick <= 3; ++tick) {
+    // Tick 1 is already completed. Nine new opportunities, four 8x8 grids,
+    // one funded window per opportunity.
+    for (std::uint64_t tick = 2; tick <= 4; ++tick) {
         const auto schedule = ledger.schedule(WorldClock(tick));
         EXPECT_EQ(schedule.due, (std::vector<RegionKey>{{0, 0}, {2, 0}}));
         std::vector<world::RegionWork> completed;
@@ -4461,11 +4462,11 @@ TEST(RegionalWaterCadence, ReopenPreservesCursorDebtAndSealedMass) {
     std::vector<std::string> errors;
     {
         P::WorldSaveService::SaveFactsScope facts(save);
-        P::SaveTransaction transaction(save, 3, {}, &P::WorldSaveService::member_digest);
+        P::SaveTransaction transaction(save, 4, {}, &P::WorldSaveService::member_digest);
         ASSERT_TRUE(transaction.begin(&errors));
         ASSERT_TRUE(service.save_world(live, save, &errors));
         nlohmann::json metadata = {{"container_version", P::WorldSaveService::kContainerVersion}};
-        WorldClock(3).write_metadata(metadata);
+        WorldClock(4).write_metadata(metadata);
         ASSERT_TRUE(P::WorldSaveService::save_metadata_and_active_regions(
             metadata.dump(), ledger, save, &errors));
         ASSERT_TRUE(P::WorldSaveService::finalize_indexed_envelope(save, &errors));
@@ -4512,7 +4513,7 @@ TEST(RegionalWaterCadence, ReopenPreservesCursorDebtAndSealedMass) {
         EXPECT_EQ(ledger.water_debts().at({1, 0}), 37u);
     };
     ASSERT_NO_FATAL_FAILURE(expect_same());
-    for (std::uint64_t tick = 4; tick <= 9; ++tick) {
+    for (std::uint64_t tick = 5; tick <= 10; ++tick) {
         SCOPED_TRACE(tick);
         const auto schedule = ledger.schedule(WorldClock(tick));
         const auto loaded_schedule = restored_ledger.schedule(WorldClock(tick));
