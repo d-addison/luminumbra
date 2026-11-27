@@ -1,5 +1,6 @@
 #include "SmokeArtifact.h"
 #include "../SimBudgetArtifact.h"
+#include "JsonArtifact.h"
 #include "luminumbra_common/core/Log.h"
 #include <algorithm>
 #include <filesystem>
@@ -321,14 +322,7 @@ int WriteSmokeArtifact(const ServerCliOptions& options,
             fs::create_directories(artifact_path.parent_path(), ec);
         }
         std::ofstream out(artifact_path);
-        if (!out.is_open()) {
-            LUMINUMBRA_CORE_ERROR("Failed to write smoke artifact: {}", options.artifact_path);
-            return 1;
-        }
-        out << artifact.dump(2) << "\n";
-        out.close();
-        if (!out) {
-            LUMINUMBRA_CORE_ERROR("Failed to finish smoke artifact: {}", options.artifact_path);
+        if (!Luminumbra::Server::WriteJsonArtifact(out, artifact, options.artifact_path)) {
             return 1;
         }
         LUMINUMBRA_CORE_INFO("Smoke artifact written: {}", options.artifact_path);

@@ -1,3 +1,4 @@
+#include "JsonArtifact.h"
 #include "ModeHelpers.h"
 #include "Modes.h"
 
@@ -388,10 +389,10 @@ int RunReplicate(const ServerCliOptions& options) {
         if (artifact_path.has_parent_path())
             fs::create_directories(artifact_path.parent_path(), ec);
         std::ofstream out(artifact_path);
-        if (out.is_open()) {
-            out << artifact.dump(2) << "\n";
-            LUMINUMBRA_CORE_INFO("Replicate artifact written: {}", options.artifact_path);
+        if (!Luminumbra::Server::WriteJsonArtifact(out, artifact, options.artifact_path)) {
+            return 1;
         }
+        LUMINUMBRA_CORE_INFO("Replicate artifact written: {}", options.artifact_path);
     }
 
     if (!passed) {
