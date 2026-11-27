@@ -38,6 +38,10 @@ namespace Luminumbra::Persistence {
 struct RegionDigestInputs;
 }
 
+namespace Luminumbra::world {
+class GameSession;
+}
+
 namespace Luminumbra::Systems {
 
 class PhysicsSystem;
@@ -433,10 +437,15 @@ public:
                        const TerrainGenParams& params,
                        int seed);
     ~SHIELD_WorldSystem();
+    // Only the session owner can authorize final service detachment.
+    class SessionServicesKey {
+        friend class Luminumbra::world::GameSession;
+        SessionServicesKey() = default;
+    };
     // Final owner-thread teardown after capture retirement and registry cleanup.
     // Drain without publication, then detach borrowed services so retained const
     // capture owners may be destroyed after the session and its job system.
-    void release_session_services();
+    void release_session_services(SessionServicesKey);
     // Const teardown diagnostic: no borrowed services or session callbacks remain.
     bool session_services_released() const;
 
@@ -1411,8 +1420,8 @@ private:
         }
     };
     struct CollisionColumn {
-        // One fixed lattice per indexed slab, including generated inputs staged
-        // before their first edit. No SDF copies or LRU-dependent reprojection.
+        // Generated inputs are not staged before their first edit, unless
+        // retiring an existing authority slab. No SDF copies.
         std::map<i32, CollisionSlab> slabs;
         std::set<i32> pending;
         // Disjoint inclusive runs of active slabs, for clearing baseline heights.

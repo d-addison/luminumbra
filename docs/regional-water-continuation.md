@@ -2,7 +2,7 @@
 
 Enabled `sim.active_regions` configurations select elapsed foliage consumers,
 fixed-tick regional water and shared simulation-host integration in production.
-Clients, servers and replays use the same profile under authority revision 9.
+Clients, servers and replays use the same profile under authority revision 10.
 Native qualification remains pending for v0.3.2 (in preparation).
 
 ## Planning and execution
@@ -78,15 +78,18 @@ the current region admission gates. Irrigation seam exchange samples prior-state
 flux and applies paired transfers limited by current donor moisture and recipient
 capacity, preserving their combined quantity.
 
-This integration reuses the shared authority revision 9 for enabled active
-regions. The canonical configuration hash appends ASCII `regional-cadence:v1:`
-after the calendar only for that enabled profile. Enabled defaults now identify
-as `c1cfd4e42aa58f8d`; the earlier revision-9 enabled identity
-`bf48b15682a969bd` and revision-8 enabled identity `45664f7615d96904` refuse
-peer and replay admission before advancement. Off configurations retain revision
-8, identity `bafe22eabc5fc385` and their existing bytes. Existing replay envelopes,
-checkpoints and Hello fields carry the changed enabled identity without a codec
-change. World, water, foliage and field state projections are unchanged.
+Authority revision 10 (issue #1331) applies in both region modes. Crop births
+check farming admission before allocating identity, and refused births leave the
+parent unchanged; senescence completes only after child creation. Recovered plants
+can cross the infection threshold again while retaining acquired resistance.
+Legacy one-tick and elapsed consumers share these rules. The canonical configuration
+hash retains ASCII `regional-cadence:v1:` after the calendar only for enabled
+active regions. Enabled defaults identify as `a281d995a5f63702`; off defaults
+identify as `6f0b1285671af053`. Earlier enabled identities `c1cfd4e42aa58f8d`,
+`bf48b15682a969bd` and `45664f7615d96904`, and off revision-8 identity
+`bafe22eabc5fc385`, refuse peer and replay admission before advancement. Existing
+replay envelopes, checkpoints and Hello fields carry the changed identities
+without a codec change. World, water, foliage and field state projections are unchanged.
 
 Historical saves continue through the existing validated readers, not a historical
 simulation lane: admitted saves resume under the current enabled rules. Existing
@@ -105,7 +108,7 @@ native execution of this coverage remains pending:
 | `RegionalCadenceIntegration.ReopenPreservesNextDueWindow` | Production-profile save/reopen in Reduced and Frozen states; subsequent due sets, prior ticks, schedule digests, plant snapshots and field pages match uninterrupted execution through thaw |
 | `GameSessionHeadlessWorldTest.RegionalCadencePendingReplayRefusesSaveThenReopens` | A 64-tick cadence with a plant and sparse soil page refuses saves and replacement loads while history is pending, preserves existing disk members, then matches continuation after bounded replay publication and reopen |
 | `RegionalWaterCadence.ReopenPreservesCursorDebtAndSealedMass` | Four 8-by-8 grids retain integer depth, bed, momentum, mirrors, sleep state, Q32 debt and cursors through indexed save/load and subsequent funded work; the frozen neighbour stays sealed and total mass is conserved |
-| `ReplayModeAdmission.RegionalCadenceRejectsIncompatibleAuthority` | Current production recordings remain readable and admissible in the existing boot envelope; historical enabled identities and mismatched authority descriptors refuse before world boot or artifact replacement |
+| `ReplayModeAdmission.RegionalCadenceRejectsIncompatibleAuthority` | Current production recordings remain readable and admissible in the existing boot envelope; historical identities and mismatched authority descriptors refuse before world boot or artifact replacement |
 
 These cases pin existing LMR payload version 2, indexed metadata version 3,
 ARL1 version 3 when debt is present, and LREC boot version 5. They do not extend
@@ -116,8 +119,8 @@ review. Successful reopen comparisons cover completed publications with the same
 sampled inputs and subsequent commands; they do not establish equivalence for
 unsaved runtime-only participants or historical environmental replay.
 
-The existing disabled-region exact-save fixtures and disabled-water byte checks
-remain unchanged. Fixture regeneration is not part of this coverage. Broader
+Save encodings and disabled-water byte checks remain unchanged. Revision-pinned
+identity and replay expectations require native qualification under revision 10. Broader
 native correctness and representative-world telemetry remain separate evidence
 requirements for issue #138.
 

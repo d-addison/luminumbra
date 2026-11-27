@@ -225,7 +225,7 @@ inline CropLifecycleStats RunCropLifecycle(entt::registry& reg,
             identity.owner_z = owner.z;
             identity.region_stamp = tick;
         }
-        if (remaining != 0 && !FarmingActionsAllowed(reg, childPos))
+        if (!FarmingActionsAllowed(reg, childPos))
             continue;
         if (owned && !allocator) {
             if (!allocate_identity(identity.persistent_id)) {
@@ -242,8 +242,6 @@ inline CropLifecycleStats RunCropLifecycle(entt::registry& reg,
                           reg.all_of<Comp::GrazeableComponent>(e),
                           owned,
                           identity});
-        if (!allocator && remaining == 0)
-            complete_senescence(e, ripe_ticks);
     }
 
     // Apply AFTER the read pass (no view invalidation mid-iteration).
@@ -277,8 +275,7 @@ inline CropLifecycleStats RunCropLifecycle(entt::registry& reg,
         reg.emplace<Comp::PollinationComponent>(child);
         reg.emplace<Comp::SoilFeederComponent>(
             child); // children feed on soil too (FarmingSystem opt-in parity)
-        if (allocator || remaining != 0)
-            complete_senescence(b.parent, b.ripe_ticks);
+        complete_senescence(b.parent, b.ripe_ticks);
     }
     for (auto e : deaths)
         reg.destroy(e);

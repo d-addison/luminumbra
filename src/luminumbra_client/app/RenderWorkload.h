@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RenderMeasurement.h"
+#include "luminumbra_client/world/WorldPresentation.h"
 
 #include <array>
 #include <chrono>
@@ -201,15 +202,52 @@ inline bool reload_residency_observed(std::uint64_t passes, int activation_inter
     return activation_interval > 0 && passes >= static_cast<std::uint64_t>(activation_interval);
 }
 
+// Capture storage stays bounded at two maximum measurement windows. Admission
+// reserves every recorded phase, including successful final upload-wait frames.
+// Python tooling mirrors these constants and arithmetic with a source-parity test.
+inline constexpr std::size_t kMaxBudgetObservations = 2 * kMaxFrames;
+inline constexpr std::size_t kMaxBenchmarkUploadWaitFrames = 4096;
+
+// Observe once after each benchmark upload-wait render. The last permitted
+// frame must settle; failure latches and prevents another render or evidence.
+class BenchmarkUploadWaitBudget {
+public:
+    bool observe(bool settled) noexcept {
+        if (m_failed)
+            return false;
+        if (m_frames == kMaxBenchmarkUploadWaitFrames) {
+            m_failed = true;
+            return false;
+        }
+        ++m_frames;
+        m_failed = !settled && m_frames == kMaxBenchmarkUploadWaitFrames;
+        return !m_failed;
+    }
+
+private:
+    std::size_t m_frames = 0;
+    bool m_failed = false;
+};
+
+inline constexpr std::size_t kMaxReloadSettlingPasses = 1800;
+
 // Reload keeps its script pose and presentation tick until every gate drains.
 // The watchdog bounds consecutive passes without a new work frontier, rather
-// than the total restream duration. Four scalar high-water marks use O(1) space;
+// than the total restream duration. A second budget caps all recorded passes.
+// Four scalar high-water marks use O(1) space;
 // oscillating or shrinking counters cannot buy more passes.
 class ReloadSettlingWatchdog {
 public:
     static constexpr std::size_t kNoProgressPasses = 300;
     bool waiting(bool settled, const std::array<std::uint64_t, 4>& progress) {
-        if (m_failed || settled)
+        if (m_failed)
+            return false;
+        if (m_passes == kMaxReloadSettlingPasses) {
+            m_failed = true;
+            return false;
+        }
+        ++m_passes;
+        if (settled)
             return false;
         bool advanced = false;
         for (std::size_t index = 0; index < progress.size(); ++index) {
@@ -219,7 +257,7 @@ public:
             }
         }
         m_idle = advanced ? 0 : m_idle + 1;
-        m_failed = m_idle >= kNoProgressPasses;
+        m_failed = m_idle >= kNoProgressPasses || m_passes == kMaxReloadSettlingPasses;
         return !m_failed;
     }
     bool failed() const {
@@ -228,9 +266,27 @@ public:
 
 private:
     std::array<std::uint64_t, 4> m_frontier{};
-    std::size_t m_idle = 0;
+    std::size_t m_idle = 0, m_passes = 0;
     bool m_failed = false;
 };
+
+inline std::size_t benchmark_observation_frames(std::size_t warmup,
+                                                std::size_t measured,
+                                                std::size_t runtime_boot,
+                                                std::size_t reloads) {
+    if (warmup > kMaxFrames || measured == 0 || measured > kMaxFrames)
+        throw std::invalid_argument("benchmark windows exceed frame bounds");
+    constexpr auto reload_frames = kWorldPresentationFrameDeadline + kMaxReloadSettlingPasses;
+    std::size_t total = kWorldPresentationFrameDeadline + 2 * kMaxBenchmarkUploadWaitFrames;
+    for (const auto frames : {warmup, measured, runtime_boot}) {
+        if (frames > kMaxBudgetObservations - total)
+            throw std::invalid_argument("benchmark exceeds 36000 budget observations");
+        total += frames;
+    }
+    if (reloads > (kMaxBudgetObservations - total) / reload_frames)
+        throw std::invalid_argument("benchmark reloads exceed 36000 budget observations");
+    return total + reloads * reload_frames;
+}
 
 class ReloadInterval {
 public:

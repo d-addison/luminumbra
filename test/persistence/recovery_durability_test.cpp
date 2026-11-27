@@ -88,7 +88,8 @@ TEST(RecoveryDurability, MatchingIndexCompletesBeforePayload) {
     }
 }
 
-TEST(RecoveryDurability, FailedFlushIsRetriedForMatchingBytes) {
+// Selects matching restoration with an injected index-flush failure, then retry.
+TEST(RecoveryQualification_matching_restore, injected_fault) {
     std::vector<std::string> trace;
     TracedOperations index("index", trace), payload("payload", trace);
     index.flush_failures = 1;

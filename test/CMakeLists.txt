@@ -2562,6 +2562,12 @@ endforeach()
 set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/HeavyTestsCTest.cmake")
 
+# Recovery evidence accepts only this exact case/mechanism command. Other
+# interruption observers are not implemented and cannot qualify matrix cells.
+add_test(NAME RecoveryQualification.matching_restore.injected_fault
+    COMMAND frontier_gates_test
+        --gtest_filter=RecoveryQualification_matching_restore.injected_fault)
+
 # The deterministic forest geometry harness is manual because it validates a
 # pinned 16k-tree workload rather than ordinary unit behavior. It guards the
 # production impostor fold with draw-call and triangle-count ceilings; it makes

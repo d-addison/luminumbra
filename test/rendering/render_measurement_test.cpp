@@ -578,6 +578,56 @@ TEST(RenderReloadInterval, Boundaries) {
     reload_boundaries();
 }
 
+TEST(RenderReloadInterval, ObservationAdmission) {
+    EXPECT_THROW(benchmark_observation_frames(18000, 18000, 0, 0), std::invalid_argument);
+    EXPECT_EQ(benchmark_observation_frames(18000, 8008, 0, 0), kMaxBudgetObservations);
+    EXPECT_THROW(benchmark_observation_frames(18000, 8009, 0, 0), std::invalid_argument);
+    EXPECT_EQ(benchmark_observation_frames(400, 18000, 0, 0), 28392u);
+    EXPECT_EQ(benchmark_observation_frames(400, 1800, 0, 1), 15792u);
+    EXPECT_EQ(benchmark_observation_frames(2200, 1800, 0, 1), 17592u);
+    EXPECT_EQ(benchmark_observation_frames(400, 18000, 408, 2), kMaxBudgetObservations);
+    EXPECT_THROW(benchmark_observation_frames(400, 18000, 409, 2), std::invalid_argument);
+    EXPECT_THROW(benchmark_observation_frames(400, 18000, 0, 3), std::invalid_argument);
+    EXPECT_EQ(benchmark_observation_frames(18000, 5000, 0, 0), 32992u);
+    EXPECT_THROW(benchmark_observation_frames(18000, 5000, 0, 1), std::invalid_argument);
+    EXPECT_EQ(benchmark_observation_frames(0, 1, 0, 0), 9993u);
+    EXPECT_THROW(benchmark_observation_frames(18001, 1, 0, 0), std::invalid_argument);
+    EXPECT_THROW(benchmark_observation_frames(1, 0, 0, 0), std::invalid_argument);
+    EXPECT_THROW(benchmark_observation_frames(1, 18001, 0, 0), std::invalid_argument);
+    constexpr auto maximum = std::numeric_limits<std::size_t>::max();
+    EXPECT_THROW(benchmark_observation_frames(1, 1, maximum, 0), std::invalid_argument);
+    EXPECT_THROW(benchmark_observation_frames(1, 1, 0, maximum), std::invalid_argument);
+}
+
+TEST(RenderReloadInterval, TotalSettlingBudgetCannotBeExtendedByProgress) {
+    ReloadSettlingWatchdog expired, boundary;
+    for (std::size_t pass = 1; pass < kMaxReloadSettlingPasses; ++pass) {
+        ASSERT_TRUE(expired.waiting(false, {pass, 0, 0, 0}));
+        ASSERT_TRUE(boundary.waiting(false, {pass, 0, 0, 0}));
+    }
+    EXPECT_FALSE(expired.waiting(false, {kMaxReloadSettlingPasses, 0, 0, 0}));
+    EXPECT_TRUE(expired.failed());
+    EXPECT_FALSE(expired.waiting(true, {}));
+    EXPECT_TRUE(expired.failed());
+    EXPECT_FALSE(boundary.waiting(true, {}));
+    EXPECT_FALSE(boundary.failed());
+    EXPECT_FALSE(boundary.waiting(true, {}));
+    EXPECT_TRUE(boundary.failed());
+}
+
+TEST(RenderReloadInterval, BenchmarkUploadWaitBudgetIncludesFinalFrame) {
+    BenchmarkUploadWaitBudget expired, boundary, immediate;
+    EXPECT_TRUE(immediate.observe(true));
+    for (std::size_t frame = 1; frame < kMaxBenchmarkUploadWaitFrames; ++frame) {
+        ASSERT_TRUE(expired.observe(false));
+        ASSERT_TRUE(boundary.observe(false));
+    }
+    EXPECT_FALSE(expired.observe(false));
+    EXPECT_FALSE(expired.observe(true));
+    EXPECT_TRUE(boundary.observe(true));
+    EXPECT_FALSE(boundary.observe(true));
+}
+
 void menu_observations() {
     struct State {
         bool in_game;

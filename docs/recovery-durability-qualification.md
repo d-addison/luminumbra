@@ -43,6 +43,32 @@ incomplete, even if another attempt passed. Keep separate attempts in separate
 bundles. Never manufacture traces from an expected sequence or turn a synthetic
 receipt into native evidence by changing its label.
 
+## Registered qualification command
+
+`test/CMakeLists.txt` registers one selectable case/mechanism command:
+`RecoveryQualification.matching_restore.injected_fault`. Its command is
+`frontier_gates_test --gtest_filter=RecoveryQualification_matching_restore.injected_fault`
+(the executable is `frontier_gates_test.exe` on Windows). The filter selects
+the native C++ regression in `test/persistence/recovery_durability_test.cpp`:
+it injects an index-flush failure, refuses payload work, and retries completion
+with the same recorded identities and matching bytes. This is a fault-injection
+unit exercise; it does not collect native member-tree or interruption receipts.
+
+The validator requires that exact CTest name, executable basename and sole
+filter argument for the cell. CTest's build-directory prefix may vary, including
+Windows path separators and spaces; additional arguments, wildcard filters,
+another case or mechanism, and unrelated executables are refused. Retained
+discovery is declarative evidence, not executable authentication.
+
+Only `matching_restore` with `injected_fault` currently has a registered command.
+All other case/mechanism pairs remain unevaluated even if fabricated discovery,
+JUnit and receipts claim success. Consequently the full 54-cell verdict remains
+incomplete. The synthetic contract fixture checks that every supported cell can
+complete diagnostically and that unsupported cells cannot; a complete verdict
+is exercised only over the supported submatrix. Process-termination and abrupt
+VM-reset observers, and the other cases, still require native implementations
+and registrations before they can contribute to a complete matrix.
+
 ## Required matrix
 
 Each row is required in all three lanes, for each of `injected_fault`,

@@ -23,6 +23,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -43,6 +44,8 @@
 #include "luminumbra_common/persistence/SavedInputFile.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 #include "luminumbra_common/replay/ReplayStream.h"
+#include "luminumbra_common/systems/CropLifecycleSystem.h"
+#include "luminumbra_common/systems/PlantDiseaseSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include <nlohmann/json.hpp>
@@ -52,6 +55,172 @@ namespace replay = Luminumbra::Replay;
 namespace fs = std::filesystem;
 
 namespace {
+
+void ExpectRefusedCropParent(const entt::registry& registry, entt::entity parent, bool perennial) {
+    namespace C = Luminumbra::Components;
+    const auto& crop = registry.get<C::CropLifecycleComponent>(parent);
+    EXPECT_EQ(crop.perennial, perennial);
+    EXPECT_EQ(crop.ripe_ticks, 4u);
+    EXPECT_EQ(crop.lifespan_ticks, 5u);
+    EXPECT_EQ(crop.generations, 2u);
+    EXPECT_EQ(crop.species_id, 7u);
+    const auto& unchanged = registry.get<C::PlantGrowthComponent>(parent);
+    EXPECT_EQ(unchanged.species_id, 7u);
+    EXPECT_EQ(unchanged.stage, static_cast<std::uint8_t>(C::PlantStage::Fruiting));
+    EXPECT_EQ(unchanged.quality, 100u);
+    EXPECT_EQ(unchanged.growth_points, 12345u);
+    EXPECT_EQ(unchanged.stress_points, 234u);
+    EXPECT_EQ(unchanged.tended, 3u);
+    EXPECT_EQ(unchanged.planted_tick, 8u);
+    EXPECT_EQ(unchanged.last_tick, 8u);
+    EXPECT_EQ(registry.get<C::GrazeableComponent>(parent).biomass, 0.5f);
+    EXPECT_EQ(registry.get<C::GrazeableComponent>(parent).last_grazed_tick, 6u);
+}
+
+void CheckRefusedCropBirth(bool elapsed, bool perennial, bool shared_identity, unsigned refusal) {
+    namespace C = Luminumbra::Components;
+    namespace F = luminumbra::foliage;
+    namespace W = Luminumbra::world;
+    entt::registry registry;
+    W::ActiveRegionLedger allocator;
+    const auto parent = shared_identity ? F::PlantSeed(registry, {24, 0, 24}, {}, 7, 8, allocator)
+                                        : F::PlantSeed(registry, {24, 0, 24}, {}, 7, 8);
+    ASSERT_TRUE(parent != entt::null);
+    registry.emplace<C::PlantRegionComponent>(parent, C::PlantRegionComponent{1, 0, 0, 8});
+    auto& growth = registry.get<C::PlantGrowthComponent>(parent);
+    growth.stage = static_cast<std::uint8_t>(C::PlantStage::Fruiting);
+    growth.growth_points = 12345;
+    growth.stress_points = 234;
+    growth.tended = 3;
+    registry.emplace<C::CropLifecycleComponent>(parent,
+                                                C::CropLifecycleComponent{perennial, 4, 5, 2, 7});
+    registry.emplace<C::GrazeableComponent>(parent, C::GrazeableComponent{0.5f, 6});
+    const auto cursor = allocator.next_persistent_id();
+    unsigned allocations = 0;
+    const auto allocate = [&allocations](std::uint64_t& identity) {
+        ++allocations;
+        identity = 2;
+        return true;
+    };
+    const std::array<W::RegionKey, 1> due{{{0, 0}}};
+    const std::map<W::RegionKey, std::uint32_t> windows{{{0, 0}, 2}};
+    const std::map<W::RegionKey, std::uint64_t> deadlines{{{0, 0}, 9}};
+    std::vector<std::uint64_t> membership;
+    const auto identity_mode = shared_identity ? W::RegionConsumerGate::PlantIdentity::Simulation
+                                               : W::RegionConsumerGate::PlantIdentity::Legacy;
+    const auto gate =
+        elapsed ? W::RegionConsumerGate(
+                      registry, due, membership, identity_mode, W::RegionElapsedTicks(windows), 10)
+                : W::RegionConsumerGate(identity_mode);
+    auto& farming_gate = registry.ctx().emplace<F::FarmingReplayGate>(
+        F::FarmingReplayGate{.blocked = refusal == 0,
+                             .inputs_pending = refusal != 0,
+                             .owner_deadlines = refusal == 2 ? &deadlines : nullptr,
+                             .current_deadline = 10,
+                             .owner_ledger = nullptr});
+    const auto run = [&]() {
+        if (elapsed) {
+            return shared_identity ? F::RunCropLifecycleRegional(registry, 10, gate, 0, allocator)
+                                   : F::RunCropLifecycleRegional(registry, 10, gate, 0, allocate);
+        }
+        return shared_identity ? F::RunCropLifecycleOnTick(registry, 10, 0, gate, allocator)
+                               : F::RunCropLifecycleOnTick(registry, 10, 0, gate, allocate);
+    };
+    const auto refused = run();
+    EXPECT_EQ(refused.ripening, 0);
+    EXPECT_EQ(refused.reseeded, 0);
+    EXPECT_EQ(refused.reset, 0);
+    EXPECT_EQ(refused.died, 0);
+    EXPECT_EQ(allocations, 0u);
+    EXPECT_EQ(allocator.next_persistent_id(), cursor);
+    ASSERT_TRUE(registry.valid(parent));
+    EXPECT_EQ(registry.view<C::PlantTag>().size(), 1u);
+    ExpectRefusedCropParent(registry, parent, perennial);
+    // Removing the refusal retries the same parent and commits exactly one birth.
+    farming_gate.blocked = false;
+    farming_gate.inputs_pending = false;
+    const auto accepted = run();
+    EXPECT_EQ(accepted.reseeded, 1);
+    EXPECT_EQ(accepted.reset, perennial ? 1 : 0);
+    EXPECT_EQ(accepted.died, perennial ? 0 : 1);
+    EXPECT_EQ(registry.valid(parent), perennial);
+    EXPECT_EQ(registry.view<C::PlantTag>().size(), perennial ? 2u : 1u);
+    EXPECT_EQ(allocations, shared_identity ? 0u : 1u);
+    EXPECT_EQ(allocator.next_persistent_id(), cursor + (shared_identity ? 1u : 0u));
+    if (perennial) {
+        EXPECT_EQ(registry.get<C::CropLifecycleComponent>(parent).generations, 3u);
+        EXPECT_EQ(registry.get<C::CropLifecycleComponent>(parent).ripe_ticks, 0u);
+        EXPECT_EQ(registry.get<C::PlantGrowthComponent>(parent).stage,
+                  static_cast<std::uint8_t>(C::PlantStage::Juvenile));
+    }
+}
+
+TEST(PlantLifecycleRegression, RefusedCropBirthPreservesParentAndIdentityInBothTickPaths) {
+    for (const bool elapsed : {false, true}) {
+        for (const bool perennial : {false, true}) {
+            for (const bool shared_identity : {false, true}) {
+                for (unsigned refusal = 0; refusal < 3; ++refusal) {
+                    SCOPED_TRACE(::testing::Message() << elapsed << ',' << perennial << ','
+                                                      << shared_identity << ',' << refusal);
+                    CheckRefusedCropBirth(elapsed, perennial, shared_identity, refusal);
+                    ASSERT_FALSE(testing::Test::HasFatalFailure());
+                }
+            }
+        }
+    }
+}
+
+void CheckRecoveredReinfection(bool elapsed, std::uint16_t threshold_result) {
+    namespace C = Luminumbra::Components;
+    namespace F = luminumbra::foliage;
+    entt::registry registry;
+    const auto target = F::PlantSeed(registry, {24, 0, 24}, {}, 0, 0);
+    const auto source = F::PlantSeed(registry, {26, 0, 24}, {}, 0, 0);
+    registry.emplace<C::PlantHealthComponent>(source).state =
+        static_cast<std::uint8_t>(C::PlantDiseaseState::Infected);
+    auto& health = registry.emplace<C::PlantHealthComponent>(target);
+    health.state = static_cast<std::uint8_t>(C::PlantDiseaseState::Infected);
+    health.resistance = F::kRecoverResistance;
+    health.infected_ticks = F::kSickTicks - 1;
+    const auto run = [&]() {
+        return elapsed ? F::RunPlantDiseaseRegional(registry, 1, {})
+                       : F::RunPlantDiseaseOnTick(registry, 1);
+    };
+    ASSERT_EQ(run().recovered, 1);
+    ASSERT_EQ(health.state, static_cast<std::uint8_t>(C::PlantDiseaseState::Recovered));
+    const auto acquired =
+        static_cast<std::uint16_t>(F::kRecoverResistance + F::kRecoveryResistanceGain);
+    ASSERT_EQ(health.resistance, acquired);
+    // Distance two admits exactly 110 * (1000 - 650) / 1000 = 38 milli-units.
+    health.infection = static_cast<std::uint16_t>(threshold_result - 38u);
+    const auto result = run();
+    const bool infected = threshold_result >= F::kInfectThreshold;
+    EXPECT_EQ(health.infection, threshold_result);
+    EXPECT_EQ(result.new_infections, infected ? 1 : 0);
+    EXPECT_EQ(health.state,
+              static_cast<std::uint8_t>(infected ? C::PlantDiseaseState::Infected
+                                                 : C::PlantDiseaseState::Recovered));
+    EXPECT_EQ(health.resistance, acquired);
+    EXPECT_EQ(health.infected_ticks, 0u);
+    // Full resistance still prevents new pressure and lets infection decay.
+    health.state = static_cast<std::uint8_t>(C::PlantDiseaseState::Recovered);
+    health.resistance = C::kDiseaseUnitScale;
+    health.infection = F::kInfectThreshold - 1;
+    EXPECT_EQ(run().new_infections, 0);
+    EXPECT_EQ(health.state, static_cast<std::uint8_t>(C::PlantDiseaseState::Recovered));
+    EXPECT_EQ(health.resistance, C::kDiseaseUnitScale);
+    EXPECT_EQ(health.infection, F::kInfectThreshold - 1 - F::kInfectionDecayPerTick);
+}
+
+TEST(PlantLifecycleRegression, RecoveredPlantsReinfectAtThresholdAndRetainAcquiredResistance) {
+    for (const bool elapsed : {false, true}) {
+        for (const std::uint16_t threshold_result : std::array<std::uint16_t, 3>{499, 500, 501}) {
+            SCOPED_TRACE(::testing::Message() << elapsed << ',' << threshold_result);
+            CheckRecoveredReinfection(elapsed, threshold_result);
+            ASSERT_FALSE(testing::Test::HasFatalFailure());
+        }
+    }
+}
 
 using AuthorityBoot = Luminumbra::world::AuthorityBootDescriptor;
 static_assert(AuthorityBoot::kSystemGateCount ==
@@ -3081,8 +3250,8 @@ TEST(AuthorityBootDescriptor, MaximumSizeRoundtripAndLittleEndianLayout) {
     std::string error;
     ASSERT_TRUE(Luminumbra::world::EncodeAuthorityBootDescriptor(original, bytes, error));
     ASSERT_EQ(bytes.size(), AuthorityBoot::kMaxEncodedBytes);
-    const std::vector<std::uint8_t> prefix{'A',  'U',  'B',  'D', 1, 0, 9, 0, 0, 0, 0x98,
-                                           0xba, 0xdc, 0xfe, 0,   0, 0, 0, 0, 1, 0, 0};
+    const std::vector<std::uint8_t> prefix{'A',  'U',  'B',  'D', 1, 0, 10, 0, 0, 0, 0x98,
+                                           0xba, 0xdc, 0xfe, 0,   0, 0, 0,  0, 1, 0, 0};
     EXPECT_TRUE(std::equal(prefix.begin(), prefix.end(), bytes.begin()));
     const std::vector<std::uint8_t> suffix{8, 7, 6, 5, 4, 3, 2, 1, 7, 0, 0, 0, 1, 1, 1, 1};
     EXPECT_TRUE(std::equal(
@@ -3505,7 +3674,7 @@ TEST_F(ReplayStreamTest, EffectiveConfigIdentityRefusesDifferentRulesBeforePlayb
         unbound, MakeHeader().system_config_identity, MakeHeader().preset_content_hash));
 }
 
-TEST_F(ReplayStreamTest, AmbientActivationRefusesPreviousEnabledReplayBeforePlayback) {
+TEST_F(ReplayStreamTest, PlantRulesRefusePreviousReplayBeforePlayback) {
     for (const bool regions : {false, true}) {
         for (const auto version :
              {replay::kLrec1Version, replay::kLrec1BootVersion, replay::kLrec1WeatherVersion}) {
@@ -3528,7 +3697,7 @@ TEST_F(ReplayStreamTest, AmbientActivationRefusesPreviousEnabledReplayBeforePlay
             if (version == replay::kLrec1BootVersion) {
                 header.authority_boot =
                     replay::CaptureReplayBoot(session, 424242, session.GetRenderCalendar());
-                EXPECT_EQ(header.authority_boot->authority_rules_revision, regions ? 9u : 8u);
+                EXPECT_EQ(header.authority_boot->authority_rules_revision, 10u);
                 // Retain a valid historical descriptor: parsing is independent of admission.
                 header.authority_boot->authority_rules_revision = 8;
                 header.authority_boot->system_config_identity = previous;
@@ -3547,7 +3716,7 @@ TEST_F(ReplayStreamTest, AmbientActivationRefusesPreviousEnabledReplayBeforePlay
             EXPECT_EQ(replay::ConfigurationMatches(contents->header,
                                                    session.SystemConfigIdentity(),
                                                    header.preset_content_hash),
-                      !regions);
+                      false);
             // The refused input remains unconsumed; no simulation has advanced.
             ASSERT_EQ(contents->inputs.size(), 1u);
             EXPECT_EQ(contents->inputs.front().tick, 1u);
@@ -3564,19 +3733,21 @@ TEST_F(ReplayStreamTest, AmbientActivationRefusesPreviousEnabledReplayBeforePlay
     }
 }
 
-TEST_F(ReplayStreamTest, RegionalCadenceRevisionAdmission) {
-    // Parsing remains historical inspection; admission rejects both historical
-    // enabled identities before consuming input, including the earlier revision 9.
+TEST_F(ReplayStreamTest, PlantRulesRevisionAdmission) {
+    // Parsing remains historical inspection; both region modes reject older
+    // rules before consuming input, including both enabled revision-9 profiles.
     for (const bool regions : {false, true}) {
-        for (const std::uint32_t revision : {8u, 9u}) {
+        for (const unsigned profile : {0u, 1u, 2u}) {
+            const std::uint32_t revision = profile == 0 ? 8u : 9u;
             for (const auto version :
                  {replay::kLrec1Version, replay::kLrec1BootVersion, replay::kLrec1WeatherVersion}) {
-                SCOPED_TRACE(::testing::Message() << regions << ',' << revision << ',' << version);
+                SCOPED_TRACE(::testing::Message() << regions << ',' << profile << ',' << version);
                 Luminumbra::world::GameSession session;
                 session.SetActiveRegionsEnabled(regions);
-                std::string previous = !regions        ? "bafe22eabc5fc385"
-                                       : revision == 8 ? "45664f7615d96904"
-                                                       : "bf48b15682a969bd";
+                std::string previous = !regions       ? "bafe22eabc5fc385"
+                                       : profile == 0 ? "45664f7615d96904"
+                                       : profile == 1 ? "bf48b15682a969bd"
+                                                      : "c1cfd4e42aa58f8d";
                 auto header = MakeHeader();
                 header.version = version;
                 if (version == replay::kLrec1WeatherVersion) {
@@ -3613,7 +3784,7 @@ TEST_F(ReplayStreamTest, RegionalCadenceRevisionAdmission) {
                     EXPECT_EQ(replay::ConfigurationMatches(candidate,
                                                            session.SystemConfigIdentity(),
                                                            header.preset_content_hash),
-                              !regions);
+                              false);
                 }
                 ASSERT_EQ(contents->inputs.size(), 1u);
                 EXPECT_EQ(contents->inputs.front().tick, 1u);
@@ -3623,7 +3794,7 @@ TEST_F(ReplayStreamTest, RegionalCadenceRevisionAdmission) {
                 if (matching.authority_boot) {
                     matching.authority_boot =
                         replay::CaptureReplayBoot(session, 424242, session.GetRenderCalendar());
-                    EXPECT_EQ(matching.authority_boot->authority_rules_revision, regions ? 9u : 8u);
+                    EXPECT_EQ(matching.authority_boot->authority_rules_revision, 10u);
                 }
                 EXPECT_TRUE(replay::ConfigurationMatches(
                     matching, session.SystemConfigIdentity(), header.preset_content_hash));
