@@ -328,21 +328,33 @@ int RunHeavy(const ServerCliOptions& options,
     // propagation), so awake > 0 is expected and NOT asserted.
     const auto& settle_orig = original.GetBootSettleStats();
     const auto& settle_loaded = loaded.GetBootSettleStats();
-    const bool settle_ok = settle_orig.contract_ok() && settle_loaded.contract_ok() &&
-                           settle_loaded.water_settle_skipped;
+    const bool settle_orig_ok = Luminumbra::Server::HeavyBootSettleContract(
+        settle_orig.water_chunks,
+        settle_orig.uninited,
+        settle_orig.water_settle_skipped,
+        orig_at_save.active_regions &&
+            original.Session()->CaptureWorldPreparationOptions().regional_water);
+    const bool settle_loaded_ok = Luminumbra::Server::HeavyBootSettleContract(
+        settle_loaded.water_chunks,
+        settle_loaded.uninited,
+        settle_loaded.water_settle_skipped,
+        loaded_at_load.active_regions &&
+            loaded.Session()->CaptureWorldPreparationOptions().regional_water);
+    const bool settle_ok = settle_orig_ok && settle_loaded_ok && settle_loaded.water_settle_skipped;
     const bool passed = roundtrip_ok && resim_ok && settle_ok &&
                         pre_save_ticks.ticks_executed == options.ticks &&
                         orig_resim.ticks_executed == options.heavy_resim &&
                         loaded_resim.ticks_executed == options.heavy_resim;
 
-    auto SettleJson = [](const Luminumbra::Server::ServerWorldRunner::BootSettleStats& s) {
+    auto SettleJson = [](const Luminumbra::Server::ServerWorldRunner::BootSettleStats& s,
+                         bool contract_ok) {
         return nlohmann::json{
             {"water_chunks", s.water_chunks},
             {"awake", s.awake},
             {"uninited", s.uninited},
             {"iterations", s.iterations},
             {"water_settle_skipped", s.water_settle_skipped},
-            {"contract_ok", s.contract_ok()},
+            {"contract_ok", contract_ok},
         };
     };
 
@@ -377,8 +389,8 @@ int RunHeavy(const ServerCliOptions& options,
              ? ""
              : Luminumbra::WaterHashDifferenceSection(orig_final.sub.water,
                                                       loaded_final.sub.water)},
-        {"boot_settle_original", SettleJson(settle_orig)},
-        {"boot_settle_loaded", SettleJson(settle_loaded)},
+        {"boot_settle_original", SettleJson(settle_orig, settle_orig_ok)},
+        {"boot_settle_loaded", SettleJson(settle_loaded, settle_loaded_ok)},
         {"settle_contract_ok", settle_ok},
         {"water_sim_cursor_at_save", cursor_at_save},
         {"water_sim_cursor_at_load", cursor_at_load},

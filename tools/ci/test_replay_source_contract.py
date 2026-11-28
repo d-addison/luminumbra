@@ -271,10 +271,30 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertRegex(settle, r"chunks\.size\(\),\s*settle_iters,")
         self.assertIn("if (!regional_boot)", settle)
         self.assertNotIn("if (!regional_boot || water_loaded_from_save)", settle)
-        self.assertIn("if (regional_boot && water_loaded_from_save)", settle)
+        self.assertIn("if (regional_boot && water_loaded_from_save && m_worldClock.can_advance(1))",
+                      settle)
+        observation = settle.split(
+            "if (regional_boot && water_loaded_from_save &&", 1)[1].split(
+                "const auto settle_water", 1)[0]
+        self.assertIn("boot_ledger = m_activeRegionLedger;", observation)
+        self.assertIn("boot_ledger.schedule(", observation)
+        self.assertIn("WorldClock(m_worldClock.tick() + 1, m_worldClock.calendar())", observation)
+        self.assertIn("std::optional<std::span<const Vec3>>(settle_anchors)", observation)
+        self.assertNotIn("m_activeRegionLedger.schedule(", settle)
         self.assertIn(
-            "Systems::RegionalWater::SelectColumns(settle_anchors, {}, m_activeRegionLedger)",
-            settle)
+            "Systems::RegionalWater::SelectColumns(settle_anchors, {}, boot_ledger)",
+            observation)
+        heavy = read_source("src/luminumbra_server/modes/Heavy.cpp")
+        self.assertEqual(heavy.count("Luminumbra::Server::HeavyBootSettleContract("), 2)
+        self.assertRegex(heavy, r"orig_at_save\.active_regions &&\s*"
+                         r"original.Session\(\)->CaptureWorldPreparationOptions\(\).regional_water")
+        self.assertRegex(heavy, r"loaded_at_load\.active_regions &&\s*"
+                         r"loaded.Session\(\)->CaptureWorldPreparationOptions\(\).regional_water")
+        self.assertIn("SettleJson(settle_orig, settle_orig_ok)", heavy)
+        self.assertIn("SettleJson(settle_loaded, settle_loaded_ok)", heavy)
+        comparison = read_source("src/luminumbra_server/HeavyComparison.h")
+        self.assertIn("uninited == 0 && (!water_settle_skipped || !regional_water || water_chunks > 0)",
+                      comparison)
         self.assertIn("return ws->snapshot_streamed_chunks();", settle)
         self.assertIn("ws->inspect_water_column(Chunk::decode_id(id))", settle)
         self.assertIn("ActiveRegionLedger boot_ledger;", settle)
