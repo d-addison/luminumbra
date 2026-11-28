@@ -1,33 +1,80 @@
 #pragma once
 
-#include "luminumbra_common/systems/WaterSystem.h"
+#include "luminumbra_common/systems/RegionalWater.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
 #include "luminumbra_common/world/Chunk.h"
 #include <entt/entity/registry.hpp>
 
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
 #include <stdexcept>
+#include <string_view>
+#include <vector>
 
 namespace Luminumbra::Server {
 
-// Explicit finite smoke input. Eight distant region centres plus one unanchored
-// control; nine sources fit the existing 256-source and 64-anchor admission caps.
-struct RegionalCadenceWorkload {
-    static constexpr std::size_t kAnchors = 8;
-    static constexpr std::size_t kParticipants = kAnchors + 1;
-    std::array<Vec3, kParticipants> positions{};
-    std::array<entt::entity, kParticipants> plants{};
+[[nodiscard]] inline bool ValidRegionalCadenceAnchors(std::size_t count) {
+    return count == 1 || count == 8 || count == 32 || count == 64;
+}
 
-    explicit RegionalCadenceWorkload(const Vec3& origin) {
+// Keep the enable flag and its parameter together across CLI/config copies.
+// Boolean assignment preserves the existing default-eight programmatic callers.
+struct RegionalCadenceSelection {
+    bool enabled = false;
+    std::size_t anchors = 8;
+    bool anchors_explicit = false;
+
+    operator bool() const {
+        return enabled;
+    }
+    RegionalCadenceSelection& operator=(bool value) {
+        enabled = value;
+        return *this;
+    }
+    [[nodiscard]] bool SetAnchors(std::string_view value) {
+        std::size_t count = 0;
+        if (value == "1")
+            count = 1;
+        else if (value == "8")
+            count = 8;
+        else if (value == "32")
+            count = 32;
+        else if (value == "64")
+            count = 64;
+        else
+            return false;
+        anchors = count;
+        anchors_explicit = true;
+        return true;
+    }
+    [[nodiscard]] bool Valid() const {
+        return ValidRegionalCadenceAnchors(anchors) && (!anchors_explicit || enabled);
+    }
+};
+
+// Explicit finite smoke input: at most 64 anchors plus one unanchored control.
+// Storage is allocated once at construction (<=65 entries), never during ticks.
+struct RegionalCadenceWorkload {
+    static constexpr std::size_t kAnchors = 8; // Legacy defaults.
+    static constexpr std::size_t kParticipants = kAnchors + 1;
+    static constexpr std::size_t kMaxAnchors = 64;
+    static_assert(kMaxAnchors <= Systems::RegionalWater::kMaxSimulationAnchors);
+    static_assert(kMaxAnchors + 1 <= Systems::RegionalWater::kMaxSimulationSources);
+    std::vector<Vec3> positions;
+    std::vector<entt::entity> plants;
+
+    explicit RegionalCadenceWorkload(const Vec3& origin, std::size_t anchors = kAnchors) {
+        if (!ValidRegionalCadenceAnchors(anchors))
+            throw std::invalid_argument("Regional cadence anchors must be one of 1, 8, 32, 64");
         if (!world::ActiveRegionLedger::valid_anchor(origin))
             throw std::invalid_argument("Invalid regional workload origin");
         const auto owner = world::ActiveRegionLedger::region_at(origin);
-        // Fixed 2 km spacing, inside the existing coordinate envelope. Validate
-        // every position before creating any entities or publishing host inputs.
+        positions.resize(anchors + 1); // Count validated before addition/allocation.
+        // Preserve the legacy three-column 2 km grid and creation order exactly.
+        // At 64 anchors the last (control) offset is (2048, 43008) metres.
+        // Validate every position before creating entities or publishing inputs.
         for (std::size_t i = 0; i < positions.size(); ++i) {
             positions[i] = Vec3(static_cast<float>(owner.x) * 512.0f + 256.0f +
                                     static_cast<float>(i % 3) * 2048.0f,
@@ -37,11 +84,11 @@ struct RegionalCadenceWorkload {
             if (!world::ActiveRegionLedger::valid_anchor(positions[i]))
                 throw std::invalid_argument("Regional workload position outside world bounds");
         }
-        plants.fill(entt::null);
+        plants.assign(positions.size(), entt::null);
     }
 
     [[nodiscard]] std::span<const Vec3> Anchors() const {
-        return {positions.data(), kAnchors};
+        return {positions.data(), positions.size() - 1};
     }
 
     // The caller owns the game roster factory; this workload only supplies
@@ -76,7 +123,8 @@ struct RegionalCadenceDiagnostics {
         std::uint64_t frozen_water_windows = 0;
         bool operator==(const Owner&) const = default;
     };
-    std::array<Owner, RegionalCadenceWorkload::kParticipants> owners{};
+    // At most 65 observations; sized once by Start, with no per-tick allocation.
+    std::vector<Owner> owners = std::vector<Owner>(RegionalCadenceWorkload::kParticipants);
     std::uint64_t observations = 0, tick = 0;
     std::uint64_t owner_visits = 0, water_window_visits = 0;
     // These foliage counters describe the latest replay/preparation pass, not
@@ -98,6 +146,7 @@ struct RegionalCadenceDiagnostics {
                                             std::uint64_t start_tick,
                                             const Systems::WaterSystem* water) {
         RegionalCadenceDiagnostics result;
+        result.owners.resize(workload.positions.size());
         result.tick = start_tick;
         result.water_sources_seen = water ? water->debug_sources_seen() : 0;
         for (std::size_t i = 0; i < result.owners.size(); ++i) {
@@ -158,7 +207,7 @@ struct RegionalCadenceDiagnostics {
         preparation_pages_last = session.GetFoliageReplayPreparationPages();
         preparation_pages_max = std::max(preparation_pages_max, preparation_pages_last);
         replay_remaining_steps = session.GetFoliageReplayRemainingSteps();
-        // Every completed regional water publication inspects all nine physical
+        // Every completed regional water publication inspects all workload physical
         // sources, even on empty grants. This cumulative counter distinguishes a
         // publication from parking deferral, which retains the previous work object.
         if (!water || water->debug_sources_seen() == water_sources_seen) {
@@ -176,7 +225,7 @@ struct RegionalCadenceDiagnostics {
         water_resident_visits += work.residents_visited;
         water_participant_visits += work.participants_visited;
         // Interior visits are bounded by the existing global cell grant. The
-        // nine-owner lookup is fixed work, independent of world/ledger size.
+        // bounded owner lookup is fixed work, independent of world/ledger size.
         for (auto& output : owners) {
             std::uint64_t windows = 0;
             for (const auto id : work.visits) {

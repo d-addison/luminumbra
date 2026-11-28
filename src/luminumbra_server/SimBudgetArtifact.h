@@ -61,11 +61,13 @@ inline void AppendRegionalCadenceArtifact(nlohmann::json& artifact,
                                           const std::optional<RegionalCadenceDiagnostics>& replay) {
     if (!first)
         return;
+    const auto anchors = first->owners.size() - 1;
     artifact["regional_cadence"] = {
-        {"schema", "luminumbra.regional_cadence.v1"},
-        {"workload", "eight_distant_regions_v1"},
-        {"anchors", RegionalCadenceWorkload::kAnchors},
-        {"participants", RegionalCadenceWorkload::kParticipants},
+        {"schema",
+         anchors == 8 ? "luminumbra.regional_cadence.v1" : "luminumbra.regional_cadence.v2"},
+        {"workload", anchors == 8 ? "eight_distant_regions_v1" : "distant_regions_v2"},
+        {"anchors", anchors},
+        {"participants", first->owners.size()},
         {"observations_replay_match", replay && *first == *replay},
         {"run", RegionalCadenceJson(*first)},
         {"replay", replay ? RegionalCadenceJson(*replay) : nlohmann::json(nullptr)}};
