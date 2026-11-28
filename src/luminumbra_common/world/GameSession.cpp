@@ -380,6 +380,15 @@ bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
     std::set<ChunkID> boot_water_columns;
     const std::vector<Vec3> spawn_anchor{m_metadata.spawnPoint};
     const auto& settle_anchors = anchors.empty() ? spawn_anchor : anchors;
+    if (regional_boot && water_loaded_from_save) {
+        // Observe the restored anchor candidates without scheduling or loading.
+        // Live ticks also admit source columns and filter by cadence and budget.
+        // At most 64 anchor rings (576 columns), bounded by SelectColumns.
+        const auto columns =
+            Systems::RegionalWater::SelectColumns(settle_anchors, {}, m_activeRegionLedger);
+        boot_water_columns.insert(columns.ids.begin(),
+                                  columns.ids.begin() + static_cast<std::ptrdiff_t>(columns.size));
+    }
     const auto settle_water = [&] {
         if (!regional_boot || !m_waterSystem)
             return;
@@ -397,7 +406,7 @@ bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
         boot_water_columns.insert(visits.begin(), visits.end());
     };
     const auto water_snapshot = [&] {
-        if (!regional_boot || water_loaded_from_save)
+        if (!regional_boot)
             return ws->snapshot_streamed_chunks();
         std::vector<std::shared_ptr<Chunk>> columns;
         columns.reserve(boot_water_columns.size());

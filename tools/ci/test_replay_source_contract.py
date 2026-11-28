@@ -265,11 +265,16 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertIn("kPostInitSettleTicks = 240", settle)
         self.assertIn("TryCompleteBootWaterSettle(m_registry, settle_anchors, phys, skipped)", settle)
         self.assertIn('"chunks total, {} settle passes{}"', settle)
-        # Regional boots report canonical participants, including parked columns;
-        # legacy and loaded boots retain the streamed snapshot.
+        # Regional boots report canonical participants, including restored and
+        # parked columns; legacy boots retain the streamed snapshot.
         self.assertIn("const auto chunks = water_snapshot();", settle)
         self.assertRegex(settle, r"chunks\.size\(\),\s*settle_iters,")
-        self.assertIn("if (!regional_boot || water_loaded_from_save)", settle)
+        self.assertIn("if (!regional_boot)", settle)
+        self.assertNotIn("if (!regional_boot || water_loaded_from_save)", settle)
+        self.assertIn("if (regional_boot && water_loaded_from_save)", settle)
+        self.assertIn(
+            "Systems::RegionalWater::SelectColumns(settle_anchors, {}, m_activeRegionLedger)",
+            settle)
         self.assertIn("return ws->snapshot_streamed_chunks();", settle)
         self.assertIn("ws->inspect_water_column(Chunk::decode_id(id))", settle)
         self.assertIn("ActiveRegionLedger boot_ledger;", settle)
