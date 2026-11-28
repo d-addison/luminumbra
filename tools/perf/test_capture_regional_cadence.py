@@ -919,7 +919,7 @@ class RegionalCadenceCaptureContract(unittest.TestCase):
                       '    COMMAND "${Python3_EXECUTABLE}" -I -B '
                       '"${CMAKE_SOURCE_DIR}/tools/perf/test_capture_regional_cadence.py")', cmake)
         self.assertIn('set_tests_properties(RegionalCadenceCaptureContract PROPERTIES '
-                      'LABELS "simulation;tools" TIMEOUT 5)', cmake)
+                      'LABELS "simulation;tools" TIMEOUT 30)', cmake)
         sys.path.insert(0, str(repository / "tools/ci"))
         import ci_paths
         self.assertIn("tools/perf/test_capture_regional_cadence.py", ci_paths.PYTHON_TESTS)

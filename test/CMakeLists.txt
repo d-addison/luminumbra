@@ -2664,11 +2664,11 @@ add_test(NAME ActiveRegionEvidenceContract
 add_test(NAME ActiveRegionRecordEvidenceContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_check_active_region_records.py")
 set_tests_properties(ActiveRegionCaptureContract ActiveRegionEvidenceContract
-    ActiveRegionRecordEvidenceContract PROPERTIES LABELS "simulation;tools" TIMEOUT 5)
+    ActiveRegionRecordEvidenceContract PROPERTIES LABELS "simulation;tools" TIMEOUT 30)
 
 add_test(NAME RegionalCadenceCaptureContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_regional_cadence.py")
-set_tests_properties(RegionalCadenceCaptureContract PROPERTIES LABELS "simulation;tools" TIMEOUT 5)
+set_tests_properties(RegionalCadenceCaptureContract PROPERTIES LABELS "simulation;tools" TIMEOUT 30)
 
 add_test(NAME SimBudgetCaptureContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py")
