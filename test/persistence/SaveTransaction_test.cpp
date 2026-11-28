@@ -1511,25 +1511,21 @@ TEST(SaveTransaction, ReceiptAppendingPublicationsCompareJournalOnceBeforeEachRe
         ASSERT_TRUE(transaction.begin(&errors));
         ASSERT_TRUE(transaction.protect(members, &errors));
         for (const auto& member : members) {
-            const auto path = save.path() / member;
-            WorldSaveService::ArtifactIdentity identity{};
-            bool missing = false;
-            ASSERT_TRUE(WorldSaveService::artifact_identity(path, identity, missing));
-            ASSERT_FALSE(missing);
-            RecordCompletedFileReceipt(save.path(),
-                                       journal_directory(save.path()) / "undo" /
-                                           ("retired." + path.filename().generic_string()),
-                                       identity);
-        }
-        for (const auto& member : members) {
             SCOPED_TRACE(member);
             const auto path = save.path() / member;
             const auto retired = journal_directory(save.path()) / "undo" /
                                  ("retired." + path.filename().generic_string());
+            // Bind the slot first; completed history then forces a reset on retry.
+            ASSERT_TRUE(SaveTransaction::prepare_publication(path, {}, &errors));
+            WorldSaveService::ArtifactIdentity identity{};
+            bool missing = false;
+            ASSERT_TRUE(WorldSaveService::artifact_identity(path, identity, missing));
+            ASSERT_FALSE(missing);
+            RecordCompletedFileReceipt(save.path(), retired, identity);
+            ASSERT_TRUE(SaveTransaction::prepare_publication(path, {}, &errors));
             if (source_missing) {
                 fs::rename(path, retired);
             }
-            ASSERT_TRUE(SaveTransaction::prepare_publication(path, {}, &errors));
             const auto before = transaction.journal_byte_comparisons();
             ComparisonObservation() = {.transaction = &transaction,
                                        .member = source_missing ? retired : path};
