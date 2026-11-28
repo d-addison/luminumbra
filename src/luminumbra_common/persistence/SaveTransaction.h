@@ -224,6 +224,9 @@ public:
     // Const work diagnostic: journal records parsed and inventory entries visited
     // by this live writer, including reloads. Recovery after the writer closes is excluded.
     [[nodiscard]] std::array<std::size_t, 2> journal_work() const;
+    // Const work diagnostic: successful full live control-byte comparisons,
+    // including checked appends. No recovery work after this writer closes.
+    [[nodiscard]] std::size_t journal_byte_comparisons() const;
 
     [[nodiscard]] bool committed() const {
         return m_state == State::Committed;
