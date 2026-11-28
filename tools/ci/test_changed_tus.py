@@ -1764,7 +1764,20 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         definitions = "\n".join((ROOT / path).read_text()
                                 for path in ("CMakeLists.txt", ".github/workflows/ci.yml"))
         expected = set(re.findall(r"-Wno-error(?:=[a-zA-Z0-9-]+)?", definitions))
-        self.assertEqual({f for f in flags if f.startswith("-Wno-error")}, expected)
+        # The GCC Debug ASan maybe-uninitialized demotion (a libstdc++ std::regex
+        # false positive at -O1) never reaches the fast-gcc/fast-clang replay
+        # databases, so it is pinned separately instead of joining the strict set.
+        helper = re.search(r"function\(luminumbra_configure_first_party_target\b(.*?)endfunction\(\)",
+                           (ROOT / "CMakeLists.txt").read_text(), re.S)[1]
+        asan_branch = re.search(r"if\(LUMINUMBRA_ENABLE_ASAN\)(.*?)\n  endif\(\)", helper, re.S)
+        self.assertIsNotNone(asan_branch)
+        asan_only = set(re.findall(
+            r"\$<\$<AND:\$<CONFIG:Debug>,\$<CXX_COMPILER_ID:GNU>>:(-Wno-error=[a-zA-Z0-9-]+)>",
+            definitions))
+        self.assertEqual(asan_only, {"-Wno-error=maybe-uninitialized"})
+        self.assertIn("$<$<AND:$<CONFIG:Debug>,$<CXX_COMPILER_ID:GNU>>:-Wno-error=maybe-uninitialized>",
+                      asan_branch[1])
+        self.assertEqual({f for f in flags if f.startswith("-Wno-error")}, expected - asan_only)
         # Preserve the exact nonfatal unused-parameter policy for the strict
         # target; a switch warning remains absent for the excluded client.
         self.a.write_text("void callback(int unused_named_parameter) {}\n")
