@@ -30,7 +30,7 @@ both Visual C++ and MSYS2 UCRT64 through `.github/workflows/windows-build.yml`.
 | `coverage` | GCC/Clang coverage instrumentation |
 | `debug-simo0` | Simulation optimization-parity investigation |
 
-Debug ASan builds compile first-party targets at `-O1` on GCC and Clang, keeping Debug assertions and all sanitizer checks. In GNU Debug ASan builds, `luminumbra_client` uses `-O1` too.
+Debug ASan builds compile first-party targets at `-O1` on GCC and Clang, keeping Debug assertions and all sanitizer checks. In GNU Debug ASan builds, `luminumbra_client` uses `-O1` too. GCC Debug ASan builds also keep `maybe-uninitialized` as a warning rather than an error, because GCC 13 reports a false positive inside libstdc++'s `std::regex` at `-O1`. GCC release builds still treat it as an error.
 
 Configure, build, and test a preset with matching names:
 
