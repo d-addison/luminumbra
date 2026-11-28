@@ -1,4 +1,4 @@
-"""QUEUED: run only in an isolated, coordinated Blender 5.1.0 process."""
+"""QUEUED: run only in an isolated, coordinated Blender 5.2.4 LTS process."""
 import argparse
 import hashlib
 import json
@@ -148,8 +148,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args(sys.argv[sys.argv.index("--") + 1:])
-    if bpy.app.version != (5, 1, 0):
-        raise RuntimeError("Unqualified Blender version; expected exact 5.1.0 profile")
+    if bpy.app.version != (5, 2, 4):
+        raise RuntimeError("Unqualified Blender version; expected exact 5.2.4 LTS profile")
     args.output.mkdir(parents=True, exist_ok=False)
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)

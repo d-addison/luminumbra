@@ -2,14 +2,19 @@
 from __future__ import annotations
 
 import copy
+import importlib
+import io
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 import tempfile
+import tomllib
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, MagicMock, patch
 
 from common import atomic_json, canonical, digest, parse_json, read_json
 from compare_exports import compare
@@ -19,6 +24,118 @@ from mock_service import MockService
 
 
 class Contracts(unittest.TestCase):
+    def blender_entry(self, filename, version):
+        # Stub only the Blender boundary; execute the actual public entry point.
+        bpy = MagicMock()
+        bpy.app.version = version
+        bpy.app.version_string = ".".join(map(str, version))
+        bpy.app.background = True
+        bpy.types.Operator = type("Operator", (), {})
+        bpy.types.Panel = type("Panel", (), {})
+        bpy.app.handlers.persistent = lambda function: function
+        with patch.dict(sys.modules, {"bpy": bpy, "bpy.app": bpy.app,
+                                     "bpy.app.handlers": bpy.app.handlers}):
+            entry = runpy.run_path(str(Path(__file__).parent / filename))
+        return bpy, entry
+
+    def test_blender_fixture_exact_profile(self):
+        for version in ((5, 2, 4), (5, 1, 0), (5, 2, 3), (5, 2, 5), (5, 3, 0), (4, 5, 4)):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as root:
+                bpy, entry = self.blender_entry("blender_fixture.py", version)
+                bpy.ops.object.select_all.side_effect = RuntimeError("qualified boundary")
+                output = Path(root) / "outputs"
+                argv = ["blender", "--", "--suite", "prop", "--output", str(output)]
+                expected = "qualified boundary" if version == (5, 2, 4) else "expected exact 5.2.4 LTS profile"
+                with patch.object(sys, "argv", argv), self.assertRaisesRegex(RuntimeError, expected):
+                    entry["main"]()
+                self.assertEqual(output.exists(), version == (5, 2, 4))
+                self.assertEqual(bpy.ops.object.select_all.call_count, int(version == (5, 2, 4)))
+
+    def test_blender_extension_exact_profile(self):
+        for version in ((5, 2, 4), (5, 1, 0), (5, 2, 3), (5, 2, 5), (5, 3, 0), (4, 5, 4)):
+            with self.subTest(version=version):
+                bpy, entry = self.blender_entry("extension/__init__.py", version)
+                bpy.utils.register_class.side_effect = RuntimeError("qualified boundary")
+                expected = "qualified boundary" if version == (5, 2, 4) else "pinned to Blender 5.2.4 LTS"
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    entry["register"]()
+                self.assertEqual(bpy.utils.register_class.call_count, int(version == (5, 2, 4)))
+                bpy.app.timers.register.assert_not_called()
+
+    def test_blender_extension_probe_exact_profile(self):
+        for version in ((5, 2, 4), (5, 1, 0), (5, 2, 3), (5, 2, 5), (5, 3, 0), (4, 5, 4)):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as root:
+                bpy, entry = self.blender_entry("blender_extension_probe.py", version)
+                repos = bpy.context.preferences.extensions.repos
+                repos.__bool__.return_value = False
+                repos.new.side_effect = RuntimeError("qualified boundary")
+                output = Path(root) / "outputs"
+                argv = ["blender", "--", "--archive", str(Path(root) / "mock.zip"),
+                        "--output", str(output), "--python", sys.executable]
+                error = RuntimeError if version == (5, 2, 4) else AssertionError
+                expected = "qualified boundary" if version == (5, 2, 4) else "exact Blender profile"
+                with patch.object(sys, "argv", argv), self.assertRaisesRegex(error, expected):
+                    entry["main"]()
+                receipt = read_json(output / "extension-receipt.json")
+                self.assertEqual(receipt["checks"], [{"check": "exact Blender profile",
+                                                     "passed": version == (5, 2, 4)}])
+                self.assertEqual(repos.new.call_count, int(version == (5, 2, 4)))
+                bpy.ops.extensions.package_install_files.assert_not_called()
+
+    def test_blender_manifest_exact_profile(self):
+        manifest = Path(__file__).parent / "extension/blender_manifest.toml"
+        value = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        self.assertEqual(value["blender_version_min"], "5.2.4")
+        self.assertEqual(value["blender_version_max"], "5.2.5")
+
+    def test_blender_identity_uses_52_exporter_paths(self):
+        runner = importlib.import_module("run")
+        for executable in ("blender.exe", "blender"):
+            with self.subTest(executable=executable), tempfile.TemporaryDirectory() as root:
+                root = Path(root)
+                (root / executable).write_bytes(b"portable executable fixture")
+                exporter = root / "5.2/scripts/addons_core/io_scene_gltf2"
+                (exporter / "nested").mkdir(parents=True)
+                files = [("nested/é.py", b"# nested source\n"), ("__init__.py", b"# exporter\n")]
+                for name, content in files:
+                    (exporter / name).write_bytes(content)
+                (exporter / "ignored.txt").write_bytes(b"not Python")
+                records = [{"path": name, "sha256": digest(content)} for name, content in sorted(files)]
+                with patch.object(runner, "command", return_value={}):
+                    identity = runner.identity(root)
+                self.assertEqual(identity["exporter"]["files"], records)
+                self.assertEqual(identity["exporter"]["count"], 2)
+                self.assertEqual(identity["exporter"]["tree_sha256"], digest(canonical(records)))
+                self.assertEqual(identity["blender"]["path"], str(root / executable))
+                self.assertEqual(identity["blender"]["sha256"], digest(b"portable executable fixture"))
+                self.assertFalse(identity["blender"]["executed"])
+
+    def test_blender_packaging_uses_52_cli_path(self):
+        runner = importlib.import_module("run")
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            blender_root = root / "portable Blender"
+            cli = blender_root / "5.2/scripts/addons_core/bl_pkg/cli/blender_ext.py"
+            cli.parent.mkdir(parents=True)
+            cli.write_bytes(b"# packaging fixture\n")
+            command = Mock(return_value={"returncode": 0})
+            result = SimpleNamespace(testsRun=1, failures=[], errors=[], skipped=[], wasSuccessful=lambda: True)
+            # The outer suite covers these tests; avoid recursive execution here.
+            with patch.object(runner, "ROOT", root), patch.object(runner, "identity", return_value={}), \
+                    patch.object(runner, "command", command), \
+                    patch.object(unittest.TextTestRunner, "run", return_value=result), \
+                    patch.dict(sys.modules, {"jsonschema": None}), \
+                    patch.object(sys, "stdout", io.StringIO()), \
+                    patch.object(sys, "argv", ["run.py", "--suite", "service", "--blender-root", str(blender_root)]):
+                self.assertEqual(runner.main(), 0)
+            command.assert_called_once()
+            argv = command.call_args.args[0]
+            self.assertEqual(argv[:4], [sys.executable, "-B", str(cli), "validate"])
+            self.assertTrue(Path(argv[4]).is_file())
+            latest = read_json(root / "evidence/latest.json")
+            validation = read_json(Path(latest["report"]).parent / "extension-validation.json")
+            self.assertEqual(validation["tool_sha256"], digest(b"# packaging fixture\n"))
+
     def test_valid_asset(self):
         validate_asset(asset())
 

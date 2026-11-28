@@ -24,7 +24,7 @@ def main():
         (args.output / 'extension-receipt.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         if not condition:
             raise AssertionError(name + ': ' + str(details))
-    check('exact Blender profile', bpy.app.version == (5, 1, 0))
+    check('exact Blender profile', bpy.app.version == (5, 2, 4))
     repos = bpy.context.preferences.extensions.repos
     # Only transient factory-startup preferences in this isolated process.
     while repos:

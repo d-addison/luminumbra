@@ -47,15 +47,22 @@ CUBICSPLINE samples, and incorrect joint-order/matrix bind palettes. Those are
 engine defects to repair, not capabilities advertised by this package.
 
 Every report identifies the actual source revision, source files and Python
-profile. Optional `--blender-root` identifies a Blender 5.1 installation and runs
+profile. Optional `--blender-root` identifies a Blender 5.2.4 LTS installation and runs
 its packaging validator as a Python script; it does not launch Blender. Generated
 assets, captures, archives, receipts and build trees are ignored and stay local.
 
 ## Native Blender qualification
 
-The extension deliberately requires Blender 5.1.0. The initial Windows profile
-used Blender build `adfe2921d5f3` and glTF exporter 5.1.18. Other versions require
-qualification; a successful Linux CPU run does not qualify Linux Blender.
+The probes and mock extension deliberately require exact Blender 5.2.4 LTS.
+The qualified Windows profile uses Blender build `cd5dc428cce1` and bundled glTF
+exporter 5.2.41, with 126 Python source files and exporter source digest
+`06723e7f58aa29513f951b67f1a5788d74693066c0cae6432da7230b162172fd`.
+The digest is SHA-256 of UTF-8 canonical JSON (`sort_keys=True`,
+`separators=(",", ":")`, `ensure_ascii=False`) over the array of `{path, sha256}`
+records for every exporter `*.py` file, sorted by relative POSIX path, with no
+trailing newline. Exporter and packaging scripts reside under `5.2/scripts/addons_core/`.
+Blender 5.1.0 was the previous profile and is no longer qualified. Other versions
+require qualification; a successful Linux CPU run does not qualify Linux Blender.
 
 Run the native launchers with the host's Python, passing its Blender executable:
 
