@@ -1354,6 +1354,10 @@ private:
     void invalidate_renderable_chunks();
     void set_renderable_chunk_state(Chunk& chunk, ChunkState state);
     const World::ActivationResidencyIndex::LifecycleCounts& streaming_lifecycle_counts();
+    // Debug-only oracle cadence for streaming_lifecycle_counts(). The member is
+    // unconditional so the class layout never depends on NDEBUG.
+    static constexpr std::uint64_t kLifecycleOracleCadence = 64;
+    std::uint64_t m_lifecycle_oracle_calls = 0;
     // debug_set_streaming_radius_cap: 0 = uncapped (production behaviour).
     int m_streaming_radius_cap = 0;
     DbgStreamTimings m_dbg_stream; // runtime telemetry

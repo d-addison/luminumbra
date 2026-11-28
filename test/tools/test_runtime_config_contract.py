@@ -1690,6 +1690,13 @@ class StreamingLifecycleSourceContract(unittest.TestCase):
         self.assertIn("#ifndefNDEBUG", read)
         self.assertIn("assert(counts==expected)", read)
         self.assertIn("pending_lod.load(std::memory_order_acquire)>=0", read)
+        # The debug oracle samples one call per window, alternating boundaries,
+        # and always checks the first call.
+        self.assertIn("constexprstd::uint64_tkLifecycleOracleCadence=64;",
+                      compact_cpp((ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.h")
+                                  .read_text(encoding="utf-8")))
+        self.assertIn("call%kLifecycleOracleCadence!=(call/kLifecycleOracleCadence)%2u", read)
+        self.assertLess(read.index("#ifndefNDEBUG"), read.index("m_lifecycle_oracle_calls++"))
         for match in re.finditer(r"(chunk|item\.chunk)->pending_lod\.store\([^;]+;", self.world):
             self.assertTrue(self.world[match.end():].startswith(
                 "m_activation_index.observe_lifecycle(*" + match[1] + ");"))

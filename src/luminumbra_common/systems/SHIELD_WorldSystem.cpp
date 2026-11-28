@@ -5900,6 +5900,13 @@ SHIELD_WorldSystem::streaming_lifecycle_counts() {
 #ifndef NDEBUG
     // Independent oracle at both historical census boundaries. Workers only
     // stage results; these published fields are read on the owner thread.
+    // The full walk is O(resident chunks), so it runs on the first call and
+    // then once per kLifecycleOracleCadence calls. Each update reads two
+    // boundaries, so the checked slot alternates between them per window.
+    const std::uint64_t call = m_lifecycle_oracle_calls++;
+    if (call % kLifecycleOracleCadence != (call / kLifecycleOracleCadence) % 2u) {
+        return counts;
+    }
     World::ActivationResidencyIndex::LifecycleCounts expected;
     for (const auto& [id, chunk] : m_streaming_state.chunks) {
         (void)id;
