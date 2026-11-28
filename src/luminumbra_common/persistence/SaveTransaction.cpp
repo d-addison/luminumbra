@@ -319,6 +319,8 @@ struct JournalDocument {
     // Live cache only: exact admitted control bytes, bounded by kMaxSnapshotIndexBytes.
     std::optional<std::string> cached_bytes;
     std::size_t parsed_records = 0;
+    // Not serialized. Each removal observes only its own comparison delta.
+    std::size_t byte_comparisons = 0;
     std::unordered_map<std::string, std::size_t> entry_indices;
     std::array<std::uint64_t, 3> root_identity{};
     std::array<std::uint64_t, 3> control_identity{};
@@ -335,7 +337,7 @@ struct JournalDocument {
 };
 
 bool VerifyCachedJournalBytes(const fs::path& save_dir,
-                              const JournalDocument& document,
+                              JournalDocument& document,
                               const WorldSaveService::ArtifactIdentity& control,
                               std::vector<std::string>* errors) {
     const SavedInputFile input(journal_directory(save_dir) / "txn.json");
@@ -348,8 +350,40 @@ bool VerifyCachedJournalBytes(const fs::path& save_dir,
                  "live snapshot journal bytes changed or cannot be verified before removal");
         return false;
     }
+    ++document.byte_comparisons;
     return true;
 }
+
+// A removal may borrow only comparisons completed during this invocation.
+// Preparation can skip its append on retries, irrespective of cached versions.
+class RemovalJournalVerification {
+public:
+    RemovalJournalVerification(const fs::path& save_dir,
+                               JournalDocument& document,
+                               const WorldSaveService::ArtifactIdentity& control)
+        : m_save_dir(save_dir)
+        , m_document(document)
+        , m_control(control)
+        , m_initial_comparisons(document.byte_comparisons) {}
+
+    bool verify(std::vector<std::string>* errors) const {
+        if (m_document.byte_comparisons != m_initial_comparisons)
+            return true;
+        m_failed = !VerifyCachedJournalBytes(m_save_dir, m_document, m_control, errors);
+        return !m_failed;
+    }
+
+    bool failed() const {
+        return m_failed;
+    }
+
+private:
+    const fs::path& m_save_dir;
+    JournalDocument& m_document;
+    const WorldSaveService::ArtifactIdentity& m_control;
+    const std::size_t m_initial_comparisons;
+    mutable bool m_failed = false;
+};
 
 auto LatestReceipt(JournalDocument& document, const std::string& path) {
     const auto found =
@@ -1124,6 +1158,7 @@ bool AppendMetadata(const fs::path& save_dir,
                                                  expected_bytes))
         return false;
     if (document.cached_bytes) {
+        ++document.byte_comparisons;
         // Successful append guarantees a published delimiter and discards any
         // incomplete tail. Its capacity check bounds this cache to 16 MiB too.
         document.cached_bytes->resize(document.cached_bytes->rfind('\n') + 1u);
@@ -1443,11 +1478,13 @@ ReceiptRemoval ReceiptRemovalFor(const fs::path& save_dir,
 // Inventory order is stable. Preparation precedes all removals, and a single later
 // carrier flush can qualify every earlier removal on that same NTFS volume.
 // Vectors are bounded by the existing journal byte and member limits.
-detail::NamespaceRetirementOutcome CompleteReceipts(const fs::path& save_dir,
-                                                    JournalDocument& document,
-                                                    const std::vector<ReceiptRemoval>& removals,
-                                                    ArtifactIdentity& control,
-                                                    std::vector<std::string>* errors) {
+detail::NamespaceRetirementOutcome
+CompleteReceipts(const fs::path& save_dir,
+                 JournalDocument& document,
+                 const std::vector<ReceiptRemoval>& removals,
+                 ArtifactIdentity& control,
+                 std::vector<std::string>* errors,
+                 const RemovalJournalVerification* verification = nullptr) {
     const auto fail = [&] {
         AddError(errors, "cannot complete recorded snapshot namespaces");
         return detail::NamespaceRetirementOutcome::Failed;
@@ -1456,8 +1493,11 @@ detail::NamespaceRetirementOutcome CompleteReceipts(const fs::path& save_dir,
     // Retain the entire batch before any reset/removal. A serial-only receipt
     // cannot establish ownership, even when its legacy file identity matches.
     for (const auto& removal : removals)
-        if (!removal.receipt->completion.stable_volume.known())
+        if (!removal.receipt->completion.stable_volume.known()) {
+            if (verification && !verification->verify(errors))
+                return fail();
             return detail::NamespaceRetirementOutcome::Retained;
+        }
 #endif
     std::vector<RetirementReceipt*> resets;
     std::vector<bool> owned;
@@ -1495,6 +1535,8 @@ detail::NamespaceRetirementOutcome CompleteReceipts(const fs::path& save_dir,
     for (std::size_t i = 0; i < removals.size(); ++i) {
         const auto& removal = removals[i];
         auto& receipt = *removal.receipt;
+        if (owned[i] && verification && !verification->verify(errors))
+            return fail();
         if (owned[i] && !WorldSaveService::remove_owned_entry(save_dir / receipt.path,
                                                               receipt.completion.identity,
                                                               errors,
@@ -1554,21 +1596,28 @@ detail::NamespaceRetirementOutcome CompleteReceipts(const fs::path& save_dir,
     }
     if (!RecordReceipts(save_dir, document, retired, 3, control, errors))
         return fail();
+    // An already-absent retry can complete through checked phase appends alone.
+    // A completed receipt that appends nothing still needs this call's check.
+    if (verification && !verification->verify(errors))
+        return fail();
     return all_retired ? detail::NamespaceRetirementOutcome::Retired
                        : detail::NamespaceRetirementOutcome::Retained;
 }
 
-detail::NamespaceRetirementOutcome CompleteReceipt(const fs::path& save_dir,
-                                                   JournalDocument& document,
-                                                   RetirementReceipt& receipt,
-                                                   ArtifactIdentity& control,
-                                                   const BoundPublicationStage* stage,
-                                                   std::vector<std::string>* errors) {
+detail::NamespaceRetirementOutcome
+CompleteReceipt(const fs::path& save_dir,
+                JournalDocument& document,
+                RetirementReceipt& receipt,
+                ArtifactIdentity& control,
+                const BoundPublicationStage* stage,
+                std::vector<std::string>* errors,
+                const RemovalJournalVerification* verification = nullptr) {
     return CompleteReceipts(save_dir,
                             document,
                             {ReceiptRemovalFor(save_dir, document, receipt, stage)},
                             control,
-                            errors);
+                            errors,
+                            verification);
 }
 
 bool CompleteRemoval(const fs::path& save_dir,
@@ -1578,7 +1627,8 @@ bool CompleteRemoval(const fs::path& save_dir,
                      ArtifactIdentity& control,
                      std::vector<std::string>* errors,
                      bool directory = false,
-                     const BoundPublicationStage* stage = nullptr) {
+                     const BoundPublicationStage* stage = nullptr,
+                     const RemovalJournalVerification* verification = nullptr) {
 #if !defined(_WIN32)
     const auto recorded_slot = stage ? stage->directory / stage->name : fs::path{};
     if (document.modern &&
@@ -1590,6 +1640,8 @@ bool CompleteRemoval(const fs::path& save_dir,
         // POSIX has a namespace barrier. The existing ownership records plus
         // repeated parent fsync suffice; per-file NTFS phase records would
         // consume the bounded control stream before large saves can roll back.
+        if (verification && !verification->verify(errors))
+            return false;
         const auto slot = stage ? stage->directory / stage->name : fs::path{};
         for (const auto& candidate : {path, slot}) {
             if (candidate.empty())
@@ -1640,6 +1692,8 @@ bool CompleteRemoval(const fs::path& save_dir,
     }
 #endif
     if (!document.modern) {
+        if (verification && !verification->verify(errors))
+            return false;
         ArtifactIdentity actual{};
         bool missing = false;
         return WorldSaveService::artifact_identity(path, actual, missing, directory) &&
@@ -1672,7 +1726,7 @@ bool CompleteRemoval(const fs::path& save_dir,
         if (candidate == slot)
             break;
     }
-    return CompleteReceipts(save_dir, document, removals, control, errors) ==
+    return CompleteReceipts(save_dir, document, removals, control, errors, verification) ==
            detail::NamespaceRetirementOutcome::Retired;
 }
 
@@ -3479,11 +3533,9 @@ std::optional<bool> SaveTransaction::complete_owned_removal(const fs::path& path
     auto& state = *transaction->m_journal_state;
     auto& document = state.document;
     state.valid = false; // Any interrupted completion must reload its durable prefix.
-    // Versions can survive an in-place rewrite. Both branches can mutate without
-    // appending, including retries whose receipt preparation writes no record.
-    if (!VerifyCachedJournalBytes(
-            transaction->m_save_dir, document, transaction->m_control_identity, errors))
-        return false;
+    const RemovalJournalVerification verification(
+        transaction->m_save_dir, document, transaction->m_control_identity);
+    const auto error_begin = errors ? errors->size() : 0u;
     document.append_reserve = transaction->m_rollback_reserve;
     const auto complete = [&]() -> bool {
         if (!publication) {
@@ -3511,7 +3563,8 @@ std::optional<bool> SaveTransaction::complete_owned_removal(const fs::path& path
                                    transaction->m_control_identity,
                                    errors,
                                    false,
-                                   &slot);
+                                   &slot,
+                                   &verification);
         }
         // Forward publication consumes only this protected member and its bound
         // slots. Recheck those identities at use; the closed inventory is checked
@@ -3563,8 +3616,11 @@ std::optional<bool> SaveTransaction::complete_owned_removal(const fs::path& path
                                    ReceiptFor(document, relative),
                                    transaction->m_control_identity,
                                    nullptr,
-                                   errors) != detail::NamespaceRetirementOutcome::Failed;
+                                   errors,
+                                   &verification) != detail::NamespaceRetirementOutcome::Failed;
 #else
+            if (!verification.verify(errors))
+                return false;
             // A protected create can still be absent beneath never-created chunk
             // directories. Persist the nearest existing ancestor, as rollback and
             // receipt completion do, without creating empty payload directories.
@@ -3596,6 +3652,8 @@ std::optional<bool> SaveTransaction::complete_owned_removal(const fs::path& path
                             !missing,
                             owned_path))
             return false;
+        if (!missing && !verification.verify(errors))
+            return false;
         const auto* stable_volume =
             HasReceipt(document, retired_name)
                 ? &ReceiptFor(document, retired_name).completion.stable_volume
@@ -3614,7 +3672,8 @@ std::optional<bool> SaveTransaction::complete_owned_removal(const fs::path& path
                                ReceiptFor(document, name),
                                transaction->m_control_identity,
                                &stage,
-                               errors) != detail::NamespaceRetirementOutcome::Failed;
+                               errors,
+                               &verification) != detail::NamespaceRetirementOutcome::Failed;
 #else
         return CompleteRemoval(transaction->m_save_dir,
                                document,
@@ -3623,11 +3682,25 @@ std::optional<bool> SaveTransaction::complete_owned_removal(const fs::path& path
                                transaction->m_control_identity,
                                errors,
                                false,
-                               &stage) &&
+                               &stage,
+                               &verification) &&
                WorldSaveService::durable_flush_directory(owned_path.parent_path(), errors);
 #endif
     };
-    const bool completed = complete();
+    const bool completed = complete() && verification.verify(errors);
+    if (verification.failed()) {
+        // Keep the original byte refusal without a receipt-completion wrapper.
+        if (errors)
+            errors->resize(error_begin + 1u);
+    } else if (!completed) {
+        // Inventory or a checked append may refuse before the removal check.
+        // Preserve the byte-integrity refusal even when that earlier check fails.
+        std::vector<std::string> verification_errors;
+        if (!verification.verify(&verification_errors) && errors) {
+            errors->resize(error_begin);
+            errors->insert(errors->end(), verification_errors.begin(), verification_errors.end());
+        }
+    }
     state.valid = completed;
     return completed;
 }
@@ -3818,6 +3891,10 @@ std::array<std::size_t, 2> SaveTransaction::journal_work() const {
                : std::array<std::size_t, 2>{};
 }
 
+std::size_t SaveTransaction::journal_byte_comparisons() const {
+    return m_journal_state ? m_journal_state->document.byte_comparisons : 0u;
+}
+
 bool SaveTransaction::read_live_journal(std::vector<std::string>* errors) {
     if (!m_journal_state)
         m_journal_state = std::make_unique<JournalState>();
@@ -3849,8 +3926,11 @@ bool SaveTransaction::read_live_journal(std::vector<std::string>* errors) {
             return false;
         }
         state.valid = false;
-        if (!ParseJournal(bytes, state.document, error) || !state.document.modern ||
-            state.document.cleanup || state.document.txn_id != m_txn_id ||
+        const auto byte_comparisons = state.document.byte_comparisons;
+        const bool parsed = ParseJournal(bytes, state.document, error);
+        state.document.byte_comparisons = byte_comparisons;
+        if (!parsed || !state.document.modern || state.document.cleanup ||
+            state.document.txn_id != m_txn_id ||
             state.document.base_generation != m_previous.generation ||
             state.document.new_generation != m_new_generation ||
             state.document.journal_identity != m_journal_identity ||
@@ -3982,6 +4062,7 @@ bool SaveTransaction::write_journal(std::vector<std::string>* errors) {
                                                                            : nullptr))
             return false;
         if (document.cached_bytes) {
+            ++document.byte_comparisons;
             // Mirror the successful writer's unpublished-tail truncation.
             document.cached_bytes->resize(document.cached_bytes->rfind('\n') + 1u);
             document.cached_bytes->append(record);

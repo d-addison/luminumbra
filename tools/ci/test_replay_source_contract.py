@@ -2371,7 +2371,8 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         completion = self.function(source, "complete_owned_removal", "SaveTransaction::")
         absent = completion.split('if (identity == ArtifactIdentity{}) {', 1)[1]
         absent = absent.split('#endif', 1)[0]
-        self.assertRegex(absent, r'#else\s*(?://[^\n]*\n\s*)*'
+        self.assertRegex(absent, r'#else\s*if \(!verification\.verify\(errors\)\)\s*'
+                         r'return false;\s*(?://[^\n]*\n\s*)*'
                          r'return WorldSaveService::durable_flush_directory\(\s*'
                          r'NearestExistingDirectory\(owned_path.parent_path\(\)\), errors\);')
         tests = read_source("test/persistence/world_save_service_test.cpp")

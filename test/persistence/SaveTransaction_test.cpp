@@ -464,8 +464,53 @@ public:
     JournalRemovalReadObserver& operator=(const JournalRemovalReadObserver&) = delete;
 };
 
-void CheckCachedJournalRemoval(const std::string_view fault) {
-    for (const std::string_view operation : {"publication", "staging", "absent publication"}) {
+// Seed completed receipt history through the shipping encoding. A live occupant
+// must prepare another generation before removal on both supported protocols.
+void RecordCompletedFileReceipt(const fs::path& save,
+                                const fs::path& path,
+                                const WorldSaveService::ArtifactIdentity& identity) {
+    auto records = JournalRecords(save);
+    auto receipt = records.front();
+    receipt["record"] = "receipt";
+    receipt["receipts"] =
+        nlohmann::json::array({{{"path", path.lexically_relative(save).generic_string()},
+                                {"generation", 0u},
+                                {"identity", identity},
+                                {"directory", false},
+                                {"absent_only", false},
+                                {"stable_volume", StableVolumeWords(save)}}});
+    for (unsigned phase = 0; phase <= 3; ++phase) {
+        receipt["phase"] = phase;
+        records.push_back(receipt);
+    }
+    Put(journal_directory(save) / "txn.json", EncodeJournalRecords(records));
+}
+
+struct JournalComparisonObservation {
+    const SaveTransaction* transaction = nullptr;
+    fs::path member{};
+    std::string_view step = "crash-artifact-removed";
+    std::size_t comparisons = 0;
+    std::size_t observations = 0;
+};
+
+JournalComparisonObservation& ComparisonObservation() {
+    static JournalComparisonObservation observation;
+    return observation;
+}
+
+void ObserveRemovalComparisons(const char* step, const fs::path& path) {
+    auto& observation = ComparisonObservation();
+    if (observation.transaction && std::string_view(step) == observation.step &&
+        path == observation.member) {
+        observation.comparisons = observation.transaction->journal_byte_comparisons();
+        ++observation.observations;
+    }
+}
+
+void CheckCachedJournalRemoval(const std::string_view fault, bool append_receipt = false) {
+    for (const std::string_view operation :
+         {"publication", "staging", "absent publication", "retired publication"}) {
         SCOPED_TRACE(operation);
         SCOPED_TRACE(fault);
         TempSave save, held;
@@ -484,8 +529,25 @@ void CheckCachedJournalRemoval(const std::string_view fault) {
         }
         ASSERT_TRUE(SaveTransaction::prepare_publication(save.path() / member, incoming, nullptr));
         const auto target = operation == "staging" ? incoming : save.path() / member;
+        const auto retired = journal_directory(save.path()) / "undo" /
+                             ("retired." + target.filename().generic_string());
+        if (append_receipt && operation != "absent publication") {
+            WorldSaveService::ArtifactIdentity identity{};
+            bool missing = false;
+            ASSERT_TRUE(WorldSaveService::artifact_identity(target, identity, missing));
+            ASSERT_FALSE(missing);
+            const auto receipt_path = operation == "staging" ? target : retired;
+            RecordCompletedFileReceipt(save.path(), receipt_path, identity);
+            ASSERT_TRUE(
+                SaveTransaction::prepare_publication(save.path() / member, incoming, nullptr));
+        }
+        if (operation == "retired publication") {
+            // Retry after the public name was consumed, with its bound slot
+            // still present. Completed history requires a reset before unlink.
+            fs::rename(target, retired);
+        }
 #if defined(_WIN32)
-        {
+        if (!append_receipt) {
             // Retry a prepared receipt: preparation now appends nothing before
             // removal, so the append writer cannot protect this mutation.
             const HookGuard hook(+[](const char* step, const fs::path&) {
@@ -523,11 +585,16 @@ void CheckCachedJournalRemoval(const std::string_view fault) {
         if (fault == "unchanged") {
             EXPECT_TRUE(errors.empty());
             EXPECT_FALSE(fs::exists(target));
+            if (operation == "retired publication") {
+                EXPECT_FALSE(fs::exists(retired));
+            }
         } else {
             ASSERT_FALSE(errors.empty());
             EXPECT_NE(errors.front().find("journal bytes"), std::string::npos);
             EXPECT_EQ(RemovalTree(save.path()), RemovalMutation().evidence);
-            EXPECT_EQ(transaction.journal_work(), work);
+            // Inventory checks now precede the byte comparison. Staging visits
+            // both the member and protected index; publication visits one member.
+            EXPECT_EQ(transaction.journal_work()[1], work[1] + (operation == "staging" ? 2u : 1u));
             if (fs::exists(RemovalMutation().retained)) {
                 fs::remove(control);
                 fs::rename(RemovalMutation().retained, control);
@@ -1428,6 +1495,114 @@ TEST(SaveTransaction, ForwardJournalWorkScalesWithAppendedRecords) {
     }
 }
 
+TEST(SaveTransaction, ReceiptAppendingPublicationsCompareJournalOnceBeforeEachRemoval) {
+    constexpr std::size_t kMembers = 2;
+    for (const bool source_missing : {false, true}) {
+        SCOPED_TRACE(source_missing);
+        TempSave save;
+        std::vector<std::string> members;
+        for (std::size_t index = 0; index < kMembers; ++index) {
+            members.push_back("chunks/region/r." + std::to_string(index) + ".0.lmr");
+            Put(save.path() / members.back(), "previous");
+        }
+        const auto baseline = Tree(save.path());
+        SaveTransaction transaction(save.path(), 1, {}, &RawDigest);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(transaction.begin(&errors));
+        ASSERT_TRUE(transaction.protect(members, &errors));
+        for (const auto& member : members) {
+            const auto path = save.path() / member;
+            WorldSaveService::ArtifactIdentity identity{};
+            bool missing = false;
+            ASSERT_TRUE(WorldSaveService::artifact_identity(path, identity, missing));
+            ASSERT_FALSE(missing);
+            RecordCompletedFileReceipt(save.path(),
+                                       journal_directory(save.path()) / "undo" /
+                                           ("retired." + path.filename().generic_string()),
+                                       identity);
+        }
+        for (const auto& member : members) {
+            SCOPED_TRACE(member);
+            const auto path = save.path() / member;
+            const auto retired = journal_directory(save.path()) / "undo" /
+                                 ("retired." + path.filename().generic_string());
+            if (source_missing) {
+                fs::rename(path, retired);
+            }
+            ASSERT_TRUE(SaveTransaction::prepare_publication(path, {}, &errors));
+            const auto before = transaction.journal_byte_comparisons();
+            ComparisonObservation() = {.transaction = &transaction,
+                                       .member = source_missing ? retired : path};
+            {
+                const HookGuard hook(&ObserveRemovalComparisons);
+                const auto removed = SaveTransaction::complete_owned_removal(path, &errors);
+                ASSERT_TRUE(removed.has_value());
+                if (removed.has_value()) {
+                    ASSERT_TRUE(*removed);
+                }
+            }
+            // Observe through the first mutation, before the existing completion
+            // phases append their own records. Preparation or a slot reset supplies
+            // the sole full comparison; an earlier removal reread makes this two.
+            EXPECT_EQ(ComparisonObservation().observations, 1u);
+            EXPECT_EQ(ComparisonObservation().comparisons - before, 1u);
+            EXPECT_FALSE(fs::exists(path));
+            EXPECT_FALSE(fs::exists(retired));
+        }
+        ComparisonObservation() = {};
+        transaction.abort(&errors);
+        EXPECT_TRUE(errors.empty());
+        EXPECT_EQ(Tree(save.path()), baseline);
+        EXPECT_FALSE(journal_pending(save.path()));
+    }
+}
+
+#if defined(_WIN32)
+TEST(SaveTransaction, PreparedAbsenceReceiptComparesJournalOnceBeforeCompletion) {
+    TempSave save;
+    SaveTransaction transaction(save.path(), 1, {}, &RawDigest);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(transaction.begin(&errors));
+    const std::string member = "chunks/region/r.0.0.lmr";
+    const auto path = save.path() / member;
+    ASSERT_TRUE(transaction.protect({member}, &errors));
+    auto records = JournalRecords(save.path());
+    auto receipt = records.front();
+    receipt["record"] = "receipt";
+    receipt["phase"] = 0u;
+    receipt["receipts"] =
+        nlohmann::json::array({{{"path", member},
+                                {"generation", 0u},
+                                {"identity", receipt.at("journal_identity")},
+                                {"directory", false},
+                                {"absent_only", true},
+                                {"stable_volume", StableVolumeWords(save.path())}}});
+    records.push_back(receipt);
+    Put(journal_directory(save.path()) / "txn.json", EncodeJournalRecords(records));
+    ASSERT_TRUE(SaveTransaction::prepare_publication(path, {}, &errors));
+    const auto before = transaction.journal_byte_comparisons();
+    ComparisonObservation() = {
+        .transaction = &transaction, .member = path, .step = "crash-before-namespace-completion"};
+    {
+        const HookGuard hook(&ObserveRemovalComparisons);
+        const auto removed = SaveTransaction::complete_owned_removal(path, &errors);
+        ASSERT_TRUE(removed.has_value());
+        if (removed.has_value()) {
+            ASSERT_TRUE(*removed);
+        }
+    }
+    // No object needs deletion. The namespace phase append verifies the bytes
+    // before recording completion; a separate earlier reread would duplicate it.
+    EXPECT_EQ(ComparisonObservation().observations, 1u);
+    EXPECT_EQ(ComparisonObservation().comparisons - before, 1u);
+    EXPECT_FALSE(fs::exists(path));
+    ComparisonObservation() = {};
+    transaction.abort(&errors);
+    EXPECT_TRUE(errors.empty());
+    EXPECT_FALSE(journal_pending(save.path()));
+}
+#endif
+
 TEST(SaveTransaction, LiveJournalReloadRefusesChangedControlWithoutPublishing) {
     for (const std::string_view fault : {"empty",
                                          "partial header",
@@ -1602,6 +1777,19 @@ TEST(SaveTransaction, LiveJournalCachedBytesRefuseUnavailableOrIncompleteControl
 
 TEST(SaveTransaction, LiveJournalCachedBytesAllowUnmodifiedRemovalWithoutReplay) {
     CheckCachedJournalRemoval("unchanged");
+}
+
+TEST(SaveTransaction, LiveJournalCheckedReceiptAppendRefusesChangedControlBeforeRemoval) {
+    for (const std::string_view fault : {"same size",
+                                         "empty",
+                                         "partial",
+                                         "oversized",
+                                         "missing",
+                                         "foreign identity",
+                                         "directory",
+                                         "unchanged"}) {
+        CheckCachedJournalRemoval(fault, true);
+    }
 }
 
 TEST(SaveTransaction, JournalAppendRequiresUnchangedVersionBeforeMutatingPrefix) {
