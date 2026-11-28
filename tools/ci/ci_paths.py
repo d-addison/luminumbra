@@ -177,6 +177,7 @@ AUTHORING_PYTHON_FILES = {
     "tools/blender/authoring/extension_tests/test_viewport_adapter_state.py",
     "tools/blender/authoring/extension_tests/test_viewport_generation.py",
     "tools/blender/authoring/extension_tests/test_evaluated_asset.py",
+    "tools/blender/authoring/extension_tests/test_profile.py",
     "tools/blender/authoring/service/tests/test_meshgen_contracts.py",
     "tools/blender/authoring/service/tests/test_meshgen_config.py",
     "tools/blender/authoring/service/tests/test_meshgen_toolchain.py",
