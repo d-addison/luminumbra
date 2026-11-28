@@ -21,6 +21,15 @@
 
 namespace Luminumbra::Server {
 
+// Regional loaded observations must contain initialized water. Cleared worlds
+// remain valid continuations, but do not satisfy the heavy oracle's workload.
+inline bool HeavyBootSettleContract(std::size_t water_chunks,
+                                    std::size_t uninited,
+                                    bool water_settle_skipped,
+                                    bool regional_water) {
+    return uninited == 0 && (!water_settle_skipped || !regional_water || water_chunks > 0);
+}
+
 // Per-capture hash set used by the heavy-mode oracle (server/modes/Heavy.cpp).
 struct HeavyHashes {
     std::string world_hash;

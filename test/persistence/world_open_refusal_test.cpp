@@ -30,6 +30,7 @@
 #include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
+#include "luminumbra_common/systems/RegionalWater.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
@@ -40,6 +41,7 @@
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
+#include "luminumbra_server/HeavyComparison.h"
 #include "luminumbra_server/ServerCliOptions.h"
 #include "luminumbra_server/ServerWorldRunner.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
@@ -1306,7 +1308,10 @@ TEST_F(WorldOpenRefusal, CurrentServerBootKeepsLoadedAuthorityAndSkipsWaterSettl
     EXPECT_EQ(runner.Session()->GetLastLoadedChunkCount(), 1u);
     EXPECT_TRUE(runner.GetBootSettleStats().water_settle_skipped);
     bool found = false;
-    for (const auto& chunk : runner.Session()->GetWorldSystem()->snapshot_streamed_chunks()) {
+    const auto residents = runner.Session()->GetWorldSystem()->snapshot_streamed_chunks();
+    EXPECT_EQ(runner.GetBootSettleStats().water_chunks + runner.GetBootSettleStats().uninited,
+              residents.size());
+    for (const auto& chunk : residents) {
         if (chunk->get_coords() == IVec3(0, 0, 0)) {
             found = true;
             EXPECT_EQ(chunk->sdf_provenance(), ChunkSdfProvenance::LoadedOrEdited);
@@ -4639,6 +4644,242 @@ TEST_F(WorldOpenRefusal, OwnerContinuationMovingAnchorResumesAcrossRunBoundaries
     ASSERT_TRUE(second_restored.Session()->GetPhysicsSystem()->capture_chunk_collision_owners(
         restored_terrain));
     EXPECT_EQ(restored_terrain, original_terrain);
+}
+
+TEST_F(WorldOpenRefusal, LoadedRegionalBootCountsCanonicalWaterColumnsWithoutSettling) {
+    auto config = SnapshotRunnerConfig(RootString(), true);
+    config.avatar_count = 1;
+    // Exact resident sub-hash parity requires the saved owner topology, as in
+    // OwnerContinuationRunnerRestoresRosterAndRejectsConflictingBoot.
+    Server::ServerWorldRunner original(config, {.owner_continuation = true});
+    ASSERT_TRUE(original.Boot()) << original.GetBootError();
+    ASSERT_TRUE(original.Session()->ActiveRegionsEnabled());
+    ASSERT_EQ(original.GetBootSettleStats().water_chunks, 9u);
+    ASSERT_EQ(original.RunFixedTicks(1).ticks_executed, 1u);
+    ASSERT_GT(original.SaveFullSnapshot(), 0u);
+    const auto expected = ReadServerWaterHashes(original);
+    const auto ledger = original.Session()->GetActiveRegionLedger().canonical_bytes();
+    const auto clock = original.Session()->GetWorldClock().canonical_bytes();
+    config.world_id = original.Session()->GetMetadata().worldId;
+    const auto saved_bytes = DiskBytes(original.Session()->GetWorldSaveDir());
+
+    Server::ServerWorldRunner restored(config, {.owner_continuation = true});
+    ASSERT_TRUE(restored.Boot()) << restored.GetBootError();
+    const auto& stats = restored.GetBootSettleStats();
+    EXPECT_TRUE(stats.water_settle_skipped);
+    EXPECT_EQ(stats.iterations, 0);
+    EXPECT_GT(stats.water_chunks, 0u);
+    EXPECT_EQ(stats.water_chunks, 9u);
+    EXPECT_EQ(stats.uninited, 0u);
+    EXPECT_TRUE(stats.contract_ok());
+    EXPECT_TRUE(Server::HeavyBootSettleContract(
+        stats.water_chunks, stats.uninited, stats.water_settle_skipped, true));
+    // Render layers are resident but do not own canonical water payloads.
+    EXPECT_GT(restored.Session()->GetWorldSystem()->snapshot_streamed_chunks().size(),
+              stats.water_chunks);
+    EXPECT_EQ(restored.Session()->GetActiveRegionLedger().canonical_bytes(), ledger);
+    EXPECT_EQ(restored.Session()->GetWorldClock().canonical_bytes(), clock);
+    ExpectSameServerSimulationHashes(ReadServerWaterHashes(restored), expected);
+    EXPECT_EQ(DiskBytes(restored.Session()->GetWorldSaveDir()), saved_bytes);
+    ASSERT_EQ(original.RunFixedTicks(1).ticks_executed, 1u);
+    ASSERT_EQ(restored.RunFixedTicks(1).ticks_executed, 1u);
+    ExpectSameServerSimulationHashes(ReadServerWaterHashes(restored),
+                                     ReadServerWaterHashes(original));
+}
+
+TEST_F(WorldOpenRefusal, LoadedRegionalBootProjectsAnchorRingsFromEmptyLedger) {
+    auto config = SnapshotRunnerConfig(RootString(), true);
+    Server::ServerWorldRunner original(config);
+    ASSERT_TRUE(original.Boot()) << original.GetBootError();
+    ASSERT_EQ(original.RunFixedTicks(1).ticks_executed, 1u);
+    // Zero avatars supply an explicit empty live anchor list. Fresh boot's
+    // transient ledger is separate, so no session records have been created.
+    ASSERT_TRUE(original.Session()->GetActiveRegionLedger().records().empty());
+    ASSERT_GT(original.SaveFullSnapshot(), 0u);
+    const auto expected = ReadServerWaterHashes(original);
+    const auto ledger = original.Session()->GetActiveRegionLedger().canonical_bytes();
+    const auto clock = original.Session()->GetWorldClock().canonical_bytes();
+    config.world_id = original.Session()->GetMetadata().worldId;
+    const auto saved_bytes = DiskBytes(original.Session()->GetWorldSaveDir());
+    Server::ServerWorldRunner restored(config);
+    ASSERT_TRUE(restored.Boot()) << restored.GetBootError();
+    const auto& stats = restored.GetBootSettleStats();
+    EXPECT_EQ(stats.water_chunks, 9u);
+    EXPECT_EQ(stats.uninited, 0u);
+    EXPECT_EQ(stats.iterations, 0);
+    EXPECT_TRUE(stats.water_settle_skipped);
+    EXPECT_TRUE(Server::HeavyBootSettleContract(
+        stats.water_chunks, stats.uninited, stats.water_settle_skipped, true));
+    EXPECT_EQ(restored.Session()->GetActiveRegionLedger().canonical_bytes(), ledger);
+    EXPECT_EQ(restored.Session()->GetWorldClock().canonical_bytes(), clock);
+    const auto actual = ReadServerWaterHashes(restored);
+    // Ordinary load filters regenerable residents. The regional authority
+    // projection, unlike resident terrain/water sub-hashes, must round-trip.
+    EXPECT_EQ(actual.world, expected.world);
+    EXPECT_EQ(actual.chunk, expected.chunk);
+    EXPECT_EQ(actual.checkpoint, expected.checkpoint);
+    EXPECT_EQ(DiskBytes(restored.Session()->GetWorldSaveDir()), saved_bytes);
+}
+
+TEST(HeavyBootSettleContract, LoadedRegionalObservationsMustBeNonempty) {
+    for (const bool regional : {false, true}) {
+        for (const bool loaded : {false, true}) {
+            SCOPED_TRACE(regional);
+            SCOPED_TRACE(loaded);
+            EXPECT_EQ(Server::HeavyBootSettleContract(0, 0, loaded, regional),
+                      !(loaded && regional));
+            EXPECT_TRUE(Server::HeavyBootSettleContract(9, 0, loaded, regional));
+            EXPECT_FALSE(Server::HeavyBootSettleContract(0, 9, loaded, regional));
+            EXPECT_FALSE(Server::HeavyBootSettleContract(9, 1, loaded, regional));
+        }
+    }
+}
+
+TEST_F(WorldOpenRefusal, LoadedRegionalBootObservesMissingAndEmptyColumnSelections) {
+    auto config = SnapshotRunnerConfig(RootString(), true);
+    Server::ServerWorldRunner original(config, {.owner_continuation = true});
+    ASSERT_TRUE(original.Boot()) << original.GetBootError();
+    ASSERT_EQ(original.RunFixedTicks(1).ticks_executed, 1u);
+    original.Session()->GetWorldSystem()->clear_world(original.Session()->GetPhysicsSystem());
+    ASSERT_TRUE(original.Session()->SaveWorldState());
+    config.world_id = original.Session()->GetMetadata().worldId;
+    Server::ServerWorldRunner restored(config, {.owner_continuation = true});
+    // Missing canonical payloads remain a failed diagnostic, not a boot refusal.
+    ASSERT_TRUE(restored.Boot()) << restored.GetBootError();
+    EXPECT_TRUE(restored.GetBootSettleStats().water_settle_skipped);
+    EXPECT_EQ(restored.GetBootSettleStats().water_chunks, 0u);
+    EXPECT_EQ(restored.GetBootSettleStats().uninited, 9u);
+    EXPECT_FALSE(restored.GetBootSettleStats().contract_ok());
+    EXPECT_FALSE(Server::HeavyBootSettleContract(restored.GetBootSettleStats().water_chunks,
+                                                 restored.GetBootSettleStats().uninited,
+                                                 restored.GetBootSettleStats().water_settle_skipped,
+                                                 true));
+    auto* session = restored.Session();
+    const auto expected = ReadServerWaterHashes(restored);
+    const auto ledger = session->GetActiveRegionLedger().canonical_bytes();
+    const auto clock = session->GetWorldClock().canonical_bytes();
+    const auto saved_bytes = DiskBytes(session->GetWorldSaveDir());
+    session->GetWorldSystem()->SetWaterBootPaused(true);
+    const std::vector<Vec3> capped(Systems::RegionalWater::kMaxSimulationAnchors,
+                                   session->GetMetadata().spawnPoint);
+    GameSession::BootSettleStats at_cap;
+    ASSERT_TRUE(session->SettleInitialSimulation(capped, at_cap));
+    EXPECT_EQ(at_cap.water_chunks, 0u);
+    EXPECT_EQ(at_cap.uninited, 9u);
+    EXPECT_EQ(at_cap.iterations, 0);
+    EXPECT_TRUE(at_cap.water_settle_skipped);
+    const std::vector<Vec3> oversized(Systems::RegionalWater::kMaxSimulationAnchors + 1);
+    GameSession::BootSettleStats refused;
+    EXPECT_THROW(session->SettleInitialSimulation(oversized, refused), std::invalid_argument);
+    std::stop_source cancellation;
+    cancellation.request_stop();
+    EXPECT_FALSE(session->SettleInitialSimulation({}, refused, cancellation.get_token()));
+    // Unknown valid anchors admit missing columns on the private projection;
+    // invalid anchors admit none. Neither observation generates payloads.
+    for (const bool valid : {true, false}) {
+        const Vec3 anchor = valid ? Vec3(1000000.0f, 0.0f, 1000000.0f)
+                                  : Vec3(std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f);
+        GameSession::BootSettleStats stats;
+        ASSERT_TRUE(session->SettleInitialSimulation({anchor}, stats));
+        EXPECT_TRUE(stats.water_settle_skipped);
+        EXPECT_EQ(stats.iterations, 0);
+        EXPECT_EQ(stats.water_chunks, 0u);
+        EXPECT_EQ(stats.uninited, valid ? 9u : 0u);
+        EXPECT_FALSE(Server::HeavyBootSettleContract(
+            stats.water_chunks, stats.uninited, stats.water_settle_skipped, true));
+    }
+    session->GetWorldSystem()->SetWaterBootPaused(false);
+    EXPECT_TRUE(session->GetWorldSystem()->snapshot_streamed_chunks().empty());
+    EXPECT_EQ(session->GetActiveRegionLedger().canonical_bytes(), ledger);
+    EXPECT_EQ(session->GetWorldClock().canonical_bytes(), clock);
+    ExpectSameServerWaterHashes(ReadServerWaterHashes(restored), expected);
+    EXPECT_EQ(DiskBytes(session->GetWorldSaveDir()), saved_bytes);
+
+    // A nearby Frozen owner must wake only in the projection. Completed remote
+    // work can also require an unrelated freeze during that hypothetical tick.
+    const auto frozen_input = root / "frozen-input";
+    const auto owner = world::ActiveRegionLedger::region_at(session->GetMetadata().spawnPoint);
+    const world::RegionKey remote_owner{10, 10};
+    world::ActiveRegionLedger frozen_ledger({0, 1, 1});
+    frozen_ledger.mark_edited(owner, world::WorldClock{});
+    frozen_ledger.schedule(world::WorldClock(1), std::span<const Vec3>{});
+    const std::array local_work{world::RegionWork{owner, 1, 0, 0, 0}};
+    frozen_ledger.schedule(world::WorldClock(2), std::span<const Vec3>{}, local_work);
+    frozen_ledger.schedule(world::WorldClock(3),
+                           std::span<const Vec3>{},
+                           local_work,
+                           [](world::RegionKey) { return std::uint64_t{123}; });
+    frozen_ledger.mark_edited(remote_owner, world::WorldClock(3));
+    const std::array remote_work{world::RegionWork{remote_owner, 1, 0, 0, 0}};
+    frozen_ledger.schedule(world::WorldClock(4), std::span<const Vec3>{}, remote_work);
+    frozen_ledger.schedule(world::WorldClock(5), std::span<const Vec3>{}, remote_work);
+    frozen_ledger.publish_completed_work(remote_work);
+    ASSERT_EQ(frozen_ledger.records().at(owner).state, world::RegionState::Frozen);
+    ASSERT_EQ(frozen_ledger.records().at(remote_owner).state, world::RegionState::Reduced);
+    // Republish a copy of the indexed save so only the clock and ledger differ.
+    fs::copy(session->GetWorldSaveDir(), frozen_input, fs::copy_options::recursive);
+    auto frozen_metadata =
+        nlohmann::json::parse(Read(session->GetWorldSaveDir() / "world_info.json"));
+    world::WorldClock(5).write_metadata(frozen_metadata);
+    auto frozen_continuation =
+        nlohmann::json::parse(frozen_metadata.at("owner_continuation").get<std::string>());
+    frozen_continuation["simulation_tick"] = 5;
+    frozen_metadata["owner_continuation"] = frozen_continuation.dump();
+    ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(frozen_input, [&] {
+        Write(frozen_input / "world_info.json", frozen_metadata.dump());
+        Write(WorldSaveService::active_regions_path(frozen_input), frozen_ledger.encode());
+        return true;
+    }));
+    ASSERT_TRUE(session->LoadWorldStateFrom(frozen_input)) << session->GetWorldOpenError();
+    const auto frozen_bytes = DiskBytes(frozen_input);
+    const auto frozen_before = session->GetActiveRegionLedger().canonical_bytes();
+    const auto frozen_clock = session->GetWorldClock().canonical_bytes();
+    const auto frozen_hashes = ReadServerWaterHashes(restored);
+    GameSession::BootSettleStats frozen_stats;
+    ASSERT_TRUE(session->SettleInitialSimulation({}, frozen_stats));
+    EXPECT_EQ(frozen_stats.water_chunks, 0u);
+    EXPECT_EQ(frozen_stats.uninited, 9u);
+    EXPECT_EQ(frozen_stats.iterations, 0);
+    EXPECT_TRUE(frozen_stats.water_settle_skipped);
+    EXPECT_FALSE(Server::HeavyBootSettleContract(
+        frozen_stats.water_chunks, frozen_stats.uninited, frozen_stats.water_settle_skipped, true));
+    EXPECT_EQ(session->GetActiveRegionLedger().canonical_bytes(), frozen_before);
+    EXPECT_EQ(session->GetWorldClock().canonical_bytes(), frozen_clock);
+    ExpectSameServerWaterHashes(ReadServerWaterHashes(restored), frozen_hashes);
+    EXPECT_EQ(DiskBytes(frozen_input), frozen_bytes);
+
+    // There is no first live tick at the last representable clock. Report an
+    // empty observation honestly, without scheduling or overflowing the clock.
+    const auto exhausted_input = root / "exhausted-input";
+    fs::copy(session->GetWorldSaveDir(), exhausted_input, fs::copy_options::recursive);
+    auto exhausted_metadata =
+        nlohmann::json::parse(Read(session->GetWorldSaveDir() / "world_info.json"));
+    world::WorldClock(world::WorldClock::kTickLimit - 1).write_metadata(exhausted_metadata);
+    auto exhausted_continuation =
+        nlohmann::json::parse(exhausted_metadata.at("owner_continuation").get<std::string>());
+    exhausted_continuation["simulation_tick"] = world::WorldClock::kTickLimit - 1;
+    exhausted_metadata["owner_continuation"] = exhausted_continuation.dump();
+    ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(exhausted_input, [&] {
+        Write(exhausted_input / "world_info.json", exhausted_metadata.dump());
+        return true;
+    }));
+    ASSERT_TRUE(session->LoadWorldStateFrom(exhausted_input)) << session->GetWorldOpenError();
+    const auto exhausted_bytes = DiskBytes(exhausted_input);
+    const auto exhausted_ledger = session->GetActiveRegionLedger().canonical_bytes();
+    const auto exhausted_clock = session->GetWorldClock().canonical_bytes();
+    GameSession::BootSettleStats exhausted;
+    ASSERT_TRUE(session->SettleInitialSimulation({}, exhausted));
+    EXPECT_TRUE(exhausted.water_settle_skipped);
+    EXPECT_EQ(exhausted.iterations, 0);
+    EXPECT_EQ(exhausted.water_chunks, 0u);
+    EXPECT_EQ(exhausted.uninited, 0u);
+    EXPECT_FALSE(Server::HeavyBootSettleContract(
+        exhausted.water_chunks, exhausted.uninited, exhausted.water_settle_skipped, true));
+    EXPECT_EQ(session->GetActiveRegionLedger().canonical_bytes(), exhausted_ledger);
+    EXPECT_EQ(session->GetWorldClock().canonical_bytes(), exhausted_clock);
+    EXPECT_TRUE(session->GetWorldSystem()->snapshot_streamed_chunks().empty());
+    EXPECT_EQ(DiskBytes(session->GetWorldSaveDir()), saved_bytes);
+    EXPECT_EQ(DiskBytes(exhausted_input), exhausted_bytes);
 }
 
 TEST_F(WorldOpenRefusal, OwnerContinuationRunnerRestoresEmptySnapshotWithoutWarmup) {

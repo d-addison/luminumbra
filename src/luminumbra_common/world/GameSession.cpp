@@ -380,6 +380,26 @@ bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
     std::set<ChunkID> boot_water_columns;
     const std::vector<Vec3> spawn_anchor{m_metadata.spawnPoint};
     const auto& settle_anchors = anchors.empty() ? spawn_anchor : anchors;
+    if (regional_boot && water_loaded_from_save && m_worldClock.can_advance(1)) {
+        if (settle_anchors.size() > Systems::RegionalWater::kMaxSimulationAnchors) {
+            throw std::invalid_argument("Regional water simulation input cap exceeded");
+        }
+        // Project the first live tick's anchor admission on a private ledger.
+        // Restored records can be absent or Frozen until that schedule wakes them.
+        // The copy is bounded by kMaxRegions; selection by 64 rings (576 columns).
+        boot_ledger = m_activeRegionLedger;
+        boot_ledger.schedule(WorldClock(m_worldClock.tick() + 1, m_worldClock.calendar()),
+                             std::optional<std::span<const Vec3>>(settle_anchors),
+                             {},
+                             [this](RegionKey key) {
+                                 // Remote budget transitions cannot affect anchor admission. Their
+                                 // hypothetical digests are never inspected or published by boot.
+                                 return m_activeRegionLedger.records().at(key).frozen_digest;
+                             });
+        const auto columns = Systems::RegionalWater::SelectColumns(settle_anchors, {}, boot_ledger);
+        boot_water_columns.insert(columns.ids.begin(),
+                                  columns.ids.begin() + static_cast<std::ptrdiff_t>(columns.size));
+    }
     const auto settle_water = [&] {
         if (!regional_boot || !m_waterSystem)
             return;
@@ -397,7 +417,7 @@ bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
         boot_water_columns.insert(visits.begin(), visits.end());
     };
     const auto water_snapshot = [&] {
-        if (!regional_boot || water_loaded_from_save)
+        if (!regional_boot)
             return ws->snapshot_streamed_chunks();
         std::vector<std::shared_ptr<Chunk>> columns;
         columns.reserve(boot_water_columns.size());
