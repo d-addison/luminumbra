@@ -117,8 +117,9 @@ public:
     // A concrete tick id reuses its successful publication within one host/session step.
     // Variable-rate render hosts use the default sentinel to start a fresh preparation.
     // Fixed one-chunk X/Z radius, 64 admitted character owners and 128 distinct columns.
-    // Existing overflow (including rigid bodies in the independent Jolt pool) uses the
-    // first complete horizons that fit, in owner order, so lifecycle ticks can continue.
+    // Host anchors and existing owners (including rigid bodies in the independent Jolt
+    // pool) use the first complete horizons that fit, in owner order, so lifecycle ticks
+    // can continue on overflow. Host anchors precede existing owners.
     // Uncovered owners wait without integration; rigid-body velocities resume on coverage.
     // Storage and terrain body slots are fixed; only changed shapes replace storage.
     static constexpr std::size_t kSimulationOwnerBudget = 64;
@@ -127,6 +128,7 @@ public:
     prepare_simulation_collisions(std::span<const Vec3> anchors,
                                   std::uint64_t tick = std::numeric_limits<std::uint64_t>::max());
     // Refresh edited geometry without retiring any previously admitted columns.
+    // Refuse if the edit's complete ring does not fit the retained horizon.
     bool refresh_simulation_collisions(const Vec3& edit_anchor);
     // Owner-thread collision mode/readiness queries used by terrain refresh.
     bool simulation_collisions_enabled() const;
@@ -134,6 +136,9 @@ public:
     void clear_simulation_collisions();
     // Const diagnostics, never session hash/save inputs. Counts actual sampled columns.
     std::size_t simulation_collision_sample_count() const;
+    // Host anchors skipped by the last uncached preparation attempt, at most
+    // kSimulationOwnerBudget. Reset on clear; tick reuse retains this diagnostic.
+    std::size_t simulation_collision_uncovered_owner_count() const;
     // Positions visited by preparation; retired avatar slots must contribute no visits.
     std::size_t simulation_collision_owner_visit_count() const;
     std::uint64_t simulation_collision_hash() const;
