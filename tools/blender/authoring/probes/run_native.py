@@ -14,7 +14,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('suite', choices=('prop', 'plant', 'character', 'extension', 'extension_ui', 'service'))
     parser.add_argument('--python', type=Path, required=True, help='Native Windows Python executable accessible from WSL')
-    parser.add_argument('--blender', help='Windows-native path to Blender 5.1.0; required except for service')
+    parser.add_argument('--blender', help='Windows-native path to Blender 5.2.4 LTS; required except for service')
     args = parser.parse_args()
     if args.suite != 'service' and not args.blender:
         parser.error('--blender is required for this suite')

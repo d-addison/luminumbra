@@ -241,6 +241,10 @@ ServerWorldRunner::~ServerWorldRunner() {
 }
 
 bool ServerWorldRunner::Boot() {
+    if (!m_config.regional_cadence_workload.Valid()) {
+        m_bootError = "Regional cadence anchors require the workload and one of 1, 8, 32, 64";
+        return false;
+    }
     if (!World::SurfaceRadiiSupported(m_config.surface_radius, m_config.collision_radius)) {
         m_bootError = "Surface and collision radii must be between 0 and 12 chunks";
         return false;
@@ -529,7 +533,7 @@ bool ServerWorldRunner::Boot() {
     }
 
     if (m_config.regional_cadence_workload) {
-        m_regionalWorkload.emplace(spawn_anchor);
+        m_regionalWorkload.emplace(spawn_anchor, m_config.regional_cadence_workload.anchors);
         namespace F = luminumbra::foliage;
         F::SpeciesTemplate species;
         species.id = "regional_smoke_crop";
@@ -542,7 +546,7 @@ bool ServerWorldRunner::Boot() {
             m_session->GetRegistry(), [&](entt::registry& registry, const Vec3& position) {
                 const auto entity = F::MakePlantFromSpecies(registry, position, species, rng, 0);
                 if (entity != entt::null) {
-                    // Keep the explicit roster at nine participants for long captures.
+                    // Keep the explicit roster finite for long captures.
                     registry.remove<Components::CropLifecycleComponent>(entity);
                     registry.emplace<Components::MortalComponent>(entity);
                     registry.emplace<Components::FlowingWaterSourceComponent>(entity);

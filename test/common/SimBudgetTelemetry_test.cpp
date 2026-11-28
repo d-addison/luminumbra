@@ -238,6 +238,161 @@ TEST(SimBudgetTelemetry, RegionalWorkloadSmokeIsDeterministic) {
     EXPECT_THROW(RegionalCadenceWorkload(Vec3(16777000.0f, 0, 0)), std::invalid_argument);
 }
 
+TEST(SimBudgetTelemetry, RegionalEightAnchorsPreserveLegacyBytesAndOrder) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Server;
+    RegionalCadenceWorkload defaults(Vec3(0)), explicit_eight(Vec3(0), 8);
+    entt::registry registry, repeated_registry;
+    PopulateRegionalWorkload(defaults, registry);
+    PopulateRegionalWorkload(explicit_eight, repeated_registry);
+    const std::array expected = {Vec3(256, 0, 256),
+                                 Vec3(2304, 0, 256),
+                                 Vec3(4352, 0, 256),
+                                 Vec3(256, 0, 2304),
+                                 Vec3(2304, 0, 2304),
+                                 Vec3(4352, 0, 2304),
+                                 Vec3(256, 0, 4352),
+                                 Vec3(2304, 0, 4352),
+                                 Vec3(4352, 0, 4352)};
+    ASSERT_EQ(defaults.positions.size(), expected.size());
+    EXPECT_EQ(defaults.positions, explicit_eight.positions);
+    EXPECT_EQ(defaults.plants, explicit_eight.plants);
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        EXPECT_EQ(defaults.positions[index], expected[index]);
+        EXPECT_EQ(entt::to_integral(defaults.plants[index]), index);
+        EXPECT_EQ(registry.get<Components::TransformComponent>(defaults.plants[index]).position,
+                  expected[index]);
+    }
+    // Empty registries pin the original complete block, including every zero counter.
+    const entt::registry empty_registry;
+    const auto diagnostic = RegionalCadenceDiagnostics::Start<Components::PlantGrowthComponent,
+                                                              Components::MortalComponent>(
+        defaults, empty_registry, 0, nullptr);
+    nlohmann::json artifact;
+    AppendRegionalCadenceArtifact(artifact, diagnostic, diagnostic);
+    const auto bytes = artifact.dump();
+    std::uint64_t checksum = 14695981039346656037ull;
+    for (const char byte : bytes) {
+        checksum = (checksum ^ static_cast<unsigned char>(byte)) * 1099511628211ull;
+    }
+    EXPECT_EQ(bytes.size(), 6625u);
+    EXPECT_EQ(checksum, 16082233747223072135ull);
+}
+
+TEST(SimBudgetTelemetry, RegionalOneAndSixtyFourAnchorSmokeKeepsDiagnosticsOutsideAuthority) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Server;
+    for (const std::size_t count : {1u, 64u}) {
+        world::GameSession observed_session, baseline;
+        RegionalCadenceWorkload workload(Vec3(0), count), repeated(Vec3(0), count);
+        PopulateRegionalWorkload(workload, observed_session.GetRegistry());
+        PopulateRegionalWorkload(repeated, baseline.GetRegistry());
+        ASSERT_EQ(workload.Anchors().size(), count);
+        ASSERT_EQ(workload.positions.size(), count + 1);
+        ASSERT_TRUE(observed_session.SetHostSimulationAnchors(workload.Anchors()));
+        ASSERT_TRUE(baseline.SetHostSimulationAnchors(repeated.Anchors()));
+        observed_session.SetSimBudgetTelemetryEnabled(true);
+        baseline.SetSimBudgetTelemetryEnabled(true);
+        auto diagnostic = RegionalCadenceDiagnostics::Start<Components::PlantGrowthComponent,
+                                                            Components::MortalComponent>(
+            workload, observed_session.GetRegistry(), 0, nullptr);
+        ASSERT_EQ(diagnostic.owners.size(), count + 1);
+        const auto* storage = diagnostic.owners.data();
+        std::set<world::RegionKey> keys;
+        for (const auto& position : workload.positions) {
+            EXPECT_TRUE(world::ActiveRegionLedger::valid_anchor(position));
+            keys.insert(world::ActiveRegionLedger::region_at(position));
+        }
+        EXPECT_EQ(keys.size(), count + 1);
+        for (int step = 0; step < 4; ++step) {
+            ASSERT_EQ(observed_session.TickSimulation(1.0 / 30.0), 1u);
+            ASSERT_EQ(baseline.TickSimulation(1.0 / 30.0), 1u);
+            ASSERT_FALSE(observed_session.GetRegionSchedulerFault());
+            ASSERT_FALSE(baseline.GetRegionSchedulerFault());
+            diagnostic.Observe<Components::PlantGrowthComponent, Components::MortalComponent>(
+                observed_session, observed_session.GetRegistry(), workload, nullptr);
+            EXPECT_EQ(diagnostic.owners.data(), storage);
+            EXPECT_EQ(observed_session.ComputePlantSubHash(), baseline.ComputePlantSubHash());
+            EXPECT_EQ(observed_session.GetActiveRegionLedger().encode(),
+                      baseline.GetActiveRegionLedger().encode());
+            EXPECT_EQ(observed_session.GetFieldPages().serialize(),
+                      baseline.GetFieldPages().serialize());
+            EXPECT_EQ(observed_session.SystemConfigIdentity(), baseline.SystemConfigIdentity());
+            EXPECT_TRUE(observed_session.GetSimBudgetTelemetry().WorkMatches(
+                baseline.GetSimBudgetTelemetry()));
+        }
+        for (std::size_t index = 0; index < count; ++index) {
+            EXPECT_EQ(diagnostic.owners[index].services, 4u);
+            EXPECT_EQ(diagnostic.owners[index].elapsed_steps, 4u);
+        }
+        EXPECT_EQ(diagnostic.owners.back().services, 0u);
+        EXPECT_EQ(diagnostic.owners.back().elapsed_steps, 0u);
+        EXPECT_EQ(diagnostic.owners.back().unadmitted_samples, 4u);
+        EXPECT_EQ(diagnostic.owner_visits, 4u * (count + 1));
+        const auto columns = Systems::RegionalWater::SelectColumns(
+            workload.Anchors(), workload.positions, observed_session.GetActiveRegionLedger());
+        EXPECT_EQ(columns.size, 9u * count);
+        nlohmann::json artifact;
+        AppendRegionalCadenceArtifact(artifact, diagnostic, diagnostic);
+        EXPECT_EQ(artifact["regional_cadence"]["schema"], "luminumbra.regional_cadence.v2");
+        EXPECT_EQ(artifact["regional_cadence"]["anchors"], count);
+        EXPECT_EQ(artifact["regional_cadence"]["participants"], count + 1);
+    }
+}
+
+TEST(SimBudgetTelemetry, RegionalAnchorCountsRefuseInvalidAndRequireWorkload) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Server;
+    for (const std::size_t count : {std::size_t{0},
+                                    std::size_t{2},
+                                    std::size_t{7},
+                                    std::size_t{9},
+                                    std::size_t{31},
+                                    std::size_t{33},
+                                    std::size_t{63},
+                                    std::size_t{65},
+                                    std::numeric_limits<std::size_t>::max()}) {
+        EXPECT_THROW(RegionalCadenceWorkload(Vec3(0), count), std::invalid_argument);
+    }
+    for (const auto text : {"",
+                            "0",
+                            "2",
+                            "7",
+                            "9",
+                            "31",
+                            "33",
+                            "63",
+                            "65",
+                            "-1",
+                            "+8",
+                            "08",
+                            "8x",
+                            "8.0",
+                            " 8",
+                            "18446744073709551616"}) {
+        ServerCliOptions options;
+        EXPECT_FALSE(options.regional_cadence_workload.SetAnchors(text));
+        EXPECT_EQ(options.regional_cadence_workload.anchors, 8u);
+        EXPECT_FALSE(options.regional_cadence_workload.anchors_explicit);
+    }
+    for (const auto text : {"1", "8", "32", "64"}) {
+        ServerCliOptions before_flag, after_flag;
+        EXPECT_TRUE(before_flag.regional_cadence_workload.SetAnchors(text));
+        EXPECT_FALSE(before_flag.regional_cadence_workload.Valid());
+        before_flag.regional_cadence_workload = true;
+        after_flag.regional_cadence_workload = true;
+        EXPECT_TRUE(after_flag.regional_cadence_workload.SetAnchors(text));
+        EXPECT_TRUE(before_flag.regional_cadence_workload.Valid());
+        EXPECT_TRUE(after_flag.regional_cadence_workload.Valid());
+        EXPECT_EQ(before_flag.regional_cadence_workload.anchors,
+                  after_flag.regional_cadence_workload.anchors);
+        ServerWorldRunnerConfig config;
+        config.regional_cadence_workload = before_flag.regional_cadence_workload;
+        EXPECT_EQ(config.regional_cadence_workload.anchors,
+                  before_flag.regional_cadence_workload.anchors);
+    }
+}
+
 TEST(SimBudgetTelemetry, RegionalDiagnosticsDoNotChangeAuthority) {
     using namespace Luminumbra;
     using namespace Luminumbra::Server;

@@ -171,8 +171,8 @@ CLASSES = (LUMINUMBRA_OT_mock, LUMINUMBRA_PT_mock)
 
 
 def register():
-    if bpy.app.version != (5, 1, 0):
-        raise RuntimeError("MOCK experiment pinned to Blender 5.1.0; qualify another profile first.")
+    if bpy.app.version != (5, 2, 4):
+        raise RuntimeError("MOCK experiment pinned to Blender 5.2.4 LTS; qualify another profile first.")
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Scene.lum_mock_python = bpy.props.StringProperty(name="External Python 3.11+", subtype="FILE_PATH")

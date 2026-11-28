@@ -5,8 +5,8 @@ name = "Luminumbra Author MOCK"
 tagline = "Exercise draft authoring jobs with a visibly labelled mock"
 maintainer = "Luminumbra contributors"
 type = "add-on"
-blender_version_min = "5.1.0"
-blender_version_max = "5.1.1"
+blender_version_min = "5.2.4"
+blender_version_max = "5.2.5"
 license = ["SPDX:MIT"]
 
 [permissions]

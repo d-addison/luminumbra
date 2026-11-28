@@ -285,25 +285,28 @@ Inputs are hashed again before publication; changes refuse a success manifest.
 
 ## Regional cadence capture and comparison
 
-The diagnostic capture tool for issue #138 uses the server's fixed
-`--regional-cadence-workload`: eight distant anchored regions and a ninth
-unanchored control, each with a plant, resource participant and water source.
-The current server flag has no anchor-count option. The matrix varies presets,
-seeds and repetitions of this fixed workload; other anchor counts await a
-separately qualified workload. Use a stable executable and isolated runtime
-content tree, with evidence outside both the repository and runtime tree:
+The diagnostic capture tool for issue #138 uses `--regional-cadence-workload`
+with `--regional-cadence-anchors <n>`: 1, 8, 32 or 64 distant anchored regions
+and one unanchored control, each with a plant, resource participant and water
+source. The server defaults to eight and refuses other counts, missing values
+or a count without the workload flag before boot. The capture tool's `--anchors`
+list (default `8`) adds counts to the preset/seed/repetition matrix. Use a stable
+executable and isolated runtime content tree, with evidence outside both the
+repository and runtime tree:
 
 ```sh
 python3 -I -B tools/perf/capture_regional_cadence.py capture \
   --root <runtime-directory> --binary <server-executable> \
   --evidence-dir <new-evidence-directory> \
-  --presets default mountains archipelago --seeds 1337 --repeats 2 --ticks 3600
+  --presets default mountains archipelago --seeds 1337 424242 \
+  --anchors 1 8 32 64 --repeats 1 --ticks 3600
 python3 -I -B tools/perf/capture_regional_cadence.py compare \
   <before-evidence-directory> <after-evidence-directory> > <comparison-file>
 ```
 
-Each command runs standalone smoke twice internally; each matrix cell repeats
-that smoke independently. Commands include no-audio, simulation telemetry,
+Each command runs standalone smoke twice internally. Independent repetitions
+are configurable (default two, minimum one); the example has 24 cells within
+the unchanged 32-cell bound. Commands include no-audio, simulation telemetry,
 30-tick autosaves and explicit surface/collision radii (both default to one).
 Inherited `LUMINUMBRA_` overrides are removed from the child environment.
 Capture-only admission bounds are 32 matrix cells, 36,000 ticks per run,
@@ -315,8 +318,33 @@ including after process failure or timeout. Unmeasured status fields are null if
 log setup fails. These bounds do not change shipping simulation limits. Larger workloads
 require separate qualification.
 
+The layout retains the original three-column grid at 2,048-metre spacing:
+owner-centre offsets `(i % 3, i / 3) * 2048`, with the control last. At 64 anchors
+the control offset is `(2048, 43008)` metres. All positions are validated against
+the existing coordinate envelope before entity creation; unsuitable origins
+refuse the workload. There are at most 65 participants, below the unchanged
+256-source cap, and at most 64 anchors. Storage is sized once, and diagnostic
+visits stay bounded by participant count and granted interior windows.
+
+Eight-anchor positions, creation order and artifact bytes retain their legacy
+identity `eight_distant_regions_v1` and regional artifact schema
+`luminumbra.regional_cadence.v1`. Other counts use `distant_regions_v2` and regional
+artifact v2 with the same fields and actual counts. Capture workload identities
+use `distant_regions_v2` with each count in its canonical workload digest;
+legacy capture v1/v2 archives remain readable with their original identity.
+Comparisons refuse different counts or workload identities, including a legacy
+capture compared with a new capture.
+
+At the default 16×16 water resolution, the existing 4,096-cell budget funds
+seven worst-case windows per tick (`4096 / (2*16*16 + 4*16)`). Fractional owner
+credit and persisted debt allow 32 and 64 owners to share those windows over
+time; owners do not need a window on the same tick. This is no native service
+guarantee: parking deferrals and changing eligibility still require the
+3,600-tick capture to demonstrate interior service for every anchored owner.
+Qualification below applies independently to every count, without exceptions.
+
 Only a complete validated matrix publishes `capture.json`, schema
-`luminumbra.regional_cadence_capture.v2`. It binds argument arrays with executable
+`luminumbra.regional_cadence_capture.v3`. It binds argument arrays with executable
 and runtime paths replaced by role labels plus their SHA-256 digests, and artifact
 paths relative to the evidence directory. The capture root is recorded as `.`.
 Comparison also redacts these paths in legacy archives. Other bindings are source
