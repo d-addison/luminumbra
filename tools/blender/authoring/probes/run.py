@@ -42,7 +42,7 @@ def identity(blender_root=None):
               "python": sys.version, "platform": platform.platform(),
               "source_hashes": {name: file_digest(SOURCE / name) for name in paths}}
     if blender_root:
-        exporter = blender_root / "5.1/scripts/addons_core/io_scene_gltf2"
+        exporter = blender_root / "5.2/scripts/addons_core/io_scene_gltf2"
         files = [{"path": path.relative_to(exporter).as_posix(), "sha256": file_digest(path)}
                  for path in sorted(exporter.rglob("*.py"))]
         executable = blender_root / ("blender.exe" if (blender_root / "blender.exe").exists() else "blender")
@@ -58,7 +58,7 @@ def main():
     parser.add_argument("--suite", choices=("all", "prop", "plant", "character", "service", "viewport"), default="all")
     parser.add_argument("--require-baseline", action="store_true", help="Require a clean source checkout at the recorded baseline")
     parser.add_argument("--require-schemas", action="store_true", help="Fail if jsonschema is unavailable")
-    parser.add_argument("--blender-root", type=Path, help="Optional Blender 5.1 installation to identify and validate packaging; never launched")
+    parser.add_argument("--blender-root", type=Path, help="Optional Blender 5.2.4 LTS installation to identify and validate packaging; never launched")
     args = parser.parse_args()
     if args.require_baseline:
         pin = command(["git", "rev-parse", "HEAD"], SOURCE)
@@ -123,7 +123,7 @@ def main():
         archive = build_package(evidence)
         report["package"] = {"path": str(archive), "sha256": file_digest(archive), "validation": "NOT_RUN"}
         if args.blender_root:
-            cli = args.blender_root / "5.1/scripts/addons_core/bl_pkg/cli/blender_ext.py"
+            cli = args.blender_root / "5.2/scripts/addons_core/bl_pkg/cli/blender_ext.py"
             validation = command([sys.executable, "-B", str(cli), "validate", str(archive)])
             validation.update(tool_sha256=file_digest(cli), scope="Packaging script only; no Blender process")
             atomic_json(evidence / "extension-validation.json", validation)
