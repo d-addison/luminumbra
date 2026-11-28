@@ -19116,6 +19116,20 @@ std::unique_ptr<SHIELD_WorldSystem> MakeSimulationCollisionWorld() {
     return world;
 }
 
+std::array<Luminumbra::Vec3, 64> RegionalCollisionAnchors(const Luminumbra::Vec3& origin) {
+    const auto region = Luminumbra::world::ActiveRegionLedger::region_at(origin);
+    std::array<Luminumbra::Vec3, 64> anchors{};
+    // Match the regional cadence workload's three-column 2 km grid and owner order.
+    for (std::size_t index = 0; index < anchors.size(); ++index) {
+        anchors[index] = {static_cast<float>(region.x) * 512.0f + 256.0f +
+                              static_cast<float>(index % 3) * 2048.0f,
+                          origin.y,
+                          static_cast<float>(region.z) * 512.0f + 256.0f +
+                              static_cast<float>(index / 3) * 2048.0f};
+    }
+    return anchors;
+}
+
 std::shared_ptr<Chunk> SimulationFloorChunk(const IVec3& coords, float height) {
     auto chunk = std::make_shared<Chunk>(coords);
     constexpr std::size_t kSide = Luminumbra::CHUNK_SIZE_X + 1;
@@ -19259,7 +19273,8 @@ TEST(SurfaceQuery, SimulationPreparationBoundsInputsAndMissingAuthority) {
     for (std::size_t i = 0; i < owners.size(); ++i) {
         owners[i] = {static_cast<float>(i) * 64, 8, 0};
     }
-    // Fifteen nonoverlapping 3x3 horizons exceed the 128-column preparation budget.
+    // Invalid anchors still refuse even after the complete-ring budget is exhausted.
+    owners[14].y = std::numeric_limits<float>::infinity();
     EXPECT_FALSE(physics.prepare_simulation_collisions(std::span(owners).first(15)));
     EXPECT_EQ(physics.simulation_collision_sample_count(), 0u);
     EXPECT_EQ(physics.simulation_collision_hash(), empty);
@@ -19677,6 +19692,99 @@ TEST(SurfaceQuery, OverflowBodiesWaitForTerrainAndResumeTheirVelocity) {
     physics.set_world_system(nullptr);
     physics.update(1.0f / 30);
     EXPECT_GT(physics.get_body_position(second).x, start.x);
+}
+
+TEST(SurfaceQuery, OverflowHostAnchorsAdmitCompleteRingsInOwnerOrder) {
+    auto world = MakeSimulationCollisionWorld();
+    auto peer_world = MakeSimulationCollisionWorld();
+    PhysicsSystem physics, peer;
+    physics.startup();
+    peer.startup();
+    physics.set_world_system(world.get());
+    peer.set_world_system(peer_world.get());
+    auto anchors = RegionalCollisionAnchors({0, 0, 0});
+    EXPECT_EQ(physics.simulation_collision_uncovered_owner_count(), 0u);
+    ASSERT_TRUE(physics.prepare_simulation_collisions(anchors, 1));
+    ASSERT_TRUE(peer.prepare_simulation_collisions(anchors, 1));
+    const auto covered = physics.simulation_collision_sample_count() / 9;
+    EXPECT_EQ(covered, PhysicsSystem::kSimulationColliderBudget / 9);
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 9 * covered);
+    EXPECT_LE(physics.simulation_collision_sample_count(),
+              PhysicsSystem::kSimulationColliderBudget);
+    EXPECT_EQ(physics.simulation_collision_uncovered_owner_count(), anchors.size() - covered);
+    EXPECT_EQ(physics.simulation_collision_owner_visit_count(), anchors.size());
+    const auto published = physics.simulation_collision_hash();
+    EXPECT_EQ(published, peer.simulation_collision_hash());
+    for (std::size_t index = 0; index < anchors.size(); ++index) {
+        SCOPED_TRACE(index);
+        const auto& anchor = anchors[index];
+        EXPECT_EQ(physics
+                      .audio_raycast({anchor.x + 0.25f, 16, anchor.z + 0.25f},
+                                     {anchor.x + 0.25f, 0, anchor.z + 0.25f})
+                      .hit,
+                  index < covered);
+    }
+    // The full publication equals precisely the prefix's complete rings.
+    ASSERT_TRUE(peer.prepare_simulation_collisions(std::span(anchors).first(covered), 2));
+    EXPECT_EQ(published, peer.simulation_collision_hash());
+    ASSERT_TRUE(physics.prepare_simulation_collisions(anchors, 1));
+    EXPECT_EQ(physics.simulation_collision_uncovered_owner_count(), anchors.size() - covered);
+    ASSERT_LT(covered, anchors.size());
+    EXPECT_FALSE(physics.refresh_simulation_collisions(anchors[covered]));
+    EXPECT_EQ(physics.simulation_collision_hash(), published);
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 0u);
+    EXPECT_FALSE(physics.simulation_collisions_ready());
+    ASSERT_TRUE(physics.refresh_simulation_collisions(anchors.front()));
+    EXPECT_EQ(physics.simulation_collision_hash(), published);
+
+    // A duplicate after skipped owners still fits; overflow must not end the visit.
+    anchors.back() = anchors.front();
+    ASSERT_TRUE(physics.prepare_simulation_collisions(anchors, 2));
+    EXPECT_EQ(physics.simulation_collision_uncovered_owner_count(), anchors.size() - covered - 1);
+    EXPECT_EQ(physics.simulation_collision_owner_visit_count(), anchors.size());
+    EXPECT_EQ(physics.simulation_collision_hash(), published);
+    anchors.back().z = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_FALSE(physics.prepare_simulation_collisions(anchors, 3));
+    EXPECT_EQ(physics.simulation_collision_hash(), published);
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 0u);
+
+    ASSERT_TRUE(physics.prepare_simulation_collisions(std::span(anchors).first(8), 4));
+    ASSERT_TRUE(peer.prepare_simulation_collisions(std::span(anchors).first(8), 4));
+    EXPECT_EQ(physics.simulation_collision_uncovered_owner_count(), 0u);
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 72u);
+    EXPECT_EQ(physics.simulation_collision_hash(), peer.simulation_collision_hash());
+    physics.clear_simulation_collisions();
+    EXPECT_EQ(physics.simulation_collision_uncovered_owner_count(), 0u);
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, 5));
+    EXPECT_EQ(physics.simulation_collision_uncovered_owner_count(), 0u);
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 0u);
+}
+
+TEST(GameSessionHeadlessWorldTest, OverflowHostAnchorsKeepDurableSessionsTicking) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const std::size_t count : {32u, 64u}) {
+        SCOPED_TRACE(count);
+        GameSession session;
+        EnableSnapshotSession(session, root, jobs);
+        ASSERT_TRUE(session.CreateTransientWorld("Host collision owners", "1337", "default"));
+        const auto anchors = RegionalCollisionAnchors(session.GetMetadata().spawnPoint);
+        ASSERT_TRUE(session.SetHostSimulationAnchors(std::span(anchors).first(count)));
+        auto* physics = session.GetPhysicsSystem();
+        ASSERT_TRUE(physics->simulation_collisions_enabled());
+        const auto dt = session.GetSimulationClock().fixed_dt();
+        for (std::uint64_t tick = 1; tick <= 3; ++tick) {
+            SCOPED_TRACE(tick);
+            ASSERT_TRUE(session.PrepareSimulationCollisions(tick));
+            EXPECT_GT(physics->simulation_collision_uncovered_owner_count(), 0u);
+            EXPECT_LE(physics->simulation_collision_sample_count(),
+                      PhysicsSystem::kSimulationColliderBudget);
+            ASSERT_EQ(session.TickSimulation(dt), 1u);
+            EXPECT_EQ(session.GetSimulationTickCount(), tick);
+            EXPECT_FALSE(session.GetRegionSchedulerFault());
+        }
+    }
 }
 
 TEST(GameSessionHeadlessWorldTest, ExistingOverBudgetOwnersKeepTickingAndCanShrink) {

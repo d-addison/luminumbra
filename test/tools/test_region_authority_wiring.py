@@ -1338,6 +1338,34 @@ class SimulationCollisionWiring(unittest.TestCase):
         self.assertIn("i < candidate_count", body)
         self.assertIn("return false;", body[:body.index("std::move_backward(")])
 
+    def assert_host_anchor_overflow_contract(self, source):
+        prepare = function(source, "bool PhysicsSystem::prepare_simulation_collisions_impl(")
+        anchors = function(prepare, "for (const auto& anchor : anchors)")
+        self.assertIn("++state.owner_visit_count;", anchors)
+        self.assertIn("if (!SimulationHorizon::valid(anchor)) { return false; }", anchors)
+        admission = function(anchors, "if (!horizon.add(anchor))")
+        self.assertEqual(admission, "if (retain_horizon) { return false; } "
+                         "++state.uncovered_owner_count;")
+        self.assertIn("state.uncovered_owner_count = 0;", prepare)
+
+    def test_host_anchor_overflow_waits_in_order_but_edit_refresh_still_refuses(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
+            encoding="utf-8")
+        self.assert_host_anchor_overflow_contract(source)
+        admission = function(source, "bool PhysicsSystem::prepare_simulation_collisions_impl(")
+        loop = function(admission, "for (const auto& anchor : anchors)")
+        overflow = function(loop, "if (!horizon.add(anchor))")
+        refused = "bool PhysicsSystem::prepare_simulation_collisions_impl() {" + admission.replace(
+            loop, loop.replace(overflow, "return false;")) + "}"
+        with self.assertRaises(AssertionError):
+            self.assert_host_anchor_overflow_contract(refused)
+        native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(
+            encoding="utf-8")
+        for case in ("TEST(SurfaceQuery, OverflowHostAnchorsAdmitCompleteRingsInOwnerOrder)",
+                     "TEST(GameSessionHeadlessWorldTest, "
+                     "OverflowHostAnchorsKeepDurableSessionsTicking)"):
+            self.assertIn(case, native)
+
     def test_traversal_catchup_stops_on_a_refused_tick(self):
         source = (ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8")
         loop = source.split("while (!gameSession->GetRegionSchedulerFault()", 1)[1].split(

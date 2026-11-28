@@ -1192,6 +1192,7 @@ struct PhysicsSystem::SimulationCollisions {
     std::size_t body_count = 0;
     std::size_t published_count = 0;
     std::size_t sampled_count = 0;
+    std::size_t uncovered_owner_count = 0;
     std::size_t owner_visit_count = 0;
     bool ready = false;
     std::uint64_t tick = std::numeric_limits<std::uint64_t>::max();
@@ -1251,6 +1252,7 @@ void PhysicsSystem::clear_simulation_collisions() {
     state.body_count = 0;
     state.published_count = 0;
     state.sampled_count = 0;
+    state.uncovered_owner_count = 0;
     state.owner_visit_count = 0;
     state.horizon = {};
     state.ready = false;
@@ -1264,6 +1266,10 @@ void PhysicsSystem::clear_simulation_collisions() {
 
 std::size_t PhysicsSystem::simulation_collision_sample_count() const {
     return m_simulation_collisions ? m_simulation_collisions->sampled_count : 0;
+}
+
+std::size_t PhysicsSystem::simulation_collision_uncovered_owner_count() const {
+    return m_simulation_collisions ? m_simulation_collisions->uncovered_owner_count : 0;
 }
 
 std::size_t PhysicsSystem::simulation_collision_owner_visit_count() const {
@@ -1350,6 +1356,7 @@ bool PhysicsSystem::prepare_simulation_collisions_impl(std::span<const Vec3> anc
     }
     state.ready = false;
     state.sampled_count = 0;
+    state.uncovered_owner_count = 0;
     state.owner_visit_count = 0;
     if (!m_body_interface || anchors.size() > kSimulationOwnerBudget) {
         return false;
@@ -1359,8 +1366,15 @@ bool PhysicsSystem::prepare_simulation_collisions_impl(std::span<const Vec3> anc
     SimulationHorizon horizon = retain_horizon ? state.horizon : SimulationHorizon{};
     for (const auto& anchor : anchors) {
         ++state.owner_visit_count;
-        if (!horizon.add(anchor)) {
+        if (!SimulationHorizon::valid(anchor)) {
             return false;
+        }
+        if (!horizon.add(anchor)) {
+            // An edit must refresh its complete ring; host overflow waits instead.
+            if (retain_horizon) {
+                return false;
+            }
+            ++state.uncovered_owner_count;
         }
     }
     // Validate every participating position, but do not stall an existing world
