@@ -1,4 +1,4 @@
-"""Actual Blender5.1 evaluated foliage input probe; no renderer or visual approval."""
+"""Actual Blender 5.2.4 LTS evaluated foliage input probe; no renderer or visual approval."""
 import argparse
 import hashlib
 import importlib.util
@@ -88,8 +88,8 @@ def main():
         report.update(inputs_before=before, blender=bpy.app.version_string,
                       blender_build=bpy.app.build_hash.decode(), blender_executable=bpy.app.binary_path,
                       blender_sha256=digest(bpy.app.binary_path))
-        check("exact Blender5.1 native profile", bpy.app.version == (5, 1, 0) and
-              bpy.app.build_hash == b"adfe2921d5f3")
+        check("exact Blender 5.2.4 LTS native profile", bpy.app.version == (5, 2, 4) and
+              bpy.app.build_hash == b"cd5dc428cce1")
         import io_scene_gltf2
         exporter = Path(io_scene_gltf2.__file__).resolve().parent
         files = sorted([{"path": p.relative_to(exporter).as_posix(), "sha256": digest(p)}
@@ -97,8 +97,8 @@ def main():
         exporter_hash = hashlib.sha256(json.dumps(files, sort_keys=True, separators=(",", ":"),
                                                    ensure_ascii=False).encode()).hexdigest()
         report["exporter_sha256"] = exporter_hash
-        check("exact exporter5.1.18 source", exporter_hash ==
-              "5fe9f5ede7e5264b0a1045dc3784e243e645a90cb6073fc73ae56bc7a10de447")
+        check("exact exporter5.2.41 source", exporter_hash ==
+              "06723e7f58aa29513f951b67f1a5788d74693066c0cae6432da7230b162172fd")
         sys.path.insert(0, str(AUTHORING / "extension"))
         asset = load("blender_asset", AUTHORING / "extension/blender_asset.py")
         worker = load("evaluated_export_worker", AUTHORING / "extension/export_worker.py")

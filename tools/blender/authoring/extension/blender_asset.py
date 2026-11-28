@@ -21,7 +21,8 @@ def static_mesh(obj, graph):
         if mesh is None:
             raise ValueError("Static modifier evaluation did not produce a mesh")
         materials = tuple(mesh.materials)
-        # Blender5.1.18 uses object slots for this exact evaluated fallback.
+        # Object-slot fallback is pending native qualification with glTF 5.2.41
+        # on Blender 5.2.4 LTS.
         if materials == (None,):
             materials = tuple(slot.material for slot in obj.material_slots)
         yield mesh, materials

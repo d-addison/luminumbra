@@ -1,4 +1,4 @@
-"""Blender 5.1 OpenGL presentation probe; run in an owned factory-startup GUI.
+"""Blender 5.2.4 LTS OpenGL presentation probe; run in an owned factory-startup GUI.
 
 blender --factory-startup --python native_viewport_presentation.py -- \
     --modules PATH_TO_EXTENSION_MODULES --output FRESH_EVIDENCE_DIRECTORY
@@ -112,7 +112,7 @@ class Probe:
 
     def stage(self):
         self.check('GUI factory context and supported Blender version',
-                   not bpy.app.background and bpy.app.version == (5, 1, 0) and
+                   not bpy.app.background and bpy.app.version == (5, 2, 4) and
                    '--factory-startup' in sys.argv and threading.current_thread() is threading.main_thread())
         self.check('little-endian frame representation', sys.byteorder == 'little')
         import gpu

@@ -328,8 +328,8 @@ CLASSES = (LUMINUMBRA_OT_mark_geometry, LUMINUMBRA_OT_geometry,
 
 
 def register():
-    if bpy.app.version != (5, 1, 0):
-        raise RuntimeError("Qualify this extension for the installed Blender version first; expected 5.1.0")
+    if bpy.app.version != (5, 2, 4):
+        raise RuntimeError("Qualify this extension for the installed Blender version first; expected 5.2.4")
     blender_recipes.reset_document()
     for cls in CLASSES:
         bpy.utils.register_class(cls)

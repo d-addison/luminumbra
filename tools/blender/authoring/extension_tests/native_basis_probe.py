@@ -25,16 +25,16 @@ def node_matrix(node):
                Quaternion((q[3],q[0],q[1],q[2])), Vector(node.get("scale", [1,1,1]))))
 def close(a,b): return max(abs(x-y) for x,y in zip(a,b)) < 2e-5
 
-check("qualified Blender 5.1.0", bpy.app.version == (5,1,0))
+check("qualified Blender 5.2.4", bpy.app.version == (5,2,4))
 import io_scene_gltf2
 exporter_root = Path(io_scene_gltf2.__file__).resolve().parent
 exporter_files = sorted(({"path": p.relative_to(exporter_root).as_posix(),
     "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
     for p in exporter_root.rglob("*.py")), key=lambda item: item["path"])
 exporter_hash = hashlib.sha256(json.dumps(exporter_files, sort_keys=True,
-    separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()).hexdigest()
 check("qualified exporter source tree", exporter_hash ==
-      "5fe9f5ede7e5264b0a1045dc3784e243e645a90cb6073fc73ae56bc7a10de447")
+      "06723e7f58aa29513f951b67f1a5788d74693066c0cae6432da7230b162172fd")
 bpy.context.preferences.use_preferences_save = False
 bpy.ops.object.select_all(action="SELECT"); bpy.ops.object.delete(use_global=False)
 bpy.context.scene.unit_settings.scale_length=1

@@ -78,12 +78,15 @@ Portable tests alone do not qualify Blender editor behavior on another platform.
 
 ## Export profile
 
-The initial native profile is Windows Blender 5.1.0, build `adfe2921d5f3`, with glTF
-exporter 5.1.18. The exporter digest is
-`5fe9f5ede7e5264b0a1045dc3784e243e645a90cb6073fc73ae56bc7a10de447`:
-SHA-256 of canonical JSON `{path, sha256}` records for all 119 Python files,
-sorted by relative POSIX path. Other profiles require the native fixture matrix;
-portable Python tests do not qualify Linux Blender.
+The authoring profile is Windows Blender 5.2.4 LTS with glTF exporter 5.2.41.
+Blender build `cd5dc428cce1` is the upstream tool pin. The exporter digest is
+`06723e7f58aa29513f951b67f1a5788d74693066c0cae6432da7230b162172fd`:
+SHA-256 of canonical JSON `{path, sha256}` records for all 126 `*.py` files,
+sorted by relative POSIX path, using `sort_keys=True`,
+`separators=(",", ":")` and `ensure_ascii=False`. The version and exporter source
+identity were measured natively. On 5.2.4 the native basis, evaluated-asset,
+presentation and recipe probes pass; the installed-viewport engine probe is still
+pending, as it was on 5.1.0. Portable Python tests do not qualify Linux Blender.
 
 Use scene unit scale 1 for meters. Include every parent, rig, constraint and
 modifier object in the asset collection. Supported object types are mesh,
@@ -125,7 +128,7 @@ the background exporter.
 ## Snapshots and lifecycle
 
 Blender's main thread captures the collection and its indirect dependencies with
-[`bpy.data.libraries.write`](https://docs.blender.org/api/5.1/bpy.types.BlendDataLibraries.html).
+[`bpy.data.libraries.write`](https://docs.blender.org/api/5.2/bpy.types.BlendDataLibraries.html).
 The open document's path remains unchanged. Snapshots live in private directories
 under `.luminumbra-author-source/` inside the project. Exclude that directory and
 `.luminumbra-author/` from source control and art-pack publication. Capturing a

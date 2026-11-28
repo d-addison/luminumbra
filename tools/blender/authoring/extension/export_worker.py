@@ -7,7 +7,7 @@ import sys
 import bpy
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from logic import atomic_json, canonical, digest, read_json
+from logic import atomic_json, digest, read_json
 from blender_asset import validate_collection, validate_prefab_materials
 
 
@@ -35,8 +35,8 @@ def validate_snapshot(scene, collection, request):
 
 def main():
     request = read_json(Path(sys.argv[sys.argv.index("--") + 1]))
-    if bpy.app.version != (5, 1, 0):
-        raise RuntimeError("This adapter is qualified for Blender 5.1.0 only")
+    if bpy.app.version != (5, 2, 4):
+        raise RuntimeError("This adapter is qualified for Blender 5.2.4 only")
     project = Path(request["project"]).resolve(strict=True)
     snapshot = Path(request["snapshot"]).resolve(strict=True)
     if not snapshot.is_relative_to(project):
@@ -104,10 +104,11 @@ def main():
     files = sorted(
         ({"path": path.relative_to(exporter_root).as_posix(), "sha256": file_hash(path)}
          for path in exporter_root.rglob("*.py")), key=lambda entry: entry["path"])
-    exporter = {"id": "blender.gltf.5.1.18", "sha256": digest(canonical(files))}
-    # The initial planning receipt used a different aggregate encoding. This
-    # canonical record-array digest is pinned by the subsequent file-level audit.
-    if exporter["sha256"] != "5fe9f5ede7e5264b0a1045dc3784e243e645a90cb6073fc73ae56bc7a10de447":
+    exporter = {"id": "blender.gltf.5.2.41", "sha256": digest(json.dumps(
+        files, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))}
+    # Canonical sorted {path, sha256} records cover all 126 exporter Python
+    # files measured for the Blender 5.2.4 LTS profile.
+    if exporter["sha256"] != "06723e7f58aa29513f951b67f1a5788d74693066c0cae6432da7230b162172fd":
         raise RuntimeError("Exporter source differs from the qualified Blender profile")
     asset = {"schema": "luminumbra.authoring.asset.v1", "profile": build_profile,
              "asset_id": request["asset_id"], "revision": request["revision"],
