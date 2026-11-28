@@ -43,8 +43,8 @@ class FrameDraw:
         pixels = width * height
         # Authentication, plane joins and bounds have already passed on the
         # worker. Uploading immutable received bytes cannot race the slot lease.
-        # Blender 5.1's GPUTexture constructor requires a FLOAT buffer even for
-        # RGBA8 storage. Normalize vectorially using Blender's bundled NumPy.
+        # GPUTexture takes a FLOAT buffer for this RGBA8 upload; the native
+        # presentation probe checks it on Blender 5.2.4 LTS. Normalize using NumPy.
         colors = np.frombuffer(payload, dtype=np.uint8, count=4 * pixels).astype(np.float32)
         colors *= np.float32(1 / 255)
         rgba = gpu.types.Buffer('FLOAT', 4 * pixels, colors)

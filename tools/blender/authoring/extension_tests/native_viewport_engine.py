@@ -77,7 +77,7 @@ def run(args, report, check, owned):
     report['archive_sha256'] = report['inputs_before']['archive']
     report['blender_sha256'], report['probe_sha256'] = sha(bpy.app.binary_path), sha(__file__)
     report['blender_build_hash'] = bpy.app.build_hash.decode('ascii')
-    check('actual Blender GUI profile', bpy.app.version == (5, 1, 0) and not bpy.app.background and
+    check('actual Blender GUI profile', bpy.app.version == (5, 2, 4) and not bpy.app.background and
           gpu.platform.backend_type_get() == 'OPENGL')
     report['gpu'] = dict(backend=gpu.platform.backend_type_get(), vendor=gpu.platform.vendor_get(),
                          renderer=gpu.platform.renderer_get(), version=gpu.platform.version_get())
