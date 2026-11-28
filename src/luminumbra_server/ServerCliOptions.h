@@ -1,5 +1,6 @@
 #pragma once
 
+#include "RegionalCadenceWorkload.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/simulation/SimBudgetProfile.h"
 
@@ -71,7 +72,8 @@ struct ServerCliOptions {
                world_id.empty() && avatars == 0 && !ecology_roster && !planted_roster && !moving &&
                !water_smoke;
     }
-    bool regional_cadence_workload = false; // --regional-cadence-workload implies smoke.
+    Luminumbra::Server::RegionalCadenceSelection
+        regional_cadence_workload{}; // --regional-cadence-workload implies smoke.
     bool sim_budget = false; // Opt-in simulation stage observation; default artifact unchanged.
     // --sim-budget-profile <path>: operator-supplied budget profile (implies --sim-budget and
     // --smoke). Parsed and validated before any world creation; never affects simulation output.

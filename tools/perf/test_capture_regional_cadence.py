@@ -24,13 +24,13 @@ import render_runner_process as process
 HASH = "0123456789abcdef"
 
 
-def artifact(preset="default", seed="1337"):
+def artifact(preset="default", seed="1337", anchors=8):
     ticks = 2
     owners = []
-    for index in range(9):
+    for index in range(anchors + 1):
         owner = dict.fromkeys(capture.OWNER_COUNTERS, 0)
         owner.update(x=-4 + (index % 3) * 4, z=-4 + (index // 3) * 4)
-        if index < 8:
+        if index < anchors:
             owner.update(plant_services=2, elapsed_steps=2, last_plant_tick=2,
                          max_service_gap=1, water_services=2, water_interior_windows=2,
                          max_water_service_gap=1)
@@ -39,9 +39,9 @@ def artifact(preset="default", seed="1337"):
                          water_service_gap=2, max_water_service_gap=2)
         owners.append(owner)
     diagnostic = dict.fromkeys(capture.COUNTERS, 0)
-    diagnostic.update(tick=2, observations=2, owner_visits=18, owners=owners,
-                      water_publications=2, water_window_visits=144, water_granted_windows=16,
-                      water_completed_cells=1024, water_total_cells_max=512)
+    diagnostic.update(tick=2, observations=2, owner_visits=2 * (anchors + 1), owners=owners,
+                      water_publications=2, water_window_visits=2 * anchors * (anchors + 1), water_granted_windows=2 * anchors,
+                      water_completed_cells=128 * anchors, water_total_cells_max=64 * anchors)
     stages = []
     for name in capture.budget.STAGES:
         inactive = name == "wind_weather"
@@ -63,8 +63,9 @@ def artifact(preset="default", seed="1337"):
                            "counters": [{"name": name, "work_trace": [
                                {"tick": 1, "work": 1}, {"tick": 2, "work": 2}]}
                                for name in capture.budget.WORK_ITEMS]}},
-            "regional_cadence": {"schema": "luminumbra.regional_cadence.v1", "workload": capture.WORKLOAD,
-                                 "anchors": 8, "participants": 9, "observations_replay_match": True,
+            "regional_cadence": {"schema": "luminumbra.regional_cadence.v1" if anchors == 8 else "luminumbra.regional_cadence.v2",
+                                 "workload": capture.WORKLOAD if anchors == 8 else capture.COUNTED_WORKLOAD,
+                                 "anchors": anchors, "participants": anchors + 1, "observations_replay_match": True,
                                  "run": diagnostic, "replay": copy.deepcopy(diagnostic)}}
 
 
@@ -87,7 +88,7 @@ class FakeRunner:
             return subprocess.CompletedProcess(argv, 2)
         def option(name):
             return argv[argv.index(name) + 1]
-        value = artifact(option("--preset"), option("--seed"))
+        value = artifact(option("--preset"), option("--seed"), int(option("--regional-cadence-anchors")))
         if self.hook:
             self.hook(value, len(self.calls))
         kwargs["stdout"].write(b"synthetic smoke complete\r\n")
@@ -117,7 +118,7 @@ class RegionalCadenceCaptureContract(unittest.TestCase):
         self.binary.write_bytes(b"synthetic executable fixture")
         self.args = argparse.Namespace(repository=self.repository, root=self.root, binary=self.binary,
             evidence_dir=self.base / "evidence", presets=list(capture.PRESETS), seeds=["1337"],
-            repeats=2, ticks=2, radius=1, collision_radius=1)
+            repeats=2, ticks=2, radius=1, collision_radius=1, anchors=[8])
         self.runner = FakeRunner()
         # Artifact-validation cases need no pipe worker. Log-specific cases below
         # restore the real drainer, including coverage with a real Python child.
@@ -149,6 +150,115 @@ class RegionalCadenceCaptureContract(unittest.TestCase):
             target[field] = value
         return data
 
+    def test_anchor_matrix_identities_commands_and_bound(self):
+        self.args.anchors = list((1, 8, 32, 64))
+        self.args.seeds = ["1337", "424242"]
+        self.args.repeats = 1
+        manifest = self.collect()
+        self.assertEqual(len(manifest["cells"]), 24)
+        self.assertEqual(len(capture.load_capture(self.args.evidence_dir)["cells"]), 24)
+        identities = set()
+        for row, (argv, _) in zip(manifest["cells"], self.runner.calls):
+            count = row["anchors"]
+            self.assertEqual(argv[argv.index("--regional-cadence-anchors") + 1], str(count))
+            self.assertEqual(row["workload_sha256"], capture.digest(capture.workload_identity(count)))
+            identities.add(row["workload_sha256"])
+        self.assertEqual(len(identities), 4)
+        self.assertTrue(all(row["same"] for row in capture.compare(
+            self.args.evidence_dir, self.args.evidence_dir)["integer_work_and_service"]))
+        with self.assertRaisesRegex(ValueError, "cell bound"):
+            capture.matrix(list(capture.PRESETS), self.args.seeds, 2, 2, 1, 1, self.args.anchors)
+
+    def test_invalid_anchor_matrices_refuse_before_writes(self):
+        for counts in ([], [0], [2], [65], [True], [8.0], ["8"], [8, 8], 8):
+            self.args.anchors = counts
+            with self.subTest(counts=counts), self.assertRaisesRegex(ValueError, "anchor"):
+                self.collect()
+            self.assertFalse(self.args.evidence_dir.exists())
+            self.assertEqual(self.runner.calls, [])
+
+    def test_each_count_requires_all_services_and_frozen_control(self):
+        for count in (1, 8, 32, 64):
+            workload = capture.matrix(["default"], ["1337"], 1, 2, 1, 1, [count])
+            def validate(data):
+                return capture.validate_artifact(data, workload, "default", "1337", count)
+            validate(artifact(anchors=count))
+            for index in range(count):
+                for field in ("plant_services", "elapsed_steps", "water_services", "water_interior_windows"):
+                    data = artifact(anchors=count)
+                    data["regional_cadence"]["run"]["owners"][index][field] = 0
+                    with self.subTest(count=count, index=index, field=field), self.assertRaises(ValueError):
+                        validate(data)
+            for field in ("plant_services", "elapsed_steps", "water_services", "water_interior_windows",
+                          "frozen_services", "frozen_water_windows"):
+                data = artifact(anchors=count)
+                data["regional_cadence"]["run"]["owners"][-1][field] = 1
+                with self.subTest(count=count, field=field), self.assertRaises(ValueError):
+                    validate(data)
+            data = artifact(anchors=count)
+            data["regional_cadence"]["run"]["water_total_cells_max"] = 4097
+            with self.assertRaisesRegex(ValueError, "cap"):
+                validate(data)
+
+    def test_compare_refuses_count_and_legacy_identity_mismatch(self):
+        modern = self.collect()
+        before = self.args.evidence_dir
+        for count in (1, 32, 64):
+            self.args.anchors = [count]
+            self.args.evidence_dir = self.base / str(count)
+            self.collect()
+            with self.subTest(count=count), self.assertRaisesRegex(ValueError, "workload identity"):
+                capture.compare(before, self.args.evidence_dir)
+        legacy = self.make_legacy(modern)
+        write(before / "capture.json", legacy)
+        for schema in (capture.PORTABLE_LEGACY_SCHEMA, capture.LEGACY_SCHEMA):
+            archive = copy.deepcopy(legacy)
+            archive["schema"] = schema
+            if schema == capture.LEGACY_SCHEMA:
+                archive.update(binary=self.binary.as_posix(), runtime_root=self.root.as_posix(),
+                               capture_root=before.as_posix())
+                for row in archive["cells"]:
+                    row["command"] = capture.command(archive["binary"], archive["runtime_root"],
+                        before / row["artifact"], archive["workload"], row["preset"], row["seed"])
+            write(before / "capture.json", archive)
+            self.assertEqual(capture.load_capture(before)["manifest"], legacy)
+        write(before / "capture.json", modern)
+        legacy_dir = self.base / "legacy"
+        shutil.copytree(before, legacy_dir)
+        write(legacy_dir / "capture.json", legacy)
+        with self.assertRaisesRegex(ValueError, "workload identity"):
+            capture.compare(before, legacy_dir)
+
+    def test_count_cell_metadata_is_revalidated(self):
+        self.args.anchors = list((1, 8, 32, 64))
+        original = self.collect()
+        path = self.args.evidence_dir / "capture.json"
+        for index in (0, 2, 4, 6):
+            for field, replacement in (("anchors", None), ("anchors", True), ("anchors", 2),
+                                       ("workload_sha256", None), ("workload_sha256", "0" * 64)):
+                manifest = copy.deepcopy(original)
+                row = manifest["cells"][index]
+                if replacement is None:
+                    del row[field]
+                else:
+                    row[field] = replacement
+                write(path, manifest)
+                with self.subTest(index=index, field=field, replacement=replacement), self.assertRaisesRegex(ValueError, "workload identity"):
+                    capture.load_capture(self.args.evidence_dir)
+        write(path, original)
+
+    def test_cli_anchor_list_default_and_refusals(self):
+        required = ["capture", "--root", str(self.root), "--binary", str(self.binary),
+                    "--evidence-dir", str(self.args.evidence_dir)]
+        for extra, expected in (([], [8]), (["--anchors", "1", "8", "32", "64"], list((1, 8, 32, 64)))):
+            with mock.patch.object(capture, "capture", return_value={}) as collect, contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(capture.main(required + extra), 0)
+                self.assertEqual(collect.call_args.args[0].anchors, expected)
+        for values in ([], ["0"], ["2"], ["65"], ["8.0"], ["x"]):
+            with self.subTest(values=values), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as result:
+                capture.main(required + ["--anchors", *values])
+            self.assertNotEqual(result.exception.code, 0)
+
     def test_stub_capture_smoke(self):
         with mock.patch.dict(os.environ, {"LUMINUMBRA_JOB_WORKERS": "99"}):
             manifest = self.collect()
@@ -176,7 +286,7 @@ class RegionalCadenceCaptureContract(unittest.TestCase):
 
     def test_capture_and_comparison_publish_only_safe_paths(self):
         manifest = self.collect()
-        self.assertEqual(manifest["schema"], "luminumbra.regional_cadence_capture.v2")
+        self.assertEqual(manifest["schema"], capture.SCHEMA)
         encoded = (self.args.evidence_dir / "capture.json").read_text(encoding="utf-8")
         self.assertEqual(json.loads(encoded), manifest)
         self.assertNotIn(self.base.as_posix(), encoded)
@@ -196,8 +306,23 @@ class RegionalCadenceCaptureContract(unittest.TestCase):
         self.assertEqual(report["before"], manifest)
         self.assertEqual(report["after"], manifest)
 
+    def make_legacy(self, manifest, schema="luminumbra.regional_cadence_capture.v2"):
+        legacy = copy.deepcopy(manifest)
+        legacy["schema"] = schema
+        value = legacy["workload"]
+        legacy["workload"] = capture.matrix(value["presets"], value["seeds"], value["repeats"],
+            value["ticks"], value["surface_radius"], value["collision_radius"], legacy=True)
+        legacy["workload_sha256"] = capture.digest(legacy["workload"])
+        for row in legacy["cells"]:
+            row.pop("anchors")
+            row.pop("workload_sha256")
+            row["command"] = capture.command(legacy["binary"], legacy["runtime_root"],
+                row["artifact"], legacy["workload"], row["preset"], row["seed"])
+        return legacy
+
     def test_legacy_comparison_redacts_bindings_commands_and_unknown_metadata(self):
-        manifest = self.collect()
+        manifest = self.make_legacy(self.collect())
+        write(self.args.evidence_dir / "capture.json", manifest)
         portable = self.base / "portable"
         shutil.copytree(self.args.evidence_dir, portable)
         legacy = copy.deepcopy(manifest)
@@ -462,7 +587,7 @@ class RegionalCadenceCaptureContract(unittest.TestCase):
     def test_invalid_matrices_refuse_before_evidence_or_launch(self):
         for field, value in (("presets", []), ("presets", ["unknown"]), ("seeds", []),
                              ("seeds", ["1", "01"]), ("seeds", [str(2**64)]),
-                             ("repeats", 1), ("repeats", 33), ("ticks", 0),
+                             ("repeats", 0), ("repeats", 33), ("ticks", 0),
                              ("ticks", 36001), ("radius", 13), ("collision_radius", -1)):
             args = copy.copy(self.args)
             setattr(args, field, value)
@@ -578,14 +703,17 @@ class RegionalCadenceCaptureContract(unittest.TestCase):
         write(path, manifest)
         with self.assertRaisesRegex(ValueError, "capture paths"):
             capture.load_capture(self.args.evidence_dir)
-        manifest["schema"] = "luminumbra.regional_cadence_capture.v1"
+        manifest = self.make_legacy(original, capture.LEGACY_SCHEMA) | {
+            key: manifest[key] for key in ("binary", "runtime_root", "capture_root")}
+        for row in manifest["cells"]:
+            row["command"] = capture.command(manifest["binary"], manifest["runtime_root"],
+                Path(manifest["capture_root"]) / row["artifact"], manifest["workload"], row["preset"], row["seed"])
         write(path, manifest)
         self.assertEqual(len(capture.load_capture(self.args.evidence_dir)["cells"]), 6)
         report = capture.compare(self.args.evidence_dir, self.args.evidence_dir)
-        self.assertEqual(report["before"], original)
-        self.assertEqual(report["after"], original)
-        manifest = copy.deepcopy(original)
-        manifest["schema"] = "luminumbra.regional_cadence_capture.v1"
+        self.assertEqual(report["before"], self.make_legacy(original))
+        self.assertEqual(report["after"], self.make_legacy(original))
+        manifest = self.make_legacy(original, capture.LEGACY_SCHEMA)
         write(path, manifest)
         with self.assertRaisesRegex(ValueError, "capture paths"):
             capture.load_capture(self.args.evidence_dir)

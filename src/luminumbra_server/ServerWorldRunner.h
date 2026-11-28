@@ -158,8 +158,8 @@ struct ServerWorldRunnerConfig {
     bool water_smoke = false;
     // Workload input only; dormant unless the session host authority profile is enabled.
     bool simulation_smoke = false;
-    bool regional_cadence_workload = false; // Explicit distributed smoke inputs.
-    bool regional_diagnostics = false;      // Independent observation toggle for parity checks.
+    RegionalCadenceSelection regional_cadence_workload{}; // Explicit distributed smoke inputs.
+    bool regional_diagnostics = false; // Independent observation toggle for parity checks.
     bool sim_budget = false; // Opt-in simulation stage observation; default artifact unchanged.
     // Applied via GameSession::SetRegionSchedulerConfig right after the root path is set, so it
     // takes effect for the fresh world Boot() creates. A loaded ledger must match an explicit

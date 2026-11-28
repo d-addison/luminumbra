@@ -237,6 +237,12 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
             options.smoke = true;
             options.sim_budget = true;
             options.regional_cadence_workload = true;
+        } else if (std::strcmp(arg, "--regional-cadence-anchors") == 0) {
+            const char* value = next_value(i);
+            if (!value || !options.regional_cadence_workload.SetAnchors(value)) {
+                LUMINUMBRA_CORE_ERROR("--regional-cadence-anchors requires one of 1, 8, 32, 64");
+                options.parse_error = true;
+            }
         } else if (std::strcmp(arg, "--sim-budget") == 0) {
             options.smoke = true;
             options.sim_budget = true;
@@ -306,6 +312,10 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
             options.parse_error = true;
         }
     }
+    if (!options.regional_cadence_workload.Valid()) {
+        LUMINUMBRA_CORE_ERROR("--regional-cadence-anchors requires --regional-cadence-workload");
+        options.parse_error = true;
+    }
     return options;
 }
 
@@ -366,7 +376,8 @@ int main(int argc, char* argv[]) {
     if (options.parse_error) {
         LUMINUMBRA_CORE_ERROR(
             "Usage: luminumbra_server_app [--smoke] [--water-smoke] [--sim-budget] [--no-audio] "
-            "[--sim-budget-profile <path>] [--regional-cadence-workload] "
+            "[--sim-budget-profile <path>] [--regional-cadence-workload "
+            "[--regional-cadence-anchors <1|8|32|64>]] "
             "[--heavy [--heavy-resim <n>]] "
             "[--record <path>] [--replay <path>] [--mutate-replay-fixture <path>] "
             "[--lockstep-loopback [--lockstep-delay-input <n>] [--lockstep-corrupt-tick <t>] "

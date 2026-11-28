@@ -19,9 +19,12 @@ from resolved_fixture import PRESETS, resolved_fixture_hash, unique_object
 import render_runner_process as process
 
 
-SCHEMA = "luminumbra.regional_cadence_capture.v2"
+SCHEMA = "luminumbra.regional_cadence_capture.v3"
+PORTABLE_LEGACY_SCHEMA = "luminumbra.regional_cadence_capture.v2"
 LEGACY_SCHEMA = "luminumbra.regional_cadence_capture.v1"
 WORKLOAD = "eight_distant_regions_v1"
+COUNTED_WORKLOAD = "distant_regions_v2"
+ANCHORS = (1, 8, 32, 64)
 # Capture/parser allocation bounds only, independent of shipping admission.
 MAX_CELLS, MAX_TICKS = 32, 36000
 MAX_FILE, MAX_TOTAL, MAX_BINARY = 64 * 1024**2, 512 * 1024**2, 512 * 1024**2
@@ -79,7 +82,12 @@ def file_digest(path):
     return checksum.hexdigest()
 
 
-def matrix(presets, seeds, repeats, ticks, radius, collision_radius):
+def workload_identity(anchors):
+    require(type(anchors) is int and anchors in ANCHORS, "invalid anchor count")
+    return {"workload": COUNTED_WORKLOAD, "anchors": anchors, "participants": anchors + 1}
+
+
+def matrix(presets, seeds, repeats, ticks, radius, collision_radius, anchors=None, *, legacy=False):
     require(isinstance(presets, list) and 0 < len(presets) <= len(PRESETS)
             and all(preset in PRESETS for preset in presets)
             and len(set(presets)) == len(presets), "invalid preset matrix")
@@ -87,22 +95,31 @@ def matrix(presets, seeds, repeats, ticks, radius, collision_radius):
             and all(isinstance(seed, str) and re.fullmatch(r"[0-9]{1,20}", seed)
                     and int(seed) < 2**64 for seed in seeds)
             and len({int(seed) for seed in seeds}) == len(seeds), "invalid seed matrix")
-    require(type(repeats) is int and 2 <= repeats <= MAX_CELLS, "matrix requires repeated runs")
-    require(len(presets) * len(seeds) * repeats <= MAX_CELLS, "capture matrix exceeds cell bound")
+    anchors = [8] if anchors is None else anchors
+    require(isinstance(anchors, list) and 0 < len(anchors) <= len(ANCHORS)
+            and all(type(count) is int and count in ANCHORS for count in anchors)
+            and len(set(anchors)) == len(anchors), "invalid anchor matrix")
+    require(type(repeats) is int and (2 if legacy else 1) <= repeats <= MAX_CELLS,
+            "invalid matrix repetitions")
+    require(len(presets) * len(seeds) * len(anchors) * repeats <= MAX_CELLS,
+            "capture matrix exceeds cell bound")
     require(type(ticks) is int and 1 <= ticks <= MAX_TICKS, "invalid capture tick count")
     require(all(type(value) is int and 0 <= value <= 12 for value in (radius, collision_radius)),
             "invalid surface/collision radius")
-    return {"workload": WORKLOAD, "anchors": 8, "participants": 9,
+    identity = {"workload": WORKLOAD, "anchors": 8, "participants": 9} if legacy else {
+        "workload": COUNTED_WORKLOAD, "anchors": anchors}
+    return {**identity,
             "presets": presets, "seeds": seeds, "repeats": repeats, "ticks": ticks,
             "surface_radius": radius, "collision_radius": collision_radius,
             "autosave_ticks": 30, "no_audio": True}
 
 
-def command(binary, root, artifact, workload, preset, seed):
+def command(binary, root, artifact, workload, preset, seed, anchors=8):
     def generic(path):
         return path.as_posix() if isinstance(path, Path) else path
+    selection = [] if workload["workload"] == WORKLOAD else ["--regional-cadence-anchors", str(anchors)]
     return [generic(binary), "--root", generic(root), "--smoke", "--no-audio", "--sim-budget",
-            "--regional-cadence-workload", "--preset", preset, "--seed", seed,
+            "--regional-cadence-workload", *selection, "--preset", preset, "--seed", seed,
             "--ticks", str(workload["ticks"]), "--autosave-ticks", "30",
             "--radius", str(workload["surface_radius"]), "--collision-radius",
             str(workload["collision_radius"]), "--artifact", generic(artifact)]
@@ -112,16 +129,18 @@ def cells(workload):
     # Product validated before iteration; at most MAX_CELLS process launches.
     for preset in workload["presets"]:
         for seed in workload["seeds"]:
-            for repeat in range(workload["repeats"]):
-                yield preset, seed, repeat
+            for anchors in ([8] if workload["workload"] == WORKLOAD else workload["anchors"]):
+                for repeat in range(workload["repeats"]):
+                    yield preset, seed, anchors, repeat
 
 
-def validate_diagnostics(data, ticks):
+def validate_diagnostics(data, ticks, anchors=8):
+    participants = anchors + 1
     require(isinstance(data, dict), "missing regional diagnostic run")
     require(all(budget.integer(data.get(key)) for key in COUNTERS), "invalid regional counter")
     result = {key: data[key] for key in COUNTERS}
     require(data["observations"] == ticks and data["tick"] >= ticks
-            and data["owner_visits"] == ticks * 9, "incomplete regional observations")
+            and data["owner_visits"] == ticks * participants, "incomplete regional observations")
     require(data["water_publications"] + data["water_deferred_samples"] == ticks,
             "incomplete water observations")
     require(data["water_total_cells_max"] <= WATER_CELL_CAP
@@ -131,7 +150,7 @@ def validate_diagnostics(data, ticks):
             and data["preparation_pages_last"] <= data["preparation_pages_max"],
             "invalid replay/page maxima")
     owners = data.get("owners")
-    require(isinstance(owners, list) and len(owners) == 9, "incomplete regional owners")
+    require(isinstance(owners, list) and len(owners) == participants, "incomplete regional owners")
     result["owners"] = []
     for index, owner in enumerate(owners):
         require(isinstance(owner, dict)
@@ -153,7 +172,7 @@ def validate_diagnostics(data, ticks):
             and max(owner["plant_services"], owner["water_services"])
             <= ticks - owner["frozen_samples"] - owner["unadmitted_samples"],
             "inconsistent owner service")
-        if index < 8:
+        if index < anchors:
             require(owner["plant_services"] > 0 and owner["elapsed_steps"] > 0
                     and owner["water_services"] > 0 and owner["water_interior_windows"] > 0,
                     "missing remote plant/resource or water work")
@@ -165,14 +184,14 @@ def validate_diagnostics(data, ticks):
         result["owners"].append({key: owner[key] for key in ("x", "z", *OWNER_COUNTERS)})
     require(data["water_completed_cells"] > 0 and data["water_granted_windows"] > 0,
             "missing water work")
-    # The visit counter includes interiors outside the nine observed owners.
-    require(data["water_window_visits"] % 9 == 0
-            and sum(owner["water_interior_windows"] for owner in owners) * 9
+    # The visit counter includes interiors outside the bounded observed owners.
+    require(data["water_window_visits"] % participants == 0
+            and sum(owner["water_interior_windows"] for owner in owners) * participants
             <= data["water_window_visits"], "inconsistent water visits")
     return result
 
 
-def validate_artifact(data, workload, preset, seed):
+def validate_artifact(data, workload, preset, seed, anchors=8):
     ticks = workload["ticks"]
     require(isinstance(data, dict), "artifact must be an object")
     budget.validate_smoke_identity(data, preset, seed, ticks)
@@ -236,13 +255,16 @@ def validate_artifact(data, workload, preset, seed):
             require([sample["work"] for sample in counter["work_trace"]] == work["server_water"]["trace"],
                     "inconsistent water cell trace")
     regional = data.get("regional_cadence")
-    require(isinstance(regional, dict) and regional.get("schema") == "luminumbra.regional_cadence.v1"
-            and regional.get("workload") == WORKLOAD
-            and type(regional.get("anchors")) is int and regional["anchors"] == 8
-            and type(regional.get("participants")) is int and regional["participants"] == 9,
+    # Eight-anchor artifacts retain their original bytes, including identity/schema.
+    schema = "luminumbra.regional_cadence.v1" if anchors == 8 else "luminumbra.regional_cadence.v2"
+    name = WORKLOAD if anchors == 8 else COUNTED_WORKLOAD
+    require(isinstance(regional, dict) and regional.get("schema") == schema
+            and regional.get("workload") == name
+            and type(regional.get("anchors")) is int and regional["anchors"] == anchors
+            and type(regional.get("participants")) is int and regional["participants"] == anchors + 1,
             "mismatched workload identity")
-    first = validate_diagnostics(regional.get("run"), ticks)
-    replay = validate_diagnostics(regional.get("replay"), ticks)
+    first = validate_diagnostics(regional.get("run"), ticks, anchors)
+    replay = validate_diagnostics(regional.get("replay"), ticks, anchors)
     require(regional.get("observations_replay_match") is True and first == replay,
             "divergent deterministic regional traces")
     work_items = {"schema": "luminumbra.sim_work.v1", "counters": [
@@ -280,7 +302,7 @@ def path_labels(identity):
 def capture(args, runner=None):
     runner = subprocess.run if runner is None else runner
     workload = matrix(list(args.presets), list(args.seeds), args.repeats, args.ticks,
-                      args.radius, args.collision_radius)
+                      args.radius, args.collision_radius, args.anchors)
     repository, root = args.repository.resolve(strict=True), args.root.resolve(strict=True)
     binary = args.binary.resolve(strict=True)
     evidence = args.evidence_dir.resolve()
@@ -294,9 +316,9 @@ def capture(args, runner=None):
                    if not key.upper().startswith("LUMINUMBRA_")}
     total = 0
     previous = {}
-    for index, (preset, seed, repeat) in enumerate(cells(workload)):
+    for index, (preset, seed, anchors, repeat) in enumerate(cells(workload)):
         name = f"cell-{index}.json"
-        argv = command(binary, root, evidence / name, workload, preset, seed)
+        argv = command(binary, root, evidence / name, workload, preset, seed, anchors)
         status = {"evidence_errors": []}
         try:
             # Shared pipe drainer retains at most 16 MiB, with bounded shutdown
@@ -316,15 +338,16 @@ def capture(args, runner=None):
         # Canonical digest binds exactly the parsed object; never reopen raw evidence for hashing.
         total += size
         require(total <= MAX_TOTAL, "capture exceeds total artifact bound")
-        summary = validate_artifact(data, workload, preset, seed)
+        summary = validate_artifact(data, workload, preset, seed, anchors)
         trace_digest = digest(summary["integer"])
-        require(previous.get((preset, seed), trace_digest) == trace_digest,
+        require(previous.get((preset, seed, anchors), trace_digest) == trace_digest,
                 "divergent deterministic repeated traces")
-        previous[preset, seed] = trace_digest
+        previous[preset, seed, anchors] = trace_digest
         manifest["cells"].append({"preset": preset, "seed": seed, "repeat": repeat,
+                                  "anchors": anchors, "workload_sha256": digest(workload_identity(anchors)),
                                   "artifact": name, "artifact_sha256": digest(data),
                                   "command": command(manifest["binary"], manifest["runtime_root"],
-                                                     name, workload, preset, seed)})
+                                                     name, workload, preset, seed, anchors)})
     require(identity == identities(repository, root, binary, runner), "capture identity changed")
     # Revalidate retained bytes, commands and the complete matrix before publishing the manifest last.
     load_capture(evidence, manifest)
@@ -335,12 +358,14 @@ def capture(args, runner=None):
 
 def load_capture(directory, manifest=None):
     manifest = read_json(directory / "capture.json") if manifest is None else manifest
-    require(isinstance(manifest, dict) and manifest.get("schema") in (SCHEMA, LEGACY_SCHEMA),
+    require(isinstance(manifest, dict) and manifest.get("schema") in (SCHEMA, PORTABLE_LEGACY_SCHEMA, LEGACY_SCHEMA),
             "unsupported capture schema")
     value = manifest.get("workload")
     require(isinstance(value, dict), "missing workload identity")
     workload = matrix(value.get("presets"), value.get("seeds"), value.get("repeats"), value.get("ticks"),
-                      value.get("surface_radius"), value.get("collision_radius"))
+                      value.get("surface_radius"), value.get("collision_radius"),
+                      value.get("anchors") if manifest["schema"] == SCHEMA else None,
+                      legacy=manifest["schema"] != SCHEMA)
     require(canonical(value) == canonical(workload) and manifest.get("workload_sha256") == digest(workload),
             "mismatched workload identity")
     identity = manifest.get("identity")
@@ -359,31 +384,38 @@ def load_capture(directory, manifest=None):
             "invalid capture paths")
     rows = manifest.get("cells")
     require(isinstance(rows, list) and len(rows) == len(workload["presets"]) * len(workload["seeds"])
-            * workload["repeats"], "incomplete capture matrix")
+            * workload["repeats"] * (1 if workload["workload"] == WORKLOAD else len(workload["anchors"])),
+            "incomplete capture matrix")
     result, published_rows, previous, total = [], [], {}, 0
-    for index, ((preset, seed, repeat), row) in enumerate(zip(cells(workload), rows)):
+    for index, ((preset, seed, anchors, repeat), row) in enumerate(zip(cells(workload), rows)):
         name = f"cell-{index}.json"
         require(isinstance(row, dict) and row.get("preset") == preset and row.get("seed") == seed
                 and type(row.get("repeat")) is int and row["repeat"] == repeat
                 and row.get("artifact") == name, "invalid matrix cell")
+        if manifest["schema"] == SCHEMA:
+            require(type(row.get("anchors")) is int and row["anchors"] == anchors
+                    and row.get("workload_sha256") == digest(workload_identity(anchors)),
+                    "mismatched cell workload identity")
         require(row.get("command") == command(manifest["binary"], manifest["runtime_root"],
-                Path(manifest["capture_root"]) / name, workload, preset, seed), "capture command mismatch")
+                Path(manifest["capture_root"]) / name, workload, preset, seed, anchors), "capture command mismatch")
         data, size = read_packet(directory / name, min(MAX_FILE, MAX_TOTAL - total))
         total += size
         require(total <= MAX_TOTAL, "capture exceeds total artifact bound")
         require(row.get("artifact_sha256") == digest(data), "artifact digest mismatch")
-        summary = validate_artifact(data, workload, preset, seed)
+        summary = validate_artifact(data, workload, preset, seed, anchors)
         checksum = digest(summary["integer"])
-        require(previous.get((preset, seed), checksum) == checksum, "divergent deterministic repeated traces")
-        previous[preset, seed] = checksum
+        require(previous.get((preset, seed, anchors), checksum) == checksum, "divergent deterministic repeated traces")
+        previous[preset, seed, anchors] = checksum
         result.append(summary)
         published_rows.append({key: row[key] for key in (
             "preset", "seed", "repeat", "artifact", "artifact_sha256")})
+        if manifest["schema"] == SCHEMA:
+            published_rows[-1].update(anchors=anchors, workload_sha256=digest(workload_identity(anchors)))
         published_rows[-1]["command"] = command(labels["binary"], labels["runtime_root"], name,
-                                               workload, preset, seed)
+                                               workload, preset, seed, anchors)
     # Project known fields so legacy path bindings and unknown metadata cannot
     # leak through either endpoint of the comparison report.
-    published = {"schema": SCHEMA, **labels, "workload": workload,
+    published = {"schema": SCHEMA if manifest["schema"] == SCHEMA else PORTABLE_LEGACY_SCHEMA, **labels, "workload": workload,
                  "workload_sha256": digest(workload), "cells": published_rows,
                  "identity": {key: identity[key] for key in (
                      "revision", "source_dirty", "binary_sha256", "content_sha256")}}
@@ -416,6 +448,7 @@ def main(argv=None):
         collect.add_argument("--" + name, type=Path, required=True)
     collect.add_argument("--presets", nargs="+", choices=PRESETS, default=list(PRESETS))
     collect.add_argument("--seeds", nargs="+", default=["1337"])
+    collect.add_argument("--anchors", nargs="+", type=int, choices=ANCHORS, default=[8])
     collect.add_argument("--repeats", type=int, default=2)
     collect.add_argument("--ticks", type=int, default=3600)
     collect.add_argument("--radius", type=int, default=1)
