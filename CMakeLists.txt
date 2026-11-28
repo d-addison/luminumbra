@@ -122,7 +122,11 @@ function(luminumbra_configure_first_party_target TARGET_NAME)
       target_compile_options(${TARGET_NAME} PRIVATE $<$<CONFIG:Debug>:/fsanitize=address>)
       target_link_options(${TARGET_NAME} ${_lea_link_scope} $<$<CONFIG:Debug>:/INCREMENTAL:NO>)
     else()
-      target_compile_options(${TARGET_NAME} PRIVATE $<$<CONFIG:Debug>:-fsanitize=address>)
+      # Debug ASan code builds at -O1 so trivial helpers inline instead of each
+      # paying a fake-stack frame (15-19% of the render runners at -O0, #617).
+      # Detection and Debug assertions are unchanged; FP pinning still applies.
+      target_compile_options(${TARGET_NAME} PRIVATE
+        $<$<CONFIG:Debug>:-fsanitize=address> $<$<CONFIG:Debug>:-O1>)
       target_link_options(${TARGET_NAME} ${_lea_link_scope} $<$<CONFIG:Debug>:-fsanitize=address>)
     endif()
   endif()
