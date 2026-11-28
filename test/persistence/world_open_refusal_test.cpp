@@ -4816,6 +4816,8 @@ TEST_F(WorldOpenRefusal, LoadedRegionalBootObservesMissingAndEmptyColumnSelectio
     frozen_ledger.publish_completed_work(remote_work);
     ASSERT_EQ(frozen_ledger.records().at(owner).state, world::RegionState::Frozen);
     ASSERT_EQ(frozen_ledger.records().at(remote_owner).state, world::RegionState::Reduced);
+    // Republish a copy of the indexed save so only the clock and ledger differ.
+    fs::copy(session->GetWorldSaveDir(), frozen_input, fs::copy_options::recursive);
     auto frozen_metadata =
         nlohmann::json::parse(Read(session->GetWorldSaveDir() / "world_info.json"));
     world::WorldClock(5).write_metadata(frozen_metadata);
@@ -4823,8 +4825,11 @@ TEST_F(WorldOpenRefusal, LoadedRegionalBootObservesMissingAndEmptyColumnSelectio
         nlohmann::json::parse(frozen_metadata.at("owner_continuation").get<std::string>());
     frozen_continuation["simulation_tick"] = 5;
     frozen_metadata["owner_continuation"] = frozen_continuation.dump();
-    Write(frozen_input / "world_info.json", frozen_metadata.dump());
-    Write(WorldSaveService::active_regions_path(frozen_input), frozen_ledger.encode());
+    ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(frozen_input, [&] {
+        Write(frozen_input / "world_info.json", frozen_metadata.dump());
+        Write(WorldSaveService::active_regions_path(frozen_input), frozen_ledger.encode());
+        return true;
+    }));
     ASSERT_TRUE(session->LoadWorldStateFrom(frozen_input)) << session->GetWorldOpenError();
     const auto frozen_bytes = DiskBytes(frozen_input);
     const auto frozen_before = session->GetActiveRegionLedger().canonical_bytes();
@@ -4846,6 +4851,7 @@ TEST_F(WorldOpenRefusal, LoadedRegionalBootObservesMissingAndEmptyColumnSelectio
     // There is no first live tick at the last representable clock. Report an
     // empty observation honestly, without scheduling or overflowing the clock.
     const auto exhausted_input = root / "exhausted-input";
+    fs::copy(session->GetWorldSaveDir(), exhausted_input, fs::copy_options::recursive);
     auto exhausted_metadata =
         nlohmann::json::parse(Read(session->GetWorldSaveDir() / "world_info.json"));
     world::WorldClock(world::WorldClock::kTickLimit - 1).write_metadata(exhausted_metadata);
@@ -4853,7 +4859,10 @@ TEST_F(WorldOpenRefusal, LoadedRegionalBootObservesMissingAndEmptyColumnSelectio
         nlohmann::json::parse(exhausted_metadata.at("owner_continuation").get<std::string>());
     exhausted_continuation["simulation_tick"] = world::WorldClock::kTickLimit - 1;
     exhausted_metadata["owner_continuation"] = exhausted_continuation.dump();
-    Write(exhausted_input / "world_info.json", exhausted_metadata.dump());
+    ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(exhausted_input, [&] {
+        Write(exhausted_input / "world_info.json", exhausted_metadata.dump());
+        return true;
+    }));
     ASSERT_TRUE(session->LoadWorldStateFrom(exhausted_input)) << session->GetWorldOpenError();
     const auto exhausted_bytes = DiskBytes(exhausted_input);
     const auto exhausted_ledger = session->GetActiveRegionLedger().canonical_bytes();
